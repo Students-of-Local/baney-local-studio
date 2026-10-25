@@ -1,8 +1,8 @@
 {
 	"manifest_version": 3,
 	"minimum_chrome_version": "141",
-	"name": "sitegeist",
-	"description": "Your AI companion for the web - Research, automate, create",
+	"name": "Tabkyra",
+	"description": "An AI agent in your browser side panel, and a browser for your coding agents",
 	"version": "1.1.8",
 	"key": "REDACTED",
 	"action": {
