@@ -71,12 +71,18 @@ impl GitWatcher {
     fn watch(&self, project: &str, targets: Vec<(PathBuf, RecursiveMode)>) {
         let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(watcher) = watcher.as_mut() else { return };
-        let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
         let mut added = Vec::new();
         for (path, mode) in targets {
+            self.routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(path.clone())
+                .or_default()
+                .insert(project.to_string());
             if watcher.watch(&path, mode).is_ok() {
-                routes.entry(path.clone()).or_default().insert(project.to_string());
                 added.push((path, mode));
+            } else {
+                self.drop_route(&path, project);
             }
         }
         self.watched.lock().unwrap_or_else(PoisonError::into_inner).insert(project.to_string(), added);
@@ -85,19 +91,26 @@ impl GitWatcher {
     fn unwatch(&self, project: &str) {
         let Some(targets) = self.watched.lock().unwrap_or_else(PoisonError::into_inner).remove(project) else { return };
         let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
         for (path, _) in targets {
-            let empty = routes.get_mut(&path).is_some_and(|owners| {
-                owners.remove(project);
-                owners.is_empty()
-            });
-            if empty {
-                routes.remove(&path);
-                if let Some(watcher) = watcher.as_mut() {
-                    let _ = watcher.unwatch(&path);
-                }
+            if !self.drop_route(&path, project) {
+                continue;
+            }
+            if let Some(watcher) = watcher.as_mut() {
+                let _ = watcher.unwatch(&path);
             }
         }
+    }
+
+    fn drop_route(&self, path: &Path, project: &str) -> bool {
+        let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
+        let empty = routes.get_mut(path).is_some_and(|owners| {
+            owners.remove(project);
+            owners.is_empty()
+        });
+        if empty {
+            routes.remove(path);
+        }
+        empty
     }
 
     pub(crate) fn stop(&self) {
