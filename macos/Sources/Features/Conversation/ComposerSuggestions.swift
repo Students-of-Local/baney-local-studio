@@ -151,6 +151,7 @@ struct ComposerSuggestionSource {
         case .command: "Command"
         case .template: "Template"
         case .skill: "Skill"
+        case .plugin: "Plugin"
         }
     }
 

@@ -26,6 +26,7 @@ use crate::model::{
     WorktreeChoice,
 };
 use crate::oneshot::TextGen;
+use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
 use crate::skills::Resources;
 use crate::store::{self, Store, StoredProject};
@@ -368,6 +369,7 @@ impl Studio {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(config: StudioConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, StudioError> {
         let socket = daemon::socket_path(config.socket_path.as_deref());
+        let plugins_dir = plugins::plugins_dir(config.data_dir.as_deref());
         let data_dir =
             store::data_dir(config.data_dir.as_deref()).map_err(|message| StudioError::Config { message })?;
         std::fs::create_dir_all(&data_dir)
@@ -441,6 +443,8 @@ impl Studio {
             interactive: true,
             daemon: None,
             daemon_pushed: None,
+            plugins_dir,
+            plugin_errors: Vec::new(),
         };
         runtime.spawn(actor.run(receiver));
         Ok(Arc::new(Self { commands, mailbox, workspace, _runtime: runtime }))
@@ -714,6 +718,8 @@ struct Actor {
     interactive: bool,
     daemon: Option<DaemonFacts>,
     daemon_pushed: Option<Update>,
+    plugins_dir: Option<PathBuf>,
+    plugin_errors: Vec<String>,
 }
 
 struct DaemonFacts {
@@ -1822,9 +1828,29 @@ impl Actor {
         threads::project_for(&cwd, &self.store.flags(id), &self.store.projects)
     }
 
+    fn plugins(&mut self) -> Vec<Plugin> {
+        let Some(dir) = self.plugins_dir.as_deref() else { return Vec::new() };
+        let scan = plugins::scan(dir);
+        let errors: Vec<String> = scan
+            .failures
+            .iter()
+            .flat_map(|failure| {
+                let name = failure.dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                failure.errors.iter().map(move |error| format!("{name}: {error}"))
+            })
+            .collect();
+        if errors != self.plugin_errors {
+            if !errors.is_empty() {
+                self.mailbox.notice(NoticeLevel::Warning, format!("Some plugins did not load: {}", errors.join("; ")));
+            }
+            self.plugin_errors = errors;
+        }
+        scan.plugins
+    }
+
     async fn resources(&mut self, id: &str, active: &str) -> Resources {
         if let Some(resources) = self.threads.get(id).and_then(|thread| thread.resources.clone()) {
-            return resources;
+            return resources.with_plugins(self.plugins());
         }
         let command = DaemonCommand::GetResourceSnapshot {
             id: None,
@@ -1837,11 +1863,11 @@ impl Actor {
                 if let Some(thread) = self.threads.get_mut(id) {
                     thread.resources = Some(resources.clone());
                 }
-                resources
+                resources.with_plugins(self.plugins())
             }
             Err(error) => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("Could not read the skills: {error}"));
-                Resources::default()
+                Resources::default().with_plugins(self.plugins())
             }
         }
     }
@@ -2374,7 +2400,7 @@ impl Actor {
         let data = self
             .call(DaemonCommand::GetResourceSnapshot { id: None, active_session_id: active, rest: Map::default() })
             .await?;
-        Ok(Resources::parse(&data))
+        Ok(Resources::parse(&data).with_plugins(self.plugins()))
     }
 
     async fn set_service_tier(&mut self, id: &str, tier: Option<String>) -> Result<(), String> {
