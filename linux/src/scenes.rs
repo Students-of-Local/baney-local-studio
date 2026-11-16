@@ -41,6 +41,17 @@ pub fn stage(app: &Rc<App>, scene: &str) {
             app.composer.extras.show_fixture_commands(commands(), "st");
             app.render(Dirty::all());
         }
+        "16-composer-plugin-installed" => {
+            app.apply(base());
+            app.new_thread(Some(project_id("local-studio")));
+            let mut listed = commands();
+            if let Some(root) = local_studio_core::plugins::plugins_dir(None) {
+                listed.extend(local_studio_core::plugins::commands(&local_studio_core::plugins::scan(&root).plugins));
+            }
+            app.composer.set_text("/ga");
+            app.composer.extras.show_fixture_commands(listed, "ga");
+            app.render(Dirty::all());
+        }
         "17-composer-mentions" => {
             conversation(app, false);
             app.composer.set_text("Compare the sidebar with @side");
