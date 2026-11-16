@@ -21,9 +21,30 @@ const SMALL: &str = "hf.co/LiquidAI/LFM3-1.7B-GGUF:Q4_K_M";
 const MAX_TOKENS: u64 = 16_384;
 const STEP: Duration = Duration::from_secs(120);
 const BUILD: Duration = Duration::from_mins(25);
-const SOURCE: &str = "plugin:smoothstone";
 const REQUEST: &str = "a fan guard for a 40 mm fan. Run the stone commands with the bash tool in the current directory and stop when stone says the part is ready.";
-const GONE: &str = "/stone Reply with only the word gone.";
+
+struct Target {
+    id: String,
+    command: String,
+    model: String,
+}
+
+impl Target {
+    fn from_env() -> Self {
+        let var = |name: &str, default: &str| {
+            std::env::var(name).ok().filter(|value| !value.is_empty()).unwrap_or_else(|| default.to_string())
+        };
+        Self {
+            id: var("PLUGIN_SMOKE_ID", "smoothstone"),
+            command: var("PLUGIN_SMOKE_COMMAND", "stone"),
+            model: var("PLUGIN_SMOKE_MODEL", MID),
+        }
+    }
+
+    fn source(&self) -> String {
+        format!("plugin:{}", self.id)
+    }
+}
 
 #[derive(Default)]
 struct Signal {
@@ -191,7 +212,7 @@ fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn agent_dir(root: &Path, models: &Path) -> anyhow::Result<PathBuf> {
+fn agent_dir(root: &Path, models: &Path, model: &str) -> anyhow::Result<PathBuf> {
     let agent = root.join("agent");
     std::fs::create_dir_all(&agent)?;
     let mut catalog: Value = serde_json::from_slice(&std::fs::read(models)?)?;
@@ -208,7 +229,7 @@ fn agent_dir(root: &Path, models: &Path) -> anyhow::Result<PathBuf> {
     write_private(&agent.join("models.json"), &serde_json::to_vec_pretty(&catalog)?)?;
     write_private(
         &agent.join("settings.json"),
-        &serde_json::to_vec_pretty(&json!({ "defaultProvider": PROVIDER, "defaultModel": MID }))?,
+        &serde_json::to_vec_pretty(&json!({ "defaultProvider": PROVIDER, "defaultModel": model }))?,
     )?;
     write_private(&agent.join("auth.json"), b"{}")?;
     println!("     scratch agent dir {} with only {PROVIDER} (auth.json is {{}})", agent.display());
@@ -230,16 +251,17 @@ fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let usage = "usage: plugin_smoke <eukhe> <scratch dir> <models.json> <plugin dir> | plugin_smoke --stop <socket>";
+    let usage = "usage: [PLUGIN_SMOKE_ID=smoothstone PLUGIN_SMOKE_COMMAND=stone PLUGIN_SMOKE_MODEL=<model>] plugin_smoke <eukhe> <scratch dir> <models.json> <plugin dir> | plugin_smoke --stop <socket>";
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if args.first().is_some_and(|arg| arg.as_os_str() == "--stop") {
         return stop_daemon(args.get(1).context(usage)?);
     }
     let [daemon, root, models, plugin] = args.as_slice() else { bail!(usage) };
-    let agent = agent_dir(root, models)?;
+    let target = Target::from_env();
+    let agent = agent_dir(root, models, &target.model)?;
     let data = root.join("data");
     let plugins = data.join("plugins");
-    copy_dir(plugin, &plugins.join("smoothstone"))?;
+    copy_dir(plugin, &plugins.join(&target.id))?;
     std::fs::create_dir_all(plugins.join("broken"))?;
     std::fs::write(plugins.join("broken").join("plugin.toml"), "id = \"broken\"\nversion = 1\n")?;
     let work = root.join("work");
@@ -258,7 +280,7 @@ fn main() -> anyhow::Result<()> {
     let signal = Arc::new(Signal::default());
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
     let mut harness = Harness { studio, signal, view: View::default() };
-    let outcome = drive(&mut harness, &work, &plugins);
+    let outcome = drive(&mut harness, &work, &plugins, &target);
     harness.studio.shutdown();
     let stopped = stop_daemon(&socket);
     outcome?;
@@ -267,19 +289,25 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn drive(harness: &mut Harness, work: &Path, plugins: &Path) -> anyhow::Result<()> {
+fn drive(harness: &mut Harness, work: &Path, plugins: &Path, target: &Target) -> anyhow::Result<()> {
     let studio = Arc::clone(&harness.studio);
+    let source = target.source();
+    let name = &target.command;
+    let gone_prompt = format!("/{name} Reply with only the word gone.");
     harness.pump_until("daemon connected", STEP, |view| matches!(view.connection, Some(Connection::Ready)))?;
     studio.add_project(work.to_string_lossy().into_owned());
     harness.pump_until("project added", STEP, |view| view.projects.len() == 1)?;
     let project = harness.view.projects[0].id.clone();
 
     let commands = harness.list_commands("before")?;
-    let stone = commands.iter().find(|command| command.name == "stone").context("/stone is not in the palette")?;
-    ensure!(stone.source == SOURCE && stone.kind == CommandKind::Plugin, "/stone has the wrong source: {stone:?}");
-    println!("ok   check 2 core: /stone listed, source {}, kind {:?}", stone.source, stone.kind);
+    let stone = commands
+        .iter()
+        .find(|command| command.name == *name)
+        .with_context(|| format!("/{name} is not in the palette"))?;
+    ensure!(stone.source == source && stone.kind == CommandKind::Plugin, "/{name} has the wrong source: {stone:?}");
+    println!("ok   check 2 core: /{name} listed, source {}, kind {:?}", stone.source, stone.kind);
     ensure!(
-        commands.iter().any(|command| command.name == "skill:smoothstone" && command.source == SOURCE),
+        commands.iter().any(|command| command.name == "skill:smoothstone" && command.source == source),
         "the plugin skill is not in the palette"
     );
     ensure!(commands.iter().any(|command| command.name == "compact"), "session commands are missing");
@@ -288,13 +316,13 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path) -> anyhow::Result<(
         "the broken plugin raised no notice: {:?}",
         harness.view.notices
     );
-    println!("ok   check 5: broken plugin reported in a notice, smoothstone and session commands still listed");
+    println!("ok   check 5: broken plugin reported in a notice, {} and session commands still listed", target.id);
 
     studio.start_thread(
         "stone".to_string(),
         Some(project.clone()),
-        prompt(&format!("/stone {REQUEST}")),
-        settings(MID),
+        prompt(&format!("/{name} {REQUEST}")),
+        settings(&target.model),
     );
     harness.pump_until("stone thread started", STEP, |view| view.thread("stone").is_some())?;
     let thread = harness.view.thread("stone").context("no stone thread")?;
@@ -302,11 +330,11 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path) -> anyhow::Result<(
     harness.pump_until("the /stone prompt reached the model expanded", STEP, |view| {
         user_text(view.items(&thread)).iter().any(|text| text.contains("stone status") && text.contains(REQUEST))
     })?;
-    std::fs::remove_dir_all(plugins.join("smoothstone"))?;
+    std::fs::remove_dir_all(plugins.join(&target.id))?;
     let commands = harness.list_commands("after")?;
-    ensure!(!commands.iter().any(|command| command.source == SOURCE), "the removed plugin is still listed");
+    ensure!(!commands.iter().any(|command| command.source == source), "the removed plugin is still listed");
     ensure!(commands.iter().any(|command| command.name == "compact"), "session commands vanished with the plugin");
-    studio.start_thread("gone".to_string(), Some(project), prompt(GONE), settings(SMALL));
+    studio.start_thread("gone".to_string(), Some(project), prompt(&gone_prompt), settings(SMALL));
     harness.pump_until("gone thread started", STEP, |view| view.thread("gone").is_some())?;
     let gone = harness.view.thread("gone").context("no gone thread")?;
     studio.select_thread(Some(gone.clone()));
@@ -314,10 +342,10 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path) -> anyhow::Result<(
         view.idle(&gone) && !user_text(view.items(&gone)).is_empty()
     })?;
     let sent = user_text(harness.view.items(&gone));
-    ensure!(sent.iter().all(|text| text.trim() == GONE), "/stone still expanded after removal: {sent:?}");
-    println!("ok   check 4: plugin folder removed, /stone gone from the palette and sent as plain text on the next turn, no restart");
+    ensure!(sent.iter().all(|text| text.trim() == gone_prompt), "/{name} still expanded after removal: {sent:?}");
+    println!("ok   check 4: plugin folder removed, /{name} gone from the palette and sent as plain text on the next turn, no restart");
     let started = Instant::now();
-    harness.pump_until("the /stone turn finished on the mid model", BUILD, |view| view.idle(&thread))?;
+    harness.pump_until(&format!("the /{name} turn finished on {}", target.model), BUILD, |view| view.idle(&thread))?;
     studio.select_thread(Some(thread.clone()));
     harness.pump_until("stone transcript reloaded", STEP, |view| !view.items(&thread).is_empty())?;
     let calls = stone_calls(harness.view.items(&thread));
@@ -325,7 +353,7 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path) -> anyhow::Result<(
     for item in harness.view.items(&thread).iter().rev().take(2) {
         println!("     last item {:.400}", format!("{:?}", item.kind));
     }
-    ensure!(calls > 0, "the /stone turn ended without running stone");
+    ensure!(calls > 0, "the /{name} turn ended without running stone");
     check_part(work)
 }
 
