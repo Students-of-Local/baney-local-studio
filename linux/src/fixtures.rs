@@ -24,7 +24,7 @@ pub fn scenes() -> Vec<&'static str> {
     all
 }
 
-pub const SCENES: [&str; 60] = [
+pub const SCENES: [&str; 61] = [
     "01-empty",
     "02-new-thread",
     "03-conversation",
@@ -42,6 +42,7 @@ pub const SCENES: [&str; 60] = [
     "14-conversation-light",
     "15-command-palette",
     "16-composer-commands",
+    "16-composer-plugin",
     "17-composer-mentions",
     "18-sidebar-search",
     "19-sidebar-multiselect",
