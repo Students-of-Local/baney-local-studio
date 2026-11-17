@@ -195,6 +195,12 @@ enum Command {
     SelectThread {
         thread: Option<String>,
     },
+    WatchThread {
+        thread: String,
+    },
+    UnwatchThread {
+        thread: String,
+    },
     StartThread {
         draft: String,
         project: Option<String>,
@@ -361,6 +367,7 @@ pub struct Studio {
     commands: mpsc::UnboundedSender<Command>,
     mailbox: Arc<Mailbox>,
     pub(crate) workspace: Workspace,
+    lock: Mutex<Option<std::fs::File>>,
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -374,6 +381,7 @@ impl Studio {
             store::data_dir(config.data_dir.as_deref()).map_err(|message| StudioError::Config { message })?;
         std::fs::create_dir_all(&data_dir)
             .map_err(|error| StudioError::Config { message: format!("create {}: {error}", data_dir.display()) })?;
+        let lock = lock_data_dir(&data_dir)?;
         let store = Store::open(&data_dir).map_err(|error| StudioError::Config { message: format!("{error:#}") })?;
         let home = store::home_dir().ok_or_else(|| StudioError::Config { message: "HOME is not set".to_string() })?;
         let session_dir = config.session_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
@@ -431,6 +439,7 @@ impl Studio {
             threads: HashMap::new(),
             by_active: HashMap::new(),
             focused: None,
+            watchers: HashMap::new(),
             heads: HashMap::new(),
             models: Vec::new(),
             models_waiting: Vec::new(),
@@ -447,7 +456,7 @@ impl Studio {
             plugin_errors: Vec::new(),
         };
         runtime.spawn(actor.run(receiver));
-        Ok(Arc::new(Self { commands, mailbox, workspace, _runtime: runtime }))
+        Ok(Arc::new(Self { commands, mailbox, workspace, lock: Mutex::new(Some(lock)), _runtime: runtime }))
     }
 
     pub fn tick(&self) -> Vec<Update> {
@@ -462,6 +471,7 @@ impl Studio {
                 self.mailbox.notice(NoticeLevel::Warning, format!("The core did not stop cleanly: {error}"));
             }
         }
+        self.lock.lock().unwrap_or_else(PoisonError::into_inner).take();
     }
 
     pub fn add_project(&self, path: String) {
@@ -486,6 +496,14 @@ impl Studio {
 
     pub fn select_thread(&self, thread: Option<String>) {
         self.send_command(Command::SelectThread { thread });
+    }
+
+    pub fn watch_thread(&self, thread: String) {
+        self.send_command(Command::WatchThread { thread });
+    }
+
+    pub fn unwatch_thread(&self, thread: String) {
+        self.send_command(Command::UnwatchThread { thread });
     }
 
     pub fn start_thread(&self, draft: String, project: Option<String>, prompt: PromptDraft, settings: ThreadSettings) {
@@ -636,6 +654,35 @@ impl Studio {
     }
 }
 
+fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, StudioError> {
+    use std::io::{Read, Seek, Write};
+    let path = data_dir.join("studio.lock");
+    let failed = |error: std::io::Error| StudioError::Config { message: format!("lock {}: {error}", path.display()) };
+    let mut file =
+        std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(failed)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut holder = String::new();
+            file.read_to_string(&mut holder).ok();
+            let holder = holder.trim();
+            let by = if holder.is_empty() { String::new() } else { format!(" (process {holder})") };
+            return Err(StudioError::Config {
+                message: format!(
+                    "another Local Studio{by} already owns {}: quit it, or give this one its own data dir",
+                    data_dir.display()
+                ),
+            });
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(failed(error)),
+    }
+    file.set_len(0)
+        .and_then(|()| file.rewind())
+        .and_then(|()| writeln!(file, "{}", std::process::id()))
+        .map_err(failed)?;
+    Ok(file)
+}
+
 impl Studio {
     fn send_command(&self, command: Command) {
         if self.commands.send(command).is_err() {
@@ -706,6 +753,7 @@ struct Actor {
     threads: HashMap<String, Thread>,
     by_active: HashMap<String, String>,
     focused: Option<String>,
+    watchers: HashMap<String, u32>,
     heads: HashMap<String, GitHead>,
     models: Vec<ModelOption>,
     models_waiting: Vec<Option<(String, String)>>,
@@ -853,9 +901,9 @@ impl Actor {
         self.refresh_saved().await;
         let mut reopen: Vec<String> =
             self.threads.iter().filter(|(_, thread)| thread.reopen).map(|(id, _)| id.clone()).collect();
-        if let Some(focused) = self.focused.clone() {
-            if !reopen.contains(&focused) {
-                reopen.push(focused);
+        for watched in self.watched_ids() {
+            if !reopen.contains(&watched) {
+                reopen.push(watched);
             }
         }
         for id in reopen {
@@ -893,8 +941,8 @@ impl Actor {
             thread.stopping = None;
             thread.run_started_at = None;
         }
-        if let Some(focused) = self.focused.clone() {
-            self.mailbox.push(Update::Approvals { thread: focused, approvals: Vec::new() });
+        for watched in self.watched_ids() {
+            self.mailbox.push(Update::Approvals { thread: watched, approvals: Vec::new() });
         }
         self.mailbox
             .push(Update::Connection { state: Connection::Lost { reason: "The Eukhe daemon stopped.".to_string() } });
@@ -1020,6 +1068,8 @@ impl Actor {
                 self.projects_changed();
             }
             Command::SelectThread { thread } => self.select(thread).await,
+            Command::WatchThread { thread } => self.watch(&thread).await,
+            Command::UnwatchThread { thread } => self.unwatch(&thread).await,
             Command::StartThread { draft, project, prompt, settings } => {
                 self.start_thread(&draft, project, prompt, settings, None).await;
             }
@@ -1330,6 +1380,43 @@ impl Actor {
         }
     }
 
+    fn watched(&self, id: &str) -> bool {
+        self.focused.as_deref() == Some(id) || self.watchers.contains_key(id)
+    }
+
+    fn watched_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.focused.iter().cloned().collect();
+        ids.extend(self.watchers.keys().filter(|id| self.focused.as_ref() != Some(*id)).cloned());
+        ids
+    }
+
+    async fn watch(&mut self, id: &str) {
+        if !self.known(id) {
+            self.mailbox.notice(NoticeLevel::Error, format!("Unknown thread {id}."));
+            return;
+        }
+        *self.watchers.entry(id.to_string()).or_default() += 1;
+        if self.client.is_none() {
+            return;
+        }
+        match self.ensure_open(id).await {
+            Ok(_) => {
+                self.emit_focus(id);
+                self.refresh_subagents(id).await;
+            }
+            Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
+        }
+    }
+
+    async fn unwatch(&mut self, id: &str) {
+        let Some(count) = self.watchers.get_mut(id) else { return };
+        *count -= 1;
+        if *count == 0 {
+            self.watchers.remove(id);
+            self.release(id).await;
+        }
+    }
+
     fn emit_focus(&self, id: &str) {
         let Some(live) = self.threads.get(id).and_then(|thread| thread.live.as_ref()) else { return };
         if let Some(info) = self.info(id) {
@@ -1344,7 +1431,7 @@ impl Actor {
     }
 
     fn emit_info(&self, id: &str) {
-        if self.focused.as_deref() != Some(id) {
+        if !self.watched(id) {
             return;
         }
         if let Some(info) = self.info(id) {
@@ -1518,7 +1605,7 @@ impl Actor {
         }
         self.fetch_entries(id, false).await;
         self.settle_pending(id);
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             self.emit_focus(id);
         }
         self.dirty = true;
@@ -1551,10 +1638,10 @@ impl Actor {
                     .collect()
             })
             .unwrap_or_default();
-        let focused = self.focused.as_deref() == Some(id);
+        let watched = self.watched(id);
         let Some(live) = self.threads.get_mut(id).and_then(|thread| thread.live.as_mut()) else { return };
         let ops = live.transcript.set_entries(&entries);
-        if emit && focused {
+        if emit && watched {
             for op in ops {
                 self.mailbox.push(Update::Transcript { thread: id.to_string(), op });
             }
@@ -1562,7 +1649,7 @@ impl Actor {
     }
 
     async fn release(&mut self, id: &str) {
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             return;
         }
         let Some(thread) = self.threads.get(id) else { return };
@@ -2091,6 +2178,7 @@ impl Actor {
                 if self.focused.as_deref() == Some(id) {
                     self.focused = None;
                 }
+                self.watchers.remove(id);
                 self.dirty = true;
             }
             Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
@@ -2247,7 +2335,7 @@ impl Actor {
             live.transcript.take_settled();
         }
         self.fetch_entries(id, false).await;
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             if let Some(live) = self.threads.get(id).and_then(|thread| thread.live.as_ref()) {
                 self.mailbox.push(Update::Transcript {
                     thread: id.to_string(),
@@ -2471,7 +2559,7 @@ impl Actor {
     }
 
     fn forget_run(&mut self, id: &str) {
-        let info = if self.focused.as_deref() == Some(id) { self.info(id) } else { None };
+        let info = if self.watched(id) { self.info(id) } else { None };
         if let Some(thread) = self.threads.get_mut(id) {
             if let Some(live) = thread.live.take() {
                 self.by_active.remove(&live.active);
@@ -2495,7 +2583,7 @@ impl Actor {
     }
 
     async fn reopen_focused(&mut self, id: &str) {
-        if self.focused.as_deref() != Some(id) || self.client.is_none() {
+        if !self.watched(id) || self.client.is_none() {
             return;
         }
         if let Err(error) = self.ensure_open(id).await {
@@ -2969,8 +3057,8 @@ impl Actor {
         }
         self.push_daemon();
         if children_changed || children_before != self.children.len() {
-            if let Some(focused) = self.focused.clone() {
-                self.emit_subagents(&focused);
+            for watched in self.watched_ids() {
+                self.emit_subagents(&watched);
             }
         }
         self.dirty = true;
@@ -3022,7 +3110,7 @@ impl Actor {
                     thread.pending_run = false;
                     thread.run_started_at = None;
                 }
-                if self.focused.as_deref() == Some(id.as_str()) {
+                if self.watched(&id) {
                     self.mailbox.push(Update::Approvals { thread: id.clone(), approvals: Vec::new() });
                     if reason != "replaced" {
                         self.mailbox.notice(NoticeLevel::Info, format!("The thread's session closed ({reason})."));
@@ -3152,7 +3240,7 @@ impl Actor {
 
     async fn session_event(&mut self, active: &str, event: &SessionEvent, sequence: u64) {
         let Some(id) = self.by_active.get(active).cloned() else { return };
-        let focused = self.focused.as_deref() == Some(id.as_str());
+        let watched = self.watched(&id);
         let now = now_ms();
         let mode = self.settings.borrow().response_streaming;
         let Some(thread) = self.threads.get_mut(&id) else { return };
@@ -3163,7 +3251,7 @@ impl Actor {
             }
             live.seen = sequence;
         }
-        let ops: Vec<TranscriptOp> = if focused {
+        let ops: Vec<TranscriptOp> = if watched {
             live.transcript.apply(event).into_iter().filter_map(|op| coalesce(mode, &mut live.shown, op)).collect()
         } else {
             live.transcript.apply(event);
@@ -3258,7 +3346,7 @@ impl Actor {
             self.save();
         }
         self.reload_context(id).await;
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             self.refresh_subagents(id).await;
         }
         self.refresh_saved().await;

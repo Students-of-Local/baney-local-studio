@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "kit"]
+members = ["core", "kit", "remote"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ local-studio-core = { path = "core" }
 eukhe-client = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.73" }
 eukhe-types = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.73" }
 anyhow = "1"
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util", "fs"] }
