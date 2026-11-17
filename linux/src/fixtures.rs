@@ -2,12 +2,13 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use local_studio_core::{
-    AccessMode, Approval, Block, Harness, ColorScheme, Connection, ContextUsage, DiffHunk, DiffLine, DiffLineKind, FileChange,
-    FileDiff, GitStatus, Item, ItemKind, Keybinding, LocalController, LocalEndpoint, LocalEngineState, LocalGpu,
-    LocalHardware, LocalJob, LocalMachineStatus, LocalModelUsage, LocalRecipe, LocalRegistry, LocalRegistryMatch,
-    LocalSnapshot, LocalUsage, ModelKey, ModelOption, ModelRef, NoticeLevel, Project, ProviderCredential, ProviderKind,
-    ProviderStatus, QueuedMessage, RegistryModel, RegistryVariant, Settings, Shelf, ThreadInfo, ThreadRow,
-    ThreadStatus, TokenHistory, ToolKind, ToolState, TranscriptOp, Update, UsageDay, UsagePeriod, UsageReport,
+    AccessMode, Approval, Block, ColorScheme, Connection, ContextUsage, DiffHunk, DiffLine, DiffLineKind, FileChange,
+    FileDiff, GitStatus, Harness, Item, ItemKind, Keybinding, LocalController, LocalEndpoint, LocalEngineState,
+    LocalGpu, LocalHardware, LocalJob, LocalMachineStatus, LocalModelUsage, LocalRecipe, LocalRegistry,
+    LocalRegistryMatch, LocalSnapshot, LocalUsage, ModelKey, ModelOption, ModelRef, NoticeLevel, Project,
+    ProviderCredential, ProviderKind, ProviderStatus, QueuedMessage, RegistryModel, RegistryVariant, Settings, Shelf,
+    ThreadInfo, ThreadRow, ThreadStatus, TokenHistory, ToolKind, ToolState, TranscriptOp, Update, UsageDay,
+    UsagePeriod, UsageReport,
 };
 
 use crate::app::{App, Dirty};
