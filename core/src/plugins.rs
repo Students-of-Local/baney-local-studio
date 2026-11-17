@@ -1,11 +1,80 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::{json, Map, Value};
 
 use crate::model::{CommandKind, SlashCommand};
 
+mod grants;
+mod install;
+
+pub use grants::{Consent, Grants, GRANTS};
+pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, MAX_FILE};
+
 pub const MANIFEST: &str = "plugin.toml";
+pub const MCP_PREFIX: &str = "plugin-";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Capability {
+    McpServer,
+    NativeHost,
+    AskUser,
+    SiteSecrets,
+    Accessibility,
+    SyntheticInput,
+    ScreenCapture,
+}
+
+impl Capability {
+    pub const ALL: [Capability; 7] = [
+        Capability::McpServer,
+        Capability::NativeHost,
+        Capability::AskUser,
+        Capability::SiteSecrets,
+        Capability::Accessibility,
+        Capability::SyntheticInput,
+        Capability::ScreenCapture,
+    ];
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Capability::McpServer => "mcp-server",
+            Capability::NativeHost => "native-host",
+            Capability::AskUser => "ask-user",
+            Capability::SiteSecrets => "site-secrets",
+            Capability::Accessibility => "accessibility",
+            Capability::SyntheticInput => "synthetic-input",
+            Capability::ScreenCapture => "screen-capture",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Capability::McpServer => "Run its own tool server for your sessions",
+            Capability::NativeHost => "Register a helper that one browser extension can talk to",
+            Capability::AskUser => "Ask you questions and ask before risky steps",
+            Capability::SiteSecrets => "Fill your saved secrets into the sites they belong to",
+            Capability::Accessibility => "Read and operate the windows and controls of other apps",
+            Capability::SyntheticInput => "Move the pointer and press keys for you",
+            Capability::ScreenCapture => "Take screenshots of app windows",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|capability| capability.name() == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plugin {
@@ -16,6 +85,8 @@ pub struct Plugin {
     pub skills: Vec<PluginFile>,
     pub prompts: Vec<PluginFile>,
     pub commands: Vec<PluginCommand>,
+    pub capabilities: Vec<Capability>,
+    pub mcp: Option<McpServer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +131,16 @@ impl Plugin {
     pub fn skill(&self, name: &str) -> Option<&PluginFile> {
         self.skills.iter().find(|skill| skill.name == name)
     }
+
+    #[must_use]
+    pub fn asks(&self, capability: Capability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    #[must_use]
+    pub fn mcp_name(&self) -> String {
+        format!("{MCP_PREFIX}{}", self.id)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +155,17 @@ struct Manifest {
     commands: Vec<ManifestCommand>,
     #[serde(default)]
     capabilities: Vec<String>,
+    mcp: Option<ManifestMcp>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestMcp {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +220,7 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         toml::from_str(&text).map_err(|error| vec![format!("invalid {MANIFEST}: {}", error.message())])?;
     let mut errors: Vec<String> = Vec::new();
     if !valid_id(&manifest.id) {
-        errors.push(format!("bad id: {:?} (use lowercase letters, digits and hyphens)", manifest.id));
+        errors.push(format!("bad id: {:?} (use lowercase letters, digits and single hyphens)", manifest.id));
     }
     let folder = dir
         .canonicalize()
@@ -144,7 +236,19 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
     if manifest.description.trim().is_empty() {
         errors.push("description is empty".to_string());
     }
-    errors.extend(manifest.capabilities.iter().map(|name| format!("capability not supported yet: {name}")));
+    let capabilities = capabilities_in(&manifest.capabilities, &mut errors);
+    let mcp = match (manifest.mcp, capabilities.contains(&Capability::McpServer)) {
+        (Some(mcp), true) => mcp_in(dir, &manifest.id, mcp, &mut errors),
+        (Some(_), false) => {
+            errors.push("[mcp] needs the mcp-server capability".to_string());
+            None
+        }
+        (None, true) => {
+            errors.push("the mcp-server capability needs an [mcp] table".to_string());
+            None
+        }
+        (None, false) => None,
+    };
     let skills_dir = match &manifest.skills {
         Some(relative) => listed_dir(dir, relative, "skills", &mut errors),
         None => Some(dir.join("skills")).filter(|path| path.is_dir()),
@@ -168,7 +272,117 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         skills,
         prompts,
         commands,
+        capabilities,
+        mcp,
     })
+}
+
+fn capabilities_in(names: &[String], errors: &mut Vec<String>) -> Vec<Capability> {
+    let mut capabilities: Vec<Capability> = Vec::new();
+    for name in names {
+        match Capability::parse(name) {
+            Some(capability) if capabilities.contains(&capability) => {
+                errors.push(format!("duplicate capability: {name}"));
+            }
+            Some(capability) => capabilities.push(capability),
+            None => errors.push(format!("unknown capability: {name}")),
+        }
+    }
+    capabilities
+}
+
+fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> Option<McpServer> {
+    let command = match inside(dir, &mcp.command) {
+        Ok(path) if path.is_file() => path,
+        Ok(path) => {
+            errors.push(format!("[mcp] command is missing: {}", path.display()));
+            return None;
+        }
+        Err(error) => {
+            errors.push(format!("[mcp] command: {error}"));
+            return None;
+        }
+    };
+    let prefix = env_prefix(id);
+    let before = errors.len();
+    for (name, host) in &mcp.env {
+        if !valid_env_name(name) {
+            errors.push(format!("[mcp] env: bad variable name: {name:?}"));
+        }
+        if !valid_env_name(host) || !host.starts_with(&prefix) {
+            errors.push(format!("[mcp] env {name}: the host variable must start with {prefix}, not {host:?}"));
+        }
+    }
+    (errors.len() == before).then_some(McpServer { command, args: mcp.args, env: mcp.env })
+}
+
+#[must_use]
+pub fn env_prefix(id: &str) -> String {
+    format!("LOCAL_STUDIO_PLUGIN_{}__", id.to_ascii_uppercase().replace('-', "_"))
+}
+
+fn valid_env_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|first| first.is_ascii_uppercase() || first == '_')
+        && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+#[must_use]
+pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
+    plugins
+        .iter()
+        .filter(|plugin| grants.consent(plugin) == Consent::Ready && plugin.asks(Capability::McpServer))
+        .filter_map(|plugin| {
+            let mcp = plugin.mcp.as_ref()?;
+            let dir = absolute(&plugin.dir);
+            let env: Map<String, Value> =
+                mcp.env.iter().map(|(name, host)| (name.clone(), json!({ "env": host }))).collect();
+            let mut entry = json!({
+                "type": "stdio",
+                "command": absolute(&mcp.command).to_string_lossy(),
+                "args": mcp.args,
+                "cwd": dir.to_string_lossy(),
+            });
+            if !env.is_empty() {
+                entry["env"] = Value::Object(env);
+            }
+            Some((plugin.mcp_name(), entry))
+        })
+        .collect()
+}
+
+pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Result<bool, String> {
+    let path = agent.join("settings.json");
+    let mut settings = crate::workspace::providers::read_object(&path)?;
+    let mut servers = match settings.remove("mcpServers") {
+        None => Map::new(),
+        Some(Value::Object(servers)) => servers,
+        Some(_) => return Err(format!("{}: mcpServers is not a JSON object", path.display())),
+    };
+    let wanted = mcp_servers(plugins, grants);
+    let current: Map<String, Value> =
+        servers.iter().filter(|(name, _)| name.starts_with(MCP_PREFIX)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    if current == wanted {
+        return Ok(false);
+    }
+    servers.retain(|name, _| !name.starts_with(MCP_PREFIX));
+    servers.extend(wanted);
+    settings.insert("mcpServers".to_string(), Value::Object(servers));
+    crate::workspace::providers::write_private(&path, &Value::Object(settings))?;
+    Ok(true)
+}
+
+#[must_use]
+pub fn agent_dir() -> Option<PathBuf> {
+    crate::daemon::agent_dir()
+}
+
+pub fn sync_agent(root: &Path, agent: &Path) -> Result<bool, String> {
+    let grants = Grants::load(root)?;
+    sync_mcp_servers(agent, &scan(root).plugins, &grants)
+}
+
+fn absolute(path: &Path) -> PathBuf {
+    path.canonicalize().or_else(|_| std::path::absolute(path)).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn listed_dir(dir: &Path, relative: &str, what: &str, errors: &mut Vec<String>) -> Option<PathBuf> {
@@ -244,7 +458,7 @@ pub fn commands(plugins: &[Plugin]) -> Vec<SlashCommand> {
         .collect()
 }
 
-fn inside(dir: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn inside(dir: &Path, relative: &str) -> Result<PathBuf, String> {
     let path = Path::new(relative);
     if path.is_absolute()
         || path.components().any(|part| !matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir))
@@ -314,10 +528,11 @@ fn frontmatter(content: &str, key: &str) -> Option<String> {
     })
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && !id.ends_with('-')
+        && !id.contains("--")
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
