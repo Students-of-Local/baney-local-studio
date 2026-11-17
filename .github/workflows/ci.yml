@@ -68,7 +68,7 @@ jobs:
             cp Cargo.toml "$dir/"
             cp macos/LocalStudio-Info.plist "$dir/macos/"
             cp linux/src/main.rs "$dir/linux/src/"
-            identity=$(nu scripts/version.nu "$channel" --stamp --json --root "$dir" --at 20261118070000)
+            identity=$(nu scripts/version.nu "$channel" --stamp --json --root "$dir" --at 20261118070000 --commit "$GITHUB_SHA")
             for field in name bundle_id scheme bundle_version base; do
               grep -qF "<string>$(jq -r ".$field" <<< "$identity")</string>" "$dir/macos/LocalStudio-Info.plist"
             done
