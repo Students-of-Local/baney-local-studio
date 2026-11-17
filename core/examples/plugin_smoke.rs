@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
+use local_studio_core::plugins::{self as plugin_store, Catalog, Consent, Source};
 use local_studio_core::{
     AccessMode, CommandKind, Connection, DaemonLaunch, Item, ItemKind, Project, PromptDraft, SkillEntry, SlashCommand,
     Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, ToolState, TranscriptOp, Update, Waker,
@@ -251,7 +252,7 @@ fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let usage = "usage: [PLUGIN_SMOKE_ID=smoothstone PLUGIN_SMOKE_COMMAND=stone PLUGIN_SMOKE_MODEL=<model>] plugin_smoke <eukhe> <scratch dir> <models.json> <plugin dir> | plugin_smoke --stop <socket>";
+    let usage = "usage: [PLUGIN_SMOKE_ID=smoothstone PLUGIN_SMOKE_COMMAND=stone PLUGIN_SMOKE_MODEL=<model>] plugin_smoke <eukhe> <scratch dir> <models.json> <plugin dir | catalog id> | plugin_smoke --stop <socket>";
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if args.first().is_some_and(|arg| arg.as_os_str() == "--stop") {
         return stop_daemon(args.get(1).context(usage)?);
@@ -266,7 +267,11 @@ fn main() -> anyhow::Result<()> {
     let agent = agent_dir(root, models, &target.model)?;
     let data = root.join("data");
     let plugins = data.join("plugins");
-    copy_dir(plugin, &plugins.join(&target.id))?;
+    if plugin.is_dir() {
+        copy_dir(plugin, &plugins.join(&target.id))?;
+    } else {
+        install_from_catalog(&plugins, &plugin.to_string_lossy(), &target)?;
+    }
     std::fs::create_dir_all(plugins.join("broken"))?;
     std::fs::write(plugins.join("broken").join("plugin.toml"), "id = \"broken\"\nversion = 1\n")?;
     let work = root.join("work");
@@ -285,12 +290,42 @@ fn main() -> anyhow::Result<()> {
     let signal = Arc::new(Signal::default());
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
     let mut harness = Harness { studio, signal, view: View::default() };
-    let outcome = drive(&mut harness, &work, &plugins, &target);
+    let outcome = drive(&mut harness, &work, &plugins, &target).and_then(|()| no_plugin_servers(&agent));
     harness.studio.shutdown();
     let stopped = stop_daemon(&socket);
     outcome?;
     stopped?;
     println!("PASS plugin smoke");
+    Ok(())
+}
+
+fn install_from_catalog(plugins: &Path, id: &str, target: &Target) -> anyhow::Result<()> {
+    ensure!(id == target.id, "catalog id {id} is not PLUGIN_SMOKE_ID {}", target.id);
+    let catalog = Catalog::bundled().map_err(anyhow::Error::msg)?;
+    let entry = catalog.entry(id).with_context(|| format!("{id} is not in the bundled catalog"))?;
+    let installed = plugin_store::install(plugins, &Source::Catalog(id.to_string()), &catalog)
+        .map_err(|errors| anyhow::anyhow!("catalog install refused: {}", errors.join("; ")))?;
+    ensure!(installed.tree == entry.tree, "installed tree {} is not the pinned {}", installed.tree, entry.tree);
+    ensure!(installed.plugin.dir == plugins.join(id), "installed into {}", installed.plugin.dir.display());
+    ensure!(installed.consent == Consent::Ready, "{id} needs consent: {:?}", installed.consent);
+    println!(
+        "ok   check 1: {id} {} installed through the catalog at {} ({} files, {})",
+        installed.plugin.version,
+        &entry.rev[..12],
+        installed.files,
+        installed.tree
+    );
+    Ok(())
+}
+
+fn no_plugin_servers(agent: &Path) -> anyhow::Result<()> {
+    let settings: Value = serde_json::from_slice(&std::fs::read(agent.join("settings.json"))?)?;
+    let servers = settings.get("mcpServers").and_then(Value::as_object);
+    ensure!(
+        servers.is_none_or(|servers| !servers.keys().any(|name| name.starts_with(plugin_store::MCP_PREFIX))),
+        "a plugin without the mcp-server capability got an mcpServers entry: {servers:?}"
+    );
+    println!("ok   no plugin MCP server registered for a plugin that asks for none");
     Ok(())
 }
 
