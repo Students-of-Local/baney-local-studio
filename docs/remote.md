@@ -33,7 +33,7 @@ So the proposal is: **serve `Studio` over a WebSocket**. Requests are `Studio` m
 - `local-studio pair` (and a "Pair a phone" sheet in each desktop app) mints a one-time pairing secret, valid 10 minutes, and shows a QR code and a link: `localstudio://pair?url=wss%3A%2F%2Fstudio-mac.tail1234.ts.net%2Fv1%2Fws&name=studio-mac#<secret>`.
 - The phone's first frame: `{"op":"pair","secret":"…","device":{"id":"<uuid>","name":"My iPhone","platform":"ios","app":"0.1.0","channel":"nightly"}}`. The server answers `{"op":"paired","credential":"<64 hex>","machine":{…}}` and burns the secret.
 - The server stores only a hash of each device credential in `<data>/remote-devices.json` (0600) with name, platform, first and last seen. Desktop settings list devices and revoke one. A revoked or unknown credential gets `{"op":"unpaired"}` and a close.
-- Later connections open with `{"op":"hello","device":"<uuid>","credential":"…","protocol":1}`. The phone keeps credentials in the Keychain (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`).
+- Later connections open with `{"op":"hello","device":"<uuid>","credential":"…","protocol":1,"min_protocol":1}`. The phone keeps credentials in the Keychain (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`).
 
 ## Frames
 
@@ -50,7 +50,7 @@ Client to server (requests run concurrently; `id` is the client's number):
 Server to client:
 
 ```json
-{"op": "hello", "protocol": 1, "machine": {"id": "…", "name": "studio-mac", "os": "macos", "version": "0.4.0", "channel": "nightly"}, "snapshot": [ {"type": "connection", …}, {"type": "projects", …}, {"type": "threads", …}, {"type": "models", …} ]}
+{"op": "hello", "protocol": 1, "min_protocol": 1, "machine": {"id": "…", "name": "studio-mac", "os": "macos", "version": "0.4.0", "channel": "nightly"}, "snapshot": [ {"type": "connection", …}, {"type": "projects", …}, {"type": "threads", …}, {"type": "models", …} ]}
 {"op": "update", "seq": 412, "update": {"type": "transcript", "thread": "t1", "op": {"type": "insert", "index": 18, "item": {…}}}}
 ```
 
@@ -65,9 +65,13 @@ Server to client:
 
 ## Gaps against T3 Code found while writing this
 
-- **Question cards.** Local Studio has command approvals (`Approval`) but no "the agent asks the user a question with options" request. T3's phone answers those. It needs an Eukhe-side request type and an `Update::Questions` here.
+- **Question cards.** Local Studio has command approvals (`Approval`) but no "the agent asks the user a question with options" request, and Eukhe's daemon has only `shell_approval`. In T3 it is the request the owner answers most (179 in 30 days against 18 command approvals). Proposed shape, copying the shell approval flow: daemon frame `user_question {active_session_id, request: {request_id, questions: [{header, question, options: [{label, description}], multi_select}]}, agent}`, answer `answer_user_question {request_id, answers: {<question>: <answer>}}`, and `user_question_settled`; in core `Update::Questions { thread, questions }` and `Studio::answer_question(thread, request, answers)`, carried on this wire unchanged.
 - **Thread list paging.** `Threads` sends every row. Fine at hundreds of threads; T3 pages settled threads 25 at a time. Measure before adding paging.
+
+## Protocol window
+
+Each side states the newest protocol it speaks (`protocol`) and the oldest it still accepts (`min_protocol`), and keeps `min_protocol` at `protocol - 1` once protocol 2 exists (docs/channels.md: both sides speak their protocol and the one before it). The server answers `hello` with the highest version inside both windows and speaks it for the life of the socket. When the windows do not overlap, the server sends `{"op":"incompatible","protocol":N,"min_protocol":M}` and closes; the phone names the machine, its version and channel, and which side to update. `/v1/health` reports both numbers so the phone can say this before pairing.
 
 ## Channels
 
-Each app channel is its own install: bundle ids `com.baney.localstudio` (stable), `.nightly`, `.dev`; schemes `localstudio`, `localstudio-nightly`, `localstudio-dev`. The server reports its channel in `hello`; the phone shows it and warns on a protocol mismatch. The core lead's channel scheme wins if it differs.
+docs/channels.md is the scheme. The iPhone app is side by side: `org.local.studio.ios` ("Local Studio"), `org.local.studio.ios.nightly` ("Local Studio Nightly"), `org.local.studio.ios.dev` ("Local Studio Dev"), URL schemes `localstudio`, `localstudio-nightly`, `localstudio-dev`. It carries the desktop app's version and tags, so a phone and a desktop from the same channel always share a protocol. The server reports its version and channel in `hello`; the phone shows them on the Machines sheet.
