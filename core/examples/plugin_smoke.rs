@@ -258,6 +258,11 @@ fn main() -> anyhow::Result<()> {
     }
     let [daemon, root, models, plugin] = args.as_slice() else { bail!(usage) };
     let target = Target::from_env();
+    ensure!(
+        target.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "PLUGIN_SMOKE_ID must be a plain plugin id, not a path: {:?}",
+        target.id
+    );
     let agent = agent_dir(root, models, &target.model)?;
     let data = root.join("data");
     let plugins = data.join("plugins");
