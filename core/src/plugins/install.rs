@@ -314,7 +314,11 @@ fn refusals(root: &Path, entries: &[Entry]) -> Vec<String> {
     for entry in entries {
         match &entry.kind {
             Kind::Link(target) if !stays_inside(&entry.path, target) || !resolves_inside(root, &entry.path) => {
-                refusals.push(format!("symlink points outside the plugin or nowhere: {} -> {}", entry.path, target.display()));
+                refusals.push(format!(
+                    "symlink points outside the plugin or nowhere: {} -> {}",
+                    entry.path,
+                    target.display()
+                ));
             }
             Kind::File { size, .. } if *size > MAX_FILE => {
                 refusals.push(format!("file over 10 MB: {} ({size} bytes)", entry.path));
