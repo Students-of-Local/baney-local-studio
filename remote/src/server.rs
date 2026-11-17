@@ -303,7 +303,7 @@ async fn session(server: Arc<Server>, socket: Socket, address: IpAddr) {
         }
     };
     drop(opening);
-    attached(&server, sink, stream, opened, address).await;
+    attached(&server, sink, stream, opened, protocol, address).await;
 }
 
 fn noise_error(error: &snow::Error) -> Refusal {
@@ -438,7 +438,14 @@ async fn first_hello(stream: &mut Stream, channel: &Channel) -> Result<Value, St
     }
 }
 
-async fn attached(server: &Arc<Server>, mut sink: Sink, mut stream: Stream, opened: Opened, address: IpAddr) {
+async fn attached(
+    server: &Arc<Server>,
+    mut sink: Sink,
+    mut stream: Stream,
+    opened: Opened,
+    protocol: u64,
+    address: IpAddr,
+) {
     let channel = Arc::new(opened.channel);
     let hello = match first_hello(&mut stream, &channel).await {
         Ok(hello) => hello,
@@ -454,7 +461,7 @@ async fn attached(server: &Arc<Server>, mut sink: Sink, mut stream: Stream, open
     }
     let name = server.devices.device(&opened.device).ok().flatten().map(|device| device.info.name).unwrap_or_default();
     let (tx, rx, cut) = hub::outbound();
-    let conn = server.hub.attach(&opened.device, &name, &opened.key, tx.clone(), &resume_of(&hello));
+    let conn = server.hub.attach(&opened.device, &name, &opened.key, protocol, tx.clone(), &resume_of(&hello));
     let mut writer = tokio::spawn(write(sink, rx, Arc::clone(&channel)));
     let mut writing = true;
     let ended = tokio::select! {
@@ -551,7 +558,12 @@ fn answer(hub: &Hub, device: &str, conn: ConnId, text: &str) -> Option<Value> {
     };
     let op = frame.get("op").and_then(Value::as_str).unwrap_or_default();
     match op {
-        "ping" => return Some(json!({ "op": "pong" })),
+        "ping" => {
+            return Some(match frame.get("id").filter(|id| !id.is_null()) {
+                Some(id) => json!({ "re": id, "ok": true }),
+                None => json!({ "op": "pong" }),
+            });
+        }
         "pong" => return None,
         _ => {}
     }

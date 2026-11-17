@@ -560,7 +560,7 @@ impl Hub {
         }
     }
 
-    pub fn attach(&self, device: &str, name: &str, key: &str, tx: Tx, resume: &Resume) -> ConnId {
+    pub fn attach(&self, device: &str, name: &str, key: &str, protocol: u64, tx: Tx, resume: &Resume) -> ConnId {
         let mut state = self.state();
         state.next += 1;
         let conn = state.next;
@@ -582,7 +582,7 @@ impl Hub {
         let base = if delta { resume.seq.unwrap_or_default() } else { session.seq };
         let hello = json!({
             "op": "hello",
-            "protocol": PROTOCOL,
+            "protocol": protocol,
             "min_protocol": MIN_PROTOCOL,
             "epoch": self.epoch,
             "machine": self.machine,

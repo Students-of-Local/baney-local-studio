@@ -1370,6 +1370,10 @@ async fn op_checks(run: &mut Run, a: &mut Client) -> anyhow::Result<()> {
         .await?;
     a.frame(&json!({ "op": "ping" }));
     a.until("ping answered with pong", QUICK, |view| view.pongs >= 1).await?;
+    let pongs = a.view().pongs;
+    let reply = a.reply("ping", json!({})).await?;
+    ensure!(reply.get("ok") == Some(&json!(true)) && a.view().pongs == pongs, "a ping with an id answered {reply}");
+    println!("ok   a ping with an id is answered {reply}, a ping without one with pong");
     let models = a.view().models;
     a.call("load_models", json!({})).await?;
     a.until("load_models brings a models update", SETUP, |view| view.models > models).await?;

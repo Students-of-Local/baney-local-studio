@@ -96,7 +96,7 @@ The server answers:
 - `machine.urls` lists every route the machine is reachable on now. The phone replaces its stored list with it, so a hostname that changed after 30 days down is learned on any route that still works.
 - **Resume by `seq`.** `seq` counts updates per device and server `epoch` (a new epoch on every `serve` start). The server keeps each device's last 2,000 updates or 10 minutes, whichever is less. When `resume.epoch` matches and `resume.seq` is still in that buffer, the server answers `"resume": "delta"`, sends the missed updates in order, then live ones. Otherwise it answers `"resume": "snapshot"` with a full snapshot (`connection`, `projects`, `threads`, and `models`, `daemon_default` and `theme` once the core has them) inside `hello`, then a `transcript` `reset` for each thread in `resume.watch` as ordinary `seq`'d updates, so the transcript, which can be large, never makes one huge `hello`.
 - **Reconnect.** After a drop the phone waits 1 s, doubling to 30 s, with full jitter, and tries its URLs in order of last success. It resets the wait after a socket stays up 60 s and reconnects at once when the app comes to the foreground or the network path changes.
-- `ping`/`pong` every 20 s from the phone; the server closes a socket silent for 60 s.
+- `ping`/`pong` every 20 s from the phone; the server closes a socket silent for 60 s. A `ping` with an `id` is answered like any request, `{"re": id, "ok": true}`; one without an `id` gets `{"op":"pong"}`.
 
 ## Frames
 
