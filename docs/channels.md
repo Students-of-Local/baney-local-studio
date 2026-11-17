@@ -2,6 +2,8 @@
 
 Every product in the Local Studio family ships on three channels: **stable**, **nightly** and **dev**. This file is the one scheme for all of them: Local Studio (desktop and iPhone), Silas, Polycarp, Tychicus, Fonsviva, Gantrel, UntoCaesar and Corunis. A product's own RELEASES.md may add detail; where it disagrees with this file, this file wins.
 
+`scripts/check-channels.sh` enforces the parts a machine can check: no workflow starts on a pushed tag, the `stable` environment runs only from `workflow_call` or `workflow_dispatch`, the version examples sort as stated, and docs/remote.md carries the protocol window. CI runs it on every pull request.
+
 ## The three channels
 
 | Channel | For | Built from | When | Gate |
