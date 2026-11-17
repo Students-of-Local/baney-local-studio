@@ -303,7 +303,7 @@ fn stop_reason(text: &str) -> Option<String> {
         .iter()
         .find_map(|level| text.split_once(level))
         .map_or(text.as_str(), |(_, rest)| rest.split_once(": ").map_or(rest, |(_, message)| message));
-    Some(message.trim().to_string())
+    Some(message.trim().trim_end_matches('.').to_string())
 }
 
 fn plain(text: &str) -> String {
