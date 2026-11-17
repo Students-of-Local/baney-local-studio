@@ -1,5 +1,5 @@
 name: Stable
-# Called only by promote.yml after it fast-forwarded `stable` and tagged it (docs/channels.md).
+# Called only by promote.yml after it fast-forwarded `stable`. Publishing the draft creates the vX.Y.Z tag, so a failed run leaves no tag behind and promote can run again (docs/channels.md).
 on:
   workflow_call:
     inputs:
@@ -55,10 +55,17 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
       - name: Write latest.json and publish the release
         env:
-          GH_TOKEN: ${{ github.token }}
-          MAC_SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MAC_SIGNED: ${{ needs.build.outputs.mac == 'true' }}
           UPDATER_SIGNING_KEY: ${{ secrets.UPDATER_SIGNING_KEY }}
           UPDATER_SIGNING_KEY_PASSWORD: ${{ secrets.UPDATER_SIGNING_KEY_PASSWORD }}
           DRAFT: ${{ needs.draft.outputs.id }}

@@ -1,6 +1,10 @@
 name: Build
 on:
   workflow_call:
+    outputs:
+      mac:
+        description: true when a signed macOS build was uploaded to the draft
+        value: ${{ jobs.macos.outputs.uploaded }}
     inputs:
       channel:
         type: string
@@ -64,6 +68,8 @@ jobs:
   macos:
     name: macOS arm64
     runs-on: macos-26
+    outputs:
+      uploaded: ${{ steps.ship.outputs.uploaded }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -82,9 +88,17 @@ jobs:
         run: |
           stamped=$(nu scripts/version.nu "$CHANNEL" --stamp --at "$AT" --commit "$COMMIT")
           [ "$stamped" = "$VERSION" ] || { echo "::error::stamped $stamped, expected $VERSION"; exit 1; }
+      - name: Newest Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          sudo xcodebuild -runFirstLaunch
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
       - name: Build (Release)
-        run: env -u DEVELOPER_DIR nu macos/build.nu --configuration Release
+        run: nu macos/build.nu --configuration Release
       - name: Sign, package and upload
+        id: ship
         env:
           GH_TOKEN: ${{ github.token }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -100,6 +114,7 @@ jobs:
           # An ad-hoc build is a new app to macOS each time, so it is built to prove it compiles but never shipped.
           if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
             echo "::warning title=macOS build not published::APPLE_CERTIFICATE or APPLE_SIGNING_IDENTITY is not set, so this ad-hoc signed build was not uploaded."
+            echo "uploaded=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           keychain="$RUNNER_TEMP/build.keychain-db"
@@ -112,8 +127,13 @@ jobs:
           rm "$RUNNER_TEMP/certificate.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app/Contents/MacOS/eukhe"
+          find "$app/Contents" -type f -print0 | xargs -0 file --no-pad | awk -F': ' '/Mach-O/ {print $1}' |
+            awk -F/ '{print NF "\t" $0}' | sort -rn | cut -f2- |
+            while IFS= read -r code; do
+              codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$code"
+            done
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
           tar -C "$stage" -czf "$RUNNER_TEMP/out/local-studio-darwin-aarch64.app.tar.gz" "$name.app"
           scripts/release.sh upload "$DRAFT" "$RUNNER_TEMP/out/local-studio-darwin-aarch64.app.tar.gz"
+          echo "uploaded=true" >> "$GITHUB_OUTPUT"

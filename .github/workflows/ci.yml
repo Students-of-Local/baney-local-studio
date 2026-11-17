@@ -96,9 +96,10 @@ jobs:
           xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
           sudo xcode-select -s "$xcode"
           sudo xcodebuild -runFirstLaunch
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
           xcodebuild -version
       - name: App (Debug)
-        run: env -u DEVELOPER_DIR nu macos/build.nu
+        run: nu macos/build.nu
 
   windows:
     name: Windows (core and kit, not shipped)

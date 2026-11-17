@@ -23,6 +23,7 @@ env:
 jobs:
   promote:
     runs-on: ubuntu-24.04
+    environment: stable
     outputs:
       version: ${{ steps.pick.outputs.version }}
       commit: ${{ steps.pick.outputs.commit }}
@@ -52,6 +53,9 @@ jobs:
             IFS=. read -r major minor patch <<< "${last#v}"
             version="$major.$minor.$((patch + 1))"
             commit=$head
+            git checkout -q "$commit"
+            stamped=$(nu scripts/version.nu stable --commit "$commit")
+            [ "$stamped" = "$version" ] || die "stable's head builds $stamped; bump the workspace version to $version in the hotfix"
           else
             [[ $NIGHTLY =~ ^nightly-[0-9]{14}$ ]] || die "nightly must be a nightly-YYYYMMDDHHMMSS tag"
             published=$(gh api "repos/$REPO/releases/tags/$NIGHTLY" -q .published_at) || die "no release $NIGHTLY"
@@ -71,19 +75,31 @@ jobs:
           open=$(gh api "repos/$REPO/issues?state=open&labels=regression&per_page=100" -q '[.[] | select(.pull_request | not)] | length')
           [ "$open" = 0 ] || die "$open open issue(s) labeled regression"
           ! git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null || die "v$version already exists"
+          [ "$head" = "$commit" ] || git merge-base --is-ancestor "$head" "$commit" || die "stable's head $head is not an ancestor of $commit"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-      - name: Fast-forward stable and tag it
+      - name: Refuse without the release app
         env:
-          VERSION: ${{ steps.pick.outputs.version }}
+          APP_ID: ${{ secrets.RELEASE_APP_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: '[ -n "$APP_ID" ] && [ -n "$APP_KEY" ] || { echo "::error::RELEASE_APP_ID and RELEASE_APP_PRIVATE_KEY are not set in the stable environment; GITHUB_TOKEN cannot move stable past workflow changes"; exit 1; }'
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+      - name: Fast-forward stable
+        env:
           COMMIT: ${{ steps.pick.outputs.commit }}
+          TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
-          git push origin "$COMMIT:refs/heads/stable"
-          git push origin "$COMMIT:refs/tags/v$VERSION"
-          stable=$(git ls-remote origin refs/heads/stable | cut -f1)
-          tagged=$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)
-          [ "$stable" = "$COMMIT" ] && [ "$tagged" = "$stable" ] || { echo "::error::v$VERSION is $tagged but stable is $stable"; exit 1; }
+          git config --unset-all http.https://github.com/.extraheader || true
+          url="https://x-access-token:$TOKEN@github.com/$REPO.git"
+          [ "$(git ls-remote "$url" refs/heads/stable | cut -f1)" = "$COMMIT" ] || git push "$url" "$COMMIT:refs/heads/stable"
+          [ "$(git ls-remote "$url" refs/heads/stable | cut -f1)" = "$COMMIT" ] || { echo "::error::stable did not move to $COMMIT"; exit 1; }
 
   stable:
     needs: promote

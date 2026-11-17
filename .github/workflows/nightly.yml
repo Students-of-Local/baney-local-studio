@@ -85,7 +85,7 @@ jobs:
       - name: Write latest.json and swap the draft in as nightly
         env:
           GH_TOKEN: ${{ github.token }}
-          MAC_SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+          MAC_SIGNED: ${{ needs.build.outputs.mac == 'true' }}
           UPDATER_SIGNING_KEY: ${{ secrets.UPDATER_SIGNING_KEY }}
           UPDATER_SIGNING_KEY_PASSWORD: ${{ secrets.UPDATER_SIGNING_KEY_PASSWORD }}
           DRAFT: ${{ needs.draft.outputs.id }}
