@@ -220,7 +220,7 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         toml::from_str(&text).map_err(|error| vec![format!("invalid {MANIFEST}: {}", error.message())])?;
     let mut errors: Vec<String> = Vec::new();
     if !valid_id(&manifest.id) {
-        errors.push(format!("bad id: {:?} (use lowercase letters, digits and hyphens)", manifest.id));
+        errors.push(format!("bad id: {:?} (use lowercase letters, digits and single hyphens)", manifest.id));
     }
     let folder = dir
         .canonicalize()
@@ -318,7 +318,7 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
 
 #[must_use]
 pub fn env_prefix(id: &str) -> String {
-    format!("LOCAL_STUDIO_PLUGIN_{}_", id.to_ascii_uppercase().replace('-', "_"))
+    format!("LOCAL_STUDIO_PLUGIN_{}__", id.to_ascii_uppercase().replace('-', "_"))
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -532,6 +532,7 @@ pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && !id.ends_with('-')
+        && !id.contains("--")
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
