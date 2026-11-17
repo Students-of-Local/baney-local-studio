@@ -7,7 +7,7 @@ mod ops;
 mod server;
 
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,24 +110,6 @@ fn host_name() -> String {
         .unwrap_or_else(|| "local-studio".to_string())
 }
 
-fn configured_hooks(data_dir: &Path) -> anyhow::Result<Vec<String>> {
-    let path = data_dir.join("remote.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
-    };
-    let config: Value = serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))?;
-    Ok(config
-        .get("notify")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|hook| hook.get("kind").and_then(Value::as_str) == Some("webhook"))
-        .filter_map(|hook| hook.get("url").and_then(Value::as_str).map(str::to_string))
-        .collect())
-}
-
 async fn stopped() {
     use tokio::signal::unix::{signal, SignalKind};
     let Ok(mut terminate) = signal(SignalKind::terminate()) else {
@@ -146,7 +128,7 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     let tunnels = args.take_all("--tunnel-host")?;
     allowed.extend(tunnels.iter().cloned());
     let mut urls = args.take_all("--url")?;
-    let mut hooks = args.take_all("--notify")?;
+    let hooks = args.take_all("--notify")?;
     let launch = args
         .take("--eukhe")?
         .or_else(|| std::env::var("EUKHE_BIN").ok().filter(|value| !value.is_empty()))
@@ -154,7 +136,6 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     let name = args.take("--name")?.unwrap_or_else(host_name);
     let data_dir = args.data_dir()?;
     args.done()?;
-    hooks.extend(configured_hooks(&data_dir)?);
     if urls.is_empty() {
         urls = allowed.iter().map(|host| format!("wss://{host}/v1/ws")).collect();
     }

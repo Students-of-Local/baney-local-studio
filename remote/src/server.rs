@@ -14,7 +14,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use serde_json::{json, Value};
 use snow::HandshakeState;
 use tokio::net::TcpListener;
@@ -75,7 +75,13 @@ pub async fn run(listener: TcpListener, server: Arc<Server>, stop: impl Future<O
                 let server = Arc::clone(&server);
                 async move { Ok::<_, Infallible>(handle(&server, request, peer)) }
             });
-            http1::Builder::new().serve_connection(TokioIo::new(stream), service).with_upgrades().await.ok();
+            http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(limits::HEADER_WITHIN)
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
+                .await
+                .ok();
         });
     }
 }
@@ -307,7 +313,7 @@ fn noise_error(error: &snow::Error) -> Refusal {
 async fn handshake_message(stream: &mut Stream, deadline: Instant, step: &str) -> Result<Bytes, Refusal> {
     match next_by(stream, deadline).await {
         Some(Next::Binary(bytes)) => Ok(bytes),
-        Some(Next::Gone) => Err(Refusal { code: BROKEN, reason: format!("closed before {step}"), counts: true }),
+        Some(Next::Gone) => Err(Refusal { code: BROKEN, reason: format!("closed before {step}"), counts: false }),
         Some(Next::Text(_)) => Err(Refusal::failed(BROKEN, format!("a text message instead of {step}"))),
         None => Err(Refusal::failed(BROKEN, "the handshake did not finish within 10 s")),
     }

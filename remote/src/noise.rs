@@ -130,6 +130,7 @@ pub enum Inbound {
 #[derive(Default)]
 pub struct Joiner {
     json: Vec<u8>,
+    open: bool,
 }
 
 impl Joiner {
@@ -142,14 +143,19 @@ impl Joiner {
                 }
                 self.json.extend_from_slice(&record[1..]);
                 if kind == JSON_MORE {
+                    self.open = true;
                     return Ok(None);
                 }
+                self.open = false;
                 let joined = std::mem::take(&mut self.json);
                 String::from_utf8(joined)
                     .map(|text| Some(Inbound::Json(text)))
                     .map_err(|_| "a JSON frame is not UTF-8".to_string())
             }
             BLOB => {
+                if self.open {
+                    return Err("a blob record inside an unfinished JSON frame".to_string());
+                }
                 if record.len() < BLOB_HEAD {
                     return Err("a short blob record".to_string());
                 }

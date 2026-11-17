@@ -24,6 +24,7 @@ const MAX_PENDING: usize = 100 << 20;
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_QUEUED_ITEMS: usize = 2 * BUFFERED;
 const MAX_QUEUED_BYTES: usize = 256 << 20;
+const FRAME_BUDGET: usize = crate::noise::MAX_JSON - 4096;
 const SNAPSHOT: [&str; 5] = ["connection", "projects", "threads", "models", "daemon_default"];
 
 pub struct Blob {
@@ -323,13 +324,20 @@ fn text_of(value: &Value) -> Arc<str> {
 }
 
 fn windowed_reset(thread: &str, items: &[Item]) -> Arc<str> {
-    let earlier = items.len().saturating_sub(WINDOW);
-    let update = json!({
-        "type": "transcript",
-        "thread": thread,
-        "op": { "type": "reset", "items": &items[earlier..], "earlier": earlier },
-    });
-    text_of(&update)
+    let mut shown = items.len().min(WINDOW);
+    loop {
+        let earlier = items.len() - shown;
+        let update = json!({
+            "type": "transcript",
+            "thread": thread,
+            "op": { "type": "reset", "items": &items[earlier..], "earlier": earlier },
+        });
+        let text = update.to_string();
+        if text.len() <= FRAME_BUDGET || shown <= 1 {
+            return Arc::from(text);
+        }
+        shown /= 2;
+    }
 }
 
 pub struct Signal(Arc<Notify>);
@@ -627,7 +635,8 @@ impl Hub {
 
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
         let mut state = self.state();
-        if state.live(device, conn)?.watching.len() >= MAX_WATCH {
+        let session = state.live(device, conn)?;
+        if !session.watching.contains(thread) && session.watching.len() >= MAX_WATCH {
             return Err(OpError::new("too_many", format!("watch at most {MAX_WATCH} threads at once")));
         }
         state.watch(&self.studio, device, thread);
@@ -656,8 +665,15 @@ impl Hub {
             })?;
         let before = before.and_then(|before| usize::try_from(before).ok()).unwrap_or(items.len()).min(items.len());
         let limit = limit.and_then(|limit| usize::try_from(limit).ok()).unwrap_or(WINDOW).min(PAGE_LIMIT);
-        let start = before.saturating_sub(limit);
-        Ok(json!({ "thread": thread, "start": start, "items": &items[start..before] }))
+        let mut shown = limit.min(before);
+        loop {
+            let start = before - shown;
+            let page = json!({ "thread": thread, "start": start, "items": &items[start..before] });
+            if shown <= 1 || page.to_string().len() <= FRAME_BUDGET {
+                return Ok(page);
+            }
+            shown /= 2;
+        }
     }
 
     pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<Option<Value>, OpError> {
@@ -739,10 +755,7 @@ impl Hub {
     ) -> Result<Option<Value>, String> {
         let mut state = self.state();
         let session = state.live(device, conn).map_err(|error| error.message)?;
-        let upload = session
-            .uploads
-            .get_mut(&blob)
-            .ok_or_else(|| format!("a chunk for blob {} with no blob_put", hex(&blob)))?;
+        let Some(upload) = session.uploads.get_mut(&blob) else { return Ok(None) };
         let Some(ack) = upload.ack.clone() else {
             return Err(format!("a chunk after blob {} was complete", hex(&blob)));
         };

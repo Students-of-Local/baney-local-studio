@@ -18,7 +18,7 @@ So: **serve `Studio` over a WebSocket**, encrypted end to end. Requests are `Stu
 
 1. **Watched threads, not one focus.** `Studio::select` keeps one `focused` thread and only that thread streams `Transcript`, `Thread`, `Approvals`, `Questions` and `Queue`. Add `watch_thread(thread)` and `unwatch_thread(thread)` with a reference count per thread; `select_thread` stays for GUI focus (it also marks read) and counts as one watch. Every `emit_*` that checks `focused == id` checks `watched.contains(id)` instead. The server routes thread-scoped updates only to connections watching that thread; global updates go to all.
 2. **One Studio owner per data dir, on all three OSes.** `state.json` is written by atomic rename with no lock, so two Studios on one data dir lose each other's flags. Take an advisory lock on `<data>/studio.lock` with `fd-lock` (flock on macOS and Linux, `LockFileEx` on Windows). Whoever holds it serves remote clients: the desktop app when it runs (it starts the server module in process), or `local-studio serve`, run as a user service where no GUI runs: a launchd agent on macOS, a systemd user unit on Linux, a Task Scheduler logon task on Windows.
-3. **`serde` behind a `wire` feature** on `Update` and everything it carries plus the request argument types: `#[serde(tag = "type", rename_all = "snake_case")]` on enums, `camelCase` fields. No binary data in JSON; images and files travel as blobs (below).
+3. **`serde` behind a `wire` feature** on `Update` and everything it carries plus the request argument types: `#[serde(tag = "type", rename_all = "snake_case")]` on enums, `camelCase` fields. One exception: access modes keep the spelling `state.json` already stores, `supervised`, `autoAcceptEdits`, `auto` and `fullAccess`, in `set_access_mode`, `start_thread` settings and thread updates. No binary data in JSON; images and files travel as blobs (below).
 
 ## Transport
 
@@ -70,7 +70,7 @@ A JSON frame is at most 8 MiB once joined; its chunks are sent back to back, nev
 **Server limits** (the hosted route has no edge rate limit, since the big assistant sites share egress IPs):
 - A socket whose opening header hasn't arrived within 5 s is closed; so is one whose handshake isn't complete within 10 s.
 - At most 8 sockets at a time that haven't finished a handshake; a ninth is closed with 1013 and is not counted as a failure.
-- 5 failed handshakes or bad headers from one client address within a minute refuse that address for 10 minutes (close code 4429).
+- 5 failed handshakes or bad headers from one client address within a minute refuse that address for 10 minutes (close code 4429). A loopback peer is never refused this way: `tailscale serve` and local clients all arrive from 127.0.0.1, so one flaky phone would lock out every other; the tailnet is the boundary there. A peer that closes mid-handshake is not counted.
 - Each failure is logged with the address, the pattern and the reason, never a secret, key or payload.
 - Close codes: 1002 for a bad header, a record that breaks the rules, or `incompatible`; 1013 when too many sockets are mid-handshake; 4000 when a newer socket of the same device replaces this one; 4401 for an unknown or revoked device or a failed handshake; 4429 for a refused address.
 

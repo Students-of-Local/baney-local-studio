@@ -45,6 +45,9 @@ impl Gate {
 
     pub fn fail(&self, address: IpAddr, pattern: &str, reason: &str) {
         eprintln!("local-studio-serve: refused {address} ({pattern}): {reason}");
+        if address.is_loopback() {
+            return;
+        }
         let now = Instant::now();
         let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
         records.retain(|_, record| {
