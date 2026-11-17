@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -145,14 +146,14 @@ impl Driver {
         }
     }
 
-    pub(crate) async fn answer(&mut self, request: &str, answer: ApprovalAnswer) -> Result<(), String> {
+    pub(crate) fn answer(&mut self, request: &str, answer: ApprovalAnswer) -> Result<(), String> {
         match self {
             Self::Claude(driver) => driver.answer(request, answer),
             Self::Codex(driver) => driver.answer(request, answer),
         }
     }
 
-    pub(crate) async fn set_access(&mut self, access: AccessMode) -> Result<(), String> {
+    pub(crate) fn set_access(&mut self, access: AccessMode) -> Result<(), String> {
         match self {
             Self::Claude(driver) => driver.set_access(access),
             Self::Codex(driver) => {
@@ -162,7 +163,7 @@ impl Driver {
         }
     }
 
-    pub(crate) async fn set_model(&mut self, model: &str) -> Result<(), String> {
+    pub(crate) fn set_model(&mut self, model: &str) -> Result<(), String> {
         match self {
             Self::Claude(driver) => driver.set_model(model),
             Self::Codex(driver) => {
@@ -272,7 +273,10 @@ pub(crate) fn new_session_id() -> String {
     }
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex = bytes.iter().fold(String::new(), |mut hex, byte| {
+        write!(hex, "{byte:02x}").ok();
+        hex
+    });
     format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
@@ -334,11 +338,18 @@ fn assistant(
     serde_json::from_value(message).ok()
 }
 
-fn user(content: Value, timestamp: u64) -> Option<AgentMessage> {
+fn user(content: &Value, timestamp: u64) -> Option<AgentMessage> {
     serde_json::from_value(json!({ "role": "user", "content": content, "timestamp": timestamp })).ok()
 }
 
-fn tool_result(call: &str, name: &str, text: &str, details: Option<Value>, error: bool, timestamp: u64) -> Option<AgentMessage> {
+fn tool_result(
+    call: &str,
+    name: &str,
+    text: &str,
+    details: Option<Value>,
+    error: bool,
+    timestamp: u64,
+) -> Option<AgentMessage> {
     let mut message = json!({
         "role": "toolResult",
         "toolCallId": call,
@@ -365,7 +376,10 @@ fn notice(text: &str, timestamp: u64) -> Option<AgentMessage> {
 }
 
 fn output(text: &str) -> ToolOutput {
-    ToolOutput { content: serde_json::from_value(json!([{ "type": "text", "text": text }])).unwrap_or_default(), details: None }
+    ToolOutput {
+        content: serde_json::from_value(json!([{ "type": "text", "text": text }])).unwrap_or_default(),
+        details: None,
+    }
 }
 
 fn emit_message(sink: &Sink, message: AgentMessage) {

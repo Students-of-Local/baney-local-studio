@@ -45,11 +45,11 @@ impl Rpc {
         }
     }
 
-    fn notify(&self, method: &str, params: Value) {
+    fn notify(&self, method: &str, params: &Value) {
         self.lines.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string()).ok();
     }
 
-    fn respond(&self, id: &Value, result: Value) -> Result<(), String> {
+    fn respond(&self, id: &Value, result: &Value) -> Result<(), String> {
         self.lines
             .send(json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string())
             .map_err(|_| "Codex has stopped.".to_string())
@@ -124,7 +124,13 @@ fn reviewer(access: AccessMode) -> &'static str {
     }
 }
 
-fn start(cwd: &str, sink: Option<Sink>, approvals: Arc<Mutex<HashMap<String, PendingApproval>>>, turn: Arc<Mutex<Option<String>>>) -> Result<Process, String> {
+#[allow(clippy::too_many_lines)]
+fn start(
+    cwd: &str,
+    sink: Option<Sink>,
+    approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
+    turn: Arc<Mutex<Option<String>>>,
+) -> Result<Process, String> {
     let binary = program("LOCAL_STUDIO_CODEX_BIN", "codex");
     let mut command = command(&binary, cwd);
     command.arg("app-server");
@@ -234,7 +240,7 @@ async fn initialize(rpc: &Rpc) -> Result<(), String> {
         json!({ "clientInfo": { "name": "local-studio", "title": "Local Studio", "version": env!("CARGO_PKG_VERSION") } }),
     )
     .await?;
-    rpc.notify("initialized", json!({}));
+    rpc.notify("initialized", &json!({}));
     Ok(())
 }
 
@@ -388,7 +394,7 @@ impl Codex {
             (ApprovalAnswer::AlwaysAllowSession, true) => "approved_for_session",
             (ApprovalAnswer::Deny, true) => "denied",
         };
-        self.rpc.respond(&pending.id, json!({ "decision": decision }))
+        self.rpc.respond(&pending.id, &json!({ "decision": decision }))
     }
 
     pub(crate) fn set_access(&mut self, access: AccessMode) {
@@ -525,12 +531,13 @@ impl Translator {
             "turn/completed" => {
                 let turn = params.get("turn");
                 let status = text(turn, "status");
-                let error = turn
-                    .and_then(|turn| turn.get("error"))
-                    .filter(|error| !error.is_null())
-                    .map(|error| error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string));
+                let error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null()).map(|error| {
+                    error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string)
+                });
                 let failure = if status == "failed" {
-                    let reason = error.or_else(|| self.failure.take()).unwrap_or_else(|| "Codex ended the turn with an error.".to_string());
+                    let reason = error
+                        .or_else(|| self.failure.take())
+                        .unwrap_or_else(|| "Codex ended the turn with an error.".to_string());
                     if let Some(stop) = stop_reason(&reason) {
                         self.stop(stop);
                         return;
@@ -602,7 +609,7 @@ impl Translator {
         match item.get("type").and_then(Value::as_str).unwrap_or_default() {
             "userMessage" => {
                 self.begin();
-                if let Some(message) = user(user_text(item), at) {
+                if let Some(message) = user(&user_text(item), at) {
                     emit_message(&self.sink, message);
                 }
             }
@@ -624,10 +631,16 @@ impl Translator {
                 }
                 self.items.insert(id.clone(), Live { kind: kind.to_string(), text: String::new(), started: at });
                 let block = json!({ "type": "toolCall", "id": id, "name": name, "arguments": arguments });
-                if let Some(message) = assistant(CODEX_PROVIDER, &self.model, &[block], &Spend::default(), "toolUse", None, at) {
+                if let Some(message) =
+                    assistant(CODEX_PROVIDER, &self.model, &[block], &Spend::default(), "toolUse", None, at)
+                {
                     emit_message(&self.sink, message);
                 }
-                self.sink.session(SessionEvent::ToolExecutionStart { tool_call_id: id, tool_name: name, args: arguments });
+                self.sink.session(SessionEvent::ToolExecutionStart {
+                    tool_call_id: id,
+                    tool_name: name,
+                    args: arguments,
+                });
             }
         }
     }
@@ -641,17 +654,18 @@ impl Translator {
             "userMessage" => {}
             "agentMessage" => {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
-                if let Some(message) = self.message("agentMessage", text, "stop", live.map_or(at, |live| live.started)) {
-                    if self.items.is_empty() {
-                        self.sink.session(SessionEvent::MessageEnd { message });
-                    } else {
-                        self.sink.session(SessionEvent::MessageEnd { message });
-                    }
+                if let Some(message) = self.message("agentMessage", text, "stop", live.map_or(at, |live| live.started))
+                {
+                    self.sink.session(SessionEvent::MessageEnd { message });
                 }
             }
             "reasoning" => {
                 let summary = reasoning_text(item);
-                let text = if summary.is_empty() { live.as_ref().map(|live| live.text.clone()).unwrap_or_default() } else { summary };
+                let text = if summary.is_empty() {
+                    live.as_ref().map(|live| live.text.clone()).unwrap_or_default()
+                } else {
+                    summary
+                };
                 if let Some(message) = self.message("reasoning", &text, "stop", live.map_or(at, |live| live.started)) {
                     self.sink.session(SessionEvent::MessageEnd { message });
                 }
@@ -682,7 +696,11 @@ impl Translator {
             }
             "item/fileChange/requestApproval" => {
                 let reason = text("reason");
-                (if reason.is_empty() { "Change files".to_string() } else { format!("Change files: {reason}") }, "write", false)
+                (
+                    if reason.is_empty() { "Change files".to_string() } else { format!("Change files: {reason}") },
+                    "write",
+                    false,
+                )
             }
             "execCommandApproval" => {
                 let command = params
@@ -770,18 +788,29 @@ fn reasoning_text(item: &Value) -> String {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|part| part.as_str().map(str::to_string).or_else(|| part.get("text").and_then(Value::as_str).map(str::to_string)))
+            .filter_map(|part| {
+                part.as_str()
+                    .map(str::to_string)
+                    .or_else(|| part.get("text").and_then(Value::as_str).map(str::to_string))
+            })
             .collect()
     };
     let summary = parts("summary");
-    if summary.is_empty() { parts("content").join("\n") } else { summary.join("\n") }
+    if summary.is_empty() {
+        parts("content").join("\n")
+    } else {
+        summary.join("\n")
+    }
 }
 
 fn tool_call(kind: &str, item: &Value) -> Option<(String, Value)> {
     match kind {
         "commandExecution" => {
             let command = item.get("command").cloned().unwrap_or_default();
-            Some(("bash".to_string(), json!({ "command": command, "cwd": item.get("cwd").cloned().unwrap_or_default() })))
+            Some((
+                "bash".to_string(),
+                json!({ "command": command, "cwd": item.get("cwd").cloned().unwrap_or_default() }),
+            ))
         }
         "fileChange" => {
             let paths: Vec<Value> = item
@@ -803,7 +832,9 @@ fn tool_call(kind: &str, item: &Value) -> Option<(String, Value)> {
             item.get("tool").and_then(Value::as_str).unwrap_or("tool").to_string(),
             item.get("arguments").cloned().unwrap_or_else(|| json!({})),
         )),
-        "webSearch" => Some(("web_search".to_string(), json!({ "query": item.get("query").cloned().unwrap_or_default() }))),
+        "webSearch" => {
+            Some(("web_search".to_string(), json!({ "query": item.get("query").cloned().unwrap_or_default() })))
+        }
         _ => None,
     }
 }
@@ -829,7 +860,8 @@ fn tool_outcome(kind: &str, item: &Value, streamed: Option<String>) -> (String, 
                     json!({ "path": path, "absolute": path, "diff": change.get("diff").and_then(Value::as_str).unwrap_or_default() })
                 })
                 .collect();
-            let names: Vec<&str> = changes.iter().filter_map(|change| change.get("path").and_then(Value::as_str)).collect();
+            let names: Vec<&str> =
+                changes.iter().filter_map(|change| change.get("path").and_then(Value::as_str)).collect();
             let details = match files.as_slice() {
                 [only] => Some(diff_details(
                     only["path"].as_str().unwrap_or_default(),
@@ -842,10 +874,8 @@ fn tool_outcome(kind: &str, item: &Value, streamed: Option<String>) -> (String, 
         }
         "mcpToolCall" => {
             let error = item.get("error").filter(|error| !error.is_null());
-            let text = error
-                .map(Value::to_string)
-                .or_else(|| item.get("result").map(Value::to_string))
-                .unwrap_or_default();
+            let text =
+                error.map(Value::to_string).or_else(|| item.get("result").map(Value::to_string)).unwrap_or_default();
             (text, None, error.is_some())
         }
         "dynamicToolCall" => {
@@ -859,16 +889,15 @@ fn tool_outcome(kind: &str, item: &Value, streamed: Option<String>) -> (String, 
 fn history(thread: &Value) -> Vec<AgentMessage> {
     let mut messages = Vec::new();
     for turn in thread.get("turns").and_then(Value::as_array).into_iter().flatten() {
-        let at = turn
-            .get("startedAt")
-            .and_then(Value::as_u64)
-            .map(|at| if at < 10_000_000_000 { at * 1000 } else { at })
-            .unwrap_or(0);
+        let at =
+            turn.get("startedAt")
+                .and_then(Value::as_u64)
+                .map_or(0, |at| if at < 10_000_000_000 { at * 1000 } else { at });
         for item in turn.get("items").and_then(Value::as_array).into_iter().flatten() {
             let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
             let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
             match kind {
-                "userMessage" => messages.extend(user(user_text(item), at)),
+                "userMessage" => messages.extend(user(&user_text(item), at)),
                 "agentMessage" => {
                     let block = json!({ "type": "text", "text": item.get("text").cloned().unwrap_or_default() });
                     messages.extend(assistant(CODEX_PROVIDER, "", &[block], &Spend::default(), "stop", None, at));

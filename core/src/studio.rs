@@ -22,9 +22,9 @@ use crate::daemon::{self, DaemonQuery};
 use crate::harness::{self, Envelope};
 use crate::images;
 use crate::model::{
-    AccessMode, Approval, ApprovalAnswer, Block, Connection, DaemonMismatch, Delivery, Harness, ItemKind, ModelKey, ModelOption,
-    NoticeLevel, NotificationKind, PromptDraft, Subagent, ThreadInfo, ThreadRow, ThreadSettings, TranscriptOp, Update,
-    WorktreeChoice,
+    AccessMode, Approval, ApprovalAnswer, Block, Connection, DaemonMismatch, Delivery, Harness, ItemKind, ModelKey,
+    ModelOption, NoticeLevel, NotificationKind, PromptDraft, Subagent, ThreadInfo, ThreadRow, ThreadSettings,
+    TranscriptOp, Update, WorktreeChoice,
 };
 use crate::oneshot::TextGen;
 use crate::plugins::{self, Plugin};
@@ -3414,11 +3414,7 @@ impl Actor {
         ids.extend(self.roster.values().filter(|row| row.session_file.is_some()).map(|row| row.session_id.clone()));
         ids.extend(self.threads.iter().filter(|(_, thread)| thread.path.is_some()).map(|(id, _)| id.clone()));
         ids.extend(
-            self.store
-                .threads
-                .iter()
-                .filter(|(_, flags)| flags.harness != Harness::Eukhe)
-                .map(|(id, _)| id.clone()),
+            self.store.threads.iter().filter(|(_, flags)| flags.harness != Harness::Eukhe).map(|(id, _)| id.clone()),
         );
         let mut rows = Vec::with_capacity(ids.len());
         for id in ids {

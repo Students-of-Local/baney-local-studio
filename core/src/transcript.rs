@@ -644,7 +644,6 @@ pub(crate) fn classify(name: &str, args: &Value) -> ToolKind {
     match lower.as_str() {
         "read" => ToolKind::Read,
         "edit" | "write" | "multiedit" | "notebookedit" => ToolKind::Edit,
-        "task" | "agent" => ToolKind::Agent,
         "grep" | "glob" | "find" | "search" => ToolKind::Search,
         "bash" => ToolKind::Command,
         "python" | "ipython" => {
@@ -655,7 +654,7 @@ pub(crate) fn classify(name: &str, args: &Value) -> ToolKind {
                 ToolKind::Command
             }
         }
-        "workflow" | "worker_assign" | "worker_forward" | "worker_status" => ToolKind::Agent,
+        "task" | "agent" | "workflow" | "worker_assign" | "worker_forward" | "worker_status" => ToolKind::Agent,
         _ if lower.contains("web") || lower.contains("fetch") || lower.contains("browser") => ToolKind::Web,
         _ => ToolKind::Other,
     }

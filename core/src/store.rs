@@ -61,6 +61,7 @@ pub(crate) struct ThreadFlags {
     pub(crate) thinking_level: Option<String>,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_eukhe(harness: &Harness) -> bool {
     *harness == Harness::Eukhe
 }

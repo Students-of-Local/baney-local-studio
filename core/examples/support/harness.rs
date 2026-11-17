@@ -212,7 +212,14 @@ fn prompt(text: &str) -> PromptDraft {
     PromptDraft { text: text.to_string(), images: Vec::new(), files: Vec::new() }
 }
 
-fn turn(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str, text: &str, step: &str) -> anyhow::Result<()> {
+fn turn(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    thread: &str,
+    text: &str,
+    step: &str,
+) -> anyhow::Result<()> {
     let finished = watch.finished;
     studio.send(format!("send-{finished}"), thread.to_string(), prompt(text), Delivery::Queue);
     pump(studio, signal, watch, step, |watch| watch.finished > finished)
@@ -285,7 +292,11 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         let models: Vec<ModelOption> =
             watch.models.iter().filter(|model| model.provider == target.provider).cloned().collect();
         let model = (target.model)(&models).context("no model to run")?;
-        println!("     {} models: {}", target.name, models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>().join(", "));
+        println!(
+            "     {} models: {}",
+            target.name,
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>().join(", ")
+        );
         println!("     running {}/{model}", target.provider);
         studio.add_project(work.to_string_lossy().into_owned());
         pump(&studio, &signal, watch, "project added", |watch| watch.projects.len() == 1)?;

@@ -94,7 +94,8 @@ impl Actor {
             flags.fan_out = fan_out;
         });
         self.save();
-        self.threads.insert(id.clone(), Thread { cwd: Some(cwd), prompt: Some(prompt.to_string()), ..Thread::default() });
+        self.threads
+            .insert(id.clone(), Thread { cwd: Some(cwd), prompt: Some(prompt.to_string()), ..Thread::default() });
         if let Err(error) = self.cli_open(&id).await {
             self.threads.remove(&id);
             self.store.threads.remove(&id);
@@ -195,7 +196,13 @@ impl Actor {
         Ok(active)
     }
 
-    pub(super) async fn cli_send(&mut self, id: &str, text: &str, images: Vec<Image>, steer: bool) -> Result<(), String> {
+    pub(super) async fn cli_send(
+        &mut self,
+        id: &str,
+        text: &str,
+        images: Vec<Image>,
+        steer: bool,
+    ) -> Result<(), String> {
         let cli = self.drivers.get_mut(id).ok_or_else(|| "The thread is not open.".to_string())?;
         cli.used = Instant::now();
         cli.driver.send(text, images, steer).await
@@ -239,14 +246,18 @@ impl Actor {
         self.forget_run(id);
         self.mailbox.notice(
             NoticeLevel::Warning,
-            format!("“{title}” did not stop within {} s, so Local Studio stopped its {} process.", STOP_GRACE.as_secs(), name(harness)),
+            format!(
+                "“{title}” did not stop within {} s, so Local Studio stopped its {} process.",
+                STOP_GRACE.as_secs(),
+                name(harness)
+            ),
         );
         self.reopen_focused(id).await;
     }
 
     pub(super) async fn cli_answer(&mut self, id: &str, request: &str, answer: ApprovalAnswer) {
         let result = match self.drivers.get_mut(id) {
-            Some(cli) => cli.driver.answer(request, answer).await,
+            Some(cli) => cli.driver.answer(request, answer),
             None => Err("That approval is no longer pending.".to_string()),
         };
         if let Err(error) = result {
@@ -299,7 +310,7 @@ impl Actor {
 
     pub(super) async fn cli_access(&mut self, id: &str, mode: AccessMode) {
         let Some(cli) = self.drivers.get_mut(id) else { return };
-        if let Err(error) = cli.driver.set_access(mode).await {
+        if let Err(error) = cli.driver.set_access(mode) {
             self.mailbox.notice(NoticeLevel::Error, error);
         }
     }
@@ -322,7 +333,7 @@ impl Actor {
             self.store.update(id, |flags| flags.model = Some(model.clone()));
             self.save();
             if let Some(cli) = self.drivers.get_mut(id) {
-                cli.driver.set_model(&model).await?;
+                cli.driver.set_model(&model)?;
             }
             let reference = self.model_ref(harness, &model);
             let levels = self.thinking_levels(harness, Some(&model));

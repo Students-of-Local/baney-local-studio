@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -9,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user,
-    Event, Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
+    assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Event,
+    Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -162,7 +163,7 @@ impl Claude {
         self.lines.send(frame.to_string()).map_err(|_| "Claude Code has stopped.".to_string())
     }
 
-    fn control(&mut self, request: Value) -> Result<(), String> {
+    fn control(&mut self, request: &Value) -> Result<(), String> {
         self.counter += 1;
         let id = format!("ls-{}", self.counter);
         self.write(&json!({ "type": "control_request", "request_id": id, "request": request }))
@@ -185,15 +186,15 @@ impl Claude {
     }
 
     pub(crate) fn interrupt(&mut self) -> Result<(), String> {
-        self.control(json!({ "subtype": "interrupt" }))
+        self.control(&json!({ "subtype": "interrupt" }))
     }
 
     pub(crate) fn set_access(&mut self, access: AccessMode) -> Result<(), String> {
-        self.control(json!({ "subtype": "set_permission_mode", "mode": mode(access) }))
+        self.control(&json!({ "subtype": "set_permission_mode", "mode": mode(access) }))
     }
 
     pub(crate) fn set_model(&mut self, model: &str) -> Result<(), String> {
-        self.control(json!({ "subtype": "set_model", "model": model }))
+        self.control(&json!({ "subtype": "set_model", "model": model }))
     }
 
     pub(crate) fn answer(&self, request: &str, answer: ApprovalAnswer) -> Result<(), String> {
@@ -332,7 +333,7 @@ impl Translator {
                 return;
             }
             self.start();
-            if let Some(message) = user(user_content(&content), at) {
+            if let Some(message) = user(&user_content(&content), at) {
                 emit_message(&self.sink, message);
             }
             return;
@@ -385,7 +386,10 @@ impl Translator {
                         let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                         let name = block.get("name").and_then(Value::as_str).unwrap_or_default();
                         self.names.insert(id.to_string(), name.to_string());
-                        (json!({ "type": "toolCall", "id": id, "name": name, "arguments": {} }), StreamUpdate::ToolcallStart)
+                        (
+                            json!({ "type": "toolCall", "id": id, "name": name, "arguments": {} }),
+                            StreamUpdate::ToolcallStart,
+                        )
                     }
                     _ => return,
                 };
@@ -439,7 +443,9 @@ impl Translator {
             }
             "message_delta" => {
                 let Some(open) = self.open.as_mut() else { return };
-                if let Some(stop) = event.get("delta").and_then(|delta| delta.get("stop_reason")).and_then(Value::as_str) {
+                if let Some(stop) =
+                    event.get("delta").and_then(|delta| delta.get("stop_reason")).and_then(Value::as_str)
+                {
                     open.stop = Some(stop.to_string());
                 }
                 if let Some(usage) = event.get("usage") {
@@ -500,8 +506,7 @@ impl Translator {
             .get("description")
             .or_else(|| request.get("title"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| describe(tool, &input));
+            .map_or_else(|| describe(tool, &input), str::to_string);
         self.pending.lock().unwrap_or_else(PoisonError::into_inner).insert(
             id.clone(),
             json!({ "input": input, "suggestions": request.get("permission_suggestions").cloned().unwrap_or(json!([])) }),
@@ -516,7 +521,8 @@ impl Translator {
     }
 
     fn result(&mut self, frame: &Value) {
-        let aborted = frame.get("terminal_reason").and_then(Value::as_str).is_some_and(|reason| reason.contains("abort"));
+        let aborted =
+            frame.get("terminal_reason").and_then(Value::as_str).is_some_and(|reason| reason.contains("abort"));
         self.close(aborted.then_some("aborted"));
         for (model, totals) in frame.get("modelUsage").and_then(Value::as_object).into_iter().flatten() {
             let number = |key: &str| totals.get(key).and_then(Value::as_u64).unwrap_or(0);
@@ -540,8 +546,13 @@ impl Translator {
             if delta.input + delta.output + delta.cache_read + delta.cache_write > 0 {
                 self.sink.send(Event::Usage(delta));
             }
-            if *model == self.model || self.model.is_empty() || MODELS.iter().any(|(alias, _, id)| *alias == self.model && id == model) {
-                if let (Some(window), Some(usage)) = (totals.get("contextWindow").and_then(Value::as_u64), frame.get("usage")) {
+            if *model == self.model
+                || self.model.is_empty()
+                || MODELS.iter().any(|(alias, _, id)| *alias == self.model && id == model)
+            {
+                if let (Some(window), Some(usage)) =
+                    (totals.get("contextWindow").and_then(Value::as_u64), frame.get("usage"))
+                {
                     let spend = frame_spend(usage);
                     let tokens = spend.input + spend.cache_read + spend.cache_write + spend.output;
                     self.sink.send(Event::Context(ContextUsage { tokens, window }));
@@ -555,7 +566,11 @@ impl Translator {
                 self.stop(reason);
                 return;
             }
-            Some(if text.is_empty() { "Claude Code ended the turn with an error.".to_string() } else { text.to_string() })
+            Some(if text.is_empty() {
+                "Claude Code ended the turn with an error.".to_string()
+            } else {
+                text.to_string()
+            })
         } else {
             None
         };
@@ -624,7 +639,8 @@ impl Translator {
             _ => "stop",
         });
         self.closed.insert(open.id.clone());
-        if let Some(message) = assistant(CLAUDE_PROVIDER, &self.model, &blocks, &open.spend, stop, None, open.timestamp) {
+        if let Some(message) = assistant(CLAUDE_PROVIDER, &self.model, &blocks, &open.spend, stop, None, open.timestamp)
+        {
             self.sink.session(SessionEvent::MessageEnd { message });
         }
         if forced.is_none() {
@@ -666,7 +682,9 @@ fn frame_spend(usage: &Value) -> Spend {
 fn convert_block(block: &Value) -> Option<Value> {
     match block.get("type").and_then(Value::as_str)? {
         "text" => Some(json!({ "type": "text", "text": block.get("text").cloned().unwrap_or_default() })),
-        "thinking" => Some(json!({ "type": "thinking", "thinking": block.get("thinking").cloned().unwrap_or_default() })),
+        "thinking" => {
+            Some(json!({ "type": "thinking", "thinking": block.get("thinking").cloned().unwrap_or_default() }))
+        }
         "tool_use" | "server_tool_use" => Some(json!({
             "type": "toolCall",
             "id": block.get("id").cloned().unwrap_or_default(),
@@ -720,13 +738,15 @@ fn file_change(details: &Value, input: Option<&Value>) -> Option<Value> {
         let mut diff = String::new();
         for hunk in hunks {
             let number = |key: &str| hunk.get(key).and_then(Value::as_u64).unwrap_or(0);
-            diff.push_str(&format!(
-                "@@ -{},{} +{},{} @@\n",
+            writeln!(
+                diff,
+                "@@ -{},{} +{},{} @@",
                 number("oldStart"),
                 number("oldLines"),
                 number("newStart"),
                 number("newLines")
-            ));
+            )
+            .ok();
             for line in hunk.get("lines").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
                 diff.push_str(line);
                 diff.push('\n');
@@ -736,7 +756,10 @@ fn file_change(details: &Value, input: Option<&Value>) -> Option<Value> {
     }
     if details.get("type").and_then(Value::as_str) == Some("create") {
         let content = details.get("content").and_then(Value::as_str).unwrap_or_default();
-        let diff: String = content.lines().map(|line| format!("+{line}\n")).collect();
+        let diff = content.lines().fold(String::new(), |mut diff, line| {
+            writeln!(diff, "+{line}").ok();
+            diff
+        });
         return Some(diff_details(path, &diff));
     }
     None
@@ -822,7 +845,10 @@ pub(crate) fn history(cwd: &str, session: &str) -> Vec<AgentMessage> {
             for block in content.as_array().into_iter().flatten() {
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                     let call = block.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                    names.insert(call.clone(), block.get("name").and_then(Value::as_str).unwrap_or_default().to_string());
+                    names.insert(
+                        call.clone(),
+                        block.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    );
                     inputs.insert(call, block.get("input").cloned().unwrap_or(Value::Null));
                 }
                 if let Some(block) = convert_block(block).filter(|block| {
@@ -839,20 +865,22 @@ pub(crate) fn history(cwd: &str, session: &str) -> Vec<AgentMessage> {
                 if text.starts_with('<') || text.starts_with(INTERRUPTED) || text.trim().is_empty() {
                     continue;
                 }
-                if let Some(message) = user(content.clone(), at) {
+                if let Some(message) = user(&content, at) {
                     messages.push(message);
                 }
             }
             Value::Array(blocks) => {
-                let results: Vec<&Value> =
-                    blocks.iter().filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")).collect();
+                let results: Vec<&Value> = blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                    .collect();
                 if results.is_empty() {
                     let converted = user_content(&content);
                     let text = block_text(Some(&converted));
                     if text.starts_with('<') || text.starts_with(INTERRUPTED) {
                         continue;
                     }
-                    if let Some(message) = user(converted, at) {
+                    if let Some(message) = user(&converted, at) {
                         messages.push(message);
                     }
                     continue;
@@ -861,9 +889,10 @@ pub(crate) fn history(cwd: &str, session: &str) -> Vec<AgentMessage> {
                     let call = block.get("tool_use_id").and_then(Value::as_str).unwrap_or_default();
                     let name = names.get(call).cloned().unwrap_or_default();
                     let error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                    let changes =
-                        entry.get("toolUseResult").and_then(|details| file_change(details, inputs.get(call)));
-                    if let Some(message) = tool_result(call, &name, &block_text(block.get("content")), changes, error, at) {
+                    let changes = entry.get("toolUseResult").and_then(|details| file_change(details, inputs.get(call)));
+                    if let Some(message) =
+                        tool_result(call, &name, &block_text(block.get("content")), changes, error, at)
+                    {
                         messages.push(message);
                     }
                 }
