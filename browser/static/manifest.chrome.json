@@ -1,12 +1,12 @@
 {
 	"manifest_version": 3,
 	"minimum_chrome_version": "141",
-	"name": "Polycarp",
-	"description": "Lets AI agents work in your browser, in their own tab group, while you keep working.",
+	"name": "Tychicus",
+	"description": "Browser use and computer use for AI agents: they work in their own tab group while you keep working.",
 	"version": "1.1.10",
 	"key": "REDACTED",
 	"action": {
-		"default_title": "Open Polycarp"
+		"default_title": "Open Tychicus"
 	},
 	"background": {
 		"service_worker": "background.js",
