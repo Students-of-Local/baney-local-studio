@@ -183,6 +183,7 @@ struct View {
     access: HashMap<String, AccessMode>,
     approvals: HashMap<String, Vec<Approval>>,
     answers: HashMap<String, String>,
+    answer_counts: HashMap<String, u32>,
     models: u32,
     git_status: u32,
     notifications: u32,
@@ -286,6 +287,7 @@ impl View {
         }
         if let Some(request) = raw.get("request").and_then(Value::as_str) {
             self.answers.insert(request.to_string(), kind.clone());
+            *self.answer_counts.entry(request.to_string()).or_default() += 1;
         }
         let update: Update = serde_json::from_value(raw.clone()).with_context(|| format!("decode update {raw}"))?;
         match update {
@@ -793,7 +795,7 @@ impl Serve {
     }
 
     fn start(&mut self, eukhe: &Path, hook: &str) -> anyhow::Result<()> {
-        let log = std::fs::File::create(self.root.join("serve.log"))?;
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(self.root.join("serve.log"))?;
         let child = self
             .command()
             .args(["serve", "--port", &self.port.to_string(), "--name", "smoke-box", "--tunnel-host", TUNNEL])
@@ -1026,22 +1028,54 @@ struct Target {
     thinking: String,
 }
 
+fn refuse_links(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "{} is a symlink; remote_smoke writes its own scratch agent files and never through a link",
+        path.display()
+    );
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            refuse_links(&entry?.path())?;
+        }
+    } else {
+        ensure!(
+            metadata.nlink() == 1,
+            "{} has {} hard links; remote_smoke writes its own scratch agent files and never through a link",
+            path.display(),
+            metadata.nlink()
+        );
+    }
+    Ok(())
+}
+
 fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
     let agent = root.join("agent");
+    if std::fs::symlink_metadata(&agent).is_ok() {
+        refuse_links(&agent)?;
+        for name in ["auth.json", "models.json", "settings.json"] {
+            if std::fs::symlink_metadata(agent.join(name)).is_ok() {
+                std::fs::remove_file(agent.join(name))?;
+            }
+        }
+    }
     std::fs::create_dir_all(&agent)?;
     let write = |name: &str, data: &[u8]| -> anyhow::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(agent.join(name))?
+            .open(agent.join(name))
+            .with_context(|| format!("create {}", agent.join(name).display()))?
             .write_all(data)?;
         Ok(())
     };
     write("auth.json", b"{}")?;
+    local_studio_core::check_scratch_agent(&agent).map_err(|error| anyhow::anyhow!(error))?;
     let Some(source) = std::env::var_os("LOCAL_STUDIO_SMOKE_AGENT").map(PathBuf::from) else {
         write("models.json", br#"{"providers":{}}"#)?;
         write("settings.json", br#"{"onboardingShown":true}"#)?;
@@ -1482,6 +1516,126 @@ async fn revoke_one(run: &mut Run) -> anyhow::Result<()> {
     expect_closed(opened, "a revoked device's KK is refused", 4401).await
 }
 
+async fn shared_ids(project: &str, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
+    let settings = json!({ "provider": "remote-smoke-absent", "model": "absent", "thinkingLevel": "off", "access": "supervised", "worktree": { "type": "local" } });
+    let mut threads = Vec::new();
+    for (client, draft) in [(&mut *a, "d-shared-a"), (&mut *c, "d-shared-c")] {
+        client
+            .call(
+                "start_thread",
+                json!({ "draft": draft, "project": project, "prompt": prompt("shared start"), "settings": settings }),
+            )
+            .await?;
+        client.until("a thread of its own for the shared ids", SETUP, |view| view.started.contains_key(draft)).await?;
+        let thread = client.view().started[draft].clone();
+        client.call("watch", json!({ "thread": thread })).await?;
+        threads.push(thread);
+    }
+    let mut replies = Vec::new();
+    for ((client, thread), (text, unknown)) in [&mut *a, &mut *c]
+        .into_iter()
+        .zip(&threads)
+        .zip([("shared id from A", "no-such-thread-a"), ("shared id from C", "no-such-thread-c")])
+    {
+        let args = json!({ "request": "r1", "thread": thread, "prompt": prompt(text), "delivery": "queue" });
+        replies.push(client.call("send", args).await?);
+        let args = json!({ "request": "r2", "thread": unknown, "prompt": prompt(text), "delivery": "queue" });
+        replies.push(client.call("send", args).await?);
+        client.call("list_commands", json!({ "request": "q-shared", "project": project })).await?;
+    }
+    ensure!(
+        replies.iter().all(|reply| reply.get("duplicate").is_none()),
+        "a send with another phone's request id was dropped as a duplicate: {replies:?}"
+    );
+    for ((client, thread), (mine, theirs)) in [&*a, &*c]
+        .into_iter()
+        .zip(&threads)
+        .zip([("shared id from A", "shared id from C"), ("shared id from C", "shared id from A")])
+    {
+        client
+            .until("its own send r1 in its own thread and its own answers to r2 and q-shared", QUICK, |view| {
+                view.users_saying(thread, mine) == 1
+                    && view.answers.get("r2").is_some_and(|kind| kind == "request_failed")
+                    && view.answers.contains_key("q-shared")
+            })
+            .await?;
+        ensure!(client.view().users_saying(thread, theirs) == 0, "{}'s thread holds the other phone's r1", client.name);
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    for (id, (client, thread)) in [&*a, &*c].into_iter().zip(&threads).enumerate() {
+        let view = client.view();
+        let counts = (
+            view.answer_counts.get("r1").copied(),
+            view.answer_counts.get("r2").copied(),
+            view.answer_counts.get("q-shared").copied(),
+        );
+        ensure!(
+            counts == (None, Some(1), Some(1)),
+            "{} got {counts:?} answers to r1, r2 and q-shared, not none, one and one",
+            client.name
+        );
+        client.frame(&json!({ "id": 910 + id, "op": "unwatch", "args": { "thread": thread } }));
+    }
+    println!("ok   two phones sharing request ids: each send r1 runs in its own thread only, and each phone gets exactly its own request_failed r2 and list_commands q-shared");
+    Ok(())
+}
+
+async fn restart_watch(
+    run: &mut Run,
+    eukhe: &Path,
+    a_phone: &Phone,
+    c_phone: &Phone,
+    a: &mut Client,
+) -> anyhow::Result<(Client, Client)> {
+    let settings = json!({ "provider": "remote-smoke-absent", "model": "absent", "thinkingLevel": "off", "access": "supervised", "worktree": { "type": "local" } });
+    a.call("start_thread", json!({ "draft": "d-restart", "project": run.project, "prompt": prompt("restart watch"), "settings": settings })).await?;
+    a.until("a thread for the restart check", SETUP, |view| view.started.contains_key("d-restart")).await?;
+    let thread = a.view().started["d-restart"].clone();
+    let seq = a.view().seq;
+    run.serve.stop()?;
+    let root = run.serve.root.clone();
+    stop_daemon(&root.join("d.sock"), None).await?;
+    let later = root.join("eukhe-later");
+    std::fs::remove_file(&later).ok();
+    std::os::unix::fs::symlink(root.join("eukhe-not-yet"), &later)?;
+    run.serve.start(&later, &run.hook.clone())?;
+    let restarted = Instant::now();
+    let deadline = restarted + SETUP;
+    let resume = json!({ "seq": seq, "epoch": run.epoch, "watch": [thread.clone()] });
+    let fresh = loop {
+        match reconnect(run, a_phone, resume.clone()).await {
+            Ok((client, _)) => break client,
+            Err(error) => ensure!(
+                !run.serve.exited()? && Instant::now() < deadline,
+                "serve did not come back: {error:#}\n{}",
+                run.serve.log_tail()
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    let epoch = fresh.view().hello.as_ref().and_then(|hello| hello["epoch"].as_str()).unwrap_or_default().to_string();
+    ensure!(epoch != run.epoch, "the restarted serve kept epoch {epoch}");
+    ensure!(
+        fresh.view().hello.as_ref().is_some_and(|hello| hello["resume"] == json!("snapshot")),
+        "a resume across a serve restart was not a snapshot"
+    );
+    run.epoch = epoch;
+    println!(
+        "     phone A resumed {} ms after serve started with no daemon to reach, watching {thread}",
+        restarted.elapsed().as_millis()
+    );
+    std::fs::remove_file(&later)?;
+    std::os::unix::fs::symlink(eukhe, &later)?;
+    fresh
+        .until("the watched thread streams its transcript after a serve restart", SETUP, |view| {
+            view.transcript_frames.get(&thread).copied().unwrap_or_default() > 0 && !view.items(&thread).is_empty()
+        })
+        .await?;
+    fresh.frame(&json!({ "id": 900, "op": "unwatch", "args": { "thread": thread } }));
+    let (c, _) = reconnect(run, c_phone, json!({ "watch": [] })).await?;
+    Ok((fresh, c))
+}
+
 #[allow(clippy::too_many_lines)]
 async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) -> anyhow::Result<()> {
     let settings = serde_json::to_value(ThreadSettings {
@@ -1665,9 +1819,8 @@ fn alive(pid: u32) -> bool {
 async fn stop_daemon(socket: &Path, known: Option<u32>) -> anyhow::Result<()> {
     let mut pid = known;
     if let Ok((client, _events)) = DaemonClient::connect(socket).await {
-        pid = pid.or_else(|| {
-            client.hello().get("supervisorPid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok())
-        });
+        pid =
+            client.hello().get("supervisorPid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).or(pid);
         let command = DaemonCommand::Shutdown { id: None, force: Some(true), if_idle: None, rest: Map::default() };
         client.request_ok(command).await.ok();
         client.close();
@@ -1737,6 +1890,8 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let a = resume_checks(run, a, &a_phone, &mut c).await?;
     let mut a = limit_checks(run, a, &a_phone).await?;
     revoke_one(run).await?;
+    shared_ids(&run.project.clone(), &mut a, &mut c).await?;
+    let (mut a, c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
     println!("PASS remote smoke: non-model stages");
     let model_outcome = match model {
         Some(model) => model_stage(run, model, &mut a, &c).await,

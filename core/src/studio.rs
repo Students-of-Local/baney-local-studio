@@ -1397,14 +1397,18 @@ impl Actor {
     }
 
     async fn watch(&mut self, id: &str) {
-        if !self.known(id) {
-            self.mailbox.notice(NoticeLevel::Error, format!("Unknown thread {id}."));
-            return;
-        }
         *self.watchers.entry(id.to_string()).or_default() += 1;
         if self.client.is_none() {
             return;
         }
+        if !self.known(id) {
+            self.mailbox.notice(NoticeLevel::Error, format!("Unknown thread {id}."));
+            return;
+        }
+        self.open_watched(id).await;
+    }
+
+    async fn open_watched(&mut self, id: &str) {
         match self.ensure_open(id).await {
             Ok(_) => {
                 self.emit_focus(id);
@@ -2974,6 +2978,14 @@ impl Actor {
                     thread.title = None;
                 }
                 self.dirty = true;
+                let waiting: Vec<String> = self
+                    .watched_ids()
+                    .into_iter()
+                    .filter(|id| self.known(id) && self.live_active(id).is_none())
+                    .collect();
+                for id in waiting {
+                    self.open_watched(&id).await;
+                }
             }
             Err(error) => self.mailbox.notice(NoticeLevel::Error, format!("Could not list the threads: {error}")),
         }
