@@ -73,7 +73,7 @@ impl Watch {
     }
 
     fn answer_after(&self, seen: &HashSet<u64>) -> Option<&String> {
-        self.answers.iter().filter(|(id, _)| !seen.contains(id)).map(|(_, text)| text).last()
+        self.answers.iter().filter(|(id, _)| !seen.contains(id)).map(|(_, text)| text).next_back()
     }
 }
 
@@ -315,7 +315,7 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         let thread = watch.thread.clone().context("thread id")?;
         studio.select_thread(Some(thread.clone()));
         pump(&studio, &signal, watch, "turn 1 finished", |watch| watch.finished > finished)?;
-        let reply = watch.answers.values().last().cloned().unwrap_or_default();
+        let reply = watch.answers.values().next_back().cloned().unwrap_or_default();
         println!("     turn 1 reply: {}", reply.trim());
         ensure!(reply.to_ascii_lowercase().contains(WORD), "turn 1 did not answer with {WORD}");
         println!("ok   reply contains the asked word");
