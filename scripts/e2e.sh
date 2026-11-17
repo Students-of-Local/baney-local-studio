@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${LOCAL_STUDIO_SMOKE_AGENT:?set LOCAL_STUDIO_SMOKE_AGENT to the agent credentials dir (AGENTS.md)}"
+command -v "${NU:-nu}" > /dev/null || { echo "nu is not on PATH; set NU to its path" >&2; exit 2; }
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
 post=
@@ -16,8 +17,14 @@ status() {
 }
 
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
-eukhe=$(nu -c 'use eukhe.nu; eukhe binary . target/eukhe')
+cleanup() {
+  for socket in "$scratch"/*/d.sock; do
+    [ -S "$socket" ] && cargo run -q -p local-studio-core --example smoke -- --stop "$socket" || true
+  done
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+eukhe=$("${NU:-nu}" -c 'use eukhe.nu; eukhe binary . target/eukhe')
 status pending "core smokes running on $(hostname -s)"
 cargo build -j3 -p local-studio-core --examples
 for example in smoke workspace_smoke working_smoke durable_smoke order_smoke; do
