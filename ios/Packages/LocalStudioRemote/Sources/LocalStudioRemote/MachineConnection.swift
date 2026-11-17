@@ -1,0 +1,576 @@
+import Foundation
+
+public enum LinkState: Sendable, Hashable {
+    case idle
+    case connecting
+    case pairing
+    case live
+    case waiting(attempt: Int, retryAt: Date, reason: String)
+    case unpaired
+    case incompatible(machine: ProtocolWindow, app: ProtocolWindow)
+
+    public var detail: String? {
+        switch self {
+        case let .waiting(attempt, _, reason): "attempt \(attempt): \(reason)"
+        case .unpaired: "pair again"
+        case let .incompatible(machine, app):
+            machine.oldest > app.newest
+                ? "the machine speaks protocol \(machine.label) and this app \(app.label): update this app"
+                : "the machine speaks protocol \(machine.label) and this app \(app.label): update the machine"
+        default: nil
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .idle: "idle"
+        case .connecting: "connecting"
+        case .pairing: "pairing"
+        case .live: "live"
+        case .waiting: "waiting"
+        case .unpaired: "unpaired"
+        case .incompatible: "incompatible"
+        }
+    }
+}
+
+public enum ConnectionEvent: Sendable {
+    case state(LinkState)
+    case hello(MachineIdentity, protocolVersion: Int, resume: ResumeKind, snapshot: [Update])
+    case update(seq: UInt64, update: Update)
+    case sendAccepted(request: String)
+    case sendRejected(request: String, message: String)
+}
+
+public struct ConnectionConfig: Sendable {
+    public var account: String
+    public var device: DeviceProfile
+    public var pingInterval: Duration
+    public var handshakeTimeout: Duration
+    public var initialDelay: Duration
+    public var stableAfter: TimeInterval
+
+    public init(
+        account: String,
+        device: DeviceProfile,
+        pingInterval: Duration = .seconds(20),
+        handshakeTimeout: Duration = .seconds(10),
+        initialDelay: Duration = .zero,
+        stableAfter: TimeInterval = 60
+    ) {
+        self.account = account
+        self.device = device
+        self.pingInterval = pingInterval
+        self.handshakeTimeout = handshakeTimeout
+        self.initialDelay = initialDelay
+        self.stableAfter = stableAfter
+    }
+}
+
+private final class ReplyWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, any Error>?
+
+    init(_ continuation: CheckedContinuation<Void, any Error>) {
+        self.continuation = continuation
+    }
+
+    func finish(_ result: Result<Void, any Error>) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(with: result)
+    }
+}
+
+struct SocketTransport: HandshakeTransport {
+    let socket: URLSessionWebSocketTask
+
+    func send(_ message: Data) async throws {
+        try await socket.send(.data(message))
+    }
+
+    func receive() async throws -> Data {
+        switch try await socket.receive() {
+        case let .data(data):
+            return data
+        case let .string(text):
+            if case let .incompatible(window) = try? FrameCodec.decode(Data(text.utf8)) {
+                throw RemoteError.incompatible(window)
+            }
+            throw RemoteError.handshake("a text frame during the handshake")
+        @unknown default:
+            throw RemoteError.handshake("an unknown socket message")
+        }
+    }
+}
+
+public actor MachineConnection {
+    public static let unpairedCloseCode = 4401
+
+    public nonisolated let events: AsyncStream<ConnectionEvent>
+    private let sink: AsyncStream<ConnectionEvent>.Continuation
+    private let config: ConnectionConfig
+    private let credentials: CredentialStore
+    private let outbox: Outbox
+    private let channel: any SecureChannel
+    private let session: URLSession
+
+    private var pairing: PairingLink?
+    private var socket: URLSessionWebSocketTask?
+    private var secure: (any SecureSession)?
+    private var reader = RecordReader()
+    private var waiters: [Int: ReplyWaiter] = [:]
+    private var nextID = 1
+    private var watched: [String] = []
+    private var inFlight: Set<String> = []
+    private var runner: Task<Void, Never>?
+    private var pause: Task<Void, Never>?
+    private var pinger: Task<Void, Never>?
+    private var attempt = 0
+    private var live = false
+    private var connectedAt: Date?
+    private var epoch: String?
+    private var lastSeq: UInt64?
+    private var unpaired = false
+    private var incompatible: ProtocolWindow?
+    private var stopped = false
+
+    public init(config: ConnectionConfig, credentials: CredentialStore, outbox: Outbox, channel: any SecureChannel = PassThroughChannel(), pairing: PairingLink? = nil) {
+        let (stream, sink) = AsyncStream<ConnectionEvent>.makeStream(bufferingPolicy: .unbounded)
+        events = stream
+        self.sink = sink
+        self.config = config
+        self.credentials = credentials
+        self.outbox = outbox
+        self.channel = channel
+        self.pairing = pairing
+        let configuration = URLSessionConfiguration.default
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 30
+        session = URLSession(configuration: configuration)
+    }
+
+    public func start() {
+        guard runner == nil else {
+            return
+        }
+        stopped = false
+        runner = Task { await self.run() }
+    }
+
+    public func stop() {
+        stopped = true
+        runner?.cancel()
+        runner = nil
+        pause?.cancel()
+        dropSocket()
+        sink.yield(.state(.idle))
+    }
+
+    public func wake() async {
+        if live {
+            do {
+                try await ping(timeout: .seconds(3))
+            } catch {
+                socket?.cancel(with: .goingAway, reason: nil)
+            }
+            return
+        }
+        attempt = 0
+        pause?.cancel()
+    }
+
+    public func watch(_ thread: String) async throws {
+        if !watched.contains(thread) {
+            watched.append(thread)
+        }
+        if live {
+            try await request("watch", ThreadArgs(thread: thread))
+        }
+    }
+
+    public func unwatch(_ thread: String) async throws {
+        watched.removeAll { $0 == thread }
+        if live {
+            try await request("unwatch", ThreadArgs(thread: thread))
+        }
+    }
+
+    public func send(_ thread: String, prompt: PromptDraft, delivery: Delivery) async -> String {
+        let entry = await outbox.enqueue(thread: thread, prompt: prompt, delivery: delivery)
+        if live {
+            Task { await self.deliver(entry) }
+        }
+        return entry.args.request
+    }
+
+    public func answerApproval(thread: String, request approval: String, answer: ApprovalAnswer) async throws {
+        try await request("answer_approval", AnswerApprovalArgs(thread: thread, request: approval, answer: answer))
+    }
+
+    public func loadEarlier(thread: String, before: Int, limit: Int) async throws {
+        try await request("load_earlier", LoadEarlierArgs(thread: thread, before: before, limit: limit))
+    }
+
+    public func sendQueuedNow(thread: String, queued: String) async throws {
+        try await request("send_queued_now", QueuedArgs(thread: thread, queued: queued))
+    }
+
+    public func removeQueued(thread: String, queued: String) async throws {
+        try await request("remove_queued", QueuedArgs(thread: thread, queued: queued))
+    }
+
+    public func abort(thread: String) async throws {
+        try await request("abort", ThreadArgs(thread: thread))
+    }
+
+    public func startThread(_ args: StartThreadArgs) async throws {
+        try await request("start_thread", args)
+    }
+
+    public func request<Args: Encodable & Sendable>(_ op: String, _ args: Args) async throws {
+        guard live, socket != nil else {
+            throw RemoteError.notConnected
+        }
+        let id = nextID
+        nextID += 1
+        let json = try FrameCodec.encode(RequestFrame(id: id, op: op, args: args))
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let waiter = ReplyWaiter(continuation)
+            waiters[id] = waiter
+            do {
+                try transmit(json) { error in
+                    if error != nil {
+                        waiter.finish(.failure(RemoteError.notConnected))
+                    }
+                }
+            } catch {
+                waiters.removeValue(forKey: id)
+                waiter.finish(.failure(error))
+            }
+        }
+    }
+
+    private func transmit(_ json: Data, completion: @escaping @Sendable ((any Error)?) -> Void) throws {
+        guard let socket else {
+            throw RemoteError.notConnected
+        }
+        var sealed: [Data] = []
+        for record in try RecordWriter.frame(json) {
+            guard let message = try secure?.seal(record) else {
+                throw RemoteError.notConnected
+            }
+            sealed.append(message)
+        }
+        for (index, message) in sealed.enumerated() {
+            let last = index == sealed.count - 1
+            socket.send(.data(message)) { error in
+                if last || error != nil {
+                    completion(error)
+                }
+            }
+        }
+    }
+
+    private func routes() -> [URL]? {
+        if let pairing {
+            return [pairing.url]
+        }
+        guard let credential = credentials.load(config.account), !credential.urls.isEmpty else {
+            return nil
+        }
+        return credential.orderedURLs
+    }
+
+    private func run() async {
+        if config.initialDelay > .zero {
+            try? await Task.sleep(for: config.initialDelay)
+        }
+        while !stopped && !Task.isCancelled {
+            guard let urls = routes() else {
+                unpaired = true
+                sink.yield(.state(.unpaired))
+                return
+            }
+            var reason = "closed"
+            for url in urls {
+                do {
+                    try await connectOnce(url)
+                } catch {
+                    reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+                let upFor = connectedAt.map { Date().timeIntervalSince($0) }
+                connectedAt = nil
+                dropSocket()
+                if stopped || Task.isCancelled {
+                    return
+                }
+                if unpaired {
+                    sink.yield(.state(.unpaired))
+                    return
+                }
+                if let incompatible {
+                    sink.yield(.state(.incompatible(machine: incompatible, app: .app)))
+                    return
+                }
+                if let upFor {
+                    if upFor >= config.stableAfter {
+                        attempt = 0
+                    }
+                    break
+                }
+            }
+            attempt += 1
+            let delay = Self.backoff(attempt: attempt)
+            sink.yield(.state(.waiting(attempt: attempt, retryAt: Date().addingTimeInterval(delay), reason: reason)))
+            let sleeper = Task { _ = try? await Task.sleep(for: .seconds(delay)) }
+            pause = sleeper
+            await sleeper.value
+            pause = nil
+        }
+    }
+
+    public static func backoff(attempt: Int) -> Double {
+        Double.random(in: 0...min(30.0, pow(2.0, Double(max(0, attempt - 1)))))
+    }
+
+    private func connectOnce(_ url: URL) async throws {
+        let role: HandshakeRole
+        let staticKey: Data
+        if let pairing {
+            sink.yield(.state(.pairing))
+            if let health = await Self.health(for: url), !health.window.overlaps(.app) {
+                incompatible = health.window
+                throw RemoteError.incompatible(health.window)
+            }
+            staticKey = StaticKey.generate()
+            role = .pair(id: pairing.id, psk: pairing.secret, device: config.device.record(id: UUID().uuidString.lowercased()))
+        } else if let credential = credentials.load(config.account) {
+            sink.yield(.state(.connecting))
+            staticKey = credential.staticKey
+            role = .known(device: credential.device, machineKey: credential.machineKey)
+        } else {
+            unpaired = true
+            throw RemoteError.unpaired
+        }
+
+        let socket = session.webSocketTask(with: url)
+        socket.maximumMessageSize = 2 * RecordWriter.maxMessage
+        self.socket = socket
+        socket.resume()
+        let timeout = config.handshakeTimeout
+        let watchdog = Task {
+            try await Task.sleep(for: timeout)
+            socket.cancel(with: .goingAway, reason: nil)
+        }
+        defer { watchdog.cancel() }
+
+        let header = try FrameCodec.encode(OpeningHeader(role: role))
+        guard let headerText = String(bytes: header, encoding: .utf8) else {
+            throw RemoteError.unexpected("the opening header is not UTF-8")
+        }
+        try await socket.send(.string(headerText))
+        let established: any SecureSession
+        do {
+            established = try await channel.handshake(role, staticKey: staticKey, prologue: Data(remotePrologue.utf8) + header, over: SocketTransport(socket: socket))
+        } catch let RemoteError.incompatible(window) {
+            incompatible = window
+            throw RemoteError.incompatible(window)
+        } catch {
+            if socket.closeCode.rawValue == Self.unpairedCloseCode {
+                unpaired = true
+                throw RemoteError.unpaired
+            }
+            throw error
+        }
+        secure = established
+        reader = RecordReader()
+        if case let .pair(_, _, device) = role {
+            let credential = MachineCredential(device: device.id, staticKey: staticKey, machineKey: established.remoteStatic, urls: [url])
+            guard credentials.save(credential, for: config.account) else {
+                throw RemoteError.unexpected("the Keychain refused the machine credential")
+            }
+            pairing = nil
+        }
+
+        let device = config.device
+        let hello = HelloFrame(
+            device: HelloDevice(name: device.name, app: device.app, channel: device.channel),
+            resume: ResumeState(seq: epoch == nil ? nil : lastSeq, epoch: epoch, watch: watched)
+        )
+        try transmit(try FrameCodec.encode(hello)) { _ in }
+        switch try await receiveFrame(socket) {
+        case let .hello(reply):
+            watchdog.cancel()
+            if !ProtocolWindow.app.contains(reply.protocolVersion) {
+                let machine = ProtocolWindow(newest: reply.protocolVersion, oldest: reply.protocolVersion)
+                incompatible = machine
+                throw RemoteError.incompatible(machine)
+            }
+            if reply.resume == .snapshot || reply.epoch != epoch {
+                lastSeq = nil
+            }
+            epoch = reply.epoch
+            if var credential = credentials.load(config.account) {
+                credential.machine = reply.machine.id
+                credential.lastSuccess[url.absoluteString] = Date()
+                credential.replaceURLs(reply.machine.urls ?? [])
+                credentials.save(credential, for: config.account)
+            }
+            live = true
+            connectedAt = Date()
+            sink.yield(.hello(reply.machine, protocolVersion: reply.protocolVersion, resume: reply.resume, snapshot: reply.snapshot))
+            sink.yield(.state(.live))
+        case let .incompatible(machine):
+            incompatible = machine
+            throw RemoteError.incompatible(machine)
+        default:
+            throw RemoteError.unexpected("the machine did not answer hello")
+        }
+
+        startPinger()
+        Task { await self.flushOutbox() }
+        while true {
+            try handle(try await receiveFrame(socket))
+        }
+    }
+
+    public static func healthURL(for socket: URL) -> URL? {
+        guard var components = URLComponents(url: socket, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.scheme = components.scheme?.lowercased() == "wss" ? "https" : "http"
+        var path = components.path
+        if path.hasSuffix("/ws") {
+            path.removeLast(3)
+        }
+        components.path = path + "/health"
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    public static func health(for socket: URL) async -> HealthReport? {
+        guard let url = healthURL(for: socket) else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        guard
+            let (data, response) = try? await URLSession.shared.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200
+        else {
+            return nil
+        }
+        return try? JSONDecoder().decode(HealthReport.self, from: data)
+    }
+
+    private func receiveFrame(_ socket: URLSessionWebSocketTask) async throws -> ServerFrame {
+        while true {
+            let message = try await socket.receive()
+            guard case let .data(data) = message else {
+                throw RemoteError.unexpected("a text frame after the handshake")
+            }
+            guard let plaintext = try secure?.open(data) else {
+                throw RemoteError.notConnected
+            }
+            if case let .frame(json) = try reader.read(plaintext) {
+                return try FrameCodec.decode(json)
+            }
+        }
+    }
+
+    private func handle(_ frame: ServerFrame) throws {
+        switch frame {
+        case let .update(seq, update):
+            lastSeq = seq
+            sink.yield(.update(seq: seq, update: update))
+        case let .reply(id, error):
+            waiters.removeValue(forKey: id)?.finish(error.map { .failure(RemoteError.server($0)) } ?? .success(()))
+        case let .incompatible(machine):
+            incompatible = machine
+            throw RemoteError.incompatible(machine)
+        case .hello, .unknown:
+            return
+        }
+    }
+
+    private func flushOutbox() async {
+        for entry in await outbox.pending() {
+            guard live else {
+                return
+            }
+            await deliver(entry)
+        }
+    }
+
+    private func deliver(_ entry: OutboxEntry) async {
+        let request = entry.args.request
+        guard !inFlight.contains(request) else {
+            return
+        }
+        inFlight.insert(request)
+        defer { inFlight.remove(request) }
+        do {
+            try await self.request("send", entry.args)
+            await outbox.remove(request)
+            sink.yield(.sendAccepted(request: request))
+        } catch RemoteError.server(let message) {
+            await outbox.remove(request)
+            sink.yield(.sendRejected(request: request, message: message))
+        } catch {
+            return
+        }
+    }
+
+    private func startPinger() {
+        pinger?.cancel()
+        let interval = config.pingInterval
+        pinger = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if Task.isCancelled {
+                    return
+                }
+                do {
+                    try await self.ping(timeout: .seconds(10))
+                } catch {
+                    self.cancelSocket()
+                    return
+                }
+            }
+        }
+    }
+
+    private func ping(timeout: Duration) async throws {
+        let socket = socket
+        let watchdog = Task {
+            try await Task.sleep(for: timeout)
+            socket?.cancel(with: .goingAway, reason: nil)
+        }
+        defer { watchdog.cancel() }
+        try await request("ping", EmptyArgs())
+    }
+
+    private func cancelSocket() {
+        socket?.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func dropSocket() {
+        live = false
+        pinger?.cancel()
+        pinger = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        secure = nil
+        reader = RecordReader()
+        let pending = waiters
+        waiters = [:]
+        inFlight = []
+        for waiter in pending.values {
+            waiter.finish(.failure(RemoteError.notConnected))
+        }
+    }
+}
