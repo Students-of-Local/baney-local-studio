@@ -327,9 +327,20 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path, target: &Target) ->
     harness.pump_until("stone thread started", STEP, |view| view.thread("stone").is_some())?;
     let thread = harness.view.thread("stone").context("no stone thread")?;
     studio.select_thread(Some(thread.clone()));
-    harness.pump_until("the /stone prompt reached the model expanded", STEP, |view| {
+    harness.pump_until(&format!("the /{name} prompt reached the model expanded"), STEP, |view| {
         user_text(view.items(&thread)).iter().any(|text| text.contains("stone status") && text.contains(REQUEST))
     })?;
+    let started = Instant::now();
+    harness.pump_until(&format!("the /{name} turn finished on {}", target.model), BUILD, |view| view.idle(&thread))?;
+    studio.select_thread(Some(thread.clone()));
+    harness.pump_until("stone transcript reloaded", STEP, |view| !view.items(&thread).is_empty())?;
+    let calls = stone_calls(harness.view.items(&thread));
+    println!("     {calls} stone tool calls in {:?}", started.elapsed());
+    for item in harness.view.items(&thread).iter().rev().take(2) {
+        println!("     last item {:.400}", format!("{:?}", item.kind));
+    }
+    ensure!(calls > 0, "the /{name} turn ended without running stone");
+    check_part(work)?;
     std::fs::remove_dir_all(plugins.join(&target.id))?;
     let commands = harness.list_commands("after")?;
     ensure!(!commands.iter().any(|command| command.source == source), "the removed plugin is still listed");
@@ -344,17 +355,7 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path, target: &Target) ->
     let sent = user_text(harness.view.items(&gone));
     ensure!(sent.iter().all(|text| text.trim() == gone_prompt), "/{name} still expanded after removal: {sent:?}");
     println!("ok   check 4: plugin folder removed, /{name} gone from the palette and sent as plain text on the next turn, no restart");
-    let started = Instant::now();
-    harness.pump_until(&format!("the /{name} turn finished on {}", target.model), BUILD, |view| view.idle(&thread))?;
-    studio.select_thread(Some(thread.clone()));
-    harness.pump_until("stone transcript reloaded", STEP, |view| !view.items(&thread).is_empty())?;
-    let calls = stone_calls(harness.view.items(&thread));
-    println!("     {calls} stone tool calls in {:?}", started.elapsed());
-    for item in harness.view.items(&thread).iter().rev().take(2) {
-        println!("     last item {:.400}", format!("{:?}", item.kind));
-    }
-    ensure!(calls > 0, "the /{name} turn ended without running stone");
-    check_part(work)
+    Ok(())
 }
 
 fn check_part(work: &Path) -> anyhow::Result<()> {
