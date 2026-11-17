@@ -1076,14 +1076,26 @@ fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
     };
     write("auth.json", b"{}")?;
     local_studio_core::check_scratch_agent(&agent).map_err(|error| anyhow::anyhow!(error))?;
+    let absent = json!({
+        "baseUrl": format!("http://127.0.0.1:{}/v1", free_port()?),
+        "api": "openai-completions",
+        "apiKey": "absent",
+        "models": [{ "id": "absent", "input": ["text"], "contextWindow": 8192 }]
+    });
     let Some(source) = std::env::var_os("LOCAL_STUDIO_SMOKE_AGENT").map(PathBuf::from) else {
-        write("models.json", br#"{"providers":{}}"#)?;
+        write("models.json", &serde_json::to_vec(&json!({ "providers": { "remote-smoke-absent": absent } }))?)?;
         write("settings.json", br#"{"onboardingShown":true}"#)?;
         return Ok(None);
     };
     let models = std::fs::read(source.join("models.json"))
         .with_context(|| format!("read {}", source.join("models.json").display()))?;
-    write("models.json", &models)?;
+    let mut scratch: Value = serde_json::from_slice(&models)?;
+    scratch
+        .get_mut("providers")
+        .and_then(Value::as_object_mut)
+        .context("models.json has no providers")?
+        .insert("remote-smoke-absent".to_string(), absent);
+    write("models.json", &serde_json::to_vec(&scratch)?)?;
     write(
         "settings.json",
         &std::fs::read(source.join("settings.json")).unwrap_or_else(|_| br#"{"onboardingShown":true}"#.to_vec()),
@@ -1529,6 +1541,8 @@ async fn shared_ids(project: &str, a: &mut Client, c: &mut Client) -> anyhow::Re
         client.until("a thread of its own for the shared ids", SETUP, |view| view.started.contains_key(draft)).await?;
         let thread = client.view().started[draft].clone();
         client.call("watch", json!({ "thread": thread })).await?;
+        client.call("abort", json!({ "thread": thread })).await?;
+        client.until("its thread idle before the shared sends", SETUP, |view| view.idle(&thread)).await?;
         threads.push(thread);
     }
     let mut replies = Vec::new();
@@ -1574,6 +1588,7 @@ async fn shared_ids(project: &str, a: &mut Client, c: &mut Client) -> anyhow::Re
             "{} got {counts:?} answers to r1, r2 and q-shared, not none, one and one",
             client.name
         );
+        client.frame(&json!({ "id": 920 + id, "op": "abort", "args": { "thread": thread } }));
         client.frame(&json!({ "id": 910 + id, "op": "unwatch", "args": { "thread": thread } }));
     }
     println!("ok   two phones sharing request ids: each send r1 runs in its own thread only, and each phone gets exactly its own request_failed r2 and list_commands q-shared");
