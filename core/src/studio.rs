@@ -1135,7 +1135,7 @@ impl Actor {
                 self.store.update(&thread, |flags| flags.access = Some(mode));
                 self.save();
                 if self.harness(&thread).is_some() {
-                    self.cli_access(&thread, mode).await;
+                    self.cli_access(&thread, mode);
                 } else if let Some(active) = self.live_active(&thread) {
                     if let Err(error) = self.apply_access(&thread, &active).await {
                         self.mailbox.notice(NoticeLevel::Error, error);
@@ -2027,7 +2027,7 @@ impl Actor {
 
     async fn answer(&mut self, id: &str, request: String, answer: ApprovalAnswer) {
         if self.harness(id).is_some() {
-            self.cli_answer(id, &request, answer).await;
+            self.cli_answer(id, &request, answer);
             return;
         }
         let Some(active) = self.live_active(id) else {
@@ -2273,7 +2273,7 @@ impl Actor {
         level: Option<String>,
     ) -> Result<(), String> {
         if self.harness(id).is_some() {
-            return self.cli_model(id, provider, model, level).await;
+            return self.cli_model(id, provider, model, level);
         }
         let mut active = self.ensure_open(id).await?;
         if let (Some(provider), Some(model)) = (provider, model) {

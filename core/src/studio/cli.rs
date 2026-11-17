@@ -255,7 +255,7 @@ impl Actor {
         self.reopen_focused(id).await;
     }
 
-    pub(super) async fn cli_answer(&mut self, id: &str, request: &str, answer: ApprovalAnswer) {
+    pub(super) fn cli_answer(&mut self, id: &str, request: &str, answer: ApprovalAnswer) {
         let result = match self.drivers.get_mut(id) {
             Some(cli) => cli.driver.answer(request, answer),
             None => Err("That approval is no longer pending.".to_string()),
@@ -308,14 +308,14 @@ impl Actor {
         }
     }
 
-    pub(super) async fn cli_access(&mut self, id: &str, mode: AccessMode) {
+    pub(super) fn cli_access(&mut self, id: &str, mode: AccessMode) {
         let Some(cli) = self.drivers.get_mut(id) else { return };
         if let Err(error) = cli.driver.set_access(mode) {
             self.mailbox.notice(NoticeLevel::Error, error);
         }
     }
 
-    pub(super) async fn cli_model(
+    pub(super) fn cli_model(
         &mut self,
         id: &str,
         provider: Option<String>,
