@@ -271,7 +271,7 @@ fn install_copies_a_clean_plugin_and_reports_consent() {
     assert_eq!(installed.plugin.dir, root.join("tidy"));
     assert_eq!(installed.consent, Consent::NeedsConsent { missing: vec![Capability::McpServer] });
     assert!(installed.replaced.is_none());
-    let mode = std::fs::metadata(root.join("tidy/bin/server")).map(|meta| meta.permissions().mode()).unwrap_or(0);
+    let mode = std::fs::metadata(root.join("tidy/bin/server")).map_or(0, |meta| meta.permissions().mode());
     assert_ne!(mode & 0o111, 0);
     assert_eq!(installed.tree, tree_hash(&source, &[]).unwrap_or_default());
     let again = install(&root, &Source::Dir(source), &Catalog::default()).unwrap_or_else(|errors| panic!("{errors:?}"));

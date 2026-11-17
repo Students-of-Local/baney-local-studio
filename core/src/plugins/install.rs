@@ -50,20 +50,25 @@ pub struct Installed {
 
 impl Source {
     pub fn parse(arg: &str) -> Result<Self, String> {
+        if valid_id(arg) {
+            return Ok(Source::Catalog(arg.to_string()));
+        }
         let path = Path::new(arg);
         if path.is_dir() {
             return Ok(Source::Dir(path.to_path_buf()));
-        }
-        if valid_id(arg) {
-            return Ok(Source::Catalog(arg.to_string()));
         }
         match arg.rsplit_once('@') {
             Some((url, rev)) if !url.is_empty() && full_sha(rev) => {
                 Ok(Source::Git { url: url.to_string(), rev: rev.to_string() })
             }
-            _ if arg.contains("://") || arg.contains('@') || arg.ends_with(".git") => Err(format!(
-                "a git source must be pinned to a full commit SHA (40 hex characters) as <url>@<sha>, not {arg}"
-            )),
+            _ if arg.contains("://")
+                || arg.contains('@')
+                || path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("git")) =>
+            {
+                Err(format!(
+                    "a git source must be pinned to a full commit SHA (40 hex characters) as <url>@<sha>, not {arg}"
+                ))
+            }
             _ => Err(format!("not a plugin folder, a catalog id or a git source <url>@<sha>: {arg}")),
         }
     }
@@ -131,7 +136,9 @@ pub fn install(root: &Path, source: &Source, catalog: &Catalog) -> Result<Instal
             place(root, &fetched.0, &[], None)
         }
         Source::Catalog(id) => {
-            let entry = catalog.entry(id).ok_or_else(|| vec![format!("{id} is not in the plugin catalog")])?;
+            let entry = catalog
+                .entry(id)
+                .ok_or_else(|| vec![format!("{id} is not in the plugin catalog (use ./{id} for a folder)")])?;
             let fetched = Scratch::new(root, "fetch")?;
             fetch(&entry.git, &entry.rev, &fetched.0)?;
             let dir = match &entry.subdir {
