@@ -457,6 +457,7 @@ impl Studio {
             drivers: HashMap::new(),
             generation: 0,
             codex_models: Vec::new(),
+            plugin_consent: Vec::new(),
         };
         runtime.spawn(actor.run(receiver, cli_events));
         Ok(Arc::new(Self { commands, mailbox, workspace, _runtime: runtime }))
@@ -737,6 +738,7 @@ struct Actor {
     drivers: HashMap<String, cli::Cli>,
     generation: u64,
     codex_models: Vec<ModelOption>,
+    plugin_consent: Vec<String>,
 }
 
 struct DaemonFacts {
@@ -1924,6 +1926,28 @@ impl Actor {
                 self.mailbox.notice(NoticeLevel::Warning, format!("Some plugins did not load: {}", errors.join("; ")));
             }
             self.plugin_errors = errors;
+        }
+        let mut notes: Vec<String> = Vec::new();
+        let grants = plugins::Grants::load(dir).unwrap_or_else(|error| {
+            notes.push(error);
+            plugins::Grants::default()
+        });
+        for plugin in &scan.plugins {
+            if let plugins::Consent::NeedsConsent { missing } = grants.consent(plugin) {
+                let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+                notes.push(format!("{} needs consent for {}, so its MCP server is off", plugin.id, names.join(", ")));
+            }
+        }
+        if let Some(agent) = crate::daemon::agent_dir() {
+            if let Err(error) = plugins::sync_mcp_servers(&agent, &scan.plugins, &grants) {
+                notes.push(error);
+            }
+        }
+        if notes != self.plugin_consent {
+            if !notes.is_empty() {
+                self.mailbox.notice(NoticeLevel::Info, format!("Plugins: {}", notes.join("; ")));
+            }
+            self.plugin_consent = notes;
         }
         scan.plugins
     }
