@@ -22,11 +22,11 @@ So: **serve `Studio` over a WebSocket**, encrypted end to end. Requests are `Stu
 
 ## Transport
 
-- `local-studio serve [--port 18093] [--allow-host <name>]...` binds `127.0.0.1` only. `GET /v1/ws` upgrades to the WebSocket. `GET /v1/health` answers `{"ok":true,"protocol":N,"min_protocol":M}` without auth.
-- **Host check.** The server checks the `Host` header, never `X-Forwarded-Host`. Allowed: `127.0.0.1:<port>`, `localhost:<port>` and each `--allow-host` name. Any other `Host` gets 403 on every path, `/v1/health` included.
+- `local-studio-serve serve [--port 18093] [--allow-host <name>]... [--tunnel-host <name>]... [--url <wss url>]... [--notify <url>]...` binds `127.0.0.1` only. `--url` lists the routes reported in `hello` as `machine.urls`; without it the server reports `wss://<name>/v1/ws` for each allowed or tunnel host. `GET /v1/ws` upgrades to the WebSocket. `GET /v1/health` answers `{"ok":true,"protocol":N,"min_protocol":M}` without auth.
+- **Host check.** The server checks the `Host` header, never `X-Forwarded-Host`. Allowed: `127.0.0.1:<port>`, `localhost:<port>` (the bound port only) and each `--allow-host` and `--tunnel-host` name. Any other `Host` gets 403 on every path, `/v1/health` included.
 - **Origin.** Native clients send no `Origin`. A request with an `Origin` must match its `Host` (browsers); a request without one is allowed.
 - Tailscale: `tailscale serve --bg --https=443 http://127.0.0.1:18093`, `--allow-host <machine>.<tailnet>.ts.net`, and the phone connects to `wss://<machine>.<tailnet>.ts.net/v1/ws`.
-- Cloudflare: the tunnels lead's hosted tunnel forwards a hostname to `127.0.0.1:18093`, and `--allow-host` names it. For rate limits the client address is `CF-Connecting-IP` when `Host` is a tunnel hostname (Cloudflare overwrites that header, so a client can't set it), and the socket peer otherwise.
+- Cloudflare: the tunnels lead's hosted tunnel forwards a hostname to `127.0.0.1:18093`, and `--tunnel-host` names it (it is allowed like `--allow-host`, and the server also knows to trust Cloudflare's address header for it). For rate limits the client address is `CF-Connecting-IP` when `Host` is a `--tunnel-host` name (Cloudflare overwrites that header, so a client can't set it), and the socket peer otherwise.
 - Binary WebSocket messages only after the opening header; no `permessage-deflate` (the payload is ciphertext). One socket per machine per phone.
 
 ## Security: end to end on every route
@@ -39,6 +39,7 @@ Every route, Tailscale and loopback included, runs the same encrypted channel in
 - Each machine has one static X25519 key, created on first `serve` start, in `<data>/remote/static.key` (0600; on Windows an ACL for the user only).
 - The phone makes a new static X25519 key for each machine it pairs with, so machines can't link one phone across them. It keeps that key, the machine's static public key, the machine id and its URLs in the Keychain as `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, never synced. The Secure Enclave holds only P-256 keys, so it isn't used.
 - The server stores each paired device in `<data>/remote/devices.json` (0600): device id, name, platform, app version, channel, the device's static public key, first and last seen. Nothing secret.
+- While a pairing is open, `<data>/remote/pairing.json` (0600) holds its id, secret and expiry, because `serve` needs the secret as the `psk` and `pair` runs as a separate process. The file is removed when the pairing is used, cancelled by a newer one, or found expired.
 
 **Opening header.** The client's first WebSocket message is one text frame, also used as the Noise prologue so it can't be changed in flight:
 
@@ -50,7 +51,7 @@ Every route, Tailscale and loopback included, runs the same encrypted channel in
 The prologue is the bytes `local-studio-remote/1\n` followed by that frame's exact UTF-8 bytes. If the protocol windows don't overlap, the server answers with a text frame `{"op":"incompatible","protocol":N,"min_protocol":M}` and closes before any handshake, so the phone can say which side to update.
 
 **Pairing (`XXpsk3`).**
-- `local-studio pair` (and "Pair a phone" in each desktop app) mints a pairing id (8 random bytes, hex) and a pairing secret (32 random bytes), valid 10 minutes and for one use. Minting a new one cancels any unused one. The desktop shows a QR code and a link: `localstudio://pair?url=wss%3A%2F%2Fstudio-mac.tail1234.ts.net%2Fv1%2Fws&name=studio-mac&id=<pairing id>#<secret, base64url>`. The secret sits in the fragment, so it never reaches a server log.
+- `local-studio-serve pair` (and "Pair a phone" in each desktop app) mints a pairing id (8 random bytes, hex) and a pairing secret (32 random bytes), valid 10 minutes and for one use. Minting a new one cancels any unused one. The desktop shows a QR code and a link: `localstudio://pair?url=wss%3A%2F%2Fstudio-mac.tail1234.ts.net%2Fv1%2Fws&name=studio-mac&id=<pairing id>#<secret, base64url>`. The secret sits in the fragment, so it never reaches a server log.
 - The secret is the `psk`. Messages: `-> e`, `<- e, ee, s, es`, `-> s, se, psk`. The third message's payload is the device record: `{"id":"<uuid>","name":"My iPhone","platform":"ios","app":"0.4.0","channel":"nightly"}`. The phone trusts nothing from the server's second message until the handshake completes.
 - On success the server burns the secret, stores the device with its static key, and the channel continues as a normal session (`hello` below). The phone stores the machine's static key. A wrong secret fails the handshake at the third message and counts as a failed attempt.
 
@@ -68,9 +69,10 @@ A JSON frame is at most 8 MiB once joined; its chunks are sent back to back, nev
 
 **Server limits** (the hosted route has no edge rate limit, since the big assistant sites share egress IPs):
 - A socket whose opening header hasn't arrived within 5 s is closed; so is one whose handshake isn't complete within 10 s.
-- At most 8 sockets at a time that haven't finished a handshake.
+- At most 8 sockets at a time that haven't finished a handshake; a ninth is closed with 1013 and is not counted as a failure.
 - 5 failed handshakes or bad headers from one client address within a minute refuse that address for 10 minutes (close code 4429).
 - Each failure is logged with the address, the pattern and the reason, never a secret, key or payload.
+- Close codes: 1002 for a bad header, a record that breaks the rules, or `incompatible`; 1013 when too many sockets are mid-handshake; 4000 when a newer socket of the same device replaces this one; 4401 for an unknown or revoked device or a failed handshake; 4429 for a refused address.
 
 **Revocation.** Desktop settings list paired devices and revoke one, which deletes its static key and closes its live sockets. "Revoke all devices" deletes every device; Local Studio calls it before bringing a tunnel back after a suspension for a second connector, and the phones pair again.
 
@@ -85,12 +87,14 @@ The phone's first transport frame:
 The server answers:
 
 ```json
-{"op": "hello", "protocol": 2, "epoch": "<id>", "machine": {"id": "…", "name": "studio-mac", "os": "macos", "version": "0.4.0", "channel": "nightly", "urls": ["wss://studio-mac.tail1234.ts.net/v1/ws", "wss://studio-mac.example-tunnel.net/v1/ws"]}, "resume": "delta", "snapshot": []}
+{"op": "hello", "protocol": 2, "min_protocol": 2, "epoch": "<id>", "machine": {"id": "…", "name": "studio-mac", "os": "macos", "version": "0.4.0", "channel": "nightly", "urls": ["wss://studio-mac.tail1234.ts.net/v1/ws", "wss://studio-mac.example-tunnel.net/v1/ws"]}, "device": {"id": "<uuid>", "name": "My iPhone"}, "resume": "delta", "seq": 412, "snapshot": []}
 ```
 
 - `protocol` is the highest version inside both windows; the socket speaks it until it closes.
+- `seq` is the baseline: the next update carries `seq + 1`. On `delta` it echoes `resume.seq`; on `snapshot` the phone drops what it held and counts from it.
+- `device` echoes the paired record (the server takes `name`, `app` and `channel` from the phone's `hello` and updates the stored record).
 - `machine.urls` lists every route the machine is reachable on now. The phone replaces its stored list with it, so a hostname that changed after 30 days down is learned on any route that still works.
-- **Resume by `seq`.** `seq` counts updates per device and server `epoch` (a new epoch on every `serve` start). The server keeps each device's last 2,000 updates or 10 minutes, whichever is less. When `resume.epoch` matches and `resume.seq` is still in that buffer, the server answers `"resume": "delta"`, sends the missed updates in order, then live ones. Otherwise it answers `"resume": "snapshot"` with a full snapshot (`connection`, `projects`, `threads`, `models`, `theme`) and a `transcript` `reset` for each thread in `resume.watch`.
+- **Resume by `seq`.** `seq` counts updates per device and server `epoch` (a new epoch on every `serve` start). The server keeps each device's last 2,000 updates or 10 minutes, whichever is less. When `resume.epoch` matches and `resume.seq` is still in that buffer, the server answers `"resume": "delta"`, sends the missed updates in order, then live ones. Otherwise it answers `"resume": "snapshot"` with a full snapshot (`connection`, `projects`, `threads`, and `models`, `daemon_default` and `theme` once the core has them) inside `hello`, then a `transcript` `reset` for each thread in `resume.watch` as ordinary `seq`'d updates, so the transcript, which can be large, never makes one huge `hello`.
 - **Reconnect.** After a drop the phone waits 1 s, doubling to 30 s, with full jitter, and tries its URLs in order of last success. It resets the wait after a socket stays up 60 s and reconnects at once when the app comes to the foreground or the network path changes.
 - `ping`/`pong` every 20 s from the phone; the server closes a socket silent for 60 s.
 
@@ -102,18 +106,20 @@ Client to server (requests run concurrently; `id` is the client's counter):
 {"id": 7, "op": "send", "args": {"request": "r7", "thread": "t1", "prompt": {"text": "ship it", "images": ["<blob id>"], "files": []}, "delivery": "queue"}}
 ```
 
-The server answers each with `{"re": 7, "ok": true}` once accepted, or `{"re": 7, "error": {"code": "…", "message": "…"}}`. Outcomes arrive as updates. `request_done` and `request_failed` carry the `request` string, so a retried `send` is idempotent: the server drops a second `send` with a `request` it has already accepted.
+The server answers each with `{"re": 7, "ok": true}` once accepted, or `{"re": 7, "error": {"code": "…", "message": "…"}}`. Outcomes arrive as updates. `request_done` and `request_failed` carry the `request` string, so a retried `send` is idempotent: the server drops a second `send` with a `request` it has already accepted (or a second `start_thread` with the same `draft`) and answers it `{"re": 7, "ok": true, "result": {"duplicate": true}}`.
+
+Error codes: `not_remote` (op not in the table), `not_built` (in the table, not built yet), `bad_args`, `bad_state` (`hello` after the first frame), `not_watched`, `not_loaded`, `too_many` (more than 64 watched threads), `too_large`, `bad_blob`.
 
 Server to client: `{"op": "update", "seq": 413, "update": {"type": "transcript", "thread": "t1", "op": {"type": "insert", "index": 18, "item": {}}}}`.
 
-**Transcript window.** `reset` carries at most the last 200 items plus `{"earlier": <count>}`; `load_earlier {"thread", "before": <index>, "limit"}` pages back.
+**Transcript window.** `reset` carries at most the last 200 items plus `{"earlier": <count>}`; `load_earlier {"thread", "before": <index>, "limit"}` pages back and answers inline: `{"re": 9, "ok": true, "result": {"thread", "start", "items"}}`, at most 500 items. It is a reply rather than an update because only the asking socket wants it and it must not take a `seq` that other sockets of the device would replay. Image thumbnails inside transcript items stay inline as base64 (a few KB each, already in the core's `Item`); only full images and files travel as blobs.
 
 ## Blobs
 
 Images, attachments and file contents never go in JSON. They travel as blob records inside the encrypted channel. They don't use a separate HTTP path, because TLS ends at Cloudflare and an HTTP side channel would skip the end to end encryption.
 
 - **Upload.** The phone picks a random 16-byte id, sends `{"id": 8, "op": "blob_put", "args": {"blob": "<hex id>", "size": 183204, "mime": "image/heic"}}`, then the blob's chunks. The server acknowledges after the final chunk. A `send` names blobs by id. An unreferenced blob is dropped after 10 minutes; at most 25 MiB per blob and 100 MiB pending per device.
-- **Download.** `load_message_image` and `read_file` answer with `{"type": "blob", "request": "…", "blob": "<hex id>", "size": …, "mime": "…"}` followed by the chunks. The phone caches by `(machine, thread, entry, index)`.
+- **Download.** `load_message_image` and `read_file` answer with `{"type": "blob", "request": "…", "blob": "<hex id>", "size": …, "mime": "…"}` followed by the chunks. For `read_file` the update also carries `path` and `language`, and the mime is `text/plain; charset=utf-8`; a binary file or one over the core's 2 MiB limit answers `request_failed` instead, since the core does not read its bytes. The phone caches by `(machine, thread, entry, index)`.
 
 ## Ops, frozen for protocol 2
 
@@ -137,7 +143,7 @@ Updates the phone receives (`type`):
 
 Adding an op or update type, or a field a client must understand, raises `protocol`. A server ignores unknown fields in requests, and a client ignores unknown update types and fields.
 
-`local-studio-core`'s `remote_smoke` example starts `serve` on a scratch data dir, pairs a client through `XXpsk3`, reconnects through `KK`, and drives every op in the table once over a real socket against the real model, checking each reply and the updates it causes. It also checks the refusals: a wrong pairing secret, a revoked device, a `Host` not allowed, an op not in the table, and the rate limit.
+`local-studio-remote`'s `remote_smoke` example starts `serve` on a scratch data dir, pairs a client through `XXpsk3`, reconnects through `KK`, and drives every op in the table once over a real socket against a real model (a local Ollama model in the first runs), checking each reply and the updates it causes. It also checks the refusals: a wrong pairing secret, a revoked device, a `Host` not allowed, an op not in the table, and the rate limit.
 
 ## Theme
 
@@ -150,7 +156,7 @@ The phone holds one socket per paired machine and merges what they send by `mach
 ## Notifications when the phone is asleep
 
 - `notification` updates (`turn_done`, `needs_approval`, `needs_answer`, `failed`) go to every connected client; the app shows them as local notifications while it has a socket.
-- When the app is suspended, iOS keeps no socket. APNs needs a push key from the user's paid Apple Developer account and a relay that holds it. `serve` takes notify hooks (`remote.notify: [{"kind": "webhook", "url": …}]`) and posts a notification's kind and thread id to them, never message text. v1 uses an ntfy style webhook; APNs through the tunnels lead's hosted service is v2 and is the only piece that needs the paid account.
+- When the app is suspended, iOS keeps no socket. APNs needs a push key from the user's paid Apple Developer account and a relay that holds it. `serve` takes notify hooks (`--notify <url>`, repeatable) and posts `{"machine": {"id", "name"}, "kind", "thread"}` to them, never message text; the machine lets one hook serve every machine. v1 uses an ntfy style webhook; APNs through the tunnels lead's hosted service is v2 and is the only piece that needs the paid account.
 
 ## Question cards
 
@@ -166,5 +172,6 @@ docs/channels.md is the scheme. The iPhone app installs side by side: `org.local
 
 ## Gaps against T3 Code
 
-- **Question cards**, above.
+- **Question cards**, above. `answer_questions` is in the table and answers `not_built` until the daemon sends questions; no `questions` updates or `needs_answer` notifications are sent yet.
+- **Theme.** The core has no resolved theme yet, so `serve` sends no `theme` update; the phone uses its own default until it gets one.
 - **Thread list paging.** `threads` sends every row. That's fine at hundreds of threads; T3 pages settled threads 25 at a time. Measure before adding paging.

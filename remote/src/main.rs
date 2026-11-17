@@ -1,6 +1,8 @@
 mod access;
 mod devices;
 mod hub;
+mod limits;
+mod noise;
 mod ops;
 mod server;
 
@@ -11,12 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
+use base64::Engine;
 use local_studio_core::{DaemonLaunch, Studio, StudioConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
 use crate::devices::{now_ms, Devices};
 use crate::hub::Hub;
+use crate::limits::Gate;
 use crate::server::Server;
 
 const DEFAULT_PORT: u16 = 18093;
@@ -24,10 +28,10 @@ const VERSION: &str = env!("LOCAL_STUDIO_BUILD_VERSION");
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 
 const USAGE: &str = "usage:
-  local-studio-serve serve [--port 18093] [--allow-host <name>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
+  local-studio-serve serve [--port 18093] [--allow-host <name>]... [--tunnel-host <name>]... [--url <wss url>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
   local-studio-serve pair [--url <wss url>] [--port 18093] [--name <name>] [--data-dir <dir>]
   local-studio-serve devices [--data-dir <dir>]
-  local-studio-serve revoke <device id or name> [--data-dir <dir>]";
+  local-studio-serve revoke (<device id or name> | --all) [--data-dir <dir>]";
 
 fn main() -> ExitCode {
     match run() {
@@ -138,7 +142,10 @@ async fn stopped() {
 
 fn serve(mut args: Args) -> anyhow::Result<()> {
     let port = args.port()?;
-    let allowed = args.take_all("--allow-host")?;
+    let mut allowed = args.take_all("--allow-host")?;
+    let tunnels = args.take_all("--tunnel-host")?;
+    allowed.extend(tunnels.iter().cloned());
+    let mut urls = args.take_all("--url")?;
     let mut hooks = args.take_all("--notify")?;
     let launch = args
         .take("--eukhe")?
@@ -148,6 +155,9 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     let data_dir = args.data_dir()?;
     args.done()?;
     hooks.extend(configured_hooks(&data_dir)?);
+    if urls.is_empty() {
+        urls = allowed.iter().map(|host| format!("wss://{host}/v1/ws")).collect();
+    }
     let (waker, notify) = hub::signal();
     let config = StudioConfig {
         socket_path: None,
@@ -158,12 +168,14 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     };
     let studio = Studio::new(config, waker).map_err(|error| anyhow::anyhow!("{error}"))?;
     let devices = Devices::new(&data_dir);
+    let key = devices.static_key()?;
     let machine = json!({
         "id": devices.machine_id()?,
         "name": name,
         "os": std::env::consts::OS,
         "version": VERSION,
         "channel": CHANNEL,
+        "urls": urls,
     });
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let served = runtime.block_on(async {
@@ -171,12 +183,15 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
             TcpListener::bind(("127.0.0.1", port)).await.with_context(|| format!("listen on 127.0.0.1:{port}"))?;
         let hub = Hub::new(Arc::clone(&studio), machine, hooks)?;
         tokio::spawn(Arc::clone(&hub).pump(notify));
+        tokio::spawn(Arc::clone(&hub).reap());
         eprintln!(
-            "local-studio-serve: serving {} on http://127.0.0.1:{port} (pid {})",
+            "local-studio-serve: serving {} on http://127.0.0.1:{port} (pid {}, machine key {})",
             data_dir.display(),
-            std::process::id()
+            std::process::id(),
+            &devices::hex(&key.public)[..16]
         );
-        server::run(listener, Arc::new(Server { hub, devices, allowed }), stopped()).await;
+        let server = Server { hub, devices, key, port, allowed, tunnels, gate: Gate::default() };
+        server::run(listener, Arc::new(server), stopped()).await;
         anyhow::Ok(())
     });
     studio.shutdown();
@@ -222,8 +237,9 @@ fn pair(mut args: Args) -> anyhow::Result<()> {
     args.done()?;
     let url = url.or_else(tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{port}/v1/ws"));
     let devices = Devices::new(&data_dir);
-    let (secret, _) = devices.open_pairing()?;
-    let link = format!("{}://pair?url={}&name={}#{}", scheme(CHANNEL), encode(&url), encode(&name), secret.reveal());
+    let (id, secret, _) = devices.open_pairing()?;
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.0);
+    let link = format!("{}://pair?url={}&name={}&id={id}#{secret}", scheme(CHANNEL), encode(&url), encode(&name));
     let code = qrcode::QrCode::new(link.as_bytes())?;
     let picture = code
         .render::<qrcode::render::unicode::Dense1x2>()
@@ -233,7 +249,9 @@ fn pair(mut args: Args) -> anyhow::Result<()> {
         .build();
     println!("{picture}");
     println!("{link}");
-    eprintln!("Scan this with Local Studio on the phone within 10 minutes. It works once.");
+    eprintln!(
+        "Scan this with Local Studio on the phone within 10 minutes. It works once; a new code cancels this one."
+    );
     if url.starts_with("wss://") {
         if let Some(host) = url.trim_start_matches("wss://").split('/').next() {
             eprintln!("Run serve with --allow-host {host} so the phone's connection is accepted.");
@@ -261,9 +279,10 @@ fn list(mut args: Args) -> anyhow::Result<()> {
     }
     for device in devices {
         println!(
-            "{}  {}  {} {} {}  paired {}, last seen {}",
+            "{}  {}  key {}  {} {} {}  paired {}, last seen {}",
             device.info.id,
             device.info.name,
+            device.key.get(..16).unwrap_or_default(),
             device.info.platform,
             device.info.app,
             device.info.channel,
@@ -276,15 +295,29 @@ fn list(mut args: Args) -> anyhow::Result<()> {
 
 fn revoke(mut args: Args) -> anyhow::Result<()> {
     let data_dir = args.data_dir()?;
-    let Some(device) = args.0.first().cloned() else { bail!("name the device to revoke\n{USAGE}") };
-    args.0.remove(0);
-    args.done()?;
-    let gone = Devices::new(&data_dir).revoke(&device)?;
+    let devices = Devices::new(&data_dir);
+    let gone = if args.0.iter().any(|arg| arg == "--all") {
+        args.0.retain(|arg| arg != "--all");
+        args.done()?;
+        devices.revoke_all()?
+    } else {
+        let Some(device) = args.0.first().cloned() else { bail!("name the device to revoke, or --all\n{USAGE}") };
+        args.0.remove(0);
+        args.done()?;
+        let gone = devices.revoke(&device)?;
+        if gone.is_empty() {
+            bail!("no paired device has the id or name {device}");
+        }
+        gone
+    };
     if gone.is_empty() {
-        bail!("no paired device has the id or name {device}");
+        println!("No paired devices to revoke.");
     }
     for device in gone {
-        println!("Revoked {} ({}). Its open socket closes at its next frame.", device.info.name, device.info.id);
+        println!(
+            "Revoked {} ({}). A running serve closes its socket within a second.",
+            device.info.name, device.info.id
+        );
     }
     Ok(())
 }

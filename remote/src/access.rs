@@ -1,5 +1,3 @@
-const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
-
 fn split_authority(authority: &str) -> (String, Option<u16>) {
     let authority = authority.trim().to_ascii_lowercase();
     if let Some(rest) = authority.strip_prefix('[') {
@@ -16,12 +14,18 @@ fn split_authority(authority: &str) -> (String, Option<u16>) {
     }
 }
 
-pub fn host_allowed(host: &str, allowed: &[String]) -> bool {
+pub fn named(host: &str, names: &[String]) -> bool {
     let (name, _) = split_authority(host);
+    !name.is_empty() && names.iter().any(|allowed| split_authority(allowed).0 == name)
+}
+
+pub fn host_allowed(host: &str, port: u16, allowed: &[String]) -> bool {
+    let (name, given) = split_authority(host);
     if name.is_empty() {
         return false;
     }
-    LOOPBACK.contains(&name.as_str()) || allowed.iter().any(|allowed| split_authority(allowed).0 == name)
+    let loopback = matches!(name.as_str(), "127.0.0.1" | "localhost") && given == Some(port);
+    loopback || named(host, allowed)
 }
 
 pub fn same_origin(origin: &str, host: &str) -> bool {
@@ -41,7 +45,6 @@ pub fn same_origin(origin: &str, host: &str) -> bool {
         && origin_port.unwrap_or(default) == host_port.unwrap_or(default)
 }
 
-pub fn origin_allowed(origin: Option<&str>, host: &str, forwarded_host: Option<&str>) -> bool {
-    let Some(origin) = origin else { return true };
-    same_origin(origin, host) || forwarded_host.is_some_and(|forwarded| same_origin(origin, forwarded))
+pub fn origin_allowed(origin: Option<&str>, host: &str) -> bool {
+    origin.is_none_or(|origin| same_origin(origin, host))
 }
