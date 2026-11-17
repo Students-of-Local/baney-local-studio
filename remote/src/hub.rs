@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,8 @@ const MAX_WATCH: usize = 64;
 const MAX_BLOB: usize = 25 << 20;
 const MAX_PENDING: usize = 100 << 20;
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_QUEUED_ITEMS: usize = 2 * BUFFERED;
+const MAX_QUEUED_BYTES: usize = 256 << 20;
 const SNAPSHOT: [&str; 5] = ["connection", "projects", "threads", "models", "daemon_default"];
 
 pub struct Blob {
@@ -34,8 +37,69 @@ pub enum Out {
     Close(u16, String),
 }
 
+impl Out {
+    fn size(&self) -> usize {
+        match self {
+            Self::Frame(text) => text.len(),
+            Self::Update { text, blob, .. } => text.len() + blob.as_ref().map_or(0, |blob| blob.data.len()),
+            Self::Close(..) => 0,
+        }
+    }
+}
+
 pub type ConnId = u64;
-pub type Tx = mpsc::UnboundedSender<Out>;
+
+#[derive(Default)]
+struct Queued {
+    items: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+#[derive(Clone)]
+pub struct Tx {
+    out: mpsc::UnboundedSender<Out>,
+    queued: Arc<Queued>,
+    cut: Arc<Notify>,
+}
+
+pub struct Rx {
+    out: mpsc::UnboundedReceiver<Out>,
+    queued: Arc<Queued>,
+}
+
+pub fn outbound() -> (Tx, Rx, Arc<Notify>) {
+    let (out, rx) = mpsc::unbounded_channel();
+    let queued = Arc::new(Queued::default());
+    let cut = Arc::new(Notify::new());
+    (Tx { out, queued: Arc::clone(&queued), cut: Arc::clone(&cut) }, Rx { out: rx, queued }, cut)
+}
+
+impl Tx {
+    pub fn send(&self, out: Out) -> bool {
+        let size = out.size();
+        let items = self.queued.items.fetch_add(1, Ordering::SeqCst);
+        let bytes = self.queued.bytes.fetch_add(size, Ordering::SeqCst);
+        let full = items >= MAX_QUEUED_ITEMS || (items > 0 && bytes + size > MAX_QUEUED_BYTES);
+        if full || self.out.send(out).is_err() {
+            self.queued.items.fetch_sub(1, Ordering::SeqCst);
+            self.queued.bytes.fetch_sub(size, Ordering::SeqCst);
+            if full {
+                self.cut.notify_one();
+            }
+            return false;
+        }
+        true
+    }
+}
+
+impl Rx {
+    pub async fn recv(&mut self) -> Option<Out> {
+        let out = self.out.recv().await?;
+        self.queued.items.fetch_sub(1, Ordering::SeqCst);
+        self.queued.bytes.fetch_sub(out.size(), Ordering::SeqCst);
+        Some(out)
+    }
+}
 
 struct Entry {
     seq: u64,
@@ -84,8 +148,10 @@ impl Session {
         {
             self.buffer.pop_front();
         }
-        if let Some((_, tx)) = &self.conn {
-            tx.send(Out::Update { seq: self.seq, text, blob }).ok();
+        let gone = self.conn.as_ref().is_some_and(|(_, tx)| !tx.send(Out::Update { seq: self.seq, text, blob }));
+        if gone {
+            self.conn = None;
+            self.left_at = Some(now);
         }
     }
 
@@ -95,7 +161,7 @@ impl Session {
 
     fn close(&mut self, code: u16, reason: &str) {
         if let Some((_, tx)) = self.conn.take() {
-            tx.send(Out::Close(code, reason.to_string())).ok();
+            tx.send(Out::Close(code, reason.to_string()));
         }
     }
 }
@@ -133,6 +199,11 @@ impl<T> Remembered<T> {
     }
 }
 
+struct Tag {
+    device: String,
+    given: String,
+}
+
 #[derive(Default)]
 struct State {
     next: ConnId,
@@ -140,7 +211,8 @@ struct State {
     watchers: HashMap<String, HashSet<String>>,
     mirrors: HashMap<String, Mirror>,
     snapshot: [Option<Arc<str>>; SNAPSHOT.len()],
-    owners: Remembered<String>,
+    tags: Remembered<Tag>,
+    tagged: u64,
     git: HashMap<String, HashSet<String>>,
     accepted: Remembered<()>,
     sends: HashMap<String, (String, Instant)>,
@@ -189,11 +261,23 @@ impl State {
         }
     }
 
-    fn owner(&self, request: Option<&str>) -> Option<String> {
-        request
-            .and_then(|request| self.owners.values.get(request))
-            .filter(|device| self.sessions.contains_key(*device))
-            .cloned()
+    fn tagged(&self, tag: &str) -> Option<(String, String)> {
+        self.tags.values.get(tag).map(|tag| (tag.device.clone(), tag.given.clone()))
+    }
+
+    fn routed(&self, value: &Value) -> Option<(String, Value)> {
+        let field = ["request", "draft"].into_iter().find(|field| value.get(*field).is_some_and(Value::is_string))?;
+        let (device, given) = self.tagged(value.get(field).and_then(Value::as_str)?)?;
+        let mut value = value.clone();
+        value[field] = Value::String(given);
+        Some((device, value))
+    }
+
+    fn live(&mut self, device: &str, conn: ConnId) -> Result<&mut Session, OpError> {
+        self.sessions
+            .get_mut(device)
+            .filter(|session| session.conn.as_ref().is_some_and(|(id, _)| *id == conn))
+            .ok_or_else(|| OpError::new("closed", "this connection was replaced or closed"))
     }
 
     fn release(&mut self, studio: &Studio, device: &str, thread: &str) {
@@ -388,13 +472,13 @@ impl Hub {
                 }
             }
             Update::MessageImage { request, mime_type, data } => {
-                let Some(owner) = state.owner(Some(&request)) else { return };
+                let Some((owner, request)) = state.tagged(&request) else { return };
                 let Ok(id) = random::<BLOB_ID>() else { return };
                 let header = json!({ "type": "blob", "request": request, "blob": hex(&id), "size": data.len(), "mime": mime_type });
                 state.deliver(&owner, text_of(&header), Some(Arc::new(Blob { id, data })));
             }
             Update::FileContent { request, path, content } => {
-                let Some(owner) = state.owner(Some(&request)) else { return };
+                let Some((owner, request)) = state.tagged(&request) else { return };
                 let (mime, data, language) = match content {
                     FileContent::Text { text, language } => {
                         ("text/plain; charset=utf-8".to_string(), text.into_bytes(), language)
@@ -419,7 +503,11 @@ impl Hub {
                     }
                     state.broadcast(&text);
                 }
-                "thread_started" | "notice" | "request_done" | "request_failed" => state.broadcast(&text_of(&value)),
+                "thread_started" | "request_done" | "request_failed" => match state.routed(&value) {
+                    Some((owner, value)) => state.deliver(&owner, text_of(&value), None),
+                    None => state.broadcast(&text_of(&value)),
+                },
+                "notice" => state.broadcast(&text_of(&value)),
                 "thread_search"
                 | "archived_threads"
                 | "commands"
@@ -427,8 +515,7 @@ impl Hub {
                 | "diff"
                 | "pull_requests"
                 | "pull_request_detail" => {
-                    let request = value.get("request").and_then(Value::as_str);
-                    if let Some(owner) = state.owner(request) {
+                    if let Some((owner, value)) = state.routed(&value) {
                         state.deliver(&owner, text_of(&value), None);
                     }
                 }
@@ -486,10 +573,10 @@ impl Hub {
             "seq": base,
             "snapshot": if delta { Vec::new() } else { snapshot },
         });
-        tx.send(Out::Frame(hello.to_string())).ok();
+        tx.send(Out::Frame(hello.to_string()));
         if delta {
             for entry in session.buffer.iter().filter(|entry| entry.seq > base) {
-                tx.send(Out::Update { seq: entry.seq, text: Arc::clone(&entry.text), blob: entry.blob.clone() }).ok();
+                tx.send(Out::Update { seq: entry.seq, text: Arc::clone(&entry.text), blob: entry.blob.clone() });
             }
         }
         session.conn = Some((conn, tx));
@@ -538,29 +625,29 @@ impl Hub {
         }
     }
 
-    pub fn watch(&self, device: &str, thread: &str) -> Result<(), OpError> {
+    pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
         let mut state = self.state();
-        if state.sessions.get(device).is_some_and(|session| session.watching.len() >= MAX_WATCH) {
+        if state.live(device, conn)?.watching.len() >= MAX_WATCH {
             return Err(OpError::new("too_many", format!("watch at most {MAX_WATCH} threads at once")));
         }
         state.watch(&self.studio, device, thread);
         Ok(())
     }
 
-    pub fn unwatch(&self, device: &str, thread: &str) {
+    pub fn unwatch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
         let mut state = self.state();
-        let was = state.sessions.get_mut(device).is_some_and(|session| session.watching.remove(thread));
-        if was {
+        if state.live(device, conn)?.watching.remove(thread) {
             state.release(&self.studio, device, thread);
         }
+        Ok(())
     }
 
-    pub fn load_earlier(&self, device: &str, args: &Value) -> Result<Value, OpError> {
+    pub fn load_earlier(&self, device: &str, conn: ConnId, args: &Value) -> Result<Value, OpError> {
         let thread: String = ops::arg(args, "thread")?;
         let before: Option<u64> = ops::arg(args, "before")?;
         let limit: Option<u64> = ops::arg(args, "limit")?;
-        let state = self.state();
-        if !state.sessions.get(device).is_some_and(|session| session.watching.contains(&thread)) {
+        let mut state = self.state();
+        if !state.live(device, conn)?.watching.contains(&thread) {
             return Err(OpError::new("not_watched", format!("watch thread {thread} before loading its transcript")));
         }
         let items =
@@ -573,17 +660,33 @@ impl Hub {
         Ok(json!({ "thread": thread, "start": start, "items": &items[start..before] }))
     }
 
-    pub fn request(&self, device: &str, op: &str, args: &Value) -> Result<Option<Value>, OpError> {
+    pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<Option<Value>, OpError> {
         let mut state = self.state();
-        let key = ops::idempotency_key(op, args);
+        state.live(device, conn)?;
+        let field = ops::correlation(op).filter(|field| args.get(*field).is_some_and(Value::is_string));
+        let given = field.and_then(|field| args.get(field)).and_then(Value::as_str).map(str::to_string);
+        let key = given
+            .as_ref()
+            .filter(|_| ops::idempotent(op))
+            .map(|given| format!("{}:{device}:{op}:{given}", device.len()));
         if key.as_ref().is_some_and(|key| state.accepted.values.contains_key(key)) {
             return Ok(Some(json!({ "duplicate": true })));
         }
-        let session = state.sessions.get_mut(device).ok_or_else(|| OpError::new("closed", "this session ended"))?;
+        let mut args = args.clone();
+        let tag = match (field, &given) {
+            (Some(field), Some(given)) => {
+                state.tagged += 1;
+                let tag = format!("m{}", state.tagged);
+                args[field] = Value::String(tag.clone());
+                Some((tag, given.clone()))
+            }
+            _ => None,
+        };
+        let session = state.live(device, conn)?;
         let mut prompt = |value: &Value| resolve_prompt(session, value);
-        ops::dispatch(&self.studio, op, args, &mut prompt)?;
-        if let Some(request) = ops::request_of(args) {
-            state.owners.insert(request, device.to_string());
+        ops::dispatch(&self.studio, op, &args, &mut prompt)?;
+        if let Some((tag, given)) = tag {
+            state.tags.insert(tag, Tag { device: device.to_string(), given });
         }
         if op == "git_status" {
             if let Some(project) = args.get("project").and_then(Value::as_str) {
@@ -594,9 +697,7 @@ impl Hub {
             state.accepted.insert(key, ());
         }
         if op == "send" {
-            if let (Some(request), Some(thread)) =
-                (args.get("request").and_then(Value::as_str), args.get("thread").and_then(Value::as_str))
-            {
+            if let (Some(request), Some(thread)) = (given.as_deref(), args.get("thread").and_then(Value::as_str)) {
                 eprintln!("local-studio-serve: send {request} accepted for thread {thread} at {} ms", now_ms());
                 state.sends.insert(thread.to_string(), (request.to_string(), Instant::now()));
             }
@@ -604,7 +705,7 @@ impl Hub {
         Ok(None)
     }
 
-    pub fn blob_put(&self, device: &str, id: Value, args: &Value) -> Result<(), OpError> {
+    pub fn blob_put(&self, device: &str, conn: ConnId, id: Value, args: &Value) -> Result<(), OpError> {
         let blob: String = ops::arg(args, "blob")?;
         let size: usize = ops::arg(args, "size")?;
         let mime: String = ops::arg(args, "mime")?;
@@ -615,7 +716,7 @@ impl Hub {
             return Err(OpError::new("too_large", format!("a blob may be at most {MAX_BLOB} bytes")));
         }
         let mut state = self.state();
-        let session = state.sessions.get_mut(device).ok_or_else(|| OpError::new("closed", "this session ended"))?;
+        let session = state.live(device, conn)?;
         if session.uploads.contains_key(&blob) {
             return Err(OpError::new("bad_args", "this blob id is already in use"));
         }
@@ -631,12 +732,13 @@ impl Hub {
     pub fn blob_chunk(
         &self,
         device: &str,
+        conn: ConnId,
         blob: [u8; BLOB_ID],
         last: bool,
         data: &[u8],
     ) -> Result<Option<Value>, String> {
         let mut state = self.state();
-        let session = state.sessions.get_mut(device).ok_or("this session ended")?;
+        let session = state.live(device, conn).map_err(|error| error.message)?;
         let upload = session
             .uploads
             .get_mut(&blob)

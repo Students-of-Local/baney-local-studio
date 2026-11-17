@@ -18,7 +18,6 @@ use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
 use snow::HandshakeState;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -27,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::devices::{hex, unhex, DeviceInfo, Devices, StaticKey};
-use crate::hub::{self, Hub, Out, Resume};
+use crate::hub::{self, ConnId, Hub, Out, Resume, Rx, Tx};
 use crate::limits::{self, Gate};
 use crate::noise::{self, Channel, Inbound, Joiner};
 use crate::{access, ops};
@@ -448,20 +447,34 @@ async fn attached(server: &Arc<Server>, mut sink: Sink, mut stream: Stream, open
         eprintln!("local-studio-serve: could not note the device as seen: {error:#}");
     }
     let name = server.devices.device(&opened.device).ok().flatten().map(|device| device.info.name).unwrap_or_default();
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx, cut) = hub::outbound();
     let conn = server.hub.attach(&opened.device, &name, &opened.key, tx.clone(), &resume_of(&hello));
-    let writer = tokio::spawn(write(sink, rx, Arc::clone(&channel)));
-    let ended = read(server, &opened.device, &tx, &mut stream, &channel).await;
+    let mut writer = tokio::spawn(write(sink, rx, Arc::clone(&channel)));
+    let mut writing = true;
+    let ended = tokio::select! {
+        ended = read(server, &opened.device, conn, &tx, &mut stream, &channel) => ended,
+        _ = &mut writer => {
+            writing = false;
+            Ok(())
+        }
+        () = cut.notified() => {
+            writer.abort();
+            writing = false;
+            Err("it read too slowly and its outbound queue filled".to_string())
+        }
+    };
     if let Err(reason) = ended {
         eprintln!("local-studio-serve: closed device {} from {address}: {reason}", opened.device);
-        tx.send(Out::Close(BROKEN, "protocol error".to_string())).ok();
+        tx.send(Out::Close(BROKEN, "protocol error".to_string()));
     }
     server.hub.detach(&opened.device, conn);
     drop(tx);
-    tokio::time::timeout(DRAIN, writer).await.ok();
+    if writing {
+        tokio::time::timeout(DRAIN, writer).await.ok();
+    }
 }
 
-async fn write(mut sink: Sink, mut rx: mpsc::UnboundedReceiver<Out>, channel: Arc<Channel>) {
+async fn write(mut sink: Sink, mut rx: Rx, channel: Arc<Channel>) {
     while let Some(out) = rx.recv().await {
         let sent = match out {
             Out::Frame(text) => send_records(&mut sink, &channel, noise::json_records(&text)).await,
@@ -490,7 +503,8 @@ async fn write(mut sink: Sink, mut rx: mpsc::UnboundedReceiver<Out>, channel: Ar
 async fn read(
     server: &Arc<Server>,
     device: &str,
-    tx: &mpsc::UnboundedSender<Out>,
+    conn: ConnId,
+    tx: &Tx,
     stream: &mut Stream,
     channel: &Channel,
 ) -> Result<(), String> {
@@ -498,7 +512,7 @@ async fn read(
     loop {
         let bytes = match tokio::time::timeout(SILENCE, next(stream)).await {
             Err(_) => {
-                tx.send(Out::Close(1000, "silent for 60 s".to_string())).ok();
+                tx.send(Out::Close(1000, "silent for 60 s".to_string()));
                 return Ok(());
             }
             Ok(Next::Gone) => return Ok(()),
@@ -509,20 +523,20 @@ async fn read(
         match joiner.feed(record)? {
             None => {}
             Some(Inbound::Json(text)) => {
-                if let Some(reply) = answer(&server.hub, device, &text) {
-                    tx.send(Out::Frame(reply.to_string())).ok();
+                if let Some(reply) = answer(&server.hub, device, conn, &text) {
+                    tx.send(Out::Frame(reply.to_string()));
                 }
             }
             Some(Inbound::Chunk { blob, last, data }) => {
-                if let Some(reply) = server.hub.blob_chunk(device, blob, last, &data)? {
-                    tx.send(Out::Frame(reply.to_string())).ok();
+                if let Some(reply) = server.hub.blob_chunk(device, conn, blob, last, &data)? {
+                    tx.send(Out::Frame(reply.to_string()));
                 }
             }
         }
     }
 }
 
-fn answer(hub: &Hub, device: &str, text: &str) -> Option<Value> {
+fn answer(hub: &Hub, device: &str, conn: ConnId, text: &str) -> Option<Value> {
     let Ok(frame) = serde_json::from_str::<Value>(text) else {
         return Some(
             json!({ "op": "error", "error": { "code": "bad_frame", "message": "a frame must be a JSON object" } }),
@@ -538,17 +552,18 @@ fn answer(hub: &Hub, device: &str, text: &str) -> Option<Value> {
     let args = frame.get("args").cloned().unwrap_or_else(|| json!({}));
     let result = match op {
         "hello" => Err(ops::OpError::new("bad_state", "hello is only valid as the first frame")),
-        "watch" => ops::arg::<String>(&args, "thread").and_then(|thread| hub.watch(device, &thread)).map(|()| None),
-        "unwatch" => ops::arg::<String>(&args, "thread").map(|thread| {
-            hub.unwatch(device, &thread);
-            None
-        }),
-        "load_earlier" => hub.load_earlier(device, &args).map(Some),
-        "blob_put" => match hub.blob_put(device, id.clone(), &args) {
+        "watch" => {
+            ops::arg::<String>(&args, "thread").and_then(|thread| hub.watch(device, conn, &thread)).map(|()| None)
+        }
+        "unwatch" => {
+            ops::arg::<String>(&args, "thread").and_then(|thread| hub.unwatch(device, conn, &thread)).map(|()| None)
+        }
+        "load_earlier" => hub.load_earlier(device, conn, &args).map(Some),
+        "blob_put" => match hub.blob_put(device, conn, id.clone(), &args) {
             Ok(()) => return None,
             Err(error) => Err(error),
         },
-        _ => hub.request(device, op, &args),
+        _ => hub.request(device, conn, op, &args),
     };
     Some(match result {
         Ok(None) => json!({ "re": id, "ok": true }),

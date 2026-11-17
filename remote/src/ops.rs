@@ -22,17 +22,16 @@ pub fn arg<T: DeserializeOwned>(args: &Value, key: &str) -> Result<T, OpError> {
     serde_json::from_value(value).map_err(|error| OpError::new("bad_args", format!("args.{key}: {error}")))
 }
 
-pub fn idempotency_key(op: &str, args: &Value) -> Option<String> {
-    let key = match op {
-        "send" => "request",
-        "start_thread" => "draft",
-        _ => return None,
-    };
-    args.get(key).and_then(Value::as_str).map(|value| format!("{op}:{value}"))
+pub fn correlation(op: &str) -> Option<&'static str> {
+    match op {
+        "start_thread" => Some("draft"),
+        "answer_approval" => None,
+        _ => Some("request"),
+    }
 }
 
-pub fn request_of(args: &Value) -> Option<String> {
-    args.get("request").or_else(|| args.get("draft")).and_then(Value::as_str).map(str::to_string)
+pub fn idempotent(op: &str) -> bool {
+    matches!(op, "send" | "start_thread")
 }
 
 pub fn dispatch(

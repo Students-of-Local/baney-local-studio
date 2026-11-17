@@ -468,7 +468,13 @@ impl Studio {
         let (done, finished) = std::sync::mpsc::channel();
         if self.commands.send(Command::Shutdown { done }).is_ok() {
             if let Err(error) = finished.recv_timeout(SHUTDOWN_TIMEOUT) {
-                self.mailbox.notice(NoticeLevel::Warning, format!("The core did not stop cleanly: {error}"));
+                self.mailbox.notice(
+                    NoticeLevel::Warning,
+                    format!(
+                        "The core did not stop cleanly: {error}; it keeps the data folder until this process exits"
+                    ),
+                );
+                return;
             }
         }
         self.lock.lock().unwrap_or_else(PoisonError::into_inner).take();
