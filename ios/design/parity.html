@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iPhone Parity Table</title>
+<style>
+:root{--bg:#FCFCFC;--card:#FFFFFF;--text:#141414;--muted:#5d5d5d;--line:#e4e4e4;--accent:#1B4ED8;--ok:#0f8a5f;--warn:#a36a00;--bad:#c0392b;--cyan:#0a7ea4;--chip:#f1f1f1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0A0A0A;--card:#111111;--text:rgba(255,255,255,.85);--muted:#818181;--line:#222;--accent:#346BF1;--ok:#34D399;--warn:#FBBF24;--bad:#F87171;--cyan:#38BDF8;--chip:#1a1a1a}}
+:root[data-theme="dark"]{--bg:#0A0A0A;--card:#111111;--text:rgba(255,255,255,.85);--muted:#818181;--line:#222;--accent:#346BF1;--ok:#34D399;--warn:#FBBF24;--bad:#F87171;--cyan:#38BDF8;--chip:#1a1a1a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+main{max-width:1180px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 18px}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 20px}
+.fact{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.fact b{display:block;font-size:20px}
+.fact span{color:var(--muted);font-size:12px}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:860px}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{font-size:12px;color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card)}
+tr:last-child td{border-bottom:0}
+td:first-child{font-weight:600;width:19%}
+.s{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--chip);white-space:nowrap}
+.better{color:var(--ok)}.build{color:var(--cyan)}.gap{color:var(--bad)}.later{color:var(--warn)}
+.note{color:var(--muted);font-size:12px}
+code{font:12px ui-monospace,"SF Mono",Menlo,monospace}
+h2{font-size:15px;margin:22px 0 8px}
+ul{margin:0;padding-left:18px}
+</style>
+</head>
+<body>
+<main>
+<h1>Local Studio for iPhone: parity and better than T3 mobile</h1>
+<p class="sub">Prepared 2026-11-17 by the iPhone lead. Status words: <span class="s better">better</span> designed to beat T3, <span class="s build">building</span> in a builder's branch, <span class="s gap">gap</span> blocked on core or Eukhe, <span class="s later">v2</span> after first release. Nothing below is verified yet; the Check column is the Simulator test that turns a row green.</p>
+
+<div class="facts">
+<div class="fact"><b>Today</b><span>last iPhone connection to T3 (11:13 ET); iPad last on Oct 31</span></div>
+<div class="fact"><b>71</b><span>messages sent from the phone in 30 days, 106 chars on average, 8 with images</span></div>
+<div class="fact"><b>179</b><span>question cards answered in 30 days (any device)</span></div>
+<div class="fact"><b>18</b><span>command approvals answered in 30 days</span></div>
+<div class="fact"><b>3</b><span>machines in T3 (this Mac plus 2 linked)</span></div>
+<div class="fact"><b>153</b><span>threads in T3's store</span></div>
+</div>
+
+<div class="wrap">
+<table>
+<thead><tr><th>T3 mobile feature</th><th>Evidence he uses it</th><th>Local Studio status</th><th>Check (Simulator, real serve)</th></tr></thead>
+<tbody>
+<tr><td>Pair a machine (QR or link)</td><td>Paired iPhone and iPad sessions, 2.0.0 and 2.1.0</td><td><span class="s better">better</span> per-device revocable credentials in Keychain, one-time 10 minute secret (T3: one shared token per pairing link)</td><td>Open a <code>localstudio-dev://pair</code> link, get <code>paired</code>, relaunch, <code>hello</code> succeeds without re-pairing; revoke on the Mac and the phone shows Unpaired</td></tr>
+<tr><td>Several machines</td><td>3 machines linked in T3</td><td><span class="s better">better</span> one Home across all machines plus a Machines sheet with link kind and round-trip ms</td><td>Pair two serves; Home lists threads from both with machine names; stop one and its card turns red within 60 s</td></tr>
+<tr><td>Thread list</td><td>153 threads, daily phone use</td><td><span class="s better">better</span> "Needs you" first, then Working, Done today, Earlier; cached list shown before the socket opens</td><td>Cold start to cached list under 500 ms, cached to live in one round trip (os_signpost)</td></tr>
+<tr><td>Live transcript</td><td>Reading results is the main phone use</td><td><span class="s build">building</span> windowed reset (last 200 items) plus Load earlier; native List, no web view</td><td>Watch a running thread; streamed text appears without jumps; 2,000 item thread scrolls with no dropped frames</td></tr>
+<tr><td>Send a message</td><td>71 in 30 days</td><td><span class="s better">better</span> instant echo, idempotent <code>request</code> id so a retry never double-sends</td><td>Send, kill the network mid-send, restore; exactly one user message on the Mac. Send latency measured against T3</td></tr>
+<tr><td>Queue and steer while running</td><td>T3 outbox and queue in daily use</td><td><span class="s better">better</span> Queue by default, Steer now on long press, queue strip with Send now and remove (core has <code>send_queued_now</code>, <code>remove_queued</code>)</td><td>Queue two messages during a turn; strip shows both; Send now on the second runs it next</td></tr>
+<tr><td>Image attachments</td><td>8 of 71 phone messages had images</td><td><span class="s build">building</span> photo library and camera into <code>PromptDraft.images</code></td><td>Attach a photo, send; the Mac transcript shows it and the model describes it</td></tr>
+<tr><td>Command approvals</td><td>18 in 30 days</td><td><span class="s better">better</span> answer from Home without opening the thread, swipe to approve, Always for session</td><td>Agent runs a gated command; card shows on Home; Approve runs it; Decline stops it</td></tr>
+<tr><td>Question cards (agent asks with options)</td><td><b>179 in 30 days</b>, his most answered request</td><td><span class="s gap">gap</span> Eukhe has only <code>shell_approval</code>; no ask-the-user request in Eukhe or core. Shape proposed to the core lead</td><td>Agent asks two questions; card shows options; picking answers resumes the turn with those answers</td></tr>
+<tr><td>Start a new thread</td><td>Daily</td><td><span class="s build">building</span> machine and project picker, worktree, model, effort, access, voice</td><td>Start on a chosen project; the thread appears on the Mac and the phone opens it</td></tr>
+<tr><td>Stop a turn</td><td>Common</td><td><span class="s build">building</span> <code>abort</code></td><td>Stop during a turn; status goes Idle within one round trip</td></tr>
+<tr><td>Model, effort, access pickers</td><td>Used per thread</td><td><span class="s build">building</span> <code>set_model</code>, <code>set_thinking_level</code>, <code>set_access_mode</code>, favorites from <code>load_models</code></td><td>Change the model on the phone; the Mac composer shows it</td></tr>
+<tr><td>Archive, pin, rename</td><td>Thread housekeeping</td><td><span class="s better">better</span> adds snooze (1 h, tonight, tomorrow), settle and mark read, which T3 mobile lacks</td><td>Snooze from a swipe; the row leaves Home and returns at the time</td></tr>
+<tr><td>Search threads</td><td>153 threads</td><td><span class="s build">building</span> <code>search_threads</code> across machines</td><td>Search a word that appears on two machines; both hits listed</td></tr>
+<tr><td>Notifications while open</td><td>Approvals and questions reach him away from the desk</td><td><span class="s build">building</span> local notification from <code>Update::Notification</code></td><td>Background the app briefly; a turn finishes; a banner shows and opens the thread</td></tr>
+<tr><td>Push when the app is asleep</td><td>Same</td><td><span class="s later">v2</span> APNs needs his paid Apple Developer account and a relay; v1 webhook hook (ntfy) from serve</td><td>v1: serve posts to the webhook on <code>needs_approval</code>. v2: APNs through the tunnels service</td></tr>
+<tr><td>Voice input</td><td>On-device dictation in T3 2.1</td><td><span class="s better">better</span> big mic on Home, live transcript, then Send, Queue or Steer; nothing leaves before Send; Silas drops in behind <code>VoiceEngine</code></td><td>Dictate in the Simulator; transcript fills; Queue puts it in the thread's queue</td></tr>
+<tr><td>Reach over Tailscale</td><td>How T3 mobile reaches his machines today</td><td><span class="s build">building</span> <code>tailscale serve</code> to serve on 127.0.0.1:18093, Host allowlist</td><td>Phone reaches a serve on chapel1 or parish1 by its ts.net name</td></tr>
+<tr><td>Reach over a tunnel</td><td>Contract item (waitlisted Cloudflare tunnels)</td><td><span class="s build">building</span> to the tunnels lead's interface; pairing link carries the URL</td><td>Pair through a tunnel hostname; same checks as Tailscale</td></tr>
+<tr><td>iPad split view</td><td>iPad connected Oct 31</td><td><span class="s build">building</span> NavigationSplitView, Cmd-N, Cmd-Return, Cmd-Period, Cmd-1 to 9</td><td>iPad Simulator: sidebar plus detail, keyboard shortcuts work</td></tr>
+<tr><td>Channels</td><td>T3 has dev, preview, production</td><td><span class="s build">building</span> dev, nightly, stable as separate installs; core lead's scheme wins</td><td>Three schemes build; three icons install side by side</td></tr>
+<tr><td>Diff, PR and files</td><td>16 PRs tracked in T3</td><td><span class="s later">v2</span> v1 shows branch, PR chip and +/- counts on rows; full diff viewer after first release</td><td>v1: a thread with a PR shows the chip and counts matching the Mac</td></tr>
+<tr><td>Terminal</td><td>No evidence of phone use</td><td><span class="s later">v2</span> left out of v1 on purpose: shell over a phone link is the riskiest surface</td><td>Not offered in v1</td></tr>
+<tr><td>Widgets, Live Activities, share sheet</td><td>No evidence of use</td><td><span class="s later">v2</span> Live Activity for a working thread needs push to stay fresh</td><td>After APNs</td></tr>
+<tr><td>Settings</td><td>About 40 pages in T3</td><td><span class="s better">better</span> five small pages: Machines, Notifications, Appearance, Voice, About</td><td>Every setting reachable in two taps</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>What decides "better" at release</h2>
+<ul>
+<li>Speed, measured on the same Simulator: cold start to list, cached to live list, send to first transcript update. Beat T3 or explain.</li>
+<li>Question cards land in Eukhe and core; without them the phone loses on the request he answers most.</li>
+<li>Untested on a real phone until he signs it: camera QR scan, background notifications, voice on device, Keychain after reboot.</li>
+</ul>
+</main>
+</body>
+</html>
