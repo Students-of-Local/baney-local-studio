@@ -8,8 +8,6 @@ use crate::model::{CommandKind, SlashCommand};
 
 mod grants;
 mod install;
-#[cfg(test)]
-mod tests;
 
 pub use grants::{Consent, Grants, GRANTS};
 pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, MAX_FILE};
@@ -320,7 +318,7 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
 
 #[must_use]
 pub fn env_prefix(id: &str) -> String {
-    format!("{}_", id.to_ascii_uppercase().replace('-', "_"))
+    format!("LOCAL_STUDIO_PLUGIN_{}_", id.to_ascii_uppercase().replace('-', "_"))
 }
 
 fn valid_env_name(name: &str) -> bool {

@@ -156,7 +156,7 @@ fn place(root: &Path, source: &Path, exclude: &[String], expected: Option<&str>)
     if let Some(expected) = expected.filter(|expected| *expected != tree) {
         return Err(vec![format!("tree hash mismatch: the catalog pins {expected}, the fetched plugin is {tree}")]);
     }
-    let refusals = refusals(&entries);
+    let refusals = refusals(source, &entries);
     if !refusals.is_empty() {
         return Err(refusals);
     }
@@ -302,12 +302,19 @@ fn stays_inside(link: &str, target: &Path) -> bool {
     true
 }
 
-fn refusals(entries: &[Entry]) -> Vec<String> {
+fn resolves_inside(root: &Path, link: &str) -> bool {
+    let Ok(base) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    std::fs::canonicalize(root.join(link)).is_ok_and(|real| real.starts_with(&base))
+}
+
+fn refusals(root: &Path, entries: &[Entry]) -> Vec<String> {
     let mut refusals: Vec<String> = Vec::new();
     for entry in entries {
         match &entry.kind {
-            Kind::Link(target) if !stays_inside(&entry.path, target) => {
-                refusals.push(format!("symlink points outside the plugin: {} -> {}", entry.path, target.display()));
+            Kind::Link(target) if !stays_inside(&entry.path, target) || !resolves_inside(root, &entry.path) => {
+                refusals.push(format!("symlink points outside the plugin or nowhere: {} -> {}", entry.path, target.display()));
             }
             Kind::File { size, .. } if *size > MAX_FILE => {
                 refusals.push(format!("file over 10 MB: {} ({size} bytes)", entry.path));
