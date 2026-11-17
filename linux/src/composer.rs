@@ -3,7 +3,7 @@ use std::rc::Weak;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use local_studio_core::{AccessMode, ApprovalAnswer, Connection, ModelKey, PromptDraft, SendShortcut};
+use local_studio_core::{AccessMode, ApprovalAnswer, Connection, ModelKey, ModelOption, PromptDraft, SendShortcut};
 
 use crate::app::{App, Dirty};
 use crate::extras::Extras;
@@ -14,6 +14,8 @@ use crate::state::State;
 
 const PLACEHOLDER: &str = "Ask anything, @tag files/folders, or / for commands";
 const ADD_PROVIDER: &str = "\u{1}add-provider";
+const SHOW_HIDDEN: &str = "\u{1}show-hidden";
+const HIDDEN_SECTION: &str = "hidden";
 
 pub struct Composer {
     pub root: adw::Clamp,
@@ -27,9 +29,11 @@ pub struct Composer {
     approval_request: RefCell<Option<String>>,
     view: gtk::TextView,
     placeholder: gtk::Label,
-    model: gtk::DropDown,
-    models: gtk::StringList,
-    model_keys: RefCell<Vec<Option<ModelKey>>>,
+    model: Picker,
+    model_jumps: RefCell<Vec<ModelKey>>,
+    model_providers: RefCell<Vec<(String, String)>>,
+    focused_provider: RefCell<Option<String>>,
+    show_hidden: Cell<bool>,
     thinking: Picker,
     access: Picker,
     stop: gtk::Button,
@@ -125,14 +129,7 @@ impl Composer {
         overlay.set_child(Some(&scroller));
         overlay.add_overlay(&placeholder);
 
-        let models = gtk::StringList::new(&[]);
-        let model = picker(&models, "Model");
-        model.set_enable_search(true);
-        model.set_expression(Some(gtk::PropertyExpression::new(
-            gtk::StringObject::static_type(),
-            None::<&gtk::Expression>,
-            "string",
-        )));
+        let model = model_picker(&app);
         let thinking = thinking_picker(&app);
         let access = access_picker(&app);
         let stop = icons::button(icons::STOP, "Stop Generation");
@@ -147,7 +144,7 @@ impl Composer {
         let options = crate::options::Options::new(&app);
         let footer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         footer.append(&extras.attach);
-        footer.append(&model);
+        footer.append(&model.button);
         footer.append(&options.compare);
         footer.append(&thinking.button);
         footer.append(&access.button);
@@ -280,34 +277,6 @@ impl Composer {
             });
         }
         let weak = app.clone();
-        model.connect_selected_notify(move |dropdown| {
-            let Some(app) = weak.upgrade() else { return };
-            if app.syncing.get() {
-                return;
-            }
-            let Some(key) = usize::try_from(dropdown.selected())
-                .ok()
-                .and_then(|index| app.composer.model_keys.borrow().get(index).cloned())
-            else {
-                return;
-            };
-            if key.as_ref().is_some_and(|key| key.provider == ADD_PROVIDER) {
-                app.render(Dirty { composer: true, ..Dirty::default() });
-                app.open_settings(Some("providers"));
-                return;
-            }
-            let thread = app.state.borrow().selected.clone();
-            match thread {
-                Some(thread) => {
-                    if let Some(key) = key {
-                        app.core.run(|studio| studio.set_model(thread, key.provider, key.model));
-                    }
-                }
-                None => app.state.borrow_mut().draft_settings.model = key,
-            }
-            app.render(Dirty { composer: true, ..Dirty::default() });
-        });
-        let weak = app.clone();
         let label = working.clone();
         glib::timeout_add_seconds_local(1, move || {
             let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
@@ -333,8 +302,10 @@ impl Composer {
             view,
             placeholder,
             model,
-            models,
-            model_keys: RefCell::new(Vec::new()),
+            model_jumps: RefCell::new(Vec::new()),
+            model_providers: RefCell::new(Vec::new()),
+            focused_provider: RefCell::new(None),
+            show_hidden: Cell::new(false),
             thinking,
             access,
             stop,
@@ -398,14 +369,129 @@ impl Composer {
 
     pub fn open_picker(&self, which: &str) {
         match which {
-            "model" => {
-                if self.model.is_visible() {
-                    self.model.activate();
-                }
-            }
+            "model" => self.model.popup(),
             "thinking" => self.thinking.popup(),
             _ => self.access.popup(),
         }
+    }
+
+    pub fn model_picker_open(&self) -> bool {
+        self.model.popover.is_visible()
+    }
+
+    fn choose_model(&self, app: &std::rc::Rc<App>, id: &str) {
+        match id {
+            ADD_PROVIDER => app.open_settings(Some("providers")),
+            SHOW_HIDDEN => {
+                self.show_hidden.set(!self.show_hidden.get());
+                self.render_models(&app.state.borrow());
+            }
+            _ => {
+                if let Some((_, key)) = model_key(id) {
+                    select_model(app, key);
+                }
+            }
+        }
+    }
+
+    pub fn reveal_hidden_models(&self, app: &std::rc::Rc<App>) {
+        self.show_hidden.set(true);
+        self.render_models(&app.state.borrow());
+    }
+
+    pub fn jump_model(&self, app: &std::rc::Rc<App>, index: usize) {
+        let key = index.checked_sub(1).and_then(|index| self.model_jumps.borrow().get(index).cloned());
+        if let Some(key) = key {
+            self.model.popdown();
+            select_model(app, key);
+        }
+    }
+
+    pub fn step_provider(&self, state: &State, delta: isize) {
+        let providers = self.model_providers.borrow();
+        let Ok(count) = isize::try_from(providers.len()) else { return };
+        if count < 2 {
+            return;
+        }
+        let current = self.focused_provider.borrow().clone().or_else(|| state.active_model().map(|key| key.provider));
+        let index = current
+            .and_then(|current| providers.iter().position(|(id, _)| *id == current))
+            .and_then(|index| isize::try_from(index).ok())
+            .unwrap_or(if delta > 0 { -1 } else { count });
+        let Some((id, title)) = usize::try_from((index + delta).rem_euclid(count)).ok().and_then(|next| providers.get(next))
+        else {
+            return;
+        };
+        self.focused_provider.replace(Some(id.clone()));
+        self.model.reveal_section(title);
+    }
+
+    pub fn render_model_title(&self, state: &State) {
+        let title = crate::options::fan_out_title(state).unwrap_or_else(|| {
+            let thread = state.selected.as_ref().and(state.info.as_ref()).and_then(|info| info.model.as_ref());
+            match (thread, state.active_model()) {
+                (Some(model), _) => model.name.clone().unwrap_or_else(|| model.id.clone()),
+                (None, Some(key)) => state.model_option(&key).map_or(key.model, |model| model_name(model).to_string()),
+                (None, None) => "Model".to_string(),
+            }
+        });
+        self.model.set_label(&title);
+    }
+
+    fn render_models(&self, state: &State) {
+        let show_hidden = self.show_hidden.get();
+        let sections = local_studio_core::model_sections(
+            state.models.clone(),
+            state.favorites.clone(),
+            state.hidden.clone(),
+            state.providers.clone(),
+            self.model.search_text(),
+            show_hidden,
+            state.models_loaded,
+        );
+        let active = state.active_model();
+        let mut rows = Vec::new();
+        for section in &sections.sections {
+            for entry in &section.models {
+                let model = &entry.model;
+                let id = format!("{}\u{1}{}\u{1}{}", section.id, model.provider, model.id);
+                let checked = active.as_ref().is_some_and(|key| key.provider == model.provider && key.model == model.id);
+                let mut row = Row::new(id, model_name(model)).section(&section.title).checked(checked).dimmed(entry.hidden);
+                if model.context_window > 0 {
+                    row = row.aside(format::tokens(model.context_window));
+                }
+                if let Some(jump) = entry.jump {
+                    row = row.detail(format!("Ctrl+{jump}"));
+                }
+                rows.push(match (entry.hidden, entry.favorite) {
+                    (true, _) => row.accessory(icons::WATCH, "Unhide model", true),
+                    (false, true) => row.accessory(icons::STARRED, "Remove from favorites", true),
+                    (false, false) => row.accessory(icons::STAR_ADD, "Add to favorites", false),
+                });
+            }
+        }
+        if sections.hidden > 0 || show_hidden {
+            let title = if sections.hidden == 1 {
+                "Show 1 hidden model".to_string()
+            } else {
+                format!("Show {} hidden models", sections.hidden)
+            };
+            rows.push(Row::new(SHOW_HIDDEN, title).switch(show_hidden));
+        }
+        rows.push(Row::new(ADD_PROVIDER, "Add Provider…").icon(icons::ADD));
+        self.model.set_rows(rows);
+        self.model.set_empty(sections.empty.as_deref());
+        self.model.set_search_visible(sections.configured > 8);
+        self.model_providers.replace(
+            sections
+                .sections
+                .iter()
+                .filter(|section| sections.providers.contains(&section.id))
+                .map(|section| (section.id.clone(), section.title.clone()))
+                .collect(),
+        );
+        self.model_jumps.replace(sections.jumps);
+        self.render_model_title(state);
     }
 
     pub fn submit_steer(&self, app: &std::rc::Rc<App>) {
@@ -518,50 +604,7 @@ impl Composer {
             PLACEHOLDER
         });
 
-        let mut keys: Vec<Option<ModelKey>> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
-        if state.selected.is_none() && !state.models.is_empty() {
-            keys.push(None);
-            names.push("Default model".to_string());
-        }
-        let mut models: Vec<_> = state
-            .models
-            .iter()
-            .filter(|model| !state.hidden.iter().any(|key| key.provider == model.provider && key.model == model.id))
-            .collect();
-        models.sort_by_key(|model| {
-            let favorite = state.favorites.iter().any(|key| key.provider == model.provider && key.model == model.id);
-            (!favorite, !model.configured, model.provider.clone(), model.name.clone())
-        });
-        for model in models {
-            keys.push(Some(ModelKey { provider: model.provider.clone(), model: model.id.clone() }));
-            names.push(if model.name.is_empty() { model.id.clone() } else { model.name.clone() });
-        }
-        let active = state.active_model();
-        if let Some(active) = active.as_ref().filter(|active| !keys.iter().flatten().any(|key| key == *active)) {
-            let name = info
-                .and_then(|info| info.model.as_ref())
-                .and_then(|model| model.name.clone())
-                .unwrap_or_else(|| active.model.clone());
-            keys.push(Some(active.clone()));
-            names.push(name);
-        }
-        keys.push(Some(ModelKey { provider: ADD_PROVIDER.to_string(), model: String::new() }));
-        names.push("Add Provider…".to_string());
-        if *self.model_keys.borrow() != keys {
-            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            self.models.splice(0, self.models.n_items(), &refs);
-            self.model_keys.replace(keys);
-        }
-        let selected = self
-            .model_keys
-            .borrow()
-            .iter()
-            .position(|key| *key == active)
-            .and_then(|index| u32::try_from(index).ok())
-            .unwrap_or(gtk::INVALID_LIST_POSITION);
-        self.model.set_selected(selected);
-        self.model.set_visible(true);
+        self.render_models(state);
 
         let levels = state.thinking_levels();
         self.thinking.button.set_visible(!levels.is_empty());
@@ -582,12 +625,72 @@ impl Composer {
     }
 }
 
-fn picker(model: &gtk::StringList, tooltip: &str) -> gtk::DropDown {
-    let dropdown = gtk::DropDown::new(Some(model.clone()), None::<gtk::Expression>);
-    dropdown.set_tooltip_text(Some(tooltip));
-    dropdown.add_css_class("flat");
-    dropdown.set_show_arrow(true);
-    dropdown
+fn select_model(app: &std::rc::Rc<App>, key: ModelKey) {
+    let thread = app.state.borrow().selected.clone();
+    match thread {
+        Some(thread) => app.core.run(|studio| studio.set_model(thread, key.provider, key.model)),
+        None => app.state.borrow_mut().draft_settings.model = Some(key),
+    }
+    app.render(Dirty { composer: true, ..Dirty::default() });
+}
+
+fn model_picker(app: &Weak<App>) -> Picker {
+    let weak = app.clone();
+    let spec = Spec { tooltip: "Model", search: Some("Search models"), width: 320, ..Spec::default() };
+    let picker = Picker::new(&spec, move |id| {
+        if let Some(app) = weak.upgrade() {
+            app.composer.choose_model(&app, id);
+        }
+    });
+    let weak = app.clone();
+    picker.connect_accessory(move |id| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some((section, key)) = model_key(id) else { return };
+        if section == HIDDEN_SECTION {
+            app.core.run(|studio| studio.set_hidden_model(key.provider, key.model, false));
+            return;
+        }
+        let favorite = app.state.borrow().favorites.contains(&key);
+        app.core.run(|studio| studio.set_favorite_model(key.provider, key.model, !favorite));
+    });
+    let weak = app.clone();
+    picker.connect_search(move || {
+        if let Some(app) = weak.upgrade() {
+            app.composer.render_models(&app.state.borrow());
+        }
+    });
+    let weak = app.clone();
+    picker.popover.connect_map(move |_| {
+        let Some(app) = weak.upgrade() else { return };
+        crate::bindings::model_picker_open(&app, true);
+        if app.state.borrow().models.is_empty() {
+            app.core.run(local_studio_core::Studio::load_models);
+        }
+    });
+    let weak = app.clone();
+    picker.popover.connect_closed(move |_| {
+        let Some(app) = weak.upgrade() else { return };
+        crate::bindings::model_picker_open(&app, false);
+        app.composer.show_hidden.set(false);
+        app.composer.focused_provider.replace(None);
+        app.composer.model.set_search_text("");
+        app.composer.render_models(&app.state.borrow());
+    });
+    picker
+}
+
+fn model_key(id: &str) -> Option<(&str, ModelKey)> {
+    let mut parts = id.splitn(3, '\u{1}');
+    let (section, provider, model) = (parts.next()?, parts.next()?, parts.next()?);
+    Some((section, ModelKey { provider: provider.to_string(), model: model.to_string() }))
+}
+
+fn model_name(model: &ModelOption) -> &str {
+    if model.name.is_empty() {
+        &model.id
+    } else {
+        &model.name
+    }
 }
 
 fn thinking_picker(app: &Weak<App>) -> Picker {

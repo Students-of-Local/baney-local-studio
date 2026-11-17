@@ -136,6 +136,7 @@ impl Options {
                     }
                 }
                 let count = app.state.borrow().draft_settings.compare.len();
+                app.composer.render_model_title(&app.state.borrow());
                 if count > 0 {
                     app.composer.options.compare.set_label(&format!("+{count}"));
                     app.composer.options.compare.add_css_class("ls-compare-on");
@@ -147,6 +148,13 @@ impl Options {
             self.compare_list.append(&check);
         }
     }
+}
+
+pub fn fan_out_title(state: &State) -> Option<String> {
+    let active = state.active_model();
+    let extra = state.draft_settings.compare.iter().filter(|key| Some(*key) != active.as_ref()).count();
+    let count = extra + usize::from(active.is_some());
+    (state.selected.is_none() && count >= 2).then(|| format!("{count} models"))
 }
 
 fn tier_picker(app: &Weak<App>) -> Picker {

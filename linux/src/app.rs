@@ -458,6 +458,7 @@ impl App {
                 state.models = models;
                 state.favorites = favorites;
                 state.hidden = hidden;
+                state.models_loaded = true;
                 dirty.composer = true;
                 dirty.settings = true;
             }

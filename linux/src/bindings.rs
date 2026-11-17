@@ -9,7 +9,7 @@ use crate::state::Page;
 
 type AppAction = fn(&Rc<App>);
 
-const BINDINGS: [(&str, &str); 47] = [
+const BINDINGS: [(&str, &str); 49] = [
     ("sidebar.toggle", "win.toggle-sidebar"),
     ("navigation.back", "win.nav-back"),
     ("navigation.forward", "win.nav-forward"),
@@ -31,6 +31,8 @@ const BINDINGS: [(&str, &str); 47] = [
     ("chat.newLocal", "win.new-thread-local"),
     ("chat.newWithoutProject", "win.new-thread-without-project"),
     ("modelPicker.toggle", "win.model-picker"),
+    ("modelPicker.previousProvider", "win.model-provider-previous"),
+    ("modelPicker.nextProvider", "win.model-provider-next"),
     ("composer.effort", "win.composer-effort"),
     ("composer.mode", "win.composer-mode"),
     ("composer.workspace", "win.composer-workspace"),
@@ -65,6 +67,7 @@ pub fn action_for(command: &str) -> Option<String> {
         .find(|(known, _)| *known == command)
         .map(|(_, action)| (*action).to_string())
         .or_else(|| command.strip_prefix("thread.jump.").map(|index| format!("win.thread-jump({index})")))
+        .or_else(|| command.strip_prefix("modelPicker.jump.").map(|index| format!("win.model-jump({index})")))
         .or_else(|| {
             command.strip_prefix("usage.period.").and_then(|period| {
                 ["day", "week", "month", "quarter"]
@@ -82,8 +85,13 @@ pub fn apply(app: &App) {
     for binding in &bindings {
         let Some(action) = action_for(&binding.command) else { continue };
         let scoped = binding.when.as_deref() == Some("timelineFocus");
-        let shadowed =
-            binding.command == "rightPanel.close" && binding.shortcut.is_some() && binding.shortcut == closing;
+        let shadowed = (binding.command == "rightPanel.close"
+            && binding.shortcut.is_some()
+            && binding.shortcut == closing)
+            || binding.command.strip_prefix("modelPicker.jump.").is_some_and(|index| {
+                let thread = format!("thread.jump.{index}");
+                bindings.iter().any(|other| other.command == thread && other.shortcut == binding.shortcut)
+            });
         let owned = match binding.shortcut.as_deref() {
             Some(shortcut) if !scoped && !shadowed => accelerators(shortcut),
             _ => Vec::new(),
@@ -187,6 +195,27 @@ pub fn install(app: &Rc<App>) {
         app.usage.set_period(&app, period);
     });
     app.window.add_action(&period);
+    let jump = gio::SimpleAction::new("model-jump", Some(glib::VariantTy::INT32));
+    jump.set_enabled(false);
+    let weak = Rc::downgrade(app);
+    jump.connect_activate(move |_, parameter| {
+        let (Some(app), Some(index)) = (weak.upgrade(), parameter.and_then(glib::Variant::get::<i32>)) else { return };
+        if let Ok(index) = usize::try_from(index) {
+            app.composer.jump_model(&app, index);
+        }
+    });
+    app.window.add_action(&jump);
+    for (name, delta) in [("model-provider-previous", -1), ("model-provider-next", 1)] {
+        let action = gio::SimpleAction::new(name, None);
+        action.set_enabled(false);
+        let weak = Rc::downgrade(app);
+        action.connect_activate(move |_, _| {
+            if let Some(app) = weak.upgrade() {
+                app.composer.step_provider(&app.state.borrow(), delta);
+            }
+        });
+        app.window.add_action(&action);
+    }
     install_usage_keys(app);
     for (action, accel) in [
         ("win.nav-back", "<Control>bracketleft"),
@@ -197,6 +226,8 @@ pub fn install(app: &Rc<App>) {
         ("win.steer-queued", "<Control><Shift>Return"),
         ("win.new-thread-local", "<Control><Shift>n"),
         ("win.model-picker", "<Control><Shift>m"),
+        ("win.model-provider-previous", "<Control><Shift>Up"),
+        ("win.model-provider-next", "<Control><Shift>Down"),
         ("win.composer-effort", "<Control><Shift>e"),
         ("win.composer-mode", "<Control><Shift>a"),
         ("win.composer-workspace", "<Control><Shift>x"),
@@ -212,6 +243,14 @@ pub fn install(app: &Rc<App>) {
         app.application.set_accels_for_action(action, &[accel]);
     }
     crate::keyboard::install(app);
+}
+
+pub fn model_picker_open(app: &App, open: bool) {
+    for name in ["model-jump", "model-provider-previous", "model-provider-next"] {
+        if let Some(action) = app.window.lookup_action(name).and_downcast::<gio::SimpleAction>() {
+            action.set_enabled(open);
+        }
+    }
 }
 
 fn pull_request(app: &App) -> Option<(u64, String)> {

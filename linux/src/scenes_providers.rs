@@ -1,5 +1,8 @@
 use std::rc::Rc;
 
+use adw::prelude::*;
+use gtk::glib;
+
 use local_studio_core::{
     LocalEngine, ProviderApi, ProviderCredential, ProviderKind, ProviderModel, ProviderStatus, Update,
 };
@@ -63,12 +66,31 @@ fn updates() -> Vec<Update> {
     }]
 }
 
+fn focus_button(widget: &gtk::Widget, label: &str) -> bool {
+    if widget.downcast_ref::<gtk::Button>().is_some_and(|button| button.label().as_deref() == Some(label)) {
+        return widget.grab_focus();
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if focus_button(&current, label) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
+}
+
 pub fn stage(app: &Rc<App>, scene: &str) {
     match scene {
         "providers-pane" => {
             conversation(app, false);
             app.apply(updates());
+            app.apply(vec![crate::scenes_pickers::models(Vec::new(), crate::scenes_pickers::hidden())]);
             app.open_settings(Some("providers"));
+            let window = app.window.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+                focus_button(window.upcast_ref(), "Unhide");
+            });
         }
         "providers-endpoint-dialog" => {
             conversation(app, false);

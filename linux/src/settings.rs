@@ -215,6 +215,7 @@ impl SettingsDialog {
             group.add(&row);
         }
         groups.push(group);
+        groups.push(crate::providers::hidden_group(app, state));
         groups.push(crate::providers::signin_group());
         for group in &groups {
             self.inner.providers_page.add(group);

@@ -165,6 +165,8 @@ popover.ls-picker > contents { padding: 0; }
 .ls-picker-search { margin: 6px; }
 .ls-picker-header { font-size: 11.5px; font-weight: 500; color: alpha(currentColor, 0.55); padding: 10px 10px 3px 10px; }
 .ls-picker-header.first { padding-top: 4px; }
+.ls-picker-header.focused { color: currentColor; }
+.ls-picker-row:not(:hover):not(.highlighted) .ls-picker-accessory.hover { opacity: 0; }
 .ls-picker-separator { margin: 5px 4px; background: var(--border-color); }
 .ls-picker-row { min-height: 30px; padding: 0 8px; border-radius: 7px; }
 .ls-picker-row.tall { padding: 5px 8px; }

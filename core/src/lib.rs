@@ -4,6 +4,7 @@ mod daemon;
 mod highlight;
 mod images;
 mod model;
+mod model_picker;
 mod oneshot;
 mod scratch;
 mod session;
@@ -22,6 +23,7 @@ pub use model::{
     ThreadInfo, ThreadRow, ThreadSearchHit, ThreadSettings, ThreadStatus, ToolKind, ToolState, TranscriptOp, Update,
     WorktreeChoice,
 };
+pub use model_picker::{model_sections, ModelEntry, ModelSection, ModelSections};
 pub use scratch::{check_scratch_agent, stored_keys_empty};
 pub use studio::{DaemonLaunch, Studio, StudioConfig, StudioError, Waker};
 pub use workspace::model::*;

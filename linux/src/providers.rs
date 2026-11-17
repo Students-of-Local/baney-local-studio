@@ -389,6 +389,45 @@ fn engine_row(app: &Weak<App>, state: &State, engine: &LocalEngine) -> adw::Acti
     row
 }
 
+pub fn hidden_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Hidden Models")
+        .description("Hidden models are left out of the model picker.")
+        .build();
+    if state.hidden.is_empty() {
+        group.add(&adw::ActionRow::builder().title("No hidden models.").build());
+    }
+    for key in &state.hidden {
+        let name = state.model_option(key).map_or(key.model.as_str(), |model| {
+            if model.name.is_empty() {
+                &model.id
+            } else {
+                &model.name
+            }
+        });
+        let provider = state.providers.iter().find(|provider| provider.id == key.provider);
+        let row = adw::ActionRow::builder()
+            .title(format::escape(name))
+            .subtitle(format::escape(&format!(
+                "{} · {}",
+                provider.map_or(key.provider.as_str(), |provider| provider.name.as_str()),
+                key.model
+            )))
+            .build();
+        let unhide = gtk::Button::builder().label("Unhide").valign(gtk::Align::Center).build();
+        let (weak, key) = (app.clone(), key.clone());
+        unhide.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                let key = key.clone();
+                app.core.run(|studio| studio.set_hidden_model(key.provider, key.model, false));
+            }
+        });
+        row.add_suffix(&unhide);
+        group.add(&row);
+    }
+    group
+}
+
 pub fn signin_group() -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Subscriptions").build();
     let row = adw::ActionRow::builder()

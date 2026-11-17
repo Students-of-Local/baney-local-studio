@@ -83,7 +83,7 @@ const CSS: &str = r"
 .ls-user-row:hover .ls-row-actions, .ls-user-row:focus-within .ls-row-actions { opacity: 1; }
 .ls-chip-remove { min-width: 24px; min-height: 24px; padding: 0; margin: 0; }
 .ls-tab-close { min-width: 24px; min-height: 24px; padding: 0; }
-.ls-picker-remove { min-width: 24px; min-height: 24px; padding: 0; }
+.ls-picker-remove, .ls-picker-accessory { min-width: 24px; min-height: 24px; padding: 0; }
 .ls-minimap-button { min-width: 24px; min-height: 24px; padding: 0; }
 .ls-minimap drawingarea { opacity: 0.55; }
 .ls-minimap:hover drawingarea { opacity: 1; }

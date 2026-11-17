@@ -80,6 +80,12 @@ pub fn install(app: &Rc<App>) {
         let (Some(app), Some(index)) = (weak.upgrade(), parameter.and_then(glib::Variant::get::<i32>)) else {
             return;
         };
+        if app.composer.model_picker_open() {
+            if let Ok(index) = usize::try_from(index) {
+                app.composer.jump_model(&app, index);
+            }
+            return;
+        }
         let target = usize::try_from(index - 1).ok().and_then(|index| app.sidebar.thread_at(index));
         if let Some(thread) = target {
             app.select_thread(Some(thread));

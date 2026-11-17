@@ -1,12 +1,69 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
-use local_studio_core::{Branch, GitStatus, Update};
+use local_studio_core::{Branch, GitStatus, ModelKey, ModelOption, Update};
 
 use crate::app::{App, Dirty};
-use crate::fixtures::{base, conversation, project_id, FOCUSED};
+use crate::fixtures::{base, conversation, project_id, providers, FOCUSED};
 
-pub const SCENES: [&str; 5] = ["picker-access", "picker-thinking", "picker-branches", "picker-project", "picker-stash"];
+pub const SCENES: [&str; 8] = [
+    "picker-access",
+    "picker-thinking",
+    "picker-branches",
+    "picker-project",
+    "picker-stash",
+    "picker-model",
+    "picker-model-hidden",
+    "picker-model-all-hidden",
+];
+
+fn key(provider: &str, model: &str) -> ModelKey {
+    ModelKey { provider: provider.to_string(), model: model.to_string() }
+}
+
+pub fn models(favorites: Vec<ModelKey>, hidden: Vec<ModelKey>) -> Update {
+    let models = [
+        ("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", 200_000, true),
+        ("anthropic", "claude-opus-4-1", "Claude Opus 4.1", 200_000, true),
+        ("anthropic", "claude-haiku-4-5", "Claude Haiku 4.5", 200_000, true),
+        ("openai", "gpt-5-codex", "GPT-5 Codex", 400_000, true),
+        ("openai", "gpt-5", "GPT-5", 400_000, true),
+        ("openai", "gpt-5-mini", "GPT-5 mini", 400_000, true),
+        ("google", "gemini-2.5-pro", "Gemini 2.5 Pro", 1_048_576, false),
+        ("local", "qwen3-coder-30b", "Qwen3 Coder 30B", 131_072, true),
+        ("local", "gpt-oss-120b", "gpt-oss-120b", 131_072, true),
+        ("local", "llama-3.3-70b", "Llama 3.3 70B", 0, true),
+    ]
+    .into_iter()
+    .map(|(provider, id, name, context_window, configured)| ModelOption {
+        provider: provider.to_string(),
+        id: id.to_string(),
+        name: name.to_string(),
+        reasoning: false,
+        thinking_levels: Vec::new(),
+        context_window,
+        configured,
+        service_tiers: Vec::new(),
+    })
+    .collect();
+    Update::Models { models, favorites, hidden }
+}
+
+pub fn hidden() -> Vec<ModelKey> {
+    vec![key("openai", "gpt-5-mini"), key("local", "llama-3.3-70b")]
+}
+
+fn model_picker(app: &Rc<App>, hidden: Vec<ModelKey>, reveal: bool) {
+    conversation(app, false);
+    app.apply(vec![
+        Update::Providers { providers: providers(), engines: Vec::new(), errors: Vec::new() },
+        models(vec![key("anthropic", "claude-sonnet-4-5"), key("local", "qwen3-coder-30b")], hidden),
+    ]);
+    app.composer.open_picker("model");
+    if reveal {
+        app.composer.reveal_hidden_models(app);
+    }
+}
 
 pub fn stage(app: &Rc<App>, scene: &str) {
     match scene {
@@ -27,6 +84,22 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         "picker-project" => {
             draft(app);
             app.hero.project.popup();
+        }
+        "picker-model" => model_picker(app, Vec::new(), false),
+        "picker-model-hidden" => model_picker(app, hidden(), true),
+        "picker-model-all-hidden" => {
+            let all = [
+                ("anthropic", "claude-sonnet-4-5"),
+                ("anthropic", "claude-opus-4-1"),
+                ("anthropic", "claude-haiku-4-5"),
+                ("openai", "gpt-5-codex"),
+                ("openai", "gpt-5"),
+                ("openai", "gpt-5-mini"),
+                ("local", "qwen3-coder-30b"),
+                ("local", "gpt-oss-120b"),
+                ("local", "llama-3.3-70b"),
+            ];
+            model_picker(app, all.iter().map(|(provider, model)| key(provider, model)).collect(), false);
         }
         "picker-stash" => {
             conversation(app, false);

@@ -28,6 +28,17 @@ pub struct Row {
     pub disabled: bool,
     pub destructive: bool,
     pub removable: bool,
+    pub aside: Option<String>,
+    pub dimmed: bool,
+    pub switch: Option<bool>,
+    pub accessory: Option<Accessory>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Accessory {
+    pub icon: &'static str,
+    pub tooltip: String,
+    pub always: bool,
 }
 
 impl Row {
@@ -83,6 +94,30 @@ impl Row {
         self.removable = true;
         self
     }
+
+    #[must_use]
+    pub fn aside(mut self, aside: impl Into<String>) -> Self {
+        self.aside = Some(aside.into());
+        self
+    }
+
+    #[must_use]
+    pub fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
+    }
+
+    #[must_use]
+    pub fn switch(mut self, on: bool) -> Self {
+        self.switch = Some(on);
+        self
+    }
+
+    #[must_use]
+    pub fn accessory(mut self, icon: &'static str, tooltip: impl Into<String>, always: bool) -> Self {
+        self.accessory = Some(Accessory { icon, tooltip: tooltip.into(), always });
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -119,11 +154,15 @@ struct Inner {
     search: Option<gtk::SearchEntry>,
     rows: RefCell<Vec<Row>>,
     widgets: RefCell<Vec<gtk::Box>>,
+    headers: RefCell<Vec<gtk::Label>>,
+    focused: RefCell<Option<String>>,
+    forced: Cell<bool>,
     highlighted: RefCell<Option<String>>,
     typed: RefCell<String>,
     typed_at: Cell<i64>,
     choose: Handler,
     remove: RefCell<Option<Handler>>,
+    accessory: RefCell<Option<Handler>>,
 }
 
 impl Picker {
@@ -191,11 +230,15 @@ impl Picker {
             search,
             rows: RefCell::new(Vec::new()),
             widgets: RefCell::new(Vec::new()),
+            headers: RefCell::new(Vec::new()),
+            focused: RefCell::new(None),
+            forced: Cell::new(false),
             highlighted: RefCell::new(None),
             typed: RefCell::new(String::new()),
             typed_at: Cell::new(0),
             choose: Box::new(choose),
             remove: RefCell::new(None),
+            accessory: RefCell::new(None),
         });
         Inner::connect(&inner);
         inner.refresh_empty();
@@ -249,6 +292,46 @@ impl Picker {
         self.inner.remove.replace(Some(Box::new(remove)));
     }
 
+    pub fn connect_accessory(&self, accessory: impl Fn(&str) + 'static) {
+        self.inner.accessory.replace(Some(Box::new(accessory)));
+    }
+
+    pub fn set_empty(&self, text: Option<&str>) {
+        self.inner.empty.set_label(text.unwrap_or_default());
+        self.inner.forced.set(text.is_some());
+        self.inner.refresh_empty();
+    }
+
+    pub fn set_search_visible(&self, visible: bool) {
+        if let Some(search) = &self.inner.search {
+            search.set_visible(visible);
+            if let Some(separator) = search.next_sibling() {
+                separator.set_visible(visible);
+            }
+        }
+    }
+
+    pub fn activate(&self, id: &str) {
+        self.inner.activate(id);
+    }
+
+    pub fn reveal_section(&self, section: &str) {
+        self.inner.focused.replace(Some(section.to_string()));
+        self.inner.mark_focused();
+        let header = self.inner.headers.borrow().iter().find(|header| header.label() == section).cloned();
+        if let Some(bounds) = header.and_then(|header| header.compute_bounds(&self.inner.list)) {
+            self.inner.scroller.vadjustment().set_value(f64::from(bounds.y()));
+        }
+        let first = self
+            .inner
+            .rows
+            .borrow()
+            .iter()
+            .find(|row| row.section.as_deref() == Some(section) && !row.disabled)
+            .map(|row| row.id.clone());
+        self.inner.highlight(first, false);
+    }
+
     pub fn popup(&self) {
         if self.button.is_visible() && self.button.is_sensitive() {
             self.button.popup();
@@ -273,6 +356,13 @@ impl Inner {
         inner.popover.connect_map(move |_| {
             if let Some(inner) = weak.upgrade() {
                 inner.opened();
+            }
+        });
+        let weak = Rc::downgrade(inner);
+        inner.popover.connect_closed(move |_| {
+            if let Some(inner) = weak.upgrade() {
+                inner.focused.replace(None);
+                inner.mark_focused();
             }
         });
     }
@@ -304,7 +394,7 @@ impl Inner {
                 }
             }
             gdk::Key::Escape => self.popover.popdown(),
-            _ if self.search.is_none() => return self.type_select(key, modifiers),
+            _ if !self.search.as_ref().is_some_and(WidgetExt::is_visible) => return self.type_select(key, modifiers),
             _ => return glib::Propagation::Proceed,
         }
         glib::Propagation::Stop
@@ -372,12 +462,23 @@ impl Inner {
     }
 
     fn activate(&self, id: &str) {
-        let enabled = self.rows.borrow().iter().any(|row| row.id == id && !row.disabled);
-        if !enabled {
-            return;
+        let found = self.rows.borrow().iter().find(|row| row.id == id && !row.disabled).map(|row| row.switch.is_some());
+        let Some(stays) = found else { return };
+        if !stays {
+            self.popover.popdown();
         }
-        self.popover.popdown();
         (self.choose)(id);
+    }
+
+    fn mark_focused(&self) {
+        let focused = self.focused.borrow();
+        for header in self.headers.borrow().iter() {
+            if focused.as_deref() == Some(header.label().as_str()) {
+                header.add_css_class("focused");
+            } else {
+                header.remove_css_class("focused");
+            }
+        }
     }
 
     fn initial(&self) -> Option<String> {
@@ -431,7 +532,7 @@ impl Inner {
 
     fn refresh_empty(&self) {
         let empty = self.rows.borrow().is_empty();
-        self.empty.set_visible(empty && !self.empty.label().is_empty());
+        self.empty.set_visible((empty || self.forced.get()) && !self.empty.label().is_empty());
         self.scroller.set_visible(!empty);
     }
 
@@ -440,6 +541,7 @@ impl Inner {
             self.list.remove(&child);
         }
         let mut built = Vec::with_capacity(items.len());
+        let mut headers = Vec::new();
         if let Some(title) = &self.title {
             self.list.append(&header(title, true));
         }
@@ -449,7 +551,11 @@ impl Inner {
             let section = row.section.as_deref();
             if !started || section != current {
                 match section {
-                    Some(text) => self.list.append(&header(text, !started && self.title.is_none())),
+                    Some(text) => {
+                        let label = header(text, !started && self.title.is_none());
+                        self.list.append(&label);
+                        headers.push(label);
+                    }
                     None if started => {
                         let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
                         separator.add_css_class("ls-picker-separator");
@@ -468,6 +574,8 @@ impl Inner {
         let searching = self.search.as_ref().is_some_and(|search| !search.text().is_empty());
         self.rows.replace(items);
         self.widgets.replace(built);
+        self.headers.replace(headers);
+        self.mark_focused();
         self.refresh_empty();
         let ids = self.enabled_ids();
         let kept = previous.filter(|id| !searching && ids.contains(id));
@@ -494,17 +602,31 @@ impl Inner {
             image.set_valign(if tall { gtk::Align::Start } else { gtk::Align::Center });
             widget.append(&image);
         }
-        widget.append(&labels(row));
+        let dim = if row.dimmed { 0.55 } else { 1.0 };
+        let text = labels(row);
+        text.set_opacity(dim);
+        widget.append(&text);
         if let Some(detail) = &row.detail {
             let label = gtk::Label::new(Some(detail.as_str()));
             label.add_css_class("ls-picker-detail");
+            label.set_opacity(dim);
             widget.append(&label);
         }
-        let check = icons::styled(icons::DONE, "ls-picker-check");
-        check.set_opacity(if row.checked { 1.0 } else { 0.0 });
-        widget.append(&check);
+        if let Some(on) = row.switch {
+            let switch = gtk::Switch::builder().active(on).valign(gtk::Align::Center).can_target(false).build();
+            switch.set_focusable(false);
+            switch.add_css_class("ls-picker-switch");
+            widget.append(&switch);
+        } else {
+            let check = icons::styled(icons::DONE, "ls-picker-check");
+            check.set_opacity(if row.checked { dim } else { 0.0 });
+            widget.append(&check);
+        }
         if row.removable {
             widget.append(&self.remove_button(&row.id));
+        }
+        if let Some(accessory) = &row.accessory {
+            widget.append(&self.accessory_button(&row.id, accessory));
         }
         let click = gtk::GestureClick::new();
         let weak = Rc::downgrade(self);
@@ -529,6 +651,27 @@ impl Inner {
             widget.add_controller(motion);
         }
         widget
+    }
+
+    fn accessory_button(self: &Rc<Self>, id: &str, accessory: &Accessory) -> gtk::Button {
+        let button = icons::flat(accessory.icon, &accessory.tooltip);
+        button.set_valign(gtk::Align::Center);
+        button.set_focusable(false);
+        button.set_focus_on_click(false);
+        button.add_css_class("ls-picker-accessory");
+        if !accessory.always {
+            button.add_css_class("hover");
+        }
+        let weak = Rc::downgrade(self);
+        let id = id.to_string();
+        button.connect_clicked(move |_| {
+            let Some(inner) = weak.upgrade() else { return };
+            let handler = inner.accessory.borrow();
+            if let Some(accessory) = handler.as_ref() {
+                accessory(id.as_str());
+            }
+        });
+        button
     }
 
     fn remove_button(self: &Rc<Self>, id: &str) -> gtk::Button {
@@ -558,7 +701,18 @@ fn labels(row: &Row) -> gtk::Box {
     title.add_css_class("ls-picker-title");
     title.set_xalign(0.0);
     title.set_ellipsize(pango::EllipsizeMode::Middle);
-    labels.append(&title);
+    match &row.aside {
+        Some(aside) => {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let aside = gtk::Label::new(Some(aside.as_str()));
+            aside.add_css_class("ls-picker-detail");
+            aside.add_css_class("numeric");
+            line.append(&title);
+            line.append(&aside);
+            labels.append(&line);
+        }
+        None => labels.append(&title),
+    }
     if let Some(subtitle) = &row.subtitle {
         let text = gtk::Label::new(Some(subtitle.as_str()));
         text.add_css_class("ls-picker-subtitle");

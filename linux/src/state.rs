@@ -66,6 +66,7 @@ pub struct State {
     pub models: Vec<ModelOption>,
     pub favorites: Vec<ModelKey>,
     pub hidden: Vec<ModelKey>,
+    pub models_loaded: bool,
     pub daemon_model: Option<ModelKey>,
     pub daemon_thinking: Option<String>,
     pub settings: Settings,
