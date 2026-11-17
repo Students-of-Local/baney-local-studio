@@ -96,10 +96,10 @@ jobs:
           TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
-          git config --unset-all http.https://github.com/.extraheader || true
           url="https://x-access-token:$TOKEN@github.com/$REPO.git"
-          [ "$(git ls-remote "$url" refs/heads/stable | cut -f1)" = "$COMMIT" ] || git push "$url" "$COMMIT:refs/heads/stable"
-          [ "$(git ls-remote "$url" refs/heads/stable | cut -f1)" = "$COMMIT" ] || { echo "::error::stable did not move to $COMMIT"; exit 1; }
+          app() { git -c http.https://github.com/.extraheader= "$@"; }
+          [ "$(app ls-remote "$url" refs/heads/stable | cut -f1)" = "$COMMIT" ] || app push "$url" "$COMMIT:refs/heads/stable"
+          [ "$(app ls-remote "$url" refs/heads/stable | cut -f1)" = "$COMMIT" ] || { echo "::error::stable did not move to $COMMIT"; exit 1; }
 
   stable:
     needs: promote

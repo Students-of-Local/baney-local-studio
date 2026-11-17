@@ -104,6 +104,9 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           name=$(nu scripts/version.nu "$CHANNEL" --json --at "$AT" --commit "$COMMIT" | jq -r .name)
@@ -112,8 +115,8 @@ jobs:
           app="$stage/$name.app"
           mv macos/build/Release/LocalStudio.app "$app"
           # An ad-hoc build is a new app to macOS each time, so it is built to prove it compiles but never shipped.
-          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
-            echo "::warning title=macOS build not published::APPLE_CERTIFICATE or APPLE_SIGNING_IDENTITY is not set, so this ad-hoc signed build was not uploaded."
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER" ] || [ -z "$APPLE_API_PRIVATE_KEY" ]; then
+            echo "::warning title=macOS build not published::the Apple signing or notarization secrets are not all set, so this build was not uploaded."
             echo "uploaded=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -134,6 +137,14 @@ jobs:
             done
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" --wait --timeout 45m --output-format json > "$RUNNER_TEMP/notary.json" || true
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/notarize.zip"
+          [ "$(jq -r .status "$RUNNER_TEMP/notary.json" 2>/dev/null)" = Accepted ] || { cat "$RUNNER_TEMP/notary.json"; echo "::error::notarization was not accepted"; exit 1; }
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
           tar -C "$stage" -czf "$RUNNER_TEMP/out/local-studio-darwin-aarch64.app.tar.gz" "$name.app"
           scripts/release.sh upload "$DRAFT" "$RUNNER_TEMP/out/local-studio-darwin-aarch64.app.tar.gz"
           echo "uploaded=true" >> "$GITHUB_OUTPUT"
