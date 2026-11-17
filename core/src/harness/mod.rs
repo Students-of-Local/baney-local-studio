@@ -294,8 +294,35 @@ fn command(program: &PathBuf, cwd: &str) -> Command {
 }
 
 fn stop_reason(text: &str) -> Option<String> {
+    let text = plain(text);
     let lower = text.to_ascii_lowercase();
-    STOP_WORDS.iter().any(|word| lower.contains(word)).then(|| text.trim().to_string())
+    if !STOP_WORDS.iter().any(|word| lower.contains(word)) {
+        return None;
+    }
+    let message = ["ERROR ", "WARN "]
+        .iter()
+        .find_map(|level| text.split_once(level))
+        .map_or(text.as_str(), |(_, rest)| rest.split_once(": ").map_or(rest, |(_, message)| message));
+    Some(message.trim().to_string())
+}
+
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(next) = chars.next() {
+        if next != '\u{1b}' {
+            out.push(next);
+            continue;
+        }
+        if chars.next_if_eq(&'[').is_some() {
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 fn now_ms() -> u64 {
