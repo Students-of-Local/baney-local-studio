@@ -3,8 +3,8 @@ import LocalStudioDesign
 import SwiftUI
 
 @MainActor
-func render(_ scheme: ColorScheme, to url: URL) throws {
-    let view = DesignGallery()
+func render(_ scheme: ColorScheme, to url: URL, @ViewBuilder _ content: () -> some View) throws {
+    let view = content()
         .environment(\.colorScheme, scheme)
     let renderer = ImageRenderer(content: view)
     renderer.scale = 2
@@ -23,6 +23,8 @@ func render(_ scheme: ColorScheme, to url: URL) throws {
 let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "snapshots", isDirectory: true)
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 try MainActor.assumeIsolated {
-    try render(.dark, to: output.appendingPathComponent("gallery-dark.png"))
-    try render(.light, to: output.appendingPathComponent("gallery-light.png"))
+    try render(.dark, to: output.appendingPathComponent("gallery-dark.png")) { DesignGallery() }
+    try render(.light, to: output.appendingPathComponent("gallery-light.png")) { DesignGallery() }
+    try render(.dark, to: output.appendingPathComponent("thread-dark.png")) { ThreadGallery() }
+    try render(.light, to: output.appendingPathComponent("thread-light.png")) { ThreadGallery() }
 }

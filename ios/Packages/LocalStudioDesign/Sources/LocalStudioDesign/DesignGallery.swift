@@ -123,3 +123,63 @@ extension Samples {
         )
     }
 }
+
+extension Samples {
+    public static let threadSummary = ThreadSummary(
+        id: "t1", machine: "chapel1", title: "Wire the remote serve into the desktop app", project: "local-studio",
+        status: .working, since: now.addingTimeInterval(-134), updated: now, branch: "remote-serve", pullRequest: 31,
+        additions: 412, deletions: 37, model: "Opus 5.5"
+    )
+
+    public static let transcript: [TranscriptItem] = [
+        TranscriptItem(id: 1, turn: 1, kind: .user(text: "Add a health endpoint to the serve and show its version in Settings.", images: 0)),
+        TranscriptItem(id: 2, turn: 1, kind: .assistant(blocks: [.thinking("**Plan the endpoint**\nThe serve already answers /v1/ws. A GET on /v1/health should return protocol, min_protocol and the machine version.")], streaming: false, error: nil, changed: [])),
+        TranscriptItem(id: 3, turn: 1, kind: .tool(ToolCallSummary(id: "c1", name: "read", kind: .read, summary: "remote/src/server.rs", state: .succeeded, output: "pub async fn serve(listener: TcpListener, studio: Studio) -> Result<()> {"))),
+        TranscriptItem(id: 4, turn: 1, kind: .tool(ToolCallSummary(id: "c2", name: "grep", kind: .search, summary: "min_protocol in remote/", state: .succeeded, output: "remote/src/hello.rs:14: pub min_protocol: u32,"))),
+        TranscriptItem(id: 5, turn: 1, kind: .tool(ToolCallSummary(id: "c3", name: "edit", kind: .edit, summary: "remote/src/health.rs", state: .succeeded, file: FileChangeSummary(path: "remote/src/health.rs", additions: 48, deletions: 0)))),
+        TranscriptItem(id: 6, turn: 1, kind: .tool(ToolCallSummary(id: "c4", name: "edit", kind: .edit, summary: "remote/src/server.rs", state: .succeeded, file: FileChangeSummary(path: "remote/src/server.rs", additions: 9, deletions: 2)))),
+        TranscriptItem(id: 7, turn: 1, kind: .tool(ToolCallSummary(id: "c5", name: "bash", kind: .command, summary: "cargo test -p local-studio-remote", state: .succeeded, output: "test result: ok. 14 passed; 0 failed"))),
+        TranscriptItem(id: 8, turn: 1, kind: .turnSummary(milliseconds: 134_000, tools: 5)),
+        TranscriptItem(id: 9, turn: 1, kind: .assistant(blocks: [.text("Added `GET /v1/health`. It returns:\n\n```json\n{ \"protocol\": 2, \"min_protocol\": 2, \"version\": \"0.4.0-nightly.20261117\" }\n```\n\n- The phone reads it before pairing.\n- Settings shows the machine's version and channel.")], streaming: false, error: nil, changed: [
+            FileChangeSummary(path: "remote/src/health.rs", additions: 48, deletions: 0),
+            FileChangeSummary(path: "remote/src/server.rs", additions: 9, deletions: 2),
+        ])),
+        TranscriptItem(id: 10, turn: 2, kind: .compaction(summary: "Added the health endpoint and its test.", tokensBefore: 182_000)),
+        TranscriptItem(id: 11, turn: 2, kind: .user(text: "Now run the remote smoke against chapel1.", images: 1)),
+        TranscriptItem(id: 12, turn: 2, kind: .assistant(blocks: [.text("Building the serve first, then the smoke.")], streaming: true, error: nil, changed: [])),
+        TranscriptItem(id: 13, turn: 2, kind: .tool(ToolCallSummary(id: "c6", name: "bash", kind: .command, summary: "cargo build -p local-studio-serve --release", state: .succeeded))),
+        TranscriptItem(id: 14, turn: 2, kind: .tool(ToolCallSummary(id: "c7", name: "bash", kind: .command, summary: "ssh chapel1 systemctl --user status local-studio", state: .failed, output: "Unit local-studio.service could not be found."))),
+        TranscriptItem(id: 15, turn: 2, kind: .notice(.warning, "chapel1 has no local-studio unit yet. Asking before installing one.")),
+        TranscriptItem(id: 16, turn: 2, kind: .tool(ToolCallSummary(id: "c8", name: "bash", kind: .command, summary: "cargo test -p local-studio-remote --test remote_smoke", state: .pending))),
+    ]
+
+    public static var thread: ThreadContent {
+        ThreadContent(
+            thread: threadSummary, items: transcript, phase: .working(since: now.addingTimeInterval(-74)),
+            approvals: [approval], queued: [QueuedSummary(id: "q1", text: "Then open a draft PR against main.")],
+            composer: ComposerState(
+                model: "Opus 5.5", models: ["Opus 5.5", "Sonnet 5.5", "Haiku 5.5"], effort: "High", efforts: ["Low", "Medium", "High", "Max"],
+                access: "Ask", context: 0.42
+            ),
+            hasEarlier: true
+        )
+    }
+}
+
+public struct ThreadGallery: View {
+    @State private var draft = "Also bump the nightly"
+
+    public init() {}
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Transcript(content: Samples.thread, actions: ThreadActions())
+            PinnedRequest(content: Samples.thread, actions: ThreadActions())
+            QueueStrip(Samples.thread.queued, sendNow: { _ in }, remove: { _ in })
+            Composer(text: $draft, state: Samples.thread.composer, busy: true, actions: ThreadActions())
+        }
+        .padding(Theme.Metrics.gutter)
+        .frame(width: 390)
+        .background(Theme.canvas)
+    }
+}
