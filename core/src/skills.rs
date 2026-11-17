@@ -199,7 +199,8 @@ fn with_args(block: String, args: &str) -> String {
     if args.trim().is_empty() {
         block
     } else {
-        format!("{block}\n\n{args}")
+        // Small models lose a request that sits after a long skill, so it also opens the prompt.
+        format!("The person's request: {}\n\n{block}\n\n{args}", args.trim())
     }
 }
 
@@ -338,4 +339,17 @@ fn substitute_args(content: &str, args: &[String]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::with_args;
+
+    #[test]
+    fn the_request_opens_and_closes_an_expanded_skill() {
+        let text = with_args("<skill>body</skill>".into(), " a fan guard ");
+        assert!(text.starts_with("The person's request: a fan guard\n"));
+        assert!(text.ends_with("</skill>\n\n a fan guard "));
+        assert_eq!(with_args("<skill>body</skill>".into(), "  "), "<skill>body</skill>");
+    }
 }
