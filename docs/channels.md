@@ -16,34 +16,36 @@ A channel never ships half a build: CI uploads every platform into a draft relea
 
 - `main`: all work lands here by pull request. It feeds dev and nightly.
 - `stable`: moves only by fast-forward to a promoted nightly commit, or by a hotfix pull request. Protected: no direct pushes, no force pushes.
-- `vX.Y.Z`: immutable tag on `stable` for each stable release.
-- `nightly`: rolling tag and pre-release, moved to each new nightly. Each nightly also keeps an immutable pre-release tagged `vX.Y.Z-nightly.YYYYMMDDHHMM` for 14 days, so any recent nightly can be reinstalled.
+- `vX.Y.Z`: immutable tag on `stable` for each stable release. A tag is never reused or moved.
+- `nightly`: rolling tag and pre-release, moved to each new nightly. Each nightly also keeps an immutable pre-release tagged `nightly-YYYYMMDDHHMM` for 14 days, so any recent nightly can be reinstalled.
 - `dev`: rolling tag and pre-release, moved to each dev build. No immutable dev tags.
 - Feature branches: anything else. They never publish to a channel.
+- A stable release workflow triggers only on `v[0-9]+.[0-9]+.[0-9]+`, never on a `v*` glob, so no pre-release tag can start it.
 
 Local Studio is a fork of gildrb/local-studio. Upstream changes come in by a pull request that merges `upstream/main` into `main`, like any other change.
 
 ## Version strings
 
-One base version per product, `X.Y.Z`, in one file (Local Studio: the workspace `Cargo.toml`; Tauri apps: `tauri.conf.json`; Tychicus: its manifest). After a stable release, `main` bumps the base to the next version.
+One base version per product, `X.Y.Z`, in one file (Local Studio: the workspace `Cargo.toml`; Tauri apps: `tauri.conf.json`; Tychicus: its manifest). After stable `X.Y.Z` ships, `main` bumps the base to the next minor, `X.(Y+1).0`. Patch numbers on a released minor belong to hotfixes from `stable`, so `main` and a hotfix never claim the same version.
 
 | Channel | Version | Example |
 | --- | --- | --- |
-| stable | `X.Y.Z` | `0.2.0` |
-| nightly | `X.Y.Z-nightly.YYYYMMDDHHMM+<sha7>`, base = next unreleased version | `0.2.1-nightly.202611180700+1a2b3c4` |
-| dev | `X.Y.Z-dev.YYYYMMDDHHMM+<sha7>` | `0.2.1-dev.202611171310+9f8e7d6` |
-| local build | `X.Y.Z-dev.0+local.<sha7>` | `0.2.1-dev.0+local.9f8e7d6` |
+| stable | `X.Y.Z` | `0.2.0`, hotfix `0.2.1` |
+| nightly | `X.Y.Z-nightly.YYYYMMDDHHMM+<sha7>`, base = `main`'s unreleased minor | `0.3.0-nightly.202611180700+1a2b3c4` |
+| dev | `X.Y.Z-dev.YYYYMMDDHHMM+<sha7>` | `0.3.0-dev.202611171310+9f8e7d6` |
+| local build | `X.Y.Z-dev.0+local.<sha7>` | `0.3.0-dev.0+local.9f8e7d6` |
 
 Timestamps are UTC build start. These are SemVer 2.0 strings, so for one base version dev sorts below nightly and nightly below stable (checked with the `semver` package: `0.1.7-dev.202611180905 < 0.1.7-nightly.202611170700 < 0.1.7`). A dev build made after a nightly still sorts below it. So:
 
 - An updater compares versions **within its own channel** only. It offers an update when the feed's version on its channel is newer than the installed one.
-- Switching channel is an explicit choice in the app, never an "upgrade", and it may install a lower version.
+- Switching channel is an explicit choice, never an "upgrade", and it may install a lower version. The in-app channel setting opens the other channel's download and the user installs it; no updater crosses channels, because each build trusts only its own channel's signing key (see Update feeds).
 - Local builds never update themselves.
 
 Where a platform needs numbers only:
 
 - Apple: `CFBundleShortVersionString` = `X.Y.Z`; `CFBundleVersion` = the build timestamp `YYYYMMDDHHMM` (one integer, always rising, which TestFlight also needs).
 - Windows file and product version: `X.Y.Z.B`, where `B` is 0 for stable and the CI run number modulo 65536 otherwise. Installers decide updates from the SemVer string, not this.
+- Windows installers: nightly and dev ship NSIS only. An MSI rejects a pre-release identifier above 65535, so a stable MSI, where a product ships one, sets its WiX version explicitly (Tauri: `bundle.windows.wix.version`) from the `X.Y.Z.B` rule.
 
 ## Install identity
 
@@ -65,11 +67,12 @@ Local Studio is side by side:
 
 The stable ids are the ones upstream already uses, so existing installs keep their data.
 
-**Shared data.** Stable and nightly use the same Local Studio data dir and Eukhe sessions, so moving between them costs nothing. That works only under three rules:
+**Shared data.** Stable and nightly use the same Local Studio data dir and Eukhe sessions, so moving between them costs nothing while the data stays readable by both. Four rules keep it that way:
 
 1. One owner at a time per data dir (`studio.lock`, see docs/remote.md). The second app to start attaches to the owner or says which app owns the data.
-2. Data migrations go forward only and record a schema version. A build that finds a newer schema than it knows opens read-only and names the channel that wrote it. It never rewrites newer data.
-3. The newer Eukhe release wins the daemon. An older app offers to update instead of restarting the daemon onto an older Eukhe.
+2. Between stable and nightly, data changes are additive: a build ignores fields it does not know and keeps them when it writes. Every write records the schema version.
+3. A change an older build cannot read is a breaking migration. Nightly snapshots the data dir before running it. A build that finds a newer schema than it knows opens read-only, names the channel that wrote it, and offers to open the snapshot. The cost is stated in the release notes: stable then sees work only up to the snapshot until the migration reaches stable. At most one breaking migration and one client protocol bump land per stable release, so stable is never more than one protocol version behind nightly.
+4. The newer Eukhe release wins the daemon. An older app offers the newer channel instead of restarting the daemon onto an older Eukhe.
 
 Dev keeps its own data dir (`Local Studio Dev`) so tests never touch real threads, matching AGENTS.md.
 
@@ -104,7 +107,7 @@ The format is Tauri v2's updater manifest (Silas already serves it), with extra 
 
 - `signature` is a minisign signature of the artifact, as Tauri checks it. The Local Studio core checks the same feed and signature for all three desktop apps, so the native apps need no second updater format.
 - `protocol` is the client protocol version the build speaks (docs/remote.md). A server accepts clients on its own protocol and the one before it.
-- Stable is signed with a key that only the `stable` GitHub Environment can read, and that environment only runs on the `stable` branch. Nothing built from `main` can reach stable users.
+- Stable is signed with a key that only the `stable` GitHub Environment can read, and that environment only runs on the `stable` branch. Nightly and dev share a second key held by CI. Each build carries only its own channel's public key, so nothing built from `main` can install over a stable app through the updater.
 - iPhone: dev builds install from Xcode; nightly goes to a TestFlight internal group; stable goes to TestFlight external testing and later the App Store, under the Apple team that signs Silas.
 - Plugins and skill packs that ship as git trees (Gantrel, UntoCaesar, Corunis, Fonsviva) need no binary feed: their channel is a git ref. stable = the newest `vX.Y.Z` tag, nightly = the `nightly` tag, dev = `main`. A Local Studio install on channel C installs plugins from channel C by default. How the plugin catalog records this belongs to the plugin system lead.
 
@@ -130,7 +133,9 @@ Then `stable` fast-forwards to that commit, it is tagged `vX.Y.Z`, the stable wo
 
 **Hotfix**: a pull request into `stable` with a check that fails before the fix and passes after. It skips the 72 hours, ships as `vX.Y.(Z+1)`, and `stable` merges back into `main` the same day.
 
-**Rollback**: re-publish the previous release's `latest.json` on that channel. Never delete a release.
+**Rollback**: re-publish the previous release's `latest.json` on that channel. That stops new installs from taking the bad build, but updaters never offer a lower version, so machines that already took it are repaired by rolling forward: a hotfix with a higher version that carries the good code. Never delete a release.
+
+**Renaming a feed**: an installed build has its feed URL built in, so a channel or tag rename (Polycarp's `preview` to `nightly`) first ships one last build on the old feed that points at the new feed, and the old `latest.json` keeps being served until that bridge build has reached every install. Only then is the old tag retired.
 
 ## Products
 
@@ -139,8 +144,8 @@ Then `stable` fast-forwards to that commit, it is tagged `vX.Y.Z`, the stable wo
 | Local Studio desktop (`baney75/local-studio`) | side by side | No releases; bundle version 0.0.0 | Add `stable` branch, nightly and dev workflows, version stamping, the core update check |
 | Local Studio iPhone (`ios/` in this repo) | side by side | In progress (PR #4) | Same version and tags as the desktop app, so the protocol always matches |
 | Silas | replace | `vX.Y.Z` tags from the Mac, rolling `nightly` (`-nightly.YYYYMMDDHHMM`) | Add `stable` branch and `dev`; add `+<sha7>` to nightly versions |
-| Polycarp | replace | Rolling `preview` pre-release | Rename `preview` to `nightly`; add `stable` and `dev` |
-| Tychicus | side by side (extension ids per channel) | `v*` tag release workflow | Add `stable` branch, nightly and dev; Chrome Web Store gets stable only |
+| Polycarp | replace | Rolling `preview` pre-release | Move `preview` to `nightly` through a bridge build (Renaming a feed); add `stable` and `dev` |
+| Tychicus | side by side (extension ids per channel) | `v*` tag release workflow | Narrow the release trigger to `v[0-9]+.[0-9]+.[0-9]+`; add `stable` branch, nightly and dev; Chrome Web Store gets stable only |
 | Fonsviva | git ref | `main` and `stable` branches | Add `nightly` tag and `vX.Y.Z` tags |
 | Gantrel | git ref | `main` and `stable` (RELEASES.md says no nightly) | Add the `nightly` tag; update RELEASES.md to this scheme |
 | UntoCaesar | git ref | `main` and `stable` | Add `nightly` tag and `vX.Y.Z` tags |
