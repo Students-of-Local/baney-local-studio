@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -16,7 +16,7 @@ use serde_json::Map;
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(240);
 const WORD: &str = "zeppelin";
-const LONG: &str = "Write the numbers from 1 to 3000 as English words, one per line, with no other text.";
+const LONG: &str = "Write a 3000 word short story about a lighthouse keeper on a northern island, in plain prose.";
 
 pub struct Target {
     pub name: &'static str,
@@ -61,6 +61,9 @@ struct Watch {
     approvals: Vec<Approval>,
     answers: BTreeMap<u64, String>,
     users: BTreeMap<u64, String>,
+    latest: Option<String>,
+    streamed: bool,
+    failure: Option<String>,
     resets: u32,
     errors: Vec<String>,
     usage: Option<UsageReport>,
@@ -72,14 +75,26 @@ impl Watch {
         self.threads.iter().find(|row| row.id == thread)
     }
 
-    fn answer_after(&self, seen: &HashSet<u64>) -> Option<&String> {
-        self.answers.iter().filter(|(id, _)| !seen.contains(id)).map(|(_, text)| text).next_back()
+    fn begin(&mut self) -> u32 {
+        self.latest = None;
+        self.streamed = false;
+        self.failure = None;
+        self.finished
+    }
+
+    fn reply(&self, step: &str) -> anyhow::Result<String> {
+        if let Some(failure) = &self.failure {
+            bail!("{step}: the reply ended with an error: {failure}");
+        }
+        let reply = self.latest.clone().unwrap_or_default();
+        println!("     {step} reply: {}", reply.trim());
+        Ok(reply)
     }
 }
 
-fn observe(watch: &mut Watch, item: &Item) {
+fn observe(watch: &mut Watch, item: &Item, live: bool) {
     match &item.kind {
-        ItemKind::Assistant { blocks, streaming: false, .. } => {
+        ItemKind::Assistant { blocks, streaming, error, .. } => {
             let text: String = blocks
                 .iter()
                 .filter_map(|block| match block {
@@ -87,15 +102,26 @@ fn observe(watch: &mut Watch, item: &Item) {
                     Block::Thinking { .. } => None,
                 })
                 .collect();
-            if !text.trim().is_empty() {
-                watch.answers.insert(item.id, text);
+            let said = !text.trim().is_empty();
+            if *streaming {
+                watch.streamed |= live && said;
+                return;
+            }
+            if let (true, Some(error)) = (live, error) {
+                println!("     assistant error: {error}");
+                watch.failure = Some(error.clone());
+            }
+            if said {
+                watch.answers.insert(item.id, text.clone());
+                if live {
+                    watch.latest = Some(text);
+                }
             }
         }
         ItemKind::User { text, .. } => {
             watch.users.insert(item.id, text.clone());
         }
-        ItemKind::Assistant { .. }
-        | ItemKind::Tool { .. }
+        ItemKind::Tool { .. }
         | ItemKind::TurnSummary { .. }
         | ItemKind::Notice { .. }
         | ItemKind::Compaction { .. } => {}
@@ -110,10 +136,10 @@ fn apply(watch: &mut Watch, update: Update) {
                 watch.answers.clear();
                 watch.users.clear();
                 for item in &items {
-                    observe(watch, item);
+                    observe(watch, item, false);
                 }
             }
-            TranscriptOp::Insert { item, .. } | TranscriptOp::Update { item, .. } => observe(watch, &item),
+            TranscriptOp::Insert { item, .. } | TranscriptOp::Update { item, .. } => observe(watch, &item, true),
         },
         Update::Thread { thread, info } if watch.thread.as_deref() == Some(thread.as_str()) => {
             if watch.busy && !info.busy {
@@ -219,10 +245,11 @@ fn turn(
     thread: &str,
     text: &str,
     step: &str,
-) -> anyhow::Result<()> {
-    let finished = watch.finished;
+) -> anyhow::Result<String> {
+    let finished = watch.begin();
     studio.send(format!("send-{finished}"), thread.to_string(), prompt(text), Delivery::Queue);
-    pump(studio, signal, watch, step, |watch| watch.finished > finished)
+    pump(studio, signal, watch, &format!("{step} finished"), |watch| watch.finished > finished)?;
+    watch.reply(step)
 }
 
 fn approval_turn(
@@ -308,15 +335,14 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
             worktree: WorktreeChoice::Local,
         };
         let first = format!("Remember the word {WORD}. Reply with only that word, nothing else.");
-        let finished = watch.finished;
+        let finished = watch.begin();
         let project = watch.projects.first().cloned();
         studio.start_thread("draft-harness".to_string(), project, prompt(&first), settings);
         pump(&studio, &signal, watch, "thread started", |watch| watch.thread.is_some())?;
         let thread = watch.thread.clone().context("thread id")?;
         studio.select_thread(Some(thread.clone()));
         pump(&studio, &signal, watch, "turn 1 finished", |watch| watch.finished > finished)?;
-        let reply = watch.answers.values().next_back().cloned().unwrap_or_default();
-        println!("     turn 1 reply: {}", reply.trim());
+        let reply = watch.reply("turn 1")?;
         ensure!(reply.to_ascii_lowercase().contains(WORD), "turn 1 did not answer with {WORD}");
         println!("ok   reply contains the asked word");
         let row = watch.row().context("thread row")?;
@@ -332,14 +358,13 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         ensure!(work.join("approved.txt").is_file(), "approved.txt is missing after an approve");
         println!("ok   approve wrote approved.txt ({approved} approvals)");
 
-        let finished = watch.finished;
+        let finished = watch.begin();
         studio.send("send-long".to_string(), thread.clone(), prompt(LONG), Delivery::Queue);
         pump(&studio, &signal, watch, "long turn is working", |watch| watch.busy)?;
-        let seen: HashSet<u64> = watch.answers.keys().copied().collect();
-        pump(&studio, &signal, watch, "long turn is streaming", |watch| {
-            watch.answers.keys().any(|id| !seen.contains(id)) || watch.finished > finished
-        })
-        .ok();
+        pump(&studio, &signal, watch, "long turn is streaming text", |watch| {
+            watch.streamed || watch.finished > finished
+        })?;
+        ensure!(watch.finished == finished, "the long turn ended before the abort: {:?}", watch.failure);
         studio.abort(thread.clone());
         let aborted = Instant::now();
         pump(&studio, &signal, watch, "abort ended the turn", |watch| watch.finished > finished && !watch.busy)?;
@@ -368,17 +393,14 @@ fn second_run(config: &StudioConfig, target: &Target, thread: &str) -> anyhow::R
             watch.users.values().any(|text| text.contains(WORD))
         })?;
         println!("ok   earlier turns shown ({} user messages, {} replies)", watch.users.len(), watch.answers.len());
-        let seen: HashSet<u64> = watch.answers.keys().copied().collect();
-        turn(
+        let reply = turn(
             &studio,
             &signal,
             watch,
             thread,
             "What word did I ask you to remember in my first message? Reply with only that word.",
-            "resumed turn finished",
+            "resumed turn",
         )?;
-        let reply = watch.answer_after(&seen).cloned().unwrap_or_default();
-        println!("     resumed reply: {}", reply.trim());
         ensure!(reply.to_ascii_lowercase().contains(WORD), "the resumed session did not remember {WORD}");
         println!("ok   the session resumed: turn 1 word recalled");
         studio.load_usage("usage-1".to_string(), UsagePeriod::Day);
