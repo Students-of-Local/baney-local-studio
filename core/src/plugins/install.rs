@@ -167,16 +167,28 @@ fn place(root: &Path, source: &Path, exclude: &[String], expected: Option<&str>)
     load(&staged)?;
     let target = root.join(&id);
     let replaced = load(&target).ok().map(|old| old.version);
-    if target.exists() {
-        let old = staging.0.join(".old");
+    let old = staging.0.join(".old");
+    let moved = target.exists();
+    if moved {
         std::fs::rename(&target, &old)
             .map_err(|error| vec![format!("cannot move the installed {id} aside: {error}")])?;
     }
-    std::fs::rename(&staged, &target).map_err(|error| vec![format!("cannot install {}: {error}", target.display())])?;
+    if let Err(error) = std::fs::rename(&staged, &target) {
+        if moved {
+            let _ = std::fs::rename(&old, &target);
+        }
+        return Err(vec![format!("cannot install {}: {error}", target.display())]);
+    }
     let plugin = load(&target)?;
     let grants = Grants::load(root).map_err(|error| vec![error])?;
     let consent = grants.consent(&plugin);
-    Ok(Installed { plugin, replaced, consent, files: entries.len(), tree })
+    Ok(Installed {
+        plugin,
+        replaced,
+        consent,
+        files: entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count(),
+        tree,
+    })
 }
 
 fn manifest_id(source: &Path) -> Result<String, Vec<String>> {
