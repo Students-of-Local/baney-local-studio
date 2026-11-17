@@ -96,3 +96,30 @@ public struct DesignGallery: View {
         .background(Theme.canvas)
     }
 }
+
+extension Samples {
+    public static var home: HomeContent {
+        HomeContent(
+            needsYou: [
+                .approval(approvalThread, [approval, ApprovalSummary(id: "a2", command: "git push origin remote-serve", effects: ["network"])]),
+                .question(questionThread, requestID: "q1", questions),
+                .failed(failedThread, error: "error[E0433]: failed to resolve: use of undeclared crate `gtk4`"),
+                .woke(wokeThread),
+            ],
+            working: working,
+            doneToday: done,
+            earlier: [
+                ThreadSummary(id: "t9", machine: "chapel1", title: "Gantrel smoke on Linux", project: "gantrel",
+                              status: .idle, updated: now.addingTimeInterval(-90_000)),
+                ThreadSummary(id: "t10", machine: "parish1", title: "UntoCaesar ledger import", project: "untocaesar",
+                              status: .idle, updated: now.addingTimeInterval(-180_000)),
+            ],
+            snoozed: [
+                ThreadSummary(id: "t11", machine: "rectory1", title: "Corunis brain schema", project: "corunis",
+                              status: .idle, updated: now.addingTimeInterval(-40_000)),
+            ],
+            machines: machines,
+            moreEarlier: true
+        )
+    }
+}

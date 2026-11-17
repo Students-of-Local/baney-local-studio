@@ -80,6 +80,7 @@ public struct ApprovalBody: View {
                 .foregroundStyle(Theme.text)
                 .lineSpacing(2)
                 .lineLimit(expanded ? nil : 5)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
@@ -96,13 +97,15 @@ public struct ApprovalBody: View {
                     Button("Decline", systemImage: "xmark", role: .destructive) { choose(.deny) }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .frame(width: 36, height: 36)
+                        .foregroundStyle(Theme.secondaryText)
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("More approval options")
                 Spacer(minLength: 0)
                 Button("Decline") { choose(.deny) }
                     .buttonStyle(.bordered)
+                    .tint(Theme.text)
                 Button("Approve") { choose(.approve) }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.primary)
@@ -155,6 +158,7 @@ public struct FailedBody: View {
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 Button("Open", action: open).buttonStyle(.bordered)
+                    .tint(Theme.text)
                 Button("Retry", systemImage: "arrow.clockwise", action: retry)
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.primary)
@@ -187,6 +191,7 @@ public struct WokeBody: View {
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 Button("Mark read", action: markRead).buttonStyle(.bordered)
+                    .tint(Theme.text)
                 Button("Open", action: open)
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.primary)
