@@ -9,8 +9,8 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
     AccessMode, Approval, ApprovalAnswer, Block, Connection, DaemonLaunch, Delivery, Harness, Item, ItemKind,
-    ModelOption, NoticeLevel, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings, TranscriptOp, Update,
-    UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    ModelOption, NoticeLevel, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp,
+    Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::Map;
 
@@ -342,12 +342,12 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         .ok();
         studio.abort(thread.clone());
         let aborted = Instant::now();
-        pump(&studio, &signal, watch, "abort left Working", |watch| watch.finished > finished && !watch.busy)?;
-        ensure!(
-            watch.row().is_none_or(|row| row.status != local_studio_core::ThreadStatus::Working),
-            "the row still shows Working"
-        );
-        println!("ok   aborted turn left Working in {} ms", aborted.elapsed().as_millis());
+        pump(&studio, &signal, watch, "abort ended the turn", |watch| watch.finished > finished && !watch.busy)?;
+        pump(&studio, &signal, watch, "abort took the row out of Working", |watch| {
+            watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
+        })?;
+        let status = watch.row().map(|row| row.status);
+        println!("ok   aborted turn left Working in {} ms (row {status:?})", aborted.elapsed().as_millis());
         Ok(thread)
     })();
     studio.shutdown();
