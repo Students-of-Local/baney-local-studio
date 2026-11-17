@@ -47,9 +47,6 @@ pub fn model_sections(
     show_hidden: bool,
     loaded: bool,
 ) -> ModelSections {
-    let has = |keys: &[ModelKey], model: &ModelOption| {
-        keys.iter().any(|key| key.provider == model.provider && key.model == model.id)
-    };
     let configured: Vec<&ModelOption> = models.iter().filter(|model| model.configured).collect();
     let hidden_count = configured.iter().filter(|model| has(&hidden, model)).count();
     let needle = query.trim().to_lowercase();
@@ -76,7 +73,7 @@ pub fn model_sections(
     }
     let mut order: Vec<&str> = Vec::new();
     let mut grouped: HashMap<&str, Vec<&ModelOption>> = HashMap::new();
-    for model in &visible {
+    for &model in &visible {
         let entry = grouped.entry(model.provider.as_str()).or_insert_with(|| {
             order.push(model.provider.as_str());
             Vec::new()
@@ -144,6 +141,10 @@ pub fn model_sections(
         hidden: u32::try_from(hidden_count).unwrap_or(u32::MAX),
         empty,
     }
+}
+
+fn has(keys: &[ModelKey], model: &ModelOption) -> bool {
+    keys.iter().any(|key| key.provider == model.provider && key.model == model.id)
 }
 
 fn capitalized(text: &str) -> String {

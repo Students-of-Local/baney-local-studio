@@ -85,13 +85,12 @@ pub fn apply(app: &App) {
     for binding in &bindings {
         let Some(action) = action_for(&binding.command) else { continue };
         let scoped = binding.when.as_deref() == Some("timelineFocus");
-        let shadowed = (binding.command == "rightPanel.close"
-            && binding.shortcut.is_some()
-            && binding.shortcut == closing)
-            || binding.command.strip_prefix("modelPicker.jump.").is_some_and(|index| {
-                let thread = format!("thread.jump.{index}");
-                bindings.iter().any(|other| other.command == thread && other.shortcut == binding.shortcut)
-            });
+        let shadowed =
+            (binding.command == "rightPanel.close" && binding.shortcut.is_some() && binding.shortcut == closing)
+                || binding.command.strip_prefix("modelPicker.jump.").is_some_and(|index| {
+                    let thread = format!("thread.jump.{index}");
+                    bindings.iter().any(|other| other.command == thread && other.shortcut == binding.shortcut)
+                });
         let owned = match binding.shortcut.as_deref() {
             Some(shortcut) if !scoped && !shadowed => accelerators(shortcut),
             _ => Vec::new(),

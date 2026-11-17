@@ -22,7 +22,11 @@ fn key(provider: &str, model: &str) -> ModelKey {
 }
 
 pub fn models(favorites: Vec<ModelKey>, hidden: Vec<ModelKey>) -> Update {
-    let models = [
+    Update::Models { models: catalog(), favorites, hidden }
+}
+
+fn catalog() -> Vec<ModelOption> {
+    [
         ("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", 200_000, true),
         ("anthropic", "claude-opus-4-1", "Claude Opus 4.1", 200_000, true),
         ("anthropic", "claude-haiku-4-5", "Claude Haiku 4.5", 200_000, true),
@@ -45,8 +49,7 @@ pub fn models(favorites: Vec<ModelKey>, hidden: Vec<ModelKey>) -> Update {
         configured,
         service_tiers: Vec::new(),
     })
-    .collect();
-    Update::Models { models, favorites, hidden }
+    .collect()
 }
 
 pub fn hidden() -> Vec<ModelKey> {
@@ -88,18 +91,8 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         "picker-model" => model_picker(app, Vec::new(), false),
         "picker-model-hidden" => model_picker(app, hidden(), true),
         "picker-model-all-hidden" => {
-            let all = [
-                ("anthropic", "claude-sonnet-4-5"),
-                ("anthropic", "claude-opus-4-1"),
-                ("anthropic", "claude-haiku-4-5"),
-                ("openai", "gpt-5-codex"),
-                ("openai", "gpt-5"),
-                ("openai", "gpt-5-mini"),
-                ("local", "qwen3-coder-30b"),
-                ("local", "gpt-oss-120b"),
-                ("local", "llama-3.3-70b"),
-            ];
-            model_picker(app, all.iter().map(|(provider, model)| key(provider, model)).collect(), false);
+            let all = catalog().iter().map(|model| key(&model.provider, &model.id)).collect();
+            model_picker(app, all, false);
         }
         "picker-stash" => {
             conversation(app, false);

@@ -311,25 +311,13 @@ impl Picker {
         }
     }
 
-    pub fn activate(&self, id: &str) {
-        self.inner.activate(id);
-    }
-
     pub fn reveal_section(&self, section: &str) {
         self.inner.focused.replace(Some(section.to_string()));
         self.inner.mark_focused();
-        let header = self.inner.headers.borrow().iter().find(|header| header.label() == section).cloned();
+        let header = self.inner.headers.borrow().iter().find(|header| header.label().as_str() == section).cloned();
         if let Some(bounds) = header.and_then(|header| header.compute_bounds(&self.inner.list)) {
             self.inner.scroller.vadjustment().set_value(f64::from(bounds.y()));
         }
-        let first = self
-            .inner
-            .rows
-            .borrow()
-            .iter()
-            .find(|row| row.section.as_deref() == Some(section) && !row.disabled)
-            .map(|row| row.id.clone());
-        self.inner.highlight(first, false);
     }
 
     pub fn popup(&self) {

@@ -418,7 +418,8 @@ impl Composer {
             .and_then(|current| providers.iter().position(|(id, _)| *id == current))
             .and_then(|index| isize::try_from(index).ok())
             .unwrap_or(if delta > 0 { -1 } else { count });
-        let Some((id, title)) = usize::try_from((index + delta).rem_euclid(count)).ok().and_then(|next| providers.get(next))
+        let Some((id, title)) =
+            usize::try_from((index + delta).rem_euclid(count)).ok().and_then(|next| providers.get(next))
         else {
             return;
         };
@@ -455,8 +456,10 @@ impl Composer {
             for entry in &section.models {
                 let model = &entry.model;
                 let id = format!("{}\u{1}{}\u{1}{}", section.id, model.provider, model.id);
-                let checked = active.as_ref().is_some_and(|key| key.provider == model.provider && key.model == model.id);
-                let mut row = Row::new(id, model_name(model)).section(&section.title).checked(checked).dimmed(entry.hidden);
+                let checked =
+                    active.as_ref().is_some_and(|key| key.provider == model.provider && key.model == model.id);
+                let mut row =
+                    Row::new(id, model_name(model)).section(&section.title).checked(checked).dimmed(entry.hidden);
                 if model.context_window > 0 {
                     row = row.aside(format::tokens(model.context_window));
                 }
