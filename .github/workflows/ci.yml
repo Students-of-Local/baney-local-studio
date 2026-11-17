@@ -95,8 +95,6 @@ jobs:
   macos-app:
     name: macOS app (not blocking)
     runs-on: macos-26
-    # actool in Xcode 26.6, the newest on macos-26, crashes on macos/AppIcon.icon; this records it without blocking.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -115,13 +113,13 @@ jobs:
           echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
           xcodebuild -version
       - name: App (Debug)
+        # actool in Xcode 26.6, the newest on macos-26, crashes on macos/AppIcon.icon (#27); this records it without blocking.
+        continue-on-error: true
         run: nu macos/build.nu
 
   windows:
     name: Windows (core and kit, not shipped)
     runs-on: windows-latest
-    # Eukhe ships no Windows binary; this records what fails without blocking.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -129,4 +127,7 @@ jobs:
           version: 0.15.2
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo check -p local-studio-core -p local-studio-kit
+      - name: Core and kit
+        # Eukhe ships no Windows binary and eukhe-client is Unix-only; this records what fails without blocking.
+        continue-on-error: true
+        run: cargo check -p local-studio-core -p local-studio-kit
