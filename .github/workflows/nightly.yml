@@ -11,6 +11,8 @@ on:
 permissions:
   contents: write
   issues: read
+  statuses: read
+  actions: read
 concurrency:
   group: nightly
   cancel-in-progress: false
