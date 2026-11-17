@@ -138,6 +138,66 @@ prune_nightlies() {
     done
 }
 
+lookup() {
+  local out
+  out=$(gh api "$1" -q "$2" 2> /dev/null) && echo "$out" || true
+}
+
+release_id() { lookup "repos/$REPO/releases/tags/$1" .id; }
+
+tag_sha() { lookup "repos/$REPO/git/ref/tags/$1" .object.sha; }
+
+set_tag() {
+  if [ -n "$(tag_sha "$1")" ]; then
+    gh api -X PATCH "repos/$REPO/git/refs/tags/$1" -f sha="$2" -F force=true > /dev/null
+  else
+    gh api "repos/$REPO/git/refs" -f ref="refs/tags/$1" -f sha="$2" > /dev/null
+  fi
+}
+
+drop_tag() { [ -z "$(tag_sha "$1")" ] || gh api -X DELETE "repos/$REPO/git/refs/tags/$1"; }
+
+swap_rolling() {
+  local channel=$1 id=$2 commit=$3 text=$4 previous="$1-previous" old old_sha stale
+  old=$(release_id "$channel")
+  stale=$(release_id "$previous")
+  if [ -z "$old" ] && [ -n "$stale" ]; then
+    echo "the $channel release is missing; $previous is the last good one"
+    old=$stale
+  elif [ -n "$stale" ]; then
+    gh api -X DELETE "repos/$REPO/releases/$stale"
+  fi
+  old_sha=$(tag_sha "$channel")
+  [ -n "$old_sha" ] || old_sha=$(tag_sha "$previous")
+  if [ -n "$old" ] && [ -z "$old_sha" ]; then
+    echo "the $channel release has no tag left; removing it"
+    gh api -X DELETE "repos/$REPO/releases/$old"
+    old=
+  fi
+  if [ -n "$old" ]; then
+    set_tag "$previous" "$old_sha"
+    gh api -X PATCH "repos/$REPO/releases/$old" -f tag_name="$previous" > /dev/null
+  fi
+  if set_tag "$channel" "$commit" &&
+    gh api -X PATCH "repos/$REPO/releases/$id" -f tag_name="$channel" \
+      -F draft=false -F prerelease=true -f make_latest=false -f body="$text" > /dev/null; then
+    if [ -n "$old" ]; then
+      gh api -X DELETE "repos/$REPO/releases/$old"
+      drop_tag "$previous"
+    fi
+    return 0
+  fi
+  echo "::error::could not publish $channel; restoring the previous release"
+  if [ -n "$old" ]; then
+    set_tag "$channel" "$old_sha"
+    gh api -X PATCH "repos/$REPO/releases/$old" -f tag_name="$channel" > /dev/null
+    drop_tag "$previous"
+  else
+    drop_tag "$channel"
+  fi
+  exit 1
+}
+
 publish() {
   local channel=$1 id=$2 version=$3 commit=$4 dir="$RUNNER_TEMP/assets" text base
   check_newer "$channel" "$version"
@@ -155,9 +215,7 @@ publish() {
   if [ "$channel" = stable ]; then
     gh api -X PATCH "repos/$REPO/releases/$id" -F draft=false -F prerelease=false -f make_latest=true -f body="$text" > /dev/null
   else
-    gh release delete "$channel" -R "$REPO" --cleanup-tag --yes 2> /dev/null || true
-    gh api -X PATCH "repos/$REPO/releases/$id" -f tag_name="$channel" -f target_commitish="$commit" \
-      -F draft=false -F prerelease=true -f make_latest=false -f body="$text" > /dev/null
+    swap_rolling "$channel" "$id" "$commit" "$text"
   fi
   [ "$channel" = nightly ] && prune_nightlies
   return 0
