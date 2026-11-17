@@ -178,7 +178,8 @@ fn manifest_id(source: &Path) -> Result<String, Vec<String>> {
         id: String,
     }
     let path = source.join(MANIFEST);
-    let text = std::fs::read_to_string(&path).map_err(|error| vec![format!("cannot read {}: {error}", path.display())])?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| vec![format!("cannot read {}: {error}", path.display())])?;
     let id: Id = toml::from_str(&text).map_err(|error| vec![format!("invalid {MANIFEST}: {}", error.message())])?;
     if valid_id(&id.id) {
         Ok(id.id)

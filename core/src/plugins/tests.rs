@@ -6,8 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{json, Value};
 
 use super::{
-    install, load, mcp_servers, sync_mcp_servers, tree_hash, Capability, Catalog, CatalogEntry, Consent, Grants,
-    Source,
+    install, load, mcp_servers, sync_mcp_servers, tree_hash, Capability, Catalog, CatalogEntry, Consent, Grants, Source,
 };
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -264,10 +263,11 @@ fn install_copies_a_clean_plugin_and_reports_consent() {
     let temp = Temp::new();
     let source = served(&temp.0.join("src"), "tidy", "1.0.0", "\"mcp-server\"");
     write(&source.join("skills/tidy/SKILL.md"), "---\nname: tidy\ndescription: Tidy up\n---\nBody\n");
-    std::os::unix::fs::symlink("skills/tidy/SKILL.md", source.join("SKILL.md")).unwrap_or_else(|error| panic!("{error}"));
+    std::os::unix::fs::symlink("skills/tidy/SKILL.md", source.join("SKILL.md"))
+        .unwrap_or_else(|error| panic!("{error}"));
     let root = temp.0.join("plugins");
-    let installed = install(&root, &Source::Dir(source.clone()), &Catalog::default())
-        .unwrap_or_else(|errors| panic!("{errors:?}"));
+    let installed =
+        install(&root, &Source::Dir(source.clone()), &Catalog::default()).unwrap_or_else(|errors| panic!("{errors:?}"));
     assert_eq!(installed.plugin.dir, root.join("tidy"));
     assert_eq!(installed.consent, Consent::NeedsConsent { missing: vec![Capability::McpServer] });
     assert!(installed.replaced.is_none());
@@ -280,7 +280,12 @@ fn install_copies_a_clean_plugin_and_reports_consent() {
 
 #[test]
 fn git_sources_must_be_pinned_to_a_full_sha() {
-    for arg in ["https://github.com/a/b", "https://github.com/a/b@main", "https://github.com/a/b@5cdd089", "git@github.com:a/b.git"] {
+    for arg in [
+        "https://github.com/a/b",
+        "https://github.com/a/b@main",
+        "https://github.com/a/b@5cdd089",
+        "git@github.com:a/b.git",
+    ] {
         let error = Source::parse(arg).err().unwrap_or_else(|| panic!("{arg} parsed"));
         assert!(error.contains("full commit SHA"), "{arg}: {error}");
     }

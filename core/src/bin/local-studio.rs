@@ -157,14 +157,12 @@ fn install(arg: &str) -> Result<(), String> {
 }
 
 fn installed(root: &Path, id: &str) -> Result<Plugin, String> {
-    plugins::load(&root.join(id)).map_err(|errors| format!("{id} is not installed or does not load: {}", errors.join("; ")))
+    plugins::load(&root.join(id))
+        .map_err(|errors| format!("{id} is not installed or does not load: {}", errors.join("; ")))
 }
 
 fn capabilities(names: &[&str]) -> Result<Vec<Capability>, String> {
-    names
-        .iter()
-        .map(|name| Capability::parse(name).ok_or_else(|| format!("unknown capability: {name}")))
-        .collect()
+    names.iter().map(|name| Capability::parse(name).ok_or_else(|| format!("unknown capability: {name}"))).collect()
 }
 
 fn grant(id: &str, names: &[&str]) -> Result<(), String> {
