@@ -29,6 +29,11 @@ pub(super) fn name(harness: Harness) -> &'static str {
     }
 }
 
+fn session_gone(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    ["no rollout", "not found", "no such thread", "unknown thread"].iter().any(|words| lower.contains(words))
+}
+
 pub(super) fn unsupported(harness: Harness, what: &str) -> String {
     format!("{} threads cannot {what} in Local Studio.", name(harness))
 }
@@ -142,7 +147,7 @@ impl Actor {
         let generation = self.generation;
         let opened = match Driver::open(launch.clone(), Sink::new(id, generation, self.cli.clone())).await {
             Ok(opened) => opened,
-            Err(error) if harness == Harness::Codex && resume => {
+            Err(error) if harness == Harness::Codex && resume && session_gone(&error) => {
                 self.mailbox.notice(
                     NoticeLevel::Warning,
                     format!("Codex could not resume this thread ({error}); it continues in a new Codex session."),

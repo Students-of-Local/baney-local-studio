@@ -109,16 +109,12 @@ impl Claude {
         });
         let tail = Arc::new(Mutex::new(Vec::<String>::new()));
         let errors = Arc::clone(&tail);
-        let error_sink = sink.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 let lower = line.to_ascii_lowercase();
                 if line.trim().is_empty() || QUIET_STDERR.iter().any(|quiet| lower.contains(quiet)) {
                     continue;
-                }
-                if let Some(reason) = stop_reason(&line) {
-                    error_sink.send(Event::Stopped(reason));
                 }
                 let mut tail = errors.lock().unwrap_or_else(PoisonError::into_inner);
                 tail.push(line);
@@ -207,7 +203,17 @@ impl Claude {
         let response = match answer {
             ApprovalAnswer::Approve => json!({ "behavior": "allow", "updatedInput": input["input"] }),
             ApprovalAnswer::AlwaysAllowSession => {
-                let suggestions = input.get("suggestions").cloned().unwrap_or_else(|| json!([]));
+                let suggestions: Vec<Value> = input
+                    .get("suggestions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|suggestion| {
+                        let mut suggestion = suggestion.as_object()?.clone();
+                        suggestion.insert("destination".to_string(), json!("session"));
+                        Some(Value::Object(suggestion))
+                    })
+                    .collect();
                 json!({ "behavior": "allow", "updatedInput": input["input"], "updatedPermissions": suggestions })
             }
             ApprovalAnswer::Deny => json!({ "behavior": "deny", "message": "The user denied this in Local Studio." }),
