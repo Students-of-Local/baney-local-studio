@@ -91,6 +91,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Core and kit
         run: PATH="$(nu macos/zig.nu):$PATH" cargo build -p local-studio-core -p local-studio-kit
+      - name: Newest Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          sudo xcodebuild -runFirstLaunch
+          xcodebuild -version
       - name: App (Debug)
         run: env -u DEVELOPER_DIR nu macos/build.nu
 
