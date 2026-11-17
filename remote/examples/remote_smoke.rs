@@ -167,6 +167,7 @@ struct View {
     seq_gaps: u32,
     updates: u32,
     replies: HashMap<u64, Value>,
+    named: HashMap<String, Value>,
     pongs: u32,
     kinds: HashSet<String>,
     connection: Option<Connection>,
@@ -249,10 +250,15 @@ impl View {
                 self.apply_update(frame.get("update").context("an update frame has no update")?)?;
             }
             Some("pong") => self.pongs += 1,
-            _ => {
-                let id = frame.get("re").and_then(Value::as_u64).with_context(|| format!("unexpected frame {text}"))?;
-                self.replies.insert(id, frame);
-            }
+            _ => match frame.get("re") {
+                Some(Value::String(name)) => {
+                    self.named.insert(name.clone(), frame);
+                }
+                re => {
+                    let id = re.and_then(Value::as_u64).with_context(|| format!("unexpected frame {text}"))?;
+                    self.replies.insert(id, frame);
+                }
+            },
         }
         Ok(())
     }
@@ -1651,6 +1657,212 @@ async fn restart_watch(
     Ok((fresh, c))
 }
 
+type Hold = (tokio::net::UnixListener, tokio::net::UnixStream, Instant);
+
+async fn hold_core(run: &Run) -> anyhow::Result<Hold> {
+    let root = run.serve.root.clone();
+    let later = root.join("eukhe-later");
+    std::fs::remove_file(&later)?;
+    std::os::unix::fs::symlink(root.join("eukhe-not-yet"), &later)?;
+    let socket = root.join("d.sock");
+    stop_daemon(&socket, None).await?;
+    std::fs::remove_file(&socket).ok();
+    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let (held, _) = tokio::time::timeout(SETUP, listener.accept())
+        .await
+        .context("the core never came back to the daemon socket")??;
+    Ok((listener, held, Instant::now()))
+}
+
+async fn release_core(run: &Run, eukhe: &Path, hold: Hold) -> anyhow::Result<Duration> {
+    let held_for = hold.2.elapsed();
+    drop(hold);
+    let root = run.serve.root.clone();
+    let socket = root.join("d.sock");
+    std::fs::remove_file(&socket).ok();
+    let later = root.join("eukhe-later");
+    std::fs::remove_file(&later)?;
+    std::os::unix::fs::symlink(eukhe, &later)?;
+    ensure!(
+        held_for < Duration::from_secs(14),
+        "the core was held {} ms, too close to eukhe-client's 15 s hello timeout to be sure it was held throughout",
+        held_for.as_millis()
+    );
+    let deadline = Instant::now() + SETUP;
+    while DaemonClient::connect(&socket).await.is_err() {
+        ensure!(Instant::now() < deadline, "the daemon did not come back after the hold:\n{}", run.serve.log_tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(held_for)
+}
+
+async fn upload_caps(c: &mut Client) -> anyhow::Result<()> {
+    let mime = format!("image/{}", "x".repeat(294));
+    c.refused("blob_put", json!({ "blob": hex(&rand_bytes::<16>()?), "size": 0, "mime": mime }), "bad_args").await?;
+    let long = "r".repeat(70);
+    c.frame(&json!({ "id": long, "op": "blob_put", "args": { "blob": hex(&rand_bytes::<16>()?), "size": 0, "mime": "image/png" } }));
+    c.until("a blob_put with a 70-byte request id answered", SETUP, |view| view.named.contains_key(&long)).await?;
+    let reply = c.view().named.remove(&long).context("no answer to the long request id")?;
+    ensure!(
+        reply.pointer("/error/code") == Some(&json!("bad_args")),
+        "a blob_put with a 70-byte request id answered {reply}"
+    );
+    println!(
+        "ok   C: blob_put with a 70-byte request id is refused with bad_args: {}",
+        reply.pointer("/error/message").unwrap_or(&Value::Null)
+    );
+    let mut pending = Vec::new();
+    for _ in 0..16 {
+        let blob = rand_bytes::<16>()?;
+        c.next += 1;
+        c.frame(
+            &json!({ "id": c.next, "op": "blob_put", "args": { "blob": hex(&blob), "size": 0, "mime": "image/png" } }),
+        );
+        pending.push((c.next, blob));
+    }
+    c.refused("blob_put", json!({ "blob": hex(&rand_bytes::<16>()?), "size": 0, "mime": "image/png" }), "too_many")
+        .await?;
+    ensure!(
+        pending.iter().all(|(ask, _)| !c.view().replies.contains_key(ask)),
+        "one of the first 16 pending blob_put calls was answered before its bytes: {:?}",
+        c.view().replies
+    );
+    for (ask, blob) in pending {
+        c.blob(&blob, &[]);
+        let reply = c.reply_to(ask, "blob_put").await?;
+        ensure!(reply.get("ok") == Some(&json!(true)), "a pending zero-size blob did not complete: {reply}");
+    }
+    println!("ok   upload caps: a 300-byte mime and a 70-byte request id are bad_args, and the 17th pending blob_put is too_many");
+    Ok(())
+}
+
+async fn prompt_backlog(run: &Run, eukhe: &Path, a: &mut Client) -> anyhow::Result<()> {
+    let hold = hold_core(run).await?;
+    let mut busy = None;
+    for at in 1..=70 {
+        let args = json!({ "request": format!("r-backlog-{at}"), "thread": "no-such-thread-backlog", "prompt": prompt("backlog"), "delivery": "queue" });
+        let reply = a.reply("send", args).await?;
+        if reply.pointer("/error/code") == Some(&json!("busy")) {
+            busy = Some(at);
+            break;
+        }
+        ensure!(reply.get("ok") == Some(&json!(true)), "send {at} while the core was held answered {reply}");
+    }
+    let held_for = release_core(run, eukhe, hold).await?;
+    let Some(busy) = busy else {
+        bail!(
+            "all 70 sends were accepted while the core was held for {} ms; none was refused busy",
+            held_for.as_millis()
+        )
+    };
+    ensure!(busy >= 65, "send {busy} was refused busy, before the core held 64 prompts");
+    let deadline = Instant::now() + SETUP;
+    loop {
+        let args = json!({ "request": "r-backlog-after", "thread": "no-such-thread-backlog", "prompt": prompt("backlog after"), "delivery": "queue" });
+        let reply = a.reply("send", args).await?;
+        if reply.get("ok") == Some(&json!(true)) {
+            break;
+        }
+        ensure!(
+            reply.pointer("/error/code") == Some(&json!("busy")) && Instant::now() < deadline,
+            "a send after the daemon came back answered {reply}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    println!(
+        "ok   prompt backlog: with the core held {} ms, send {busy} of 70 was refused busy, and a send after the daemon came back was accepted",
+        held_for.as_millis()
+    );
+    Ok(())
+}
+
+async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
+    let flood = 5000;
+    let known: HashSet<String> = c.view().answers.keys().cloned().collect();
+    let hold = hold_core(run).await?;
+    a.call("send", json!({ "request": "r-own", "thread": "no-such-thread-tags", "prompt": prompt("tag isolation"), "delivery": "queue" })).await?;
+    let first = c.next + 1;
+    for at in 0..flood {
+        c.next += 1;
+        c.frame(&json!({ "id": c.next, "op": "list_archived", "args": { "request": format!("q-flood-{at}") } }));
+    }
+    let last = c.next;
+    c.until("5,000 tagged requests accepted while the core holds phone A's send", QUICK, |view| {
+        view.replies.len() >= flood && (first..=last).all(|id| view.replies.contains_key(&id))
+    })
+    .await?;
+    let refused = (first..=last).filter(|id| c.view().replies[id].get("error").is_some()).count();
+    let held_for = release_core(run, eukhe, hold).await?;
+    a.until("its own request_failed for r-own after the flood", SETUP, |view| {
+        view.answers.get("r-own").is_some_and(|kind| kind == "request_failed")
+    })
+    .await?;
+    let tail = format!("q-flood-{}", flood - 1);
+    c.until("the answer to its last flood request", SETUP, |view| view.answers.contains_key(&tail) || view.closed)
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let view = c.view();
+    ensure!(!view.closed, "phone C was disconnected during the flood: {:?}", view.close_code);
+    let foreign: Vec<&String> =
+        view.answers.keys().filter(|request| !known.contains(*request) && !request.starts_with("q-flood-")).collect();
+    ensure!(foreign.is_empty(), "phone C saw request outcomes that were not its own: {foreign:?}");
+    println!(
+        "ok   tag isolation: phone A's request_failed r-own reached only phone A after 5,000 tagged requests from phone C ({refused} refused) while the core was held {} ms",
+        held_for.as_millis()
+    );
+    drop(view);
+    c.view().replies.clear();
+    Ok(())
+}
+
+async fn writer_abort(run: &Run, c_phone: &Phone) -> anyhow::Result<Client> {
+    let pid = run.serve.child.as_ref().context("serve is not running")?.id();
+    let fds = || std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(usize::MAX, Iterator::count);
+    let huge = (0..23_000).fold(String::new(), |mut huge, line| {
+        writeln!(huge, "line {line:05} of a file that fills the socket while nobody reads it").ok();
+        huge
+    });
+    std::fs::write(run.work.join("huge.txt"), &huge)?;
+    let baseline = fds();
+    let Opened::Ready(mut socket, transport, _) =
+        kk_handshake(run.serve.port, &Route::default(), &c_phone.id, &c_phone.private, &run.server_key).await?
+    else {
+        bail!("phone C's KK was refused:\n{}", run.serve.log_tail())
+    };
+    let transport = Mutex::new(transport);
+    let mut frames = vec![
+        json!({ "op": "hello", "device": { "name": "Smoke Phone C", "app": "0.4.1", "channel": CHANNEL }, "resume": { "watch": [] } }),
+    ];
+    frames.extend((1..=12).map(|at| json!({ "id": at, "op": "read_file", "args": { "request": format!("q-huge-{at}"), "project": run.project, "relative": "huge.txt" } })));
+    for frame in frames {
+        for record in records(1, frame.to_string().as_bytes(), 65_000) {
+            let message = seal(&transport, &record).context("seal")?;
+            socket.send(Message::binary(message)).await?;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let open = fds();
+    ensure!(open > baseline, "the unread socket holds no fd: {open} open against a baseline of {baseline}");
+    socket.send(Message::binary(vec![0u8; 64])).await?;
+    let sent = Instant::now();
+    while fds() > baseline {
+        ensure!(
+            sent.elapsed() < Duration::from_secs(5),
+            "5 s after a bad record ended the reader, serve still holds {} fds against a baseline of {baseline}: the writer is stuck on the unread socket",
+            fds()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    println!(
+        "ok   writer abort: {} KiB of read_file blobs left unread ({baseline} fds, {open} with the socket), and the socket's fd closed {} ms after a bad record",
+        12 * huge.len() / 1024,
+        sent.elapsed().as_millis()
+    );
+    drop(socket);
+    let (c, _) = reconnect(run, c_phone, json!({ "watch": [] })).await?;
+    Ok(c)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) -> anyhow::Result<()> {
     let settings = serde_json::to_value(ThreadSettings {
@@ -1906,7 +2118,24 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let mut a = limit_checks(run, a, &a_phone).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
-    let (mut a, c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
+    let (mut a, mut c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
+    let steps = std::env::var("REMOTE_SMOKE_STEPS").unwrap_or_default();
+    let step = |name: &str| steps.is_empty() || steps.split(',').any(|chosen| chosen == name);
+    if step("caps") {
+        upload_caps(&mut c).await?;
+    }
+    if step("backlog") {
+        prompt_backlog(run, eukhe, &mut a).await?;
+    }
+    if step("tags") {
+        tag_isolation(run, eukhe, &mut a, &mut c).await?;
+    }
+    let c = if step("writer") {
+        drop(c);
+        writer_abort(run, &c_phone).await?
+    } else {
+        c
+    };
     println!("PASS remote smoke: non-model stages");
     let model_outcome = match model {
         Some(model) => model_stage(run, model, &mut a, &c).await,
