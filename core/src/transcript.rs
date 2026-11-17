@@ -643,7 +643,8 @@ pub(crate) fn classify(name: &str, args: &Value) -> ToolKind {
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
         "read" => ToolKind::Read,
-        "edit" | "write" => ToolKind::Edit,
+        "edit" | "write" | "multiedit" | "notebookedit" => ToolKind::Edit,
+        "task" | "agent" => ToolKind::Agent,
         "grep" | "glob" | "find" | "search" => ToolKind::Search,
         "bash" => ToolKind::Command,
         "python" | "ipython" => {
@@ -663,10 +664,17 @@ pub(crate) fn classify(name: &str, args: &Value) -> ToolKind {
 pub(crate) fn summarize(name: &str, args: &Value) -> String {
     let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
     let first_line = |value: &str| value.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_string);
-    let summary = match name {
-        "bash" => text("script").and_then(first_line),
-        "read" | "write" => text("path").map(str::to_string),
-        "edit" => text("input").map(edited_paths).filter(|paths| !paths.is_empty()),
+    let summary = match name.to_ascii_lowercase().as_str() {
+        "bash" => text("script").or_else(|| text("command")).and_then(first_line),
+        "read" | "write" => text("path").or_else(|| text("file_path")).map(str::to_string),
+        "edit" => text("input")
+            .map(edited_paths)
+            .filter(|paths| !paths.is_empty())
+            .or_else(|| text("file_path").or_else(|| text("path")).map(str::to_string)),
+        "multiedit" | "notebookedit" => text("file_path").or_else(|| text("notebook_path")).map(str::to_string),
+        "webfetch" => text("url").map(str::to_string),
+        "websearch" | "web_search" => text("query").map(str::to_string),
+        "task" | "agent" => text("description").map(str::to_string),
         "grep" => text("pattern").map(str::to_string),
         "glob" => text("pattern").or_else(|| text("path")).map(str::to_string),
         "python" | "ipython" => {
