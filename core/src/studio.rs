@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -362,9 +363,40 @@ enum Command {
     },
 }
 
+impl Command {
+    fn prompt_bytes(&self) -> Option<usize> {
+        match self {
+            Command::Send { prompt, .. }
+            | Command::StartThread { prompt, .. }
+            | Command::StartThreads { prompt, .. } => Some(prompt.images.iter().map(|image| image.data.len()).sum()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Backlog {
+    prompts: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+impl Backlog {
+    fn change(&self, command: &Command, add: bool) {
+        let Some(bytes) = command.prompt_bytes() else { return };
+        if add {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            self.bytes.fetch_add(bytes, Ordering::SeqCst);
+        } else {
+            self.prompts.fetch_sub(1, Ordering::SeqCst);
+            self.bytes.fetch_sub(bytes, Ordering::SeqCst);
+        }
+    }
+}
+
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Studio {
     commands: mpsc::UnboundedSender<Command>,
+    backlog: Arc<Backlog>,
     mailbox: Arc<Mailbox>,
     pub(crate) workspace: Workspace,
     lock: Mutex<Option<std::fs::File>>,
@@ -410,6 +442,7 @@ impl Studio {
         let settings = workspace.settings();
         let pull_requests = workspace.pull_requests_changed();
         let (commands, receiver) = mpsc::unbounded_channel();
+        let backlog = Arc::new(Backlog::default());
         let adder = commands.clone();
         workspace.set_project_adder(Arc::new(move |path: String| {
             adder.send(Command::AddProject { path }).ok();
@@ -454,9 +487,10 @@ impl Studio {
             daemon_pushed: None,
             plugins_dir,
             plugin_errors: Vec::new(),
+            backlog: Arc::clone(&backlog),
         };
         runtime.spawn(actor.run(receiver));
-        Ok(Arc::new(Self { commands, mailbox, workspace, lock: Mutex::new(Some(lock)), _runtime: runtime }))
+        Ok(Arc::new(Self { commands, backlog, mailbox, workspace, lock: Mutex::new(Some(lock)), _runtime: runtime }))
     }
 
     pub fn tick(&self) -> Vec<Update> {
@@ -690,8 +724,14 @@ fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, StudioError> {
 }
 
 impl Studio {
+    pub fn backlog(&self) -> (usize, usize) {
+        (self.backlog.prompts.load(Ordering::SeqCst), self.backlog.bytes.load(Ordering::SeqCst))
+    }
+
     fn send_command(&self, command: Command) {
-        if self.commands.send(command).is_err() {
+        self.backlog.change(&command, true);
+        if let Err(mpsc::error::SendError(command)) = self.commands.send(command) {
+            self.backlog.change(&command, false);
             self.mailbox.notice(NoticeLevel::Error, "The Local Studio core has stopped.");
         }
     }
@@ -739,6 +779,7 @@ struct Thread {
 }
 
 struct Actor {
+    backlog: Arc<Backlog>,
     socket: PathBuf,
     session_dir: Option<PathBuf>,
     launch: Option<DaemonLaunch>,
@@ -848,7 +889,10 @@ impl Actor {
                         self.stop(&done).await;
                         return;
                     }
-                    Some(command) => self.handle(command).await,
+                    Some(command) => {
+                        self.backlog.change(&command, false);
+                        self.handle(command).await;
+                    }
                     None => return,
                 },
                 event = next_event(&mut events) => if let Some(event) = event {

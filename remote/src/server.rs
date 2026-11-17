@@ -475,8 +475,9 @@ async fn attached(server: &Arc<Server>, mut sink: Sink, mut stream: Stream, open
     }
     server.hub.detach(&opened.device, conn);
     drop(tx);
-    if writing {
-        tokio::time::timeout(DRAIN, writer).await.ok();
+    if writing && tokio::time::timeout(DRAIN, &mut writer).await.is_err() {
+        writer.abort();
+        writer.await.ok();
     }
 }
 

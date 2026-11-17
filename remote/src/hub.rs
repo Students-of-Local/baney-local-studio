@@ -15,7 +15,11 @@ pub const PROTOCOL: u64 = 2;
 pub const MIN_PROTOCOL: u64 = 2;
 const WINDOW: usize = 200;
 const PAGE_LIMIT: usize = 500;
-const REMEMBERED: usize = 4096;
+const REMEMBERED: usize = 1024;
+const MAX_BACKLOG: usize = 64;
+const MAX_UPLOADS: usize = 16;
+const MAX_MIME: usize = 255;
+const MAX_ACK: usize = 64;
 const BUFFERED: usize = 2000;
 const KEPT: Duration = Duration::from_secs(600);
 const MAX_WATCH: usize = 64;
@@ -125,6 +129,8 @@ struct Session {
     watching: HashSet<String>,
     left_at: Option<Instant>,
     uploads: HashMap<[u8; BLOB_ID], Upload>,
+    tags: VecDeque<String>,
+    accepted: Remembered<()>,
 }
 
 impl Session {
@@ -137,6 +143,8 @@ impl Session {
             watching: HashSet::new(),
             left_at: None,
             uploads: HashMap::new(),
+            tags: VecDeque::new(),
+            accepted: Remembered::default(),
         }
     }
 
@@ -212,10 +220,9 @@ struct State {
     watchers: HashMap<String, HashSet<String>>,
     mirrors: HashMap<String, Mirror>,
     snapshot: [Option<Arc<str>>; SNAPSHOT.len()],
-    tags: Remembered<Tag>,
+    tags: HashMap<String, Tag>,
     tagged: u64,
     git: HashMap<String, HashSet<String>>,
-    accepted: Remembered<()>,
     sends: HashMap<String, (String, Instant)>,
 }
 
@@ -263,7 +270,7 @@ impl State {
     }
 
     fn tagged(&self, tag: &str) -> Option<(String, String)> {
-        self.tags.values.get(tag).map(|tag| (tag.device.clone(), tag.given.clone()))
+        self.tags.get(tag).map(|tag| (tag.device.clone(), tag.given.clone()))
     }
 
     fn routed(&self, value: &Value) -> Option<(String, Value)> {
@@ -310,6 +317,9 @@ impl State {
     fn drop_session(&mut self, studio: &Studio, device: &str, code: u16, reason: &str) {
         let Some(mut session) = self.sessions.remove(device) else { return };
         session.close(code, reason);
+        for tag in &session.tags {
+            self.tags.remove(tag);
+        }
         for thread in session.watching {
             self.release(studio, device, &thread);
         }
@@ -513,7 +523,7 @@ impl Hub {
                 }
                 "thread_started" | "request_done" | "request_failed" => match state.routed(&value) {
                     Some((owner, value)) => state.deliver(&owner, text_of(&value), None),
-                    None => state.broadcast(&text_of(&value)),
+                    None => eprintln!("local-studio-serve: dropped a {kind} for a request no phone owns"),
                 },
                 "notice" => state.broadcast(&text_of(&value)),
                 "thread_search"
@@ -685,8 +695,17 @@ impl Hub {
             .as_ref()
             .filter(|_| ops::idempotent(op))
             .map(|given| format!("{}:{device}:{op}:{given}", device.len()));
-        if key.as_ref().is_some_and(|key| state.accepted.values.contains_key(key)) {
+        if key
+            .as_ref()
+            .is_some_and(|key| state.live(device, conn).is_ok_and(|session| session.accepted.values.contains_key(key)))
+        {
             return Ok(Some(json!({ "duplicate": true })));
+        }
+        if matches!(op, "send" | "start_thread") {
+            let (prompts, bytes) = self.studio.backlog();
+            if prompts >= MAX_BACKLOG || bytes >= MAX_PENDING {
+                return Err(OpError::new("busy", "the machine is still taking earlier prompts; try again shortly"));
+            }
         }
         let mut args = args.clone();
         let tag = match (field, &given) {
@@ -702,7 +721,16 @@ impl Hub {
         let mut prompt = |value: &Value| resolve_prompt(session, value);
         ops::dispatch(&self.studio, op, &args, &mut prompt)?;
         if let Some((tag, given)) = tag {
-            state.tags.insert(tag, Tag { device: device.to_string(), given });
+            state.tags.insert(tag.clone(), Tag { device: device.to_string(), given });
+            let session = state.live(device, conn)?;
+            session.tags.push_back(tag);
+            let mut evicted = Vec::new();
+            while session.tags.len() > REMEMBERED {
+                evicted.extend(session.tags.pop_front());
+            }
+            for old in evicted {
+                state.tags.remove(&old);
+            }
         }
         if op == "git_status" {
             if let Some(project) = args.get("project").and_then(Value::as_str) {
@@ -710,7 +738,7 @@ impl Hub {
             }
         }
         if let Some(key) = key {
-            state.accepted.insert(key, ());
+            state.live(device, conn)?.accepted.insert(key, ());
         }
         if op == "send" {
             if let (Some(request), Some(thread)) = (given.as_deref(), args.get("thread").and_then(Value::as_str)) {
@@ -731,12 +759,22 @@ impl Hub {
         if size > MAX_BLOB {
             return Err(OpError::new("too_large", format!("a blob may be at most {MAX_BLOB} bytes")));
         }
+        if mime.len() > MAX_MIME {
+            return Err(OpError::new("bad_args", format!("args.mime may be at most {MAX_MIME} bytes")));
+        }
+        if id.to_string().len() > MAX_ACK {
+            return Err(OpError::new("bad_args", format!("the request id may be at most {MAX_ACK} bytes")));
+        }
+        let (_, queued) = self.studio.backlog();
         let mut state = self.state();
         let session = state.live(device, conn)?;
         if session.uploads.contains_key(&blob) {
             return Err(OpError::new("bad_args", "this blob id is already in use"));
         }
-        if session.pending() + size > MAX_PENDING {
+        if session.uploads.len() >= MAX_UPLOADS {
+            return Err(OpError::new("too_many", format!("at most {MAX_UPLOADS} uploads may be pending per device")));
+        }
+        if session.pending() + queued + size > MAX_PENDING {
             return Err(OpError::new("too_large", format!("at most {MAX_PENDING} bytes may be pending per device")));
         }
         let upload =

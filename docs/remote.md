@@ -108,7 +108,7 @@ Client to server (requests run concurrently; `id` is the client's counter):
 
 The server answers each with `{"re": 7, "ok": true}` once accepted, or `{"re": 7, "error": {"code": "…", "message": "…"}}`. Outcomes arrive as updates. `request_done` and `request_failed` carry the `request` string, so a retried `send` is idempotent: the server drops a second `send` with a `request` it has already accepted (or a second `start_thread` with the same `draft`) and answers it `{"re": 7, "ok": true, "result": {"duplicate": true}}`.
 
-Error codes: `not_remote` (op not in the table), `not_built` (in the table, not built yet), `bad_args`, `bad_state` (`hello` after the first frame), `not_watched`, `not_loaded`, `too_many` (more than 64 watched threads), `too_large`, `bad_blob`.
+Error codes: `not_remote` (op not in the table), `not_built` (in the table, not built yet), `bad_args`, `bad_state` (`hello` after the first frame), `not_watched`, `not_loaded`, `too_many` (more than 64 watched threads, or more than 16 pending uploads), `too_large`, `bad_blob`, `busy` (the machine still holds 64 prompts it has not taken yet, or 100 MiB of their images; retry after a moment), `closed` (the request came on a socket that was replaced).
 
 Server to client: `{"op": "update", "seq": 413, "update": {"type": "transcript", "thread": "t1", "op": {"type": "insert", "index": 18, "item": {}}}}`.
 
