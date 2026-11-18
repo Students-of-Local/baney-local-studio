@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -198,6 +199,12 @@ enum Command {
     SelectThread {
         thread: Option<String>,
     },
+    WatchThread {
+        thread: String,
+    },
+    UnwatchThread {
+        thread: String,
+    },
     StartThread {
         draft: String,
         project: Option<String>,
@@ -362,11 +369,64 @@ enum Command {
     },
 }
 
+impl Command {
+    fn prompt_bytes(&self) -> Option<usize> {
+        match self {
+            Command::Send { prompt, .. }
+            | Command::StartThread { prompt, .. }
+            | Command::StartThreads { prompt, .. } => Some(prompt.images.iter().map(|image| image.data.len()).sum()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Backlog {
+    commands: AtomicUsize,
+    prompts: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+impl Backlog {
+    fn change(&self, command: &Command, add: bool) {
+        if add {
+            self.commands.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.commands.fetch_sub(1, Ordering::SeqCst);
+        }
+        let Some(bytes) = command.prompt_bytes() else { return };
+        if add {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            self.bytes.fetch_add(bytes, Ordering::SeqCst);
+        } else {
+            self.prompts.fetch_sub(1, Ordering::SeqCst);
+            self.bytes.fetch_sub(bytes, Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Inbox {
+    commands: mpsc::UnboundedSender<Command>,
+    backlog: Arc<Backlog>,
+}
+
+impl Inbox {
+    fn send(&self, command: Command) {
+        self.backlog.change(&command, true);
+        if let Err(mpsc::error::SendError(command)) = self.commands.send(command) {
+            self.backlog.change(&command, false);
+        }
+    }
+}
+
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Studio {
     commands: mpsc::UnboundedSender<Command>,
+    backlog: Arc<Backlog>,
     mailbox: Arc<Mailbox>,
     pub(crate) workspace: Workspace,
+    lock: Mutex<Option<std::fs::File>>,
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -380,6 +440,7 @@ impl Studio {
             store::data_dir(config.data_dir.as_deref()).map_err(|message| StudioError::Config { message })?;
         std::fs::create_dir_all(&data_dir)
             .map_err(|error| StudioError::Config { message: format!("create {}: {error}", data_dir.display()) })?;
+        let lock = lock_data_dir(&data_dir)?;
         let store = Store::open(&data_dir).map_err(|error| StudioError::Config { message: format!("{error:#}") })?;
         let home = store::home_dir().ok_or_else(|| StudioError::Config { message: "HOME is not set".to_string() })?;
         let session_dir = config.session_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
@@ -408,14 +469,16 @@ impl Studio {
         let settings = workspace.settings();
         let pull_requests = workspace.pull_requests_changed();
         let (commands, receiver) = mpsc::unbounded_channel();
+        let backlog = Arc::new(Backlog::default());
+        let inbox = Inbox { commands: commands.clone(), backlog: Arc::clone(&backlog) };
         let (cli, cli_events) = mpsc::unbounded_channel();
-        let adder = commands.clone();
+        let adder = inbox.clone();
         workspace.set_project_adder(Arc::new(move |path: String| {
-            adder.send(Command::AddProject { path }).ok();
+            adder.send(Command::AddProject { path });
         }));
-        let reloader = commands.clone();
+        let reloader = inbox.clone();
         workspace.set_models_reloader(Arc::new(move |answer| {
-            reloader.send(Command::LoadModels { answer }).ok();
+            reloader.send(Command::LoadModels { answer });
         }));
         let actor = Actor {
             socket,
@@ -427,7 +490,7 @@ impl Studio {
             settings,
             pull_requests,
             text,
-            itself: commands.clone(),
+            itself: inbox.clone(),
             client_slot,
             client: None,
             store,
@@ -438,6 +501,7 @@ impl Studio {
             threads: HashMap::new(),
             by_active: HashMap::new(),
             focused: None,
+            watchers: HashMap::new(),
             heads: HashMap::new(),
             models: Vec::new(),
             models_waiting: Vec::new(),
@@ -452,6 +516,7 @@ impl Studio {
             daemon_pushed: None,
             plugins_dir,
             plugin_errors: Vec::new(),
+            backlog: Arc::clone(&backlog),
             data_dir,
             cli,
             drivers: HashMap::new(),
@@ -460,7 +525,7 @@ impl Studio {
             plugin_consent: Vec::new(),
         };
         runtime.spawn(actor.run(receiver, cli_events));
-        Ok(Arc::new(Self { commands, mailbox, workspace, _runtime: runtime }))
+        Ok(Arc::new(Self { commands, backlog, mailbox, workspace, lock: Mutex::new(Some(lock)), _runtime: runtime }))
     }
 
     pub fn tick(&self) -> Vec<Update> {
@@ -472,9 +537,16 @@ impl Studio {
         let (done, finished) = std::sync::mpsc::channel();
         if self.commands.send(Command::Shutdown { done }).is_ok() {
             if let Err(error) = finished.recv_timeout(SHUTDOWN_TIMEOUT) {
-                self.mailbox.notice(NoticeLevel::Warning, format!("The core did not stop cleanly: {error}"));
+                self.mailbox.notice(
+                    NoticeLevel::Warning,
+                    format!(
+                        "The core did not stop cleanly: {error}; it keeps the data folder until this process exits"
+                    ),
+                );
+                return;
             }
         }
+        self.lock.lock().unwrap_or_else(PoisonError::into_inner).take();
     }
 
     pub fn add_project(&self, path: String) {
@@ -499,6 +571,14 @@ impl Studio {
 
     pub fn select_thread(&self, thread: Option<String>) {
         self.send_command(Command::SelectThread { thread });
+    }
+
+    pub fn watch_thread(&self, thread: String) {
+        self.send_command(Command::WatchThread { thread });
+    }
+
+    pub fn unwatch_thread(&self, thread: String) {
+        self.send_command(Command::UnwatchThread { thread });
     }
 
     pub fn start_thread(&self, draft: String, project: Option<String>, prompt: PromptDraft, settings: ThreadSettings) {
@@ -649,9 +729,48 @@ impl Studio {
     }
 }
 
+fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, StudioError> {
+    use std::io::{Read, Seek, Write};
+    let path = data_dir.join("studio.lock");
+    let failed = |error: std::io::Error| StudioError::Config { message: format!("lock {}: {error}", path.display()) };
+    let mut file =
+        std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(failed)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut holder = String::new();
+            file.read_to_string(&mut holder).ok();
+            let holder = holder.trim();
+            let by = if holder.is_empty() { String::new() } else { format!(" (process {holder})") };
+            return Err(StudioError::Config {
+                message: format!(
+                    "another Local Studio{by} already owns {}: quit it, or give this one its own data dir",
+                    data_dir.display()
+                ),
+            });
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(failed(error)),
+    }
+    file.set_len(0)
+        .and_then(|()| file.rewind())
+        .and_then(|()| writeln!(file, "{}", std::process::id()))
+        .map_err(failed)?;
+    Ok(file)
+}
+
 impl Studio {
+    pub fn backlog(&self) -> (usize, usize) {
+        (self.backlog.prompts.load(Ordering::SeqCst), self.backlog.bytes.load(Ordering::SeqCst))
+    }
+
+    pub fn queued(&self) -> usize {
+        self.backlog.commands.load(Ordering::SeqCst)
+    }
+
     fn send_command(&self, command: Command) {
-        if self.commands.send(command).is_err() {
+        self.backlog.change(&command, true);
+        if let Err(mpsc::error::SendError(command)) = self.commands.send(command) {
+            self.backlog.change(&command, false);
             self.mailbox.notice(NoticeLevel::Error, "The Local Studio core has stopped.");
         }
     }
@@ -699,6 +818,7 @@ struct Thread {
 }
 
 struct Actor {
+    backlog: Arc<Backlog>,
     socket: PathBuf,
     session_dir: Option<PathBuf>,
     launch: Option<DaemonLaunch>,
@@ -708,7 +828,7 @@ struct Actor {
     settings: watch::Receiver<Settings>,
     pull_requests: watch::Receiver<u64>,
     text: TextGen,
-    itself: mpsc::UnboundedSender<Command>,
+    itself: Inbox,
     client_slot: watch::Sender<Option<DaemonClient>>,
     client: Option<DaemonClient>,
     store: Store,
@@ -719,6 +839,7 @@ struct Actor {
     threads: HashMap<String, Thread>,
     by_active: HashMap<String, String>,
     focused: Option<String>,
+    watchers: HashMap<String, u32>,
     heads: HashMap<String, GitHead>,
     models: Vec<ModelOption>,
     models_waiting: Vec<Option<(String, String)>>,
@@ -819,7 +940,10 @@ impl Actor {
                         self.stop(&done).await;
                         return;
                     }
-                    Some(command) => self.handle(command).await,
+                    Some(command) => {
+                        self.backlog.change(&command, false);
+                        self.handle(command).await;
+                    }
                     None => return,
                 },
                 event = next_event(&mut events) => if let Some(event) = event {
@@ -881,9 +1005,9 @@ impl Actor {
         self.refresh_saved().await;
         let mut reopen: Vec<String> =
             self.threads.iter().filter(|(_, thread)| thread.reopen).map(|(id, _)| id.clone()).collect();
-        if let Some(focused) = self.focused.clone() {
-            if !reopen.contains(&focused) {
-                reopen.push(focused);
+        for watched in self.watched_ids() {
+            if !reopen.contains(&watched) {
+                reopen.push(watched);
             }
         }
         for id in reopen {
@@ -924,8 +1048,10 @@ impl Actor {
             thread.stopping = None;
             thread.run_started_at = None;
         }
-        if let Some(focused) = self.focused.clone().filter(|focused| self.harness(focused).is_none()) {
-            self.mailbox.push(Update::Approvals { thread: focused, approvals: Vec::new() });
+        let cleared: Vec<String> =
+            self.watched_ids().into_iter().filter(|watched| self.harness(watched).is_none()).collect();
+        for watched in cleared {
+            self.mailbox.push(Update::Approvals { thread: watched, approvals: Vec::new() });
         }
         self.mailbox
             .push(Update::Connection { state: Connection::Lost { reason: "The Eukhe daemon stopped.".to_string() } });
@@ -989,7 +1115,7 @@ impl Actor {
                 .map(|(id, _)| id.clone())
                 .collect();
             for thread in unsure {
-                self.itself.send(Command::Verify { thread, attempt: 0, relink: false }).ok();
+                self.itself.send(Command::Verify { thread, attempt: 0, relink: false });
             }
         }
         self.dirty = true;
@@ -1058,6 +1184,8 @@ impl Actor {
                 self.projects_changed();
             }
             Command::SelectThread { thread } => self.select(thread).await,
+            Command::WatchThread { thread } => self.watch(&thread).await,
+            Command::UnwatchThread { thread } => self.unwatch(&thread).await,
             Command::StartThread { draft, project, prompt, settings } => {
                 self.start_thread(&draft, project, prompt, settings, None).await;
             }
@@ -1379,6 +1507,47 @@ impl Actor {
         }
     }
 
+    fn watched(&self, id: &str) -> bool {
+        self.focused.as_deref() == Some(id) || self.watchers.contains_key(id)
+    }
+
+    fn watched_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.focused.iter().cloned().collect();
+        ids.extend(self.watchers.keys().filter(|id| self.focused.as_ref() != Some(*id)).cloned());
+        ids
+    }
+
+    async fn watch(&mut self, id: &str) {
+        *self.watchers.entry(id.to_string()).or_default() += 1;
+        if self.client.is_none() {
+            return;
+        }
+        if !self.known(id) {
+            self.mailbox.notice(NoticeLevel::Error, format!("Unknown thread {id}."));
+            return;
+        }
+        self.open_watched(id).await;
+    }
+
+    async fn open_watched(&mut self, id: &str) {
+        match self.ensure_open(id).await {
+            Ok(_) => {
+                self.emit_focus(id);
+                self.refresh_subagents(id).await;
+            }
+            Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
+        }
+    }
+
+    async fn unwatch(&mut self, id: &str) {
+        let Some(count) = self.watchers.get_mut(id) else { return };
+        *count -= 1;
+        if *count == 0 {
+            self.watchers.remove(id);
+            self.release(id).await;
+        }
+    }
+
     fn emit_focus(&self, id: &str) {
         let Some(live) = self.threads.get(id).and_then(|thread| thread.live.as_ref()) else { return };
         if let Some(info) = self.info(id) {
@@ -1393,7 +1562,7 @@ impl Actor {
     }
 
     fn emit_info(&self, id: &str) {
-        if self.focused.as_deref() != Some(id) {
+        if !self.watched(id) {
             return;
         }
         if let Some(info) = self.info(id) {
@@ -1575,7 +1744,7 @@ impl Actor {
         }
         self.fetch_entries(id, false).await;
         self.settle_pending(id);
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             self.emit_focus(id);
         }
         self.dirty = true;
@@ -1611,10 +1780,10 @@ impl Actor {
                     .collect()
             })
             .unwrap_or_default();
-        let focused = self.focused.as_deref() == Some(id);
+        let watched = self.watched(id);
         let Some(live) = self.threads.get_mut(id).and_then(|thread| thread.live.as_mut()) else { return };
         let ops = live.transcript.set_entries(&entries);
-        if emit && focused {
+        if emit && watched {
             for op in ops {
                 self.mailbox.push(Update::Transcript { thread: id.to_string(), op });
             }
@@ -1622,7 +1791,7 @@ impl Actor {
     }
 
     async fn release(&mut self, id: &str) {
-        if self.focused.as_deref() == Some(id) || self.harness(id).is_some() {
+        if self.watched(id) || self.harness(id).is_some() {
             return;
         }
         let Some(thread) = self.threads.get(id) else { return };
@@ -2207,6 +2376,7 @@ impl Actor {
                 if self.focused.as_deref() == Some(id) {
                     self.focused = None;
                 }
+                self.watchers.remove(id);
                 self.dirty = true;
             }
             Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
@@ -2378,7 +2548,7 @@ impl Actor {
             live.transcript.take_settled();
         }
         self.fetch_entries(id, false).await;
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             if let Some(live) = self.threads.get(id).and_then(|thread| thread.live.as_ref()) {
                 self.mailbox.push(Update::Transcript {
                     thread: id.to_string(),
@@ -2593,7 +2763,7 @@ impl Actor {
         let itself = self.itself.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            itself.send(command).ok();
+            itself.send(command);
         });
     }
 
@@ -2617,7 +2787,7 @@ impl Actor {
     }
 
     fn forget_run(&mut self, id: &str) {
-        let info = if self.focused.as_deref() == Some(id) { self.info(id) } else { None };
+        let info = if self.watched(id) { self.info(id) } else { None };
         if let Some(thread) = self.threads.get_mut(id) {
             if let Some(live) = thread.live.take() {
                 self.by_active.remove(&live.active);
@@ -2641,7 +2811,7 @@ impl Actor {
     }
 
     async fn reopen_focused(&mut self, id: &str) {
-        if self.focused.as_deref() != Some(id) || (self.client.is_none() && self.harness(id).is_none()) {
+        if !self.watched(id) || (self.client.is_none() && self.harness(id).is_none()) {
             return;
         }
         if let Err(error) = self.ensure_open(id).await {
@@ -2802,7 +2972,7 @@ impl Actor {
             Ok(_) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string() }),
             Err(error) => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("Eukhe did not take the stop request: {error}"));
-                self.itself.send(Command::StopCheck { thread: id.to_string() }).ok();
+                self.itself.send(Command::StopCheck { thread: id.to_string() });
             }
         }
     }
@@ -3047,6 +3217,14 @@ impl Actor {
                     thread.title = None;
                 }
                 self.dirty = true;
+                let waiting: Vec<String> = self
+                    .watched_ids()
+                    .into_iter()
+                    .filter(|id| self.known(id) && self.live_active(id).is_none())
+                    .collect();
+                for id in waiting {
+                    self.open_watched(&id).await;
+                }
             }
             Err(error) => self.mailbox.notice(NoticeLevel::Error, format!("Could not list the threads: {error}")),
         }
@@ -3123,7 +3301,7 @@ impl Actor {
             if attached && restarted {
                 self.later(RELINK_DELAY, Command::Verify { thread: id.clone(), attempt: 0, relink: true });
             } else if unsure && (idle || moved) {
-                self.itself.send(Command::Verify { thread: id.clone(), attempt: 0, relink: moved }).ok();
+                self.itself.send(Command::Verify { thread: id.clone(), attempt: 0, relink: moved });
             }
             if stopped && !self.running(&id) {
                 if let Some(thread) = self.threads.get_mut(&id) {
@@ -3136,8 +3314,8 @@ impl Actor {
         }
         self.push_daemon();
         if children_changed || children_before != self.children.len() {
-            if let Some(focused) = self.focused.clone() {
-                self.emit_subagents(&focused);
+            for watched in self.watched_ids() {
+                self.emit_subagents(&watched);
             }
         }
         self.dirty = true;
@@ -3189,7 +3367,7 @@ impl Actor {
                     thread.pending_run = false;
                     thread.run_started_at = None;
                 }
-                if self.focused.as_deref() == Some(id.as_str()) {
+                if self.watched(&id) {
                     self.mailbox.push(Update::Approvals { thread: id.clone(), approvals: Vec::new() });
                     if reason != "replaced" {
                         self.mailbox.notice(NoticeLevel::Info, format!("The thread's session closed ({reason})."));
@@ -3261,7 +3439,7 @@ impl Actor {
             let thread = id.to_string();
             tokio::spawn(async move {
                 let result = text.one_shot(prompt, Some(provider), Some(model)).await;
-                itself.send(Command::TitleGenerated { thread, result }).ok();
+                itself.send(Command::TitleGenerated { thread, result });
             });
             return Ok(());
         }
@@ -3318,7 +3496,7 @@ impl Actor {
 
     async fn apply_event(&mut self, id: &str, event: &SessionEvent, sequence: u64) {
         let id = id.to_string();
-        let focused = self.focused.as_deref() == Some(id.as_str());
+        let watched = self.watched(&id);
         let now = now_ms();
         let mode = self.settings.borrow().response_streaming;
         let Some(thread) = self.threads.get_mut(&id) else { return };
@@ -3329,7 +3507,7 @@ impl Actor {
             }
             live.seen = sequence;
         }
-        let ops: Vec<TranscriptOp> = if focused {
+        let ops: Vec<TranscriptOp> = if watched {
             live.transcript.apply(event).into_iter().filter_map(|op| coalesce(mode, &mut live.shown, op)).collect()
         } else {
             live.transcript.apply(event);
@@ -3424,7 +3602,7 @@ impl Actor {
             self.save();
         }
         self.reload_context(id).await;
-        if self.focused.as_deref() == Some(id) {
+        if self.watched(id) {
             self.refresh_subagents(id).await;
         }
         if self.harness(id).is_none() {

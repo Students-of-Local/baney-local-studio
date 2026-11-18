@@ -237,7 +237,7 @@ impl Actor {
             Ok(()) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string() }),
             Err(error) => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("The stop request did not go through: {error}"));
-                self.itself.send(Command::StopCheck { thread: id.to_string() }).ok();
+                self.itself.send(Command::StopCheck { thread: id.to_string() });
             }
         }
     }
@@ -519,7 +519,7 @@ impl Actor {
         let itself = self.itself.clone();
         tokio::spawn(async move {
             if let Ok(models) = harness::codex_models().await {
-                itself.send(Command::HarnessModels { models }).ok();
+                itself.send(Command::HarnessModels { models });
             }
         });
     }

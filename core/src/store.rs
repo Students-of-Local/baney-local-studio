@@ -165,7 +165,7 @@ impl Store {
     }
 }
 
-pub(crate) fn data_dir(explicit: Option<&str>) -> Result<PathBuf, String> {
+pub fn data_dir(explicit: Option<&str>) -> Result<PathBuf, String> {
     if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(explicit));
     }

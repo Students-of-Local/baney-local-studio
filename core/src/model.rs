@@ -5,6 +5,7 @@ use crate::workspace::model::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ModelRef {
     pub provider: String,
@@ -14,6 +15,7 @@ pub struct ModelRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ContextUsage {
     pub tokens: u64,
@@ -32,6 +34,7 @@ pub enum AccessMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Project {
     pub id: String,
@@ -42,6 +45,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Shelf {
     Pinned,
@@ -52,6 +56,7 @@ pub enum Shelf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ThreadStatus {
     Idle,
@@ -74,6 +79,7 @@ pub enum Harness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ThreadRow {
@@ -103,6 +109,7 @@ pub struct ThreadRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ThreadSearchHit {
     pub thread: String,
@@ -112,6 +119,7 @@ pub struct ThreadSearchHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ThreadInfo {
     pub thread: String,
@@ -137,6 +145,7 @@ pub struct ThreadInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct QueuedMessage {
     pub id: String,
@@ -153,6 +162,7 @@ pub struct ModelKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SlashCommand {
     pub name: String,
@@ -162,6 +172,7 @@ pub struct SlashCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum NotificationKind {
     TurnDone,
@@ -170,13 +181,16 @@ pub enum NotificationKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ImageAttachment {
     pub mime_type: String,
+    #[cfg_attr(feature = "wire", serde(with = "crate::wire::bytes"))]
     pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PromptDraft {
     pub text: String,
@@ -185,6 +199,7 @@ pub struct PromptDraft {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Delivery {
     Queue,
@@ -193,6 +208,11 @@ pub enum Delivery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum WorktreeChoice {
     Local,
@@ -202,6 +222,7 @@ pub enum WorktreeChoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ThreadSettings {
     pub provider: Option<String>,
@@ -212,6 +233,7 @@ pub struct ThreadSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum CommandKind {
     Command,
@@ -221,6 +243,7 @@ pub enum CommandKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SkillSource {
     App,
@@ -231,6 +254,7 @@ pub enum SkillSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SkillEntry {
     pub name: String,
@@ -240,6 +264,7 @@ pub struct SkillEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Subagent {
     pub id: String,
@@ -256,6 +281,7 @@ pub struct Subagent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Goal {
     pub objective: String,
@@ -267,6 +293,7 @@ pub struct Goal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ApprovalAnswer {
     Approve,
@@ -275,6 +302,11 @@ pub enum ApprovalAnswer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Block {
     Text { text: String },
@@ -282,6 +314,7 @@ pub enum Block {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ToolState {
     Pending,
@@ -292,6 +325,7 @@ pub enum ToolState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ToolKind {
     Read,
@@ -304,15 +338,18 @@ pub enum ToolKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ImageThumbnail {
     pub mime_type: String,
+    #[cfg_attr(feature = "wire", serde(with = "crate::wire::bytes"))]
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct FileChange {
     pub path: String,
@@ -322,6 +359,7 @@ pub struct FileChange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum NoticeLevel {
     Info,
@@ -330,6 +368,11 @@ pub enum NoticeLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ItemKind {
     User {
@@ -372,6 +415,7 @@ pub enum ItemKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Item {
     pub id: u64,
@@ -381,6 +425,11 @@ pub struct Item {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum TranscriptOp {
     Reset { items: Vec<Item> },
@@ -389,6 +438,7 @@ pub enum TranscriptOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Approval {
     pub request_id: String,
@@ -399,6 +449,7 @@ pub struct Approval {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ModelOption {
     pub provider: String,
@@ -412,6 +463,11 @@ pub struct ModelOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Connection {
     Connecting,
@@ -420,6 +476,7 @@ pub enum Connection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DaemonMismatch {
     pub daemon_version: String,
@@ -429,53 +486,204 @@ pub struct DaemonMismatch {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 #[allow(clippy::large_enum_variant)]
 pub enum Update {
-    Connection { state: Connection },
-    Projects { projects: Vec<Project> },
-    Threads { threads: Vec<ThreadRow> },
-    ArchivedThreads { request: String, threads: Vec<ThreadRow> },
-    ThreadSearch { request: String, hits: Vec<ThreadSearchHit> },
-    ThreadStarted { draft: String, thread: String },
-    Thread { thread: String, info: ThreadInfo },
-    Transcript { thread: String, op: TranscriptOp },
-    Approvals { thread: String, approvals: Vec<Approval> },
-    Queue { thread: String, queued: Vec<QueuedMessage> },
-    ComposerText { thread: String, text: String },
-    Models { models: Vec<ModelOption>, favorites: Vec<ModelKey>, hidden: Vec<ModelKey> },
-    DaemonDefault { model: Option<ModelKey>, thinking_level: Option<String> },
-    Commands { request: String, commands: Vec<SlashCommand> },
-    Skills { request: String, skills: Vec<SkillEntry> },
-    Subagents { thread: String, agents: Vec<Subagent> },
-    MessageImage { request: String, mime_type: String, data: Vec<u8> },
-    Notification { thread: String, kind: NotificationKind, title: String, body: String },
-    GitStatus { project: String, status: GitStatus },
-    Branches { request: String, branches: Vec<Branch>, total: u32 },
-    Diff { request: String, files: Vec<FileDiff> },
-    Files { request: String, entries: Vec<FileEntry> },
-    FileContent { request: String, path: String, content: FileContent },
-    SearchResults { request: String, results: Vec<SearchHit> },
-    PullRequests { request: String, pulls: Vec<PullRequest> },
-    PullRequestDetail { request: String, detail: PullRequestDetail },
-    Devices { request: String, devices: Vec<Device> },
-    TerminalOpened { request: String, terminal: String },
-    TerminalFrame { terminal: String, frame: TerminalFrame },
-    TerminalText { request: String, terminal: String, text: String },
-    TerminalExited { terminal: String, code: Option<i32> },
-    Usage { request: String, report: UsageReport },
-    Local { request: String, snapshot: LocalSnapshot },
-    LocalDashboard { dashboard: LocalDashboard },
-    Providers { providers: Vec<ProviderStatus>, engines: Vec<LocalEngine>, errors: Vec<String> },
-    ProviderModels { request: String, base_url: String, models: Vec<ProviderModel> },
-    Settings { settings: Settings },
-    Keybindings { bindings: Vec<Keybinding> },
-    ProjectScripts { project: String, scripts: Vec<ProjectScript> },
-    ProjectSettings { project: String, settings: ProjectSettings, effective: Settings },
-    WorktreeSetup { thread: String, stages: Vec<SetupStage>, done: bool, error: Option<String> },
-    Daemon { socket: String, version: Option<String>, pid: Option<u32>, mismatch: Option<DaemonMismatch> },
-    Kernel { state: KernelState },
-    RequestDone { request: String, message: String },
-    RequestFailed { request: String, message: String },
-    Notice { level: NoticeLevel, text: String },
+    Connection {
+        state: Connection,
+    },
+    Projects {
+        projects: Vec<Project>,
+    },
+    Threads {
+        threads: Vec<ThreadRow>,
+    },
+    ArchivedThreads {
+        request: String,
+        threads: Vec<ThreadRow>,
+    },
+    ThreadSearch {
+        request: String,
+        hits: Vec<ThreadSearchHit>,
+    },
+    ThreadStarted {
+        draft: String,
+        thread: String,
+    },
+    Thread {
+        thread: String,
+        info: ThreadInfo,
+    },
+    Transcript {
+        thread: String,
+        op: TranscriptOp,
+    },
+    Approvals {
+        thread: String,
+        approvals: Vec<Approval>,
+    },
+    Queue {
+        thread: String,
+        queued: Vec<QueuedMessage>,
+    },
+    ComposerText {
+        thread: String,
+        text: String,
+    },
+    Models {
+        models: Vec<ModelOption>,
+        favorites: Vec<ModelKey>,
+        hidden: Vec<ModelKey>,
+    },
+    DaemonDefault {
+        model: Option<ModelKey>,
+        thinking_level: Option<String>,
+    },
+    Commands {
+        request: String,
+        commands: Vec<SlashCommand>,
+    },
+    Skills {
+        request: String,
+        skills: Vec<SkillEntry>,
+    },
+    Subagents {
+        thread: String,
+        agents: Vec<Subagent>,
+    },
+    MessageImage {
+        request: String,
+        mime_type: String,
+        #[cfg_attr(feature = "wire", serde(with = "crate::wire::bytes"))]
+        data: Vec<u8>,
+    },
+    Notification {
+        thread: String,
+        kind: NotificationKind,
+        title: String,
+        body: String,
+    },
+    GitStatus {
+        project: String,
+        status: GitStatus,
+    },
+    Branches {
+        request: String,
+        branches: Vec<Branch>,
+        total: u32,
+    },
+    Diff {
+        request: String,
+        files: Vec<FileDiff>,
+    },
+    Files {
+        request: String,
+        entries: Vec<FileEntry>,
+    },
+    FileContent {
+        request: String,
+        path: String,
+        content: FileContent,
+    },
+    SearchResults {
+        request: String,
+        results: Vec<SearchHit>,
+    },
+    PullRequests {
+        request: String,
+        pulls: Vec<PullRequest>,
+    },
+    PullRequestDetail {
+        request: String,
+        detail: PullRequestDetail,
+    },
+    Devices {
+        request: String,
+        devices: Vec<Device>,
+    },
+    TerminalOpened {
+        request: String,
+        terminal: String,
+    },
+    TerminalFrame {
+        terminal: String,
+        frame: TerminalFrame,
+    },
+    TerminalText {
+        request: String,
+        terminal: String,
+        text: String,
+    },
+    TerminalExited {
+        terminal: String,
+        code: Option<i32>,
+    },
+    Usage {
+        request: String,
+        report: UsageReport,
+    },
+    Local {
+        request: String,
+        snapshot: LocalSnapshot,
+    },
+    LocalDashboard {
+        dashboard: LocalDashboard,
+    },
+    Providers {
+        providers: Vec<ProviderStatus>,
+        engines: Vec<LocalEngine>,
+        errors: Vec<String>,
+    },
+    ProviderModels {
+        request: String,
+        base_url: String,
+        models: Vec<ProviderModel>,
+    },
+    Settings {
+        settings: Settings,
+    },
+    Keybindings {
+        bindings: Vec<Keybinding>,
+    },
+    ProjectScripts {
+        project: String,
+        scripts: Vec<ProjectScript>,
+    },
+    ProjectSettings {
+        project: String,
+        settings: ProjectSettings,
+        effective: Settings,
+    },
+    WorktreeSetup {
+        thread: String,
+        stages: Vec<SetupStage>,
+        done: bool,
+        error: Option<String>,
+    },
+    Daemon {
+        socket: String,
+        version: Option<String>,
+        pid: Option<u32>,
+        mismatch: Option<DaemonMismatch>,
+    },
+    Kernel {
+        state: KernelState,
+    },
+    RequestDone {
+        request: String,
+        message: String,
+    },
+    RequestFailed {
+        request: String,
+        message: String,
+    },
+    Notice {
+        level: NoticeLevel,
+        text: String,
+    },
 }

@@ -8,6 +8,7 @@ description = "Shared Local Studio logic: the Eukhe daemon client, session model
 
 [features]
 ffi = ["dep:uniffi"]
+wire = []
 
 [dependencies]
 eukhe-client.workspace = true
