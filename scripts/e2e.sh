@@ -9,7 +9,7 @@ command -v "${NU:-nu}" > /dev/null || { echo "nu is not on PATH; set NU to its p
 command -v bun > /dev/null || { echo "bun is not on PATH; local_smoke needs it" >&2; exit 2; }
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
-examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke stuck_smoke providers_smoke local_smoke plugin_smoke)
+examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke stuck_smoke providers_smoke local_smoke plugin_smoke harness_claude_smoke harness_codex_smoke)
 helpers=(provider_stub)
 post=
 [ "${1:-}" = --post ] && post=1 && shift
