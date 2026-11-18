@@ -635,7 +635,7 @@ enum ConversationFixtures {
             busy: busy, runStartedAt: busy ? Int64(Date.now.timeIntervalSince1970 * 1_000) - 12_400 : nil,
             compacting: false, retryAttempt: 0, queued: 0,
             context: ContextUsage(tokens: 57_600, window: 200_000), branch: nil, worktree: nil,
-            serviceTier: nil, serviceTiers: [], goal: nil
+            serviceTier: nil, serviceTiers: [], goal: nil, harness: .eukhe
         )
     }
 
