@@ -30,6 +30,9 @@ final class RemoteSmoke: XCTestCase {
         }
 
         app.navigationBars.buttons.element(boundBy: 0).tap()
+        if fake {
+            try awayApproval(app)
+        }
         expectLabel(app, "cache-state", "cache saved", timeout: 10)
         let fresh = timings(app)
         app.terminate()
@@ -118,6 +121,34 @@ final class RemoteSmoke: XCTestCase {
         expectLabel(app, "transcript-window", "60 earlier · 200 loaded", timeout: 10)
         element(app, "load-earlier").tap()
         expectLabel(app, "transcript-window", "0 earlier · 260 loaded", timeout: 10)
+    }
+
+    /// docs/remote.md, Session: while the phone has no socket its buffer takes global updates too, so a
+    /// `delta` resume shows an approval raised on a thread it never watched.
+    @MainActor
+    private func awayApproval(_ app: XCUIApplication) throws {
+        _ = try hook("away?thread=t3", method: "POST")
+        expectLabel(app, "last-notification", "needs_approval: Settled work", timeout: 30)
+        expectLabel(app, "link-state", "link live")
+        let resume = try JSONSerialization.jsonObject(with: try hook("last-resume", method: "GET")) as? [String: Any]
+        XCTAssertEqual(resume?["resume"] as? String, "delta", "the reconnect after the drop was not a delta resume")
+    }
+
+    private func hook(_ path: String, method: String) throws -> Data {
+        let socket = try XCTUnwrap(environment["LOCAL_STUDIO_REMOTE_URL"].flatMap(URLComponents.init(string:)))
+        let url = try XCTUnwrap(URL(string: "http://\(socket.host ?? "127.0.0.1"):\(socket.port ?? 80)/v1/smoke/\(path)"))
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        let done = expectation(description: "fake-studio \(path)")
+        nonisolated(unsafe) var body: Data?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
+                body = data
+            }
+            done.fulfill()
+        }.resume()
+        wait(for: [done], timeout: 10)
+        return try XCTUnwrap(body, "fake-studio refused \(path)")
     }
 
     @MainActor

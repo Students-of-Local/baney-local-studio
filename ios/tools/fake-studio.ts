@@ -22,6 +22,8 @@ const windowLimit = 200;
 const pageLimit = 500;
 const pendingLimit = 64;
 const busyOnceAfter = Number(flag("busy-once-after", "-1"));
+const smokeHooks = Bun.argv.includes("--smoke-hooks");
+let lastResume = "";
 const bufferLimit = 2000;
 const bufferMs = 10 * 60 * 1000;
 const maxChunk = 65_535 - 16 - 1;
@@ -554,6 +556,8 @@ function hello(ws: ServerWebSocket<Conn>, device: Device, frame: Json): void {
     typeof resume.seq === "number" &&
     resume.seq <= device.seq &&
     resume.seq >= oldestBuffered - 1;
+  lastResume = delta ? "delta" : "snapshot";
+  console.log(`hello ${device.name} ${lastResume}`);
   device.ws?.close(4409, "replaced by a newer socket");
   device.ws = ws;
   ws.data.ready = true;
@@ -649,6 +653,21 @@ const server = Bun.serve<Conn>({
     const url = new URL(request.url);
     if (url.pathname === "/v1/health") {
       return Response.json({ ok: true, protocol: newest, min_protocol: oldest });
+    }
+    if (smokeHooks && url.pathname === "/v1/smoke/away" && request.method === "POST") {
+      const thread = url.searchParams.get("thread") ?? "t3";
+      if (!threads.has(thread)) return new Response("unknown thread", { status: 404 });
+      for (const device of devices.values()) {
+        const socket = device.ws;
+        device.ws = undefined;
+        socket?.close(1001, "the fake drops the socket (--smoke-hooks)");
+      }
+      broadcast({ type: "notification", thread, kind: "needs_approval", title: String(threads.get(thread)!.title), body: "raised while the phone was away" });
+      console.log(`raised needs_approval on ${thread} with no socket`);
+      return Response.json({ ok: true });
+    }
+    if (smokeHooks && url.pathname === "/v1/smoke/last-resume") {
+      return Response.json({ resume: lastResume });
     }
     if (url.pathname !== "/v1/ws") {
       return new Response("not found", { status: 404 });
