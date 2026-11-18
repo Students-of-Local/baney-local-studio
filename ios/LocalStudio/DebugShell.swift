@@ -15,7 +15,7 @@ struct RootView: View {
         NavigationStack {
             List {
                 if studio.machines.isEmpty {
-                    Text("No machines. Pair one with a localstudio:// link.")
+                    Text("No machines. Tap Pair and scan the code your computer shows.")
                 }
                 ForEach(studio.machines) { machine in
                     MachineSection(machine: machine)
@@ -67,6 +67,13 @@ struct MachineSection: View {
                     .font(.caption)
                     .accessibilityIdentifier("sends-waiting")
             }
+            ForEach(machine.unconfirmedSends.keys.sorted(), id: \.self) { request in
+                HStack {
+                    Text("not confirmed after the machine restarted").font(.caption)
+                    Button("Resend") { machine.resend(request) }
+                        .accessibilityIdentifier("resend-\(request)")
+                }
+            }
             if let error = machine.lastError {
                 Text(error).foregroundStyle(.red).accessibilityIdentifier("machine-error")
             }
@@ -86,16 +93,38 @@ struct PairSheet: View {
     let studio: StudioModel
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
+    @State private var scanned: String?
+
+    private var link: PairingLink? { PairingLink(string: text, scheme: Channel.pairScheme) }
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("localstudio://pair?url=...&id=...#secret", text: $text, axis: .vertical)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("pair-link")
-                if !text.isEmpty && PairingLink(string: text) == nil {
-                    Text("Not a pairing link").foregroundStyle(.red)
+                if PairScanner.available {
+                    Section("Scan the code on your computer") {
+                        PairScanner { code in
+                            guard let found = PairingLink(string: code, scheme: Channel.pairScheme) else {
+                                scanned = code
+                                return
+                            }
+                            studio.pair(found)
+                            dismiss()
+                        }
+                        .frame(height: 320)
+                        .listRowInsets(EdgeInsets())
+                        if scanned != nil {
+                            Text("That code is not a \(Channel.pairScheme) pairing code").foregroundStyle(.red)
+                        }
+                    }
+                }
+                Section("Or paste the pairing link") {
+                    TextField("\(Channel.pairScheme)://pair?url=...&id=...#secret", text: $text, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("pair-link")
+                    if !text.isEmpty && link == nil {
+                        Text("Not a \(Channel.pairScheme) pairing link").foregroundStyle(.red)
+                    }
                 }
             }
             .navigationTitle("Pair a machine")
@@ -105,12 +134,12 @@ struct PairSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Pair") {
-                        if let link = PairingLink(string: text) {
+                        if let link {
                             studio.pair(link)
                             dismiss()
                         }
                     }
-                    .disabled(PairingLink(string: text) == nil)
+                    .disabled(link == nil)
                     .accessibilityIdentifier("pair-confirm")
                 }
             }

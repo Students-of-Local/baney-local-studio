@@ -18,6 +18,15 @@ public struct PairingLink: Sendable, Hashable {
         self.secret = secret
     }
 
+    /// A link scanned or pasted into the app with the scheme `scheme`; any other channel's scheme
+    /// is refused, so each channel's app pairs only with its own desktop channel.
+    public init?(string: String, scheme expected: String) {
+        guard let link = PairingLink(string: string), link.scheme == expected.lowercased() else {
+            return nil
+        }
+        self = link
+    }
+
     public init?(string: String) {
         guard let link = URL(string: string.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             return nil

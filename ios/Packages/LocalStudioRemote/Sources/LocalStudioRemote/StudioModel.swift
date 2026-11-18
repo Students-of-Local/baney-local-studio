@@ -7,8 +7,10 @@ public struct StudioEnvironment: Sendable {
     public var keychainService: String
     public var device: DeviceProfile
     public var connectDelay: Duration
+    public var passThrough: Bool
 
-    public init(directory: URL, keychainService: String, device: DeviceProfile, connectDelay: Duration = .zero) {
+    public init(directory: URL, keychainService: String, device: DeviceProfile, connectDelay: Duration = .zero, passThrough: Bool = false) {
+        self.passThrough = passThrough
         self.directory = directory
         self.keychainService = keychainService
         self.device = device
@@ -137,6 +139,8 @@ public final class MachineModel: Identifiable {
     public private(set) var lastError: String?
     public private(set) var pendingSends: [String: String] = [:]
     public private(set) var waitingSends: [String: String] = [:]
+    /// Sends from an earlier server epoch with no acknowledgement, by request id to thread.
+    public private(set) var unconfirmedSends: [String: String] = [:]
     public private(set) var duplicateSends = 0
     public private(set) var cacheSaved = false
     public private(set) var lastSeq: UInt64 = 0
@@ -158,6 +162,7 @@ public final class MachineModel: Identifiable {
             config: config,
             credentials: studio.credentials,
             outbox: Outbox(file: CacheStore.outboxFile(in: environment.directory, machine: record.id)),
+            channel: environment.passThrough ? PassThroughChannel() : NoiseChannel(),
             pairing: pairing
         )
         if let cached {
@@ -230,6 +235,14 @@ public final class MachineModel: Identifiable {
             let request = await remote.send(thread, prompt: PromptDraft(text: trimmed), delivery: delivery)
             self.pendingSends[request] = thread
         }
+    }
+
+    public func resend(_ request: String) {
+        guard unconfirmedSends.removeValue(forKey: request) != nil else {
+            return
+        }
+        let remote = remote
+        Task { await remote.resend(request) }
     }
 
     public func answer(_ approval: Approval, thread: String, answer: ApprovalAnswer) {
@@ -310,6 +323,8 @@ public final class MachineModel: Identifiable {
             }
         case let .sendWaiting(request, reason, _):
             waitingSends[request] = reason
+        case let .sendUnconfirmed(request):
+            unconfirmedSends[request] = pendingSends[request] ?? ""
         case let .sendRejected(request, message):
             pendingSends.removeValue(forKey: request)
             waitingSends.removeValue(forKey: request)

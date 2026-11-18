@@ -355,7 +355,8 @@ function enqueue(thread: string, text: string, request: string, steering: boolea
 
 type Failure = { code: string; message: string };
 type Answer = { result: Json };
-type Handler = (device: Device, args: Json) => Failure | Answer | string | undefined;
+type Duplicate = { duplicate: true };
+type Handler = (device: Device, args: Json) => Failure | Answer | Duplicate | string | undefined;
 
 function pendingPrompts(): number {
   let total = 0;
@@ -391,7 +392,7 @@ const handlers: Record<string, Handler> = {
     const prompt = args.prompt as { text?: string } | undefined;
     if (!threads.has(thread)) return "unknown thread";
     if (typeof prompt?.text !== "string") return "missing prompt";
-    if (accepted.has(request)) return { result: { duplicate: true } };
+    if (accepted.has(request)) return { duplicate: true };
     sendCount += 1;
     if (sendCount === busyOnceAfter + 1) {
       console.log(`answered busy once to ${request}`);
@@ -475,18 +476,18 @@ function fail(ws: ServerWebSocket<Conn>, code: number, reason: string): void {
 }
 
 function header(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
-  if (typeof raw !== "string") return fail(ws, 4400, "the opening header must be text");
+  if (typeof raw !== "string") return fail(ws, 1002, "the opening header must be text");
   let frame: Json;
   try {
     frame = JSON.parse(raw);
   } catch {
-    return fail(ws, 4400, "bad opening header");
+    return fail(ws, 1002, "bad opening header");
   }
   const clientNewest = Number(frame.protocol);
   const clientOldest = Number(frame.min_protocol ?? frame.protocol);
   if (frame.v !== 1 || !(clientOldest <= newest && oldest <= clientNewest)) {
     ws.sendText(JSON.stringify({ op: "incompatible", protocol: newest, min_protocol: oldest }));
-    ws.close(4426, "incompatible protocol");
+    ws.close(1002, "incompatible protocol");
     return;
   }
   ws.data.prologue = prologue + raw;
@@ -503,25 +504,26 @@ function header(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
     ws.data.phase = "known";
     return;
   }
-  fail(ws, 4400, "unknown pattern");
+  fail(ws, 1002, "unknown pattern");
 }
 
 function handshake(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
-  if (typeof raw === "string") return fail(ws, 4400, "text during the handshake");
+  if (typeof raw === "string") return fail(ws, 1002, "text during the handshake");
   if (ws.data.phase === "pair") {
     if (raw.length === 32) {
       ws.sendBinary(Buffer.concat([Buffer.from(crypto.getRandomValues(new Uint8Array(32))), Buffer.from(machineKey)]));
       return;
     }
-    if (raw.length < 33) return fail(ws, 4400, "short pairing message");
+    if (raw.length < 33) return fail(ws, 1002, "short pairing message");
     let record: Json;
     try {
       record = JSON.parse(raw.subarray(32).toString("utf8"));
     } catch {
-      return fail(ws, 4400, "bad device record");
+      return fail(ws, 1002, "bad device record");
     }
     const id = String(record.id ?? "");
-    if (!id) return fail(ws, 4400, "device record without id");
+    if (!id) return fail(ws, 1002, "device record without id");
+    if (devices.has(id)) return fail(ws, 4401, "a device with this id is already paired");
     secretBurned = true;
     const device: Device = {
       id,
@@ -537,7 +539,7 @@ function handshake(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
     console.log(`paired ${device.name} (${id})`);
     return;
   }
-  if (raw.length !== 32) return fail(ws, 4400, "bad KK message");
+  if (raw.length !== 32) return fail(ws, 1002, "bad KK message");
   ws.sendBinary(Buffer.from(crypto.getRandomValues(new Uint8Array(32))));
   ws.data.phase = "session";
 }
@@ -557,7 +559,7 @@ function hello(ws: ServerWebSocket<Conn>, device: Device, frame: Json): void {
   const before = new Set(device.watched);
   device.watched = new Set(watch);
   if (delta) {
-    send(ws, { op: "hello", protocol: ws.data.protocol, epoch, machine, resume: "delta", snapshot: [] });
+    send(ws, { op: "hello", protocol: ws.data.protocol, epoch, machine, resume: "delta", seq: Number(resume.seq), snapshot: [] });
     for (const entry of device.buffer) {
       if (entry.seq > Number(resume.seq)) {
         send(ws, { op: "update", seq: entry.seq, update: entry.body });
@@ -588,13 +590,13 @@ function hello(ws: ServerWebSocket<Conn>, device: Device, frame: Json): void {
 }
 
 function frame(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
-  if (typeof raw === "string" || raw.length === 0) return fail(ws, 4400, "records are binary");
+  if (typeof raw === "string" || raw.length === 0) return fail(ws, 1002, "records are binary");
   const kind = raw[0];
   if (kind === 0x03) return;
-  if (kind !== 0x01 && kind !== 0x02) return fail(ws, 4400, `unknown record ${kind}`);
+  if (kind !== 0x01 && kind !== 0x02) return fail(ws, 1002, `unknown record ${kind}`);
   ws.data.chunks.push(raw.subarray(1));
   const size = ws.data.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  if (size > maxFrame) return fail(ws, 4400, "frame over 8 MiB");
+  if (size > maxFrame) return fail(ws, 1002, "frame over 8 MiB");
   if (kind === 0x02) return;
   const joined = Buffer.concat(ws.data.chunks);
   ws.data.chunks = [];
@@ -602,17 +604,19 @@ function frame(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
   try {
     request = JSON.parse(joined.toString("utf8"));
   } catch {
-    return fail(ws, 4400, "bad frame");
+    return fail(ws, 1002, "bad frame");
   }
   const device = ws.data.device!;
   if (request.op === "hello") return hello(ws, device, request);
-  if (!ws.data.ready) return fail(ws, 4400, "hello first");
+  if (!ws.data.ready) return fail(ws, 1002, "hello first");
   const handler = handlers[String(request.op)];
-  const result: Failure | Answer | string | undefined = handler
+  const result: Failure | Answer | Duplicate | string | undefined = handler
     ? handler(device, (request.args as Json) ?? {})
     : { code: "not_remote", message: `${String(request.op)} is not a remote op` };
   if (result === undefined) {
     send(ws, { re: request.id, ok: true });
+  } else if (typeof result === "object" && "duplicate" in result) {
+    send(ws, { re: request.id, ok: true, duplicate: true });
   } else if (typeof result === "object" && "result" in result) {
     send(ws, { re: request.id, ok: true, result: result.result });
   } else {
@@ -667,6 +671,6 @@ const server = Bun.serve<Conn>({
   },
 });
 
-const link = `localstudio://pair?url=${encodeURIComponent(socketURL)}&name=${encodeURIComponent(machineName)}&id=${pairId}#${pairSecret}`;
+const link = `${flag("scheme", "localstudio-dev")}://pair?url=${encodeURIComponent(socketURL)}&name=${encodeURIComponent(machineName)}&id=${pairId}#${pairSecret}`;
 console.log(`fake-studio listening on ${socketURL} as ${machineName}, protocol ${oldest} to ${newest}, epoch ${epoch}`);
 console.log(`pairing link: ${link}`);
