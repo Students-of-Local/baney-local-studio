@@ -49,6 +49,7 @@ jobs:
           version: 0.117.0
       - run: scripts/check-channels.sh
       - run: scripts/tests/check-channels-test.sh
+      - run: scripts/tests/e2e-target-test.sh
       - name: Version strings sort local < dev < nightly < stable
         run: |
           set -euo pipefail

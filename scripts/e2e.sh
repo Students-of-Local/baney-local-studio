@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# e2e builds into its own target dir in this checkout, never a CARGO_TARGET_DIR shared with other
+# worktrees, so another build can't swap the examples between this build and the runs.
+target=$(git rev-parse --show-toplevel)/target/e2e
+[ "${1:-}" = --target ] && { echo "$target"; exit 0; }
 : "${LOCAL_STUDIO_SMOKE_AGENT:?set LOCAL_STUDIO_SMOKE_AGENT to the agent credentials dir (AGENTS.md)}"
 command -v "${NU:-nu}" > /dev/null || { echo "nu is not on PATH; set NU to its path" >&2; exit 2; }
-command -v jq > /dev/null || { echo "jq is not on PATH" >&2; exit 2; }
 command -v bun > /dev/null || { echo "bun is not on PATH; local_smoke needs it" >&2; exit 2; }
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
@@ -36,12 +39,14 @@ cleanup() {
 }
 trap cleanup EXIT
 eukhe=$(realpath "$("${NU:-nu}" -c 'use eukhe.nu; eukhe binary . target/eukhe')")
-# Always build from the checked commit, so a status never rests on examples from another commit.
-# cargo reports the real target dir, which honors CARGO_TARGET_DIR.
-cargo build -j3 -p local-studio-core --examples
-bin=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)/debug/examples
+# Always build from the checked commit, so a status never rests on examples from another commit,
+# then run copies from scratch.
+CARGO_TARGET_DIR=$target cargo build -j3 -p local-studio-core --examples
+bin=$scratch/bin
+mkdir -p "$bin"
 for example in "${examples[@]}" "${helpers[@]}"; do
-  [ -x "$bin/$example" ] || { echo "$bin/$example is missing; build the examples for $commit" >&2; exit 2; }
+  [ -x "$target/debug/examples/$example" ] || { echo "$target/debug/examples/$example is missing after the build" >&2; exit 2; }
+  cp "$target/debug/examples/$example" "$bin/"
 done
 status pending "core e2e running on $(hostname -s)"
 for example in "${examples[@]}"; do
