@@ -96,11 +96,13 @@ import Testing
     }
 
     func closeCode(_ socket: URLSessionWebSocketTask) async -> Int {
-        while (try? await socket.receive()) != nil {}
-        for _ in 0..<50 where socket.closeCode == .invalid {
-            try? await Task.sleep(for: .milliseconds(20))
+        let bound = Task {
+            try await Task.sleep(for: .seconds(5))
+            socket.cancel()
         }
-        return MachineConnection.closeCode(of: socket)
+        while (try? await socket.receive()) != nil {}
+        bound.cancel()
+        return await MachineConnection.settledCloseCode(of: socket)
     }
 
     func opened(_ socket: URLSessionWebSocketTask) async -> Bool {

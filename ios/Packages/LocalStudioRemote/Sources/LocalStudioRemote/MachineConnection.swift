@@ -348,7 +348,8 @@ public actor MachineConnection {
                 } catch {
                     reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 }
-                switch socket.map({ Self.closeCode(of: $0) }) {
+                let closed: Int? = if let socket { await Self.settledCloseCode(of: socket) } else { nil }
+                switch closed {
                 case Self.unpairedCloseCode:
                     unpaired = true
                 case Self.replacedCloseCode:
@@ -403,6 +404,14 @@ public actor MachineConnection {
         }
         let raw = Int(payload[payload.startIndex]) << 8 | Int(payload[payload.startIndex + 1])
         return (1000...4999).contains(raw) ? raw : code.rawValue
+    }
+
+    /// A failed `receive()` can return before URLSession sets the close code, so wait up to a second for it.
+    public static func settledCloseCode(of socket: URLSessionWebSocketTask) async -> Int {
+        for _ in 0..<50 where socket.closeCode == .invalid && socket.closeReason == nil {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return closeCode(of: socket)
     }
 
     public static func backoff(attempt: Int) -> Double {
