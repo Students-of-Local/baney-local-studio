@@ -2117,7 +2117,15 @@ async fn writer_abort(run: &Run, c_phone: &Phone) -> anyhow::Result<Client> {
         huge
     });
     std::fs::write(run.work.join("huge.txt"), &huge)?;
-    let baseline = fds();
+    let steady = || async {
+        let mut least = usize::MAX;
+        for _ in 0..13 {
+            least = least.min(fds());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        least
+    };
+    let baseline = steady().await;
     let Opened::Ready(mut socket, transport, _) =
         kk_handshake(run.serve.port, &Route::default(), &c_phone.id, &c_phone.private, &run.server_key).await?
     else {
@@ -2135,7 +2143,7 @@ async fn writer_abort(run: &Run, c_phone: &Phone) -> anyhow::Result<Client> {
         }
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let open = fds();
+    let open = steady().await;
     ensure!(open > baseline, "the unread socket holds no fd: {open} open against a baseline of {baseline}");
     socket.send(Message::binary(vec![0u8; 64])).await?;
     let sent = Instant::now();
