@@ -24,6 +24,7 @@ const pendingLimit = 64;
 const busyOnceAfter = Number(flag("busy-once-after", "-1"));
 const smokeHooks = Bun.argv.includes("--smoke-hooks");
 let lastResume = "";
+let hellos = 0;
 const bufferLimit = 2000;
 const bufferMs = 10 * 60 * 1000;
 const maxChunk = 65_535 - 16 - 1;
@@ -558,6 +559,7 @@ function hello(ws: ServerWebSocket<Conn>, device: Device, frame: Json): void {
     resume.seq >= oldestBuffered - 1;
   lastResume = delta ? "delta" : "snapshot";
   console.log(`hello ${device.name} ${lastResume}`);
+  hellos += 1;
   device.ws?.close(4409, "replaced by a newer socket");
   device.ws = ws;
   ws.data.ready = true;
@@ -668,6 +670,9 @@ const server = Bun.serve<Conn>({
     }
     if (smokeHooks && url.pathname === "/v1/smoke/last-resume") {
       return Response.json({ resume: lastResume });
+    }
+    if (smokeHooks && url.pathname === "/v1/smoke/hellos") {
+      return Response.json({ hellos });
     }
     if (url.pathname !== "/v1/ws") {
       return new Response("not found", { status: 404 });

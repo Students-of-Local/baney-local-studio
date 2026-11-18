@@ -25,6 +25,8 @@ final class RemoteSmoke: XCTestCase {
 
         if fake {
             try fakeConversation(app)
+            let hellos = try JSONSerialization.jsonObject(with: try hook("hellos", method: "GET")) as? [String: Any]
+            XCTAssertEqual(hellos?["hellos"] as? Int, 1, "the app reconnected during the conversation: an update it could not decode, such as needs_answer, dropped the socket")
         } else {
             try realConversation(app)
         }
