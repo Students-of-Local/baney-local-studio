@@ -13,6 +13,7 @@ mod store;
 mod studio;
 mod threads;
 mod transcript;
+pub mod tunnel;
 #[cfg(feature = "wire")]
 mod wire;
 mod workspace;
