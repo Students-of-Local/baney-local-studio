@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use local_studio_core::plugins::{self, Capability, Catalog, Consent, Grants, Plugin, Source};
+use local_studio_core::tunnel::{self, Ports, Status, Tunnel};
 
 const USAGE: &str = "usage: local-studio plugin validate <dir>
        local-studio plugin list
@@ -9,7 +10,11 @@ const USAGE: &str = "usage: local-studio plugin validate <dir>
        local-studio plugin grant <id> <capability...>
        local-studio plugin revoke <id> [capability...]
        local-studio plugin capabilities
-       local-studio plugin hash <dir> [excluded path...]";
+       local-studio plugin hash <dir> [excluded path...]
+       local-studio tunnel status [--json]
+       local-studio tunnel request [--serve <port>] [--mcp <port>]
+       local-studio tunnel up | down | release
+       local-studio tunnel byo";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,6 +35,28 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
+        ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), false),
+        ["tunnel", "status", "--json"] => run_tunnel(|t| Box::pin(t.status()), true),
+        ["tunnel", "request", flags @ ..] => request_ports(flags).and_then(|ports| {
+            run_tunnel(
+                move |t| {
+                    Box::pin(t.request(ports, option_env!("LOCAL_STUDIO_CHANNEL").unwrap_or("dev"), |url| {
+                        println!("Open this address and sign in with GitHub: {url}");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        open_browser(url);
+                    }))
+                },
+                false,
+            )
+        }),
+        ["tunnel", "up"] => {
+            let cloudflared =
+                std::env::var_os("LS_CLOUDFLARED").map_or_else(|| PathBuf::from("cloudflared"), PathBuf::from);
+            run_tunnel(move |t| Box::pin(async move { t.up(&cloudflared).await }), false)
+        }
+        ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), false),
+        ["tunnel", "release"] => run_tunnel(|t| Box::pin(t.release()), false),
+        ["tunnel", "byo"] => byo(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -190,4 +217,67 @@ fn revoke(id: &str, names: &[&str]) -> Result<(), String> {
         Err(_) => println!("{id}: grants revoked"),
     }
     sync(&root)
+}
+
+type TunnelCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Status, String>> + 'a>>;
+
+fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: bool) -> Result<(), String> {
+    let tunnel = Tunnel::open(None)?;
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+    let status = runtime.block_on(call(&tunnel))?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&status).map_err(|error| error.to_string())?);
+        return Ok(());
+    }
+    println!("{}: {}", status.state, status.message);
+    if let Some(position) = status.position {
+        println!("  place in line: {position}");
+    }
+    if let Some(mcp) = &status.mcp_url {
+        println!("  MCP address: {mcp}");
+    }
+    if let Some(ws) = &status.ws_url {
+        println!("  phone address: {ws}");
+    }
+    if let Some(at) = &status.release_at {
+        println!("  released on {at} if left down");
+    }
+    Ok(())
+}
+
+fn request_ports(flags: &[&str]) -> Result<Ports, String> {
+    let usage = "usage: local-studio tunnel request [--serve <port>] [--mcp <port>]";
+    let mut ports = tunnel::DEFAULT_PORTS;
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let value: u16 = rest.next().and_then(|value| value.parse().ok()).ok_or(usage)?;
+        match *flag {
+            "--serve" => ports.serve = value,
+            "--mcp" => ports.mcp = value,
+            _ => return Err(usage.to_string()),
+        }
+    }
+    Ok(ports)
+}
+
+fn open_browser(url: &str) {
+    if std::env::var_os("LS_TUNNEL_NO_BROWSER").is_some() {
+        return;
+    }
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+fn byo() -> Result<(), String> {
+    match std::process::Command::new("tychicus").args(["remote", "setup"]).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("tychicus remote setup exited with {status}")),
+        Err(_) => Err("Install the Tychicus plugin, then run: tychicus remote setup".to_string()),
+    }
 }
