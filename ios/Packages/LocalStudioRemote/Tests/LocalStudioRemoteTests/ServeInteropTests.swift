@@ -18,7 +18,7 @@ import Testing
         let socket = URLSession.shared.webSocketTask(with: url)
         socket.resume()
         let header = try FrameCodec.encode(OpeningHeader(role: role))
-        try await socket.send(.string(String(decoding: header, as: UTF8.self)))
+        try await socket.send(.string(try #require(String(bytes: header, encoding: .utf8))))
         let session = try await NoiseChannel().handshake(role, staticKey: staticKey, prologue: Data(remotePrologue.utf8) + header, over: SocketTransport(socket: socket))
         return Opened(session: session, socket: socket)
     }
