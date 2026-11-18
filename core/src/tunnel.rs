@@ -326,7 +326,7 @@ impl Tunnel {
 
     pub async fn up(&self, cloudflared: &Path) -> Result<Status, String> {
         let keys = self.keys(false)?.ok_or("No tunnel yet. Run local-studio tunnel request first.")?;
-        let _lock = UpLock::take(&self.dir)?;
+        let _lock = UpLock::take(&self.dir, false)?;
         let value = self.remote(&keys).await?;
         let status = self.status_from(&value, self.saved().ports.unwrap_or(DEFAULT_PORTS));
         self.settle(&status);
@@ -384,13 +384,16 @@ impl Tunnel {
     }
 
     pub async fn down(&self) -> Result<Status, String> {
+        let lock = UpLock::take(&self.dir, true)?;
         self.stop();
+        drop(lock);
         let _ = fs::remove_file(self.token_path());
         self.status().await
     }
 
     pub async fn release(&self) -> Result<Status, String> {
         let keys = self.keys(false)?.ok_or("No tunnel to release.")?;
+        let _lock = UpLock::take(&self.dir, true)?;
         self.stop();
         let _ = fs::remove_file(self.token_path());
         let (code, value) = self.call(&keys, "DELETE", "/v1/tunnel", None).await?;
@@ -550,42 +553,25 @@ impl Tunnel {
     }
 }
 
-struct UpLock(PathBuf);
+struct UpLock(#[allow(dead_code)] fs::File);
 
 impl UpLock {
-    fn take(dir: &Path) -> Result<Self, String> {
+    fn take(dir: &Path, wait: bool) -> Result<Self, String> {
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|error| error.to_string())?;
         let path = dir.join("up.lock");
-        for _ in 0..2 {
-            match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
-                Ok(mut file) => {
-                    let _ = writeln!(file, "{}", std::process::id());
-                    return Ok(Self(path));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let holder = fs::read_to_string(&path).unwrap_or_default();
-                    let alive = holder.trim().parse::<u32>().is_ok_and(|pid| {
-                        Command::new("kill")
-                            .args(["-0", &pid.to_string()])
-                            .stderr(Stdio::null())
-                            .status()
-                            .is_ok_and(|s| s.success())
-                    });
-                    if alive {
-                        return Err("Another local-studio tunnel up is already starting this tunnel.".into());
-                    }
-                    let _ = fs::remove_file(&path);
-                }
-                Err(error) => return Err(format!("{}: {error}", path.display())),
-            }
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if wait {
+            file.lock().map_err(|error| format!("{}: {error}", path.display()))?;
+        } else if file.try_lock().is_err() {
+            return Err("Another local-studio tunnel up is already starting this tunnel.".into());
         }
-        Err("Another local-studio tunnel up is already starting this tunnel.".into())
-    }
-}
-
-impl Drop for UpLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        Ok(Self(file))
     }
 }
 
