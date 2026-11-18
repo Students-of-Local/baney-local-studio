@@ -244,13 +244,14 @@ impl Devices {
             Some(pairing) if pairing.id == id && pairing.expires_at >= now_ms() => {}
             _ => return Ok(Err("the pairing was used or expired during the handshake")),
         }
-        std::fs::remove_file(&self.pairing).with_context(|| format!("remove {}", self.pairing.display()))?;
         let mut ledger = self.read()?;
+        // The phone makes a new id for each pairing; a known id would replace another phone's key.
+        if ledger.devices.iter().any(|device| device.info.id == info.id) {
+            return Ok(Err("a device with this id is already paired"));
+        }
+        std::fs::remove_file(&self.pairing).with_context(|| format!("remove {}", self.pairing.display()))?;
         let now = now_ms();
-        let first_seen =
-            ledger.devices.iter().find(|device| device.info.id == info.id).map_or(now, |device| device.first_seen);
-        ledger.devices.retain(|device| device.info.id != info.id);
-        ledger.devices.push(Device { info, key: hex(key), first_seen, last_seen: now });
+        ledger.devices.push(Device { info, key: hex(key), first_seen: now, last_seen: now });
         write_private(&self.ledger, &serde_json::to_vec_pretty(&ledger)?)?;
         Ok(Ok(()))
     }

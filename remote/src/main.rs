@@ -28,7 +28,7 @@ const VERSION: &str = env!("LOCAL_STUDIO_BUILD_VERSION");
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 
 const USAGE: &str = "usage:
-  local-studio-serve serve [--port 18093] [--allow-host <name>]... [--tunnel-host <name>]... [--url <wss url>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
+  local-studio-serve serve [--port 18093] [--tunnel-port <port>] [--allow-host <name>]... [--allow-tunnel-host <name>]... [--url <wss url>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
   local-studio-serve pair [--url <wss url>] [--port 18093] [--name <name>] [--data-dir <dir>]
   local-studio-serve devices [--data-dir <dir>]
   local-studio-serve revoke (<device id or name> | --all) [--data-dir <dir>]";
@@ -124,9 +124,18 @@ async fn stopped() {
 
 fn serve(mut args: Args) -> anyhow::Result<()> {
     let port = args.port()?;
-    let mut allowed = args.take_all("--allow-host")?;
-    let tunnels = args.take_all("--tunnel-host")?;
-    allowed.extend(tunnels.iter().cloned());
+    let tunnel_port = args
+        .take("--tunnel-port")?
+        .map(|port| port.parse::<u16>().with_context(|| format!("--tunnel-port {port}")))
+        .transpose()?;
+    let allowed = args.take_all("--allow-host")?;
+    let tunnels = args.take_all("--allow-tunnel-host")?;
+    if !tunnels.is_empty() && tunnel_port.is_none() {
+        anyhow::bail!("--allow-tunnel-host needs --tunnel-port: the tunnel gets its own listener");
+    }
+    if tunnel_port == Some(port) {
+        anyhow::bail!("--tunnel-port must differ from --port: one listener per route");
+    }
     let mut urls = args.take_all("--url")?;
     let hooks = args.take_all("--notify")?;
     let launch = args
@@ -137,7 +146,7 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     let data_dir = args.data_dir()?;
     args.done()?;
     if urls.is_empty() {
-        urls = allowed.iter().map(|host| format!("wss://{host}/v1/ws")).collect();
+        urls = allowed.iter().chain(&tunnels).map(|host| format!("wss://{host}/v1/ws")).collect();
     }
     let (waker, notify) = hub::signal();
     let config = StudioConfig {
@@ -162,17 +171,26 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     let served = runtime.block_on(async {
         let listener =
             TcpListener::bind(("127.0.0.1", port)).await.with_context(|| format!("listen on 127.0.0.1:{port}"))?;
+        let tunnel = match tunnel_port {
+            Some(tunnel_port) => Some(
+                TcpListener::bind(("127.0.0.1", tunnel_port))
+                    .await
+                    .with_context(|| format!("listen on 127.0.0.1:{tunnel_port}"))?,
+            ),
+            None => None,
+        };
         let hub = Hub::new(Arc::clone(&studio), machine, hooks)?;
         tokio::spawn(Arc::clone(&hub).pump(notify));
         tokio::spawn(Arc::clone(&hub).reap());
         eprintln!(
-            "local-studio-serve: serving {} on http://127.0.0.1:{port} (pid {}, machine key {})",
+            "local-studio-serve: serving {} on http://127.0.0.1:{port}{} (pid {}, machine key {})",
             data_dir.display(),
+            tunnel_port.map(|port| format!(", tunnel on http://127.0.0.1:{port}")).unwrap_or_default(),
             std::process::id(),
             &devices::hex(&key.public)[..16]
         );
         let server = Server { hub, devices, key, port, allowed, tunnels, gate: Gate::default() };
-        server::run(listener, Arc::new(server), stopped()).await;
+        server::run(listener, tunnel, Arc::new(server), stopped()).await;
         anyhow::Ok(())
     });
     studio.shutdown();

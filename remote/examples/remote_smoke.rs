@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
@@ -36,6 +36,8 @@ const MODEL_STEP: Duration = Duration::from_mins(40);
 const ABORT_BOUND: Duration = Duration::from_secs(20);
 const PING_EVERY: Duration = Duration::from_secs(20);
 const TUNNEL: &str = "tunnel.smoke.test";
+/// The tunnel listener's port; `Route::tunnel` connects there (docs/remote.md: one listener per route).
+static TUNNEL_PORT: OnceLock<u16> = OnceLock::new();
 const ONCE_TEXT: &str = "Reply with only the word once.";
 const SLEEP_COMMAND: &str = "sleep 60 && echo slept";
 const UPDATE_TYPES: [&str; 28] = [
@@ -188,6 +190,7 @@ struct View {
     models: u32,
     git_status: u32,
     notifications: u32,
+    needs_approval: HashMap<String, u32>,
     blobs: HashMap<String, Received>,
 }
 
@@ -316,7 +319,12 @@ impl View {
             }
             Update::Models { .. } => self.models += 1,
             Update::GitStatus { .. } => self.git_status += 1,
-            Update::Notification { .. } => self.notifications += 1,
+            Update::Notification { thread, kind, .. } => {
+                self.notifications += 1;
+                if matches!(kind, local_studio_core::NotificationKind::NeedsApproval) {
+                    *self.needs_approval.entry(thread).or_default() += 1;
+                }
+            }
             Update::Notice { level, text } => println!("     notice {level:?}: {text}"),
             Update::RequestFailed { request, message } => println!("     request {request} failed: {message}"),
             _ => {}
@@ -362,25 +370,37 @@ impl View {
 
 #[derive(Default, Clone)]
 struct Route {
+    tunnel: bool,
     host: Option<String>,
     origin: Option<String>,
     from: Option<String>,
     forwarded_host: Option<String>,
+    login: Option<String>,
 }
 
 impl Route {
     fn tunnel(address: &str) -> Self {
-        Self { host: Some(TUNNEL.to_string()), from: Some(address.to_string()), ..Self::default() }
+        Self { tunnel: true, host: Some(TUNNEL.to_string()), from: Some(address.to_string()), ..Self::default() }
+    }
+
+    fn login(login: &str) -> Self {
+        Self { login: Some(login.to_string()), ..Self::default() }
     }
 }
 
+fn tunnel_port() -> u16 {
+    TUNNEL_PORT.get().copied().unwrap_or_default()
+}
+
 async fn connect(port: u16, route: &Route) -> anyhow::Result<Result<Socket, u16>> {
+    let port = if route.tunnel { tunnel_port() } else { port };
     let mut request = format!("ws://127.0.0.1:{port}/v1/ws").into_client_request()?;
     for (name, value) in [
         ("host", &route.host),
         ("origin", &route.origin),
         ("cf-connecting-ip", &route.from),
         ("x-forwarded-host", &route.forwarded_host),
+        ("tailscale-user-login", &route.login),
     ] {
         if let Some(value) = value {
             request.headers_mut().insert(name, HeaderValue::from_str(value)?);
@@ -804,7 +824,8 @@ impl Serve {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(self.root.join("serve.log"))?;
         let child = self
             .command()
-            .args(["serve", "--port", &self.port.to_string(), "--name", "smoke-box", "--tunnel-host", TUNNEL])
+            .args(["serve", "--port", &self.port.to_string(), "--name", "smoke-box"])
+            .args(["--tunnel-port", &tunnel_port().to_string(), "--allow-tunnel-host", TUNNEL])
             .arg("--eukhe")
             .arg(eukhe)
             .args(["--notify", hook])
@@ -1190,9 +1211,17 @@ async fn transport_checks(run: &mut Run, eukhe: &Path) -> anyhow::Result<()> {
         ensure!(answer.0 == 403, "{why} got {}", answer.0);
         println!("ok   {why} gets 403 on {path}");
     }
-    let tunnel = http_get(port, TUNNEL, "/v1/health", "").await?;
-    ensure!(tunnel.0 == 200, "the tunnel host got {}", tunnel.0);
-    println!("ok   the tunnel host {TUNNEL} is allowed");
+    let tunnel = http_get(tunnel_port(), TUNNEL, "/v1/health", "").await?;
+    ensure!(tunnel.0 == 200, "the tunnel host got {} on the tunnel listener", tunnel.0);
+    let crossed = http_get(port, TUNNEL, "/v1/health", "").await?;
+    ensure!(crossed.0 == 403, "the tunnel host got {} on the local listener", crossed.0);
+    let loopback = format!("127.0.0.1:{}", tunnel_port());
+    let crossed = http_get(tunnel_port(), &loopback, "/v1/health", "").await?;
+    ensure!(crossed.0 == 403, "a loopback Host got {} on the tunnel listener", crossed.0);
+    println!("ok   one listener per route: {TUNNEL} is allowed only on the tunnel listener, a loopback Host only on the local one");
+    let bare = connect(port, &Route { tunnel: true, host: Some(TUNNEL.to_string()), ..Route::default() }).await?;
+    ensure!(matches!(bare, Err(400)), "a tunnel socket without CF-Connecting-IP was not refused with 400");
+    println!("ok   a tunnel socket without CF-Connecting-IP gets 400");
     let cross = connect(port, &Route { origin: Some("https://evil.example".to_string()), ..Route::default() }).await?;
     ensure!(matches!(cross, Err(403)), "a socket with a mismatched Origin was not refused");
     println!("ok   a socket with a mismatched Origin gets 403");
@@ -1347,6 +1376,28 @@ async fn pairing_checks(run: &mut Run, a: &Phone) -> anyhow::Result<Client> {
     let opened =
         kk_handshake(port, &Route::tunnel("198.51.100.14"), "phone-nobody", &a.private, &run.server_key).await?;
     expect_closed(opened, "KK for an unknown device is refused", 4401).await?;
+    let mut socket =
+        connect(port, &Route::tunnel("198.51.100.17")).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
+    socket.send(Message::text(header_text("KK", "device", "phone-nobody", 2, 2))).await?;
+    let Raw::Closed(code) = raw_next(&mut socket, QUICK).await? else {
+        bail!("a KK header for an unknown device got a handshake message instead of a close")
+    };
+    ensure!(code == Some(4401), "a KK header for an unknown device closed with {code:?}");
+    println!("ok   a KK header naming an unknown device is closed with 4401 before any handshake message");
+    let (again, again_psk) = run.serve.pairing()?;
+    let impostor = Phone::new(&a.id, "Impostor")?;
+    let opened = pair_handshake(port, &Route::default(), &impostor, &again, &again_psk).await?;
+    expect_closed(opened, "a pairing that names an already paired device id is refused", 4401).await?;
+    let ledger: Value = serde_json::from_slice(&std::fs::read(remote.join("devices.json"))?)?;
+    let keys: Vec<&Value> = ledger["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|device| device["id"] == json!(a.id))
+        .map(|device| &device["key"])
+        .collect();
+    ensure!(keys == [&json!(hex(&a.public))], "the refused pairing changed phone A's record: {keys:?}");
+    println!("ok   phone A's record and key are unchanged");
     let stranger = Phone::new(&a.id, "Stranger")?;
     let opened = kk_handshake(port, &Route::tunnel("198.51.100.15"), &a.id, &stranger.private, &run.server_key).await?;
     expect_closed(opened, "KK with another key for a known device id fails the handshake", 4401).await?;
@@ -1472,57 +1523,107 @@ async fn resume_checks(run: &mut Run, a: Client, a_phone: &Phone, c: &mut Client
     Ok(a)
 }
 
-async fn limit_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Result<Client> {
-    let port = run.serve.port;
-    let mut held = Vec::new();
-    for _ in 0..8 {
-        held.push(
-            connect(port, &Route::tunnel("192.0.2.50")).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?,
-        );
-    }
-    let mut ninth =
-        connect(port, &Route::tunnel("192.0.2.51")).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
-    let Raw::Closed(code) = raw_next(&mut ninth, QUICK).await? else { bail!("a ninth opening socket was not closed") };
-    ensure!(code == Some(1013), "a ninth opening socket closed with {code:?}");
-    println!("ok   a ninth socket mid-handshake is closed with 1013 while 8 are open");
-    let started = Instant::now();
-    let Raw::Closed(code) = raw_next(&mut held[0], QUICK).await? else { bail!("a silent socket was not closed") };
-    ensure!(
-        code == Some(1002) && started.elapsed() < Duration::from_secs(7),
-        "a silent socket closed with {code:?} after {:?}",
-        started.elapsed()
-    );
-    println!("ok   a socket with no opening header is closed after 5 s");
-    drop(held);
-    for attempt in 1..=5 {
-        let mut socket = connect(port, &Route::tunnel("203.0.113.9"))
-            .await?
-            .map_err(|status| anyhow::anyhow!("refused {status}"))?;
+async fn bad_headers(port: u16, route: &Route, count: usize) -> anyhow::Result<()> {
+    for attempt in 1..=count {
+        let mut socket = connect(port, route).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
         socket.send(Message::text(format!("not a header {attempt}"))).await?;
         let Raw::Closed(code) = raw_next(&mut socket, QUICK).await? else {
             bail!("bad header {attempt} was not closed")
         };
         ensure!(code == Some(1002), "bad header {attempt} closed with {code:?}");
     }
-    let mut socket =
-        connect(port, &Route::tunnel("203.0.113.9")).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
-    let Raw::Closed(code) = raw_next(&mut socket, QUICK).await? else { bail!("a banned address was not closed") };
-    ensure!(code == Some(4429), "a banned address closed with {code:?}");
-    println!("ok   5 bad headers from 203.0.113.9 within a minute refuse it with 4429");
-    let spoof = Route { from: Some("203.0.113.9".to_string()), ..Route::default() };
+    Ok(())
+}
+
+async fn first_close(port: u16, route: &Route) -> anyhow::Result<Option<u16>> {
+    let mut socket = connect(port, route).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
+    let Raw::Closed(code) = raw_next(&mut socket, QUICK).await? else { bail!("the socket was not closed") };
+    Ok(code)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn limit_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Result<Client> {
+    let port = run.serve.port;
+    let open = |address: &'static str| async move {
+        connect(port, &Route::tunnel(address)).await?.map_err(|status| anyhow::anyhow!("refused {status}"))
+    };
+    let mut held = vec![open("192.0.2.50").await?, open("192.0.2.50").await?];
+    ensure!(
+        first_close(port, &Route::tunnel("192.0.2.50")).await? == Some(1013),
+        "a third pending socket from one address was not closed with 1013"
+    );
+    println!("ok   a third socket mid-handshake from one client address is closed with 1013");
+    for address in ["192.0.2.51", "192.0.2.52", "192.0.2.53"] {
+        held.push(open(address).await?);
+        held.push(open(address).await?);
+    }
+    ensure!(
+        first_close(port, &Route::tunnel("192.0.2.54")).await? == Some(1013),
+        "a ninth pending socket was not closed with 1013"
+    );
+    println!("ok   a ninth socket mid-handshake is closed with 1013 while 8 are open");
+    let started = Instant::now();
+    for (at, socket) in held.iter_mut().take(2).enumerate() {
+        let Raw::Closed(code) = raw_next(socket, QUICK).await? else { bail!("silent socket {at} was not closed") };
+        ensure!(
+            code == Some(1002) && started.elapsed() < Duration::from_secs(7),
+            "a silent socket closed with {code:?} after {:?}",
+            started.elapsed()
+        );
+    }
+    println!("ok   a socket with no opening header is closed after 5 s");
+    drop(held);
+    let mut socket = open("192.0.2.50").await?;
+    socket.send(Message::text(header_text("KK", "device", &a_phone.id, 2, 2))).await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(socket);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    bad_headers(port, &Route::tunnel("192.0.2.50"), 2).await?;
+    let code = first_close(port, &Route::tunnel("192.0.2.50")).await?;
+    ensure!(
+        code == Some(4429),
+        "after 2 timeouts, 1 close mid-handshake and 2 bad headers, 192.0.2.50 closed with {code:?}"
+    );
+    println!(
+        "ok   timeouts and a close mid-handshake count as failures: 2 + 1 + 2 bad headers refuse 192.0.2.50 with 4429"
+    );
+    let spoof = Route { from: Some("192.0.2.50".to_string()), ..Route::default() };
     let opened = kk_handshake(port, &spoof, &a_phone.id, &a_phone.private, &run.server_key).await?;
-    let Opened::Ready(socket, transport, _) = opened else { bail!("CF-Connecting-IP on a loopback Host was honored") };
+    let Opened::Ready(socket, transport, _) = opened else {
+        bail!("CF-Connecting-IP on the local listener was honored")
+    };
     let probe = Client::spawn(&a_phone.name, socket, transport);
     probe.hello(json!({ "watch": [] })).await?;
-    println!("ok   CF-Connecting-IP counts only for the tunnel host: a loopback socket naming the banned address still connects");
-    a.closed_with("the older socket of phone A is replaced with 4000", 4000).await?;
+    println!("ok   the local listener ignores CF-Connecting-IP: a socket naming the banned address still connects");
+    a.closed_with("the older socket of phone A is replaced with 4409", 4409).await?;
+    drop(probe);
+
+    bad_headers(port, &Route::login("mallory@example.com"), 5).await?;
+    let code = first_close(port, &Route::login("mallory@example.com")).await?;
+    ensure!(code == Some(4429), "5 failures from one Tailscale login closed with {code:?}");
+    println!("ok   5 bad headers from one Tailscale-User-Login refuse that login with 4429");
+    bad_headers(port, &Route::default(), 6).await?;
+    let mut last = None;
+    for (route, who) in
+        [(Route::login("alice@example.com"), "another Tailscale login"), (Route::default(), "a plain loopback client")]
+    {
+        let opened = kk_handshake(port, &route, &a_phone.id, &a_phone.private, &run.server_key).await?;
+        let Opened::Ready(socket, transport, _) = opened else { bail!("{who} was refused after other clients failed") };
+        let client = Client::spawn(&a_phone.name, socket, transport);
+        client.hello(json!({ "watch": [] })).await?;
+        if let Some(previous) = last.replace(client) {
+            drop(previous);
+        }
+        println!("ok   {who} still connects");
+    }
+    println!("ok   6 bad headers from a plain loopback client never refuse loopback");
     let log = run.serve.log();
     ensure!(
-        log.contains("refused 203.0.113.9 (-)") && log.contains("refused 198.51.100.12 (XXpsk3)"),
-        "the failures are not logged with address and pattern"
+        log.contains("refused cf:192.0.2.50 (-)") && log.contains("refused cf:198.51.100.12 (XXpsk3)"),
+        "the failures are not logged with client and pattern"
     );
-    println!("ok   each refusal is logged with its address and pattern");
-    Ok(probe)
+    println!("ok   each refusal is logged with its client and pattern");
+    last.context("no client")
 }
 
 async fn revoke_one(run: &mut Run) -> anyhow::Result<()> {
@@ -1562,13 +1663,13 @@ async fn shared_ids(project: &str, a: &mut Client, c: &mut Client) -> anyhow::Re
         .zip([("shared id from A", "no-such-thread-a"), ("shared id from C", "no-such-thread-c")])
     {
         let args = json!({ "request": "r1", "thread": thread, "prompt": prompt(text), "delivery": "queue" });
-        replies.push(client.call("send", args).await?);
+        replies.push(client.reply("send", args).await?);
         let args = json!({ "request": "r2", "thread": unknown, "prompt": prompt(text), "delivery": "queue" });
-        replies.push(client.call("send", args).await?);
+        replies.push(client.reply("send", args).await?);
         client.call("list_commands", json!({ "request": "q-shared", "project": project })).await?;
     }
     ensure!(
-        replies.iter().all(|reply| reply.get("duplicate").is_none()),
+        replies.iter().all(|reply| reply.get("ok") == Some(&json!(true)) && reply.get("duplicate").is_none()),
         "a send with another phone's request id was dropped as a duplicate: {replies:?}"
     );
     for ((client, thread), (mine, theirs)) in [&*a, &*c]
@@ -1927,8 +2028,11 @@ async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) 
     let sent = Instant::now();
     let args = json!({ "request": "r-once", "thread": thread, "prompt": prompt(ONCE_TEXT), "delivery": "queue" });
     a.call("send", args.clone()).await?;
-    let retry = a.call("send", args).await?;
-    ensure!(retry.get("duplicate") == Some(&json!(true)), "the retried send was not dropped: {retry}");
+    let retry = a.reply("send", args).await?;
+    ensure!(
+        retry.get("ok") == Some(&json!(true)) && retry.get("duplicate") == Some(&json!(true)),
+        "the retried send was not answered as a duplicate: {retry}"
+    );
     a.until("first update for the thread after send", MODEL_STEP, |view| {
         view.thread_updates.get(&thread).copied().unwrap_or_default() > updates
     })
@@ -2039,6 +2143,155 @@ async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) 
     Ok(())
 }
 
+async fn duplicate_replay(a: &mut Client) -> anyhow::Result<()> {
+    let args = json!({ "request": "r-dup", "thread": "no-such-thread-dup", "prompt": prompt("duplicate"), "delivery": "queue" });
+    let first = a.reply("send", args.clone()).await?;
+    ensure!(
+        first.get("ok") == Some(&json!(true)) && first.get("duplicate").is_none(),
+        "the first send answered {first}"
+    );
+    a.until("request_failed for r-dup", SETUP, |view| view.answer_counts.get("r-dup") == Some(&1)).await?;
+    let again = a.reply("send", args).await?;
+    ensure!(
+        again.get("ok") == Some(&json!(true)) && again.get("duplicate") == Some(&json!(true)),
+        "a second send r-dup answered {again}"
+    );
+    a.until("the duplicate's outcome is sent again", QUICK, |view| view.answer_counts.get("r-dup") == Some(&2)).await?;
+    ensure!(a.view().answers["r-dup"] == "request_failed", "the replayed outcome is {}", a.view().answers["r-dup"]);
+    println!("ok   a duplicate send is answered {again} and its request_failed is sent again");
+    Ok(())
+}
+
+fn pending(view: &View, thread: &str) -> bool {
+    view.approvals.get(thread).is_some_and(|approvals| !approvals.is_empty())
+}
+
+async fn approve_and_finish(a: &mut Client, thread: &str, proof: &Path, step: &str) -> anyhow::Result<()> {
+    let request = a.view().approvals[thread][0].request_id.clone();
+    let replies = a.view().replies_done(thread);
+    a.call("answer_approval", json!({ "thread": thread, "request": request, "answer": "approve" })).await?;
+    a.until(&format!("{step}: the approved turn finishes"), MODEL_STEP, |view| {
+        !pending(view, thread) && view.replies_done(thread) > replies && view.idle(thread)
+    })
+    .await?;
+    ensure!(proof.is_file(), "{step}: the approved command wrote no {}", proof.display());
+    Ok(())
+}
+
+/// C raises an approval on `thread` while A has no socket.
+async fn approval_while_away(c: &mut Client, thread: &str, request: &str, file: &str) -> anyhow::Result<()> {
+    let before = c.view().needs_approval.get(thread).copied().unwrap_or_default();
+    let command = format!("printf {request} > {file}");
+    c.call(
+        "send",
+        json!({ "request": request, "thread": thread, "prompt": prompt(&bash_prompt(&command)), "delivery": "queue" }),
+    )
+    .await?;
+    c.until(&format!("needs_approval for {request} while phone A is away"), MODEL_STEP, |view| {
+        view.needs_approval.get(thread).copied().unwrap_or_default() > before
+    })
+    .await?;
+    Ok(())
+}
+
+/// docs/remote.md, Session: an approval reaches the phone on `watch`, after a `delta` resume, after a
+/// `snapshot` resume, and after a `serve` restart.
+#[allow(clippy::too_many_lines)]
+async fn approval_recovery(
+    run: &mut Run,
+    eukhe: &Path,
+    model: &Target,
+    a_phone: &Phone,
+    c_phone: &Phone,
+    mut a: Client,
+    mut c: Client,
+) -> anyhow::Result<(Client, Client)> {
+    let settings = serde_json::to_value(ThreadSettings {
+        provider: Some(model.provider.clone()),
+        model: Some(model.model.clone()),
+        thinking_level: Some(model.thinking.clone()),
+        access: AccessMode::Supervised,
+        worktree: WorktreeChoice::Local,
+    })?;
+    let text = bash_prompt("printf one > approval-1.txt");
+    a.call(
+        "start_thread",
+        json!({ "draft": "d-approve", "project": run.project, "prompt": prompt(&text), "settings": settings }),
+    )
+    .await?;
+    a.until("thread_started for the approval thread", MODEL_STEP, |view| view.started.contains_key("d-approve"))
+        .await?;
+    let thread = a.view().started["d-approve"].clone();
+    a.until("needs_approval while phone A does not watch the thread", MODEL_STEP, |view| {
+        view.needs_approval.get(&thread).copied().unwrap_or_default() >= 1
+    })
+    .await?;
+    ensure!(!a.view().approvals.contains_key(&thread), "phone A got approvals for a thread it does not watch");
+    a.call("watch", json!({ "thread": thread })).await?;
+    a.until("watch sends the approval that was already pending", QUICK, |view| pending(view, &thread)).await?;
+    println!("ok   an approval pending before watch arrives on watch");
+    approve_and_finish(&mut a, &thread, &run.work.join("approval-1.txt"), "pending before watch").await?;
+
+    for (mode, file) in [("delta", "approval-2.txt"), ("snapshot", "approval-3.txt")] {
+        let seq = a.view().seq;
+        drop(a);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        approval_while_away(&mut c, &thread, &format!("r-away-{mode}"), file).await?;
+        let epoch = if mode == "delta" { run.epoch.clone() } else { "not-this-epoch".to_string() };
+        let (back, _) =
+            reconnect(run, a_phone, json!({ "seq": seq, "epoch": epoch, "watch": [thread.clone()] })).await?;
+        a = back;
+        let said = a.view().hello.as_ref().map(|hello| hello["resume"].clone()).unwrap_or_default();
+        ensure!(said == json!(mode), "the resume answered {said}, expected {mode}");
+        a.until(&format!("the approval raised while away arrives after a {mode} resume"), QUICK, |view| {
+            pending(view, &thread)
+        })
+        .await?;
+        println!("ok   an approval raised during a disconnect arrives after a {mode} resume");
+        approve_and_finish(&mut a, &thread, &run.work.join(file), mode).await?;
+    }
+
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    approval_while_away(&mut c, &thread, "r-away-restart", "approval-4.txt").await?;
+    drop(c);
+    run.serve.stop()?;
+    run.serve.start(eukhe, &run.hook.clone())?;
+    let deadline = Instant::now() + SETUP;
+    let resume = json!({ "seq": 1, "epoch": run.epoch, "watch": [thread.clone()] });
+    a = loop {
+        match reconnect(run, a_phone, resume.clone()).await {
+            Ok((client, _)) => break client,
+            Err(error) => ensure!(
+                !run.serve.exited()? && Instant::now() < deadline,
+                "serve did not come back: {error:#}\n{}",
+                run.serve.log_tail()
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let (said, epoch) = a
+        .view()
+        .hello
+        .as_ref()
+        .map(|hello| (hello["resume"].clone(), hello["epoch"].as_str().unwrap_or_default().to_string()))
+        .unwrap_or_default();
+    ensure!(
+        said == json!("snapshot") && epoch != run.epoch,
+        "after a serve restart the resume answered {said} in epoch {epoch}"
+    );
+    run.epoch = epoch;
+    a.until("the approval pending across a serve restart arrives on the new epoch", SETUP, |view| {
+        pending(view, &thread)
+    })
+    .await?;
+    println!("ok   an approval pending across a serve restart arrives after the snapshot in the new epoch");
+    approve_and_finish(&mut a, &thread, &run.work.join("approval-4.txt"), "serve restart").await?;
+    a.call("unwatch", json!({ "thread": thread })).await?;
+    let (c, _) = reconnect(run, c_phone, json!({ "watch": [] })).await?;
+    Ok((a, c))
+}
+
 fn alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -2122,6 +2375,7 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let mut a = limit_checks(run, a, &a_phone).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
+    duplicate_replay(&mut a).await?;
     let (mut a, mut c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
     let steps = std::env::var("REMOTE_SMOKE_STEPS").unwrap_or_default();
     let step = |name: &str| steps.is_empty() || steps.split(',').any(|chosen| chosen == name);
@@ -2134,7 +2388,7 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     if step("tags") {
         tag_isolation(run, eukhe, &mut a, &mut c).await?;
     }
-    let c = if step("writer") {
+    let mut c = if step("writer") {
         drop(c);
         writer_abort(run, &c_phone).await?
     } else {
@@ -2142,7 +2396,15 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     };
     println!("PASS remote smoke: non-model stages");
     let model_outcome = match model {
-        Some(model) => model_stage(run, model, &mut a, &c).await,
+        Some(model) => match model_stage(run, model, &mut a, &c).await {
+            Ok(()) => {
+                let (new_a, new_c) = approval_recovery(run, eukhe, model, &a_phone, &c_phone, a, c).await?;
+                a = new_a;
+                c = new_c;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
         None => Err(anyhow::anyhow!(
             "model stage: LOCAL_STUDIO_SMOKE_AGENT is unset. Point it at a creds dir whose models.json names a local provider (abbey1: ~/.cache/ls-creds, Ollama qwen3-vl:4b)"
         )),
@@ -2198,7 +2460,15 @@ async fn main() -> anyhow::Result<()> {
         |studio| studio.add_project(work.to_string_lossy().into_owned()),
     )?;
     let (hook, posts) = hook_listener().await?;
-    let serve = Serve { bin, root: root.clone(), data, port: free_port()?, child: None };
+    let port = free_port()?;
+    let tunnel = loop {
+        let tunnel = free_port()?;
+        if tunnel != port {
+            break tunnel;
+        }
+    };
+    TUNNEL_PORT.set(tunnel).ok();
+    let serve = Serve { bin, root: root.clone(), data, port, child: None };
     let mut run = Run {
         serve,
         work,

@@ -29,6 +29,7 @@ const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_QUEUED_ITEMS: usize = 2 * BUFFERED;
 const MAX_QUEUED_BYTES: usize = 256 << 20;
 const FRAME_BUDGET: usize = crate::noise::MAX_JSON - 4096;
+const REPLACED: u16 = 4409;
 const SNAPSHOT: [&str; 5] = ["connection", "projects", "threads", "models", "daemon_default"];
 
 pub struct Blob {
@@ -130,7 +131,8 @@ struct Session {
     left_at: Option<Instant>,
     uploads: HashMap<[u8; BLOB_ID], Upload>,
     tags: VecDeque<String>,
-    accepted: Remembered<()>,
+    /// Accepted `send` and `start_thread` ids for this epoch, with their outcome once known.
+    accepted: Remembered<Option<Arc<str>>>,
 }
 
 impl Session {
@@ -182,6 +184,7 @@ struct Mirror {
     approvals: Option<Arc<str>>,
     queue: Option<Arc<str>>,
     subagents: Option<Arc<str>>,
+    setup: Option<Arc<str>>,
 }
 
 struct Remembered<T> {
@@ -224,6 +227,9 @@ struct State {
     tagged: u64,
     git: HashMap<String, HashSet<String>>,
     sends: HashMap<String, (String, Instant)>,
+    /// The last `worktree_setup` per thread, watched or not: the core doesn't send it again on a
+    /// watch, and a phone that watches mid-setup must still see it.
+    setups: HashMap<String, Arc<str>>,
 }
 
 impl State {
@@ -263,7 +269,9 @@ impl State {
         if let Some(items) = &mirror.items {
             texts.push(windowed_reset(thread, items));
         }
-        texts.extend([&mirror.approvals, &mirror.queue, &mirror.subagents].into_iter().flatten().cloned());
+        texts.extend(
+            [&mirror.approvals, &mirror.queue, &mirror.subagents, &mirror.setup].into_iter().flatten().cloned(),
+        );
         for text in texts {
             self.deliver(device, text, None);
         }
@@ -279,6 +287,21 @@ impl State {
         let mut value = value.clone();
         value[field] = Value::String(given);
         Some((device, value))
+    }
+
+    /// Keeps a `send` or `start_thread` outcome so a duplicate of that request can be answered
+    /// with it again.
+    fn remember_outcome(&mut self, device: &str, value: &Value, text: &Arc<str>) {
+        let (op, field) = if value.get("draft").is_some_and(Value::is_string) {
+            ("start_thread", "draft")
+        } else {
+            ("send", "request")
+        };
+        let Some(given) = value.get(field).and_then(Value::as_str) else { return };
+        let key = accepted_key(device, op, given);
+        if let Some(outcome) = self.sessions.get_mut(device).and_then(|session| session.accepted.values.get_mut(&key)) {
+            outcome.get_or_insert_with(|| Arc::clone(text));
+        }
     }
 
     fn live(&mut self, device: &str, conn: ConnId) -> Result<&mut Session, OpError> {
@@ -307,7 +330,8 @@ impl State {
         let first = set.is_empty();
         set.insert(device.to_string());
         if first {
-            self.mirrors.insert(thread.to_string(), Mirror::default());
+            let setup = self.setups.get(thread).cloned();
+            self.mirrors.insert(thread.to_string(), Mirror { setup, ..Mirror::default() });
             studio.watch_thread(thread.to_string());
         } else {
             self.replay(device, thread);
@@ -327,6 +351,10 @@ impl State {
             set.remove(device);
         }
     }
+}
+
+fn accepted_key(device: &str, op: &str, given: &str) -> String {
+    format!("{}:{device}:{op}:{given}", device.len())
 }
 
 fn text_of(value: &Value) -> Arc<str> {
@@ -437,8 +465,13 @@ impl Hub {
                 match op {
                     TranscriptOp::Reset { items } => {
                         let text = windowed_reset(&thread, &items);
+                        let first = mirror.items.is_none();
                         mirror.items = Some(items);
+                        let setup = mirror.setup.clone().filter(|_| first);
                         state.send_watchers(&thread, &text);
+                        if let Some(setup) = setup {
+                            state.send_watchers(&thread, &setup);
+                        }
                         return;
                     }
                     TranscriptOp::Insert { index, item } => {
@@ -477,7 +510,18 @@ impl Hub {
                 *slot = Some(Arc::clone(&text));
                 state.send_watchers(&thread, &text);
             }
-            Update::WorktreeSetup { thread, .. } => state.send_watchers(&thread, &text_of(&value)),
+            Update::WorktreeSetup { thread, done, error, .. } => {
+                let text = text_of(&value);
+                if done && error.is_none() {
+                    state.setups.remove(&thread);
+                } else {
+                    state.setups.insert(thread.clone(), Arc::clone(&text));
+                }
+                if let Some(mirror) = state.mirrors.get_mut(&thread) {
+                    mirror.setup = Some(Arc::clone(&text));
+                }
+                state.send_watchers(&thread, &text);
+            }
             Update::Notification { thread, kind: notification, .. } => {
                 state.broadcast(&text_of(&value));
                 drop(state);
@@ -522,7 +566,11 @@ impl Hub {
                     state.broadcast(&text);
                 }
                 "thread_started" | "request_done" | "request_failed" => match state.routed(&value) {
-                    Some((owner, value)) => state.deliver(&owner, text_of(&value), None),
+                    Some((owner, value)) => {
+                        let text = text_of(&value);
+                        state.remember_outcome(&owner, &value, &text);
+                        state.deliver(&owner, text, None);
+                    }
                     None => eprintln!("local-studio-serve: dropped a {kind} for a request no phone owns"),
                 },
                 "notice" => state.broadcast(&text_of(&value)),
@@ -566,13 +614,13 @@ impl Hub {
         let conn = state.next;
         let fresh = state.sessions.get(device).is_none_or(|session| session.key != key);
         if fresh {
-            state.drop_session(&self.studio, device, 4000, "replaced");
+            state.drop_session(&self.studio, device, REPLACED, "replaced");
             state.sessions.insert(device.to_string(), Session::new(key.to_string()));
         }
         let snapshot: Vec<Value> =
             state.snapshot.iter().flatten().filter_map(|text| serde_json::from_str(text).ok()).collect();
         let Some(session) = state.sessions.get_mut(device) else { return conn };
-        session.close(4000, "replaced by a newer socket");
+        session.close(REPLACED, "replaced by a newer socket");
         let delta = !fresh
             && resume.epoch.as_deref() == Some(self.epoch.as_str())
             && resume.seq.is_some_and(|seq| {
@@ -686,20 +734,22 @@ impl Hub {
         }
     }
 
-    pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<Option<Value>, OpError> {
+    /// Runs a request op. `Ok(true)` means a duplicate of a `send` or `start_thread` this device
+    /// already made in this epoch: it isn't run again, and its outcome is sent again if known.
+    pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<bool, OpError> {
         let mut state = self.state();
         state.live(device, conn)?;
         let field = ops::correlation(op).filter(|field| args.get(*field).is_some_and(Value::is_string));
         let given = field.and_then(|field| args.get(field)).and_then(Value::as_str).map(str::to_string);
-        let key = given
-            .as_ref()
-            .filter(|_| ops::idempotent(op))
-            .map(|given| format!("{}:{device}:{op}:{given}", device.len()));
-        if key
-            .as_ref()
-            .is_some_and(|key| state.live(device, conn).is_ok_and(|session| session.accepted.values.contains_key(key)))
-        {
-            return Ok(Some(json!({ "duplicate": true })));
+        let key = given.as_ref().filter(|_| ops::idempotent(op)).map(|given| accepted_key(device, op, given));
+        if let Some(key) = &key {
+            let session = state.live(device, conn)?;
+            if let Some(outcome) = session.accepted.values.get(key) {
+                if let Some(outcome) = outcome.clone() {
+                    session.push(outcome, None);
+                }
+                return Ok(true);
+            }
         }
         if matches!(op, "send" | "start_thread") {
             let (prompts, bytes) = self.studio.backlog();
@@ -738,7 +788,7 @@ impl Hub {
             }
         }
         if let Some(key) = key {
-            state.live(device, conn)?.accepted.insert(key, ());
+            state.live(device, conn)?.accepted.insert(key, None);
         }
         if op == "send" {
             if let (Some(request), Some(thread)) = (given.as_deref(), args.get("thread").and_then(Value::as_str)) {
@@ -746,7 +796,7 @@ impl Hub {
                 state.sends.insert(thread.to_string(), (request.to_string(), Instant::now()));
             }
         }
-        Ok(None)
+        Ok(false)
     }
 
     pub fn blob_put(&self, device: &str, conn: ConnId, id: Value, args: &Value) -> Result<(), OpError> {

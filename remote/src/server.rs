@@ -27,7 +27,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::devices::{hex, unhex, DeviceInfo, Devices, StaticKey};
 use crate::hub::{self, ConnId, Hub, Out, Resume, Rx, Tx};
-use crate::limits::{self, Gate};
+use crate::limits::{self, Client, Gate};
 use crate::noise::{self, Channel, Inbound, Joiner};
 use crate::{access, ops};
 
@@ -54,26 +54,45 @@ pub struct Server {
     pub gate: Gate,
 }
 
-pub async fn run(listener: TcpListener, server: Arc<Server>, stop: impl Future<Output = ()>) {
+/// Which listener a request arrived on. The route decides the `Host` names allowed and which
+/// header names the client; nothing a client sends can change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Loopback clients and `tailscale serve`.
+    Local,
+    /// The hosted Cloudflare tunnel only.
+    Tunnel,
+}
+
+async fn accept(listener: Option<&TcpListener>) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
+pub async fn run(local: TcpListener, tunnel: Option<TcpListener>, server: Arc<Server>, stop: impl Future<Output = ()>) {
     tokio::spawn(revocations(Arc::clone(&server)));
     tokio::pin!(stop);
     loop {
-        let (stream, peer) = tokio::select! {
+        let (accepted, route) = tokio::select! {
             () = &mut stop => return,
-            accepted = listener.accept() => match accepted {
-                Ok(accepted) => accepted,
-                Err(error) => {
-                    eprintln!("local-studio-serve: accept failed: {error}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            },
+            accepted = local.accept() => (accepted, Route::Local),
+            accepted = accept(tunnel.as_ref()) => (accepted, Route::Tunnel),
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                eprintln!("local-studio-serve: accept failed: {error}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
         let server = Arc::clone(&server);
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 let server = Arc::clone(&server);
-                async move { Ok::<_, Infallible>(handle(&server, request, peer)) }
+                async move { Ok::<_, Infallible>(handle(&server, request, peer, route)) }
             });
             http1::Builder::new()
                 .timer(TokioTimer::new())
@@ -119,10 +138,17 @@ fn header(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&str> 
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-fn handle(server: &Arc<Server>, mut request: Request<Incoming>, peer: SocketAddr) -> Reply {
+fn handle(server: &Arc<Server>, mut request: Request<Incoming>, peer: SocketAddr, route: Route) -> Reply {
     let host = header(request.headers(), header::HOST).unwrap_or_default().to_string();
-    if !access::host_allowed(&host, server.port, &server.allowed) {
-        eprintln!("local-studio-serve: refused a request from {} for host {host:?}", peer.ip());
+    let allowed = match route {
+        Route::Local => access::host_allowed(&host, server.port, &server.allowed),
+        Route::Tunnel => access::named(&host, &server.tunnels),
+    };
+    if !allowed {
+        eprintln!(
+            "local-studio-serve: refused a request from {} on the {route:?} listener for host {host:?}",
+            peer.ip()
+        );
         return reply(StatusCode::FORBIDDEN, "this host is not allowed");
     }
     match (request.method(), request.uri().path()) {
@@ -132,29 +158,44 @@ fn handle(server: &Arc<Server>, mut request: Request<Incoming>, peer: SocketAddr
             response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
             response
         }
-        (&Method::GET, "/v1/ws") => {
-            let address = client_address(server, request.headers(), &host, peer);
-            upgrade(server, &mut request, &host, address)
-        }
+        (&Method::GET, "/v1/ws") => match client_of(route, request.headers(), peer) {
+            Some(client) => upgrade(server, &mut request, &host, client),
+            None => reply(StatusCode::BAD_REQUEST, "the tunnel sent no CF-Connecting-IP"),
+        },
         (_, "/v1/health" | "/v1/ws") => reply(StatusCode::METHOD_NOT_ALLOWED, "use GET"),
         _ => reply(StatusCode::NOT_FOUND, "not found"),
     }
 }
 
-fn client_address(server: &Server, headers: &HeaderMap, host: &str, peer: SocketAddr) -> IpAddr {
-    if access::named(host, &server.tunnels) {
-        if let Some(address) = header(headers, "cf-connecting-ip").and_then(|value| value.trim().parse().ok()) {
-            return address;
+/// The client a socket counts against (docs/remote.md, Transport). The tunnel listener trusts only
+/// `CF-Connecting-IP`, which Cloudflare overwrites; the local listener trusts only the headers
+/// `tailscale serve` sets. `None` refuses a tunnel request without the header.
+fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Client> {
+    let address = |name: &str| {
+        header(headers, name)
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.trim().parse::<IpAddr>().ok())
+    };
+    match route {
+        Route::Tunnel => address("cf-connecting-ip").map(|ip| Client::Key(format!("cf:{ip}"))),
+        Route::Local => {
+            let login = header(headers, "tailscale-user-login").map(str::trim).filter(|login| !login.is_empty());
+            if let Some(login) = login {
+                return Some(Client::Key(format!("ts:{}", login.to_ascii_lowercase())));
+            }
+            if let Some(ip) = address("x-forwarded-for") {
+                return Some(Client::Key(format!("xff:{ip}")));
+            }
+            Some(if peer.ip().is_loopback() { Client::Loopback } else { Client::Key(format!("peer:{}", peer.ip())) })
         }
     }
-    peer.ip()
 }
 
-fn upgrade(server: &Arc<Server>, request: &mut Request<Incoming>, host: &str, address: IpAddr) -> Reply {
+fn upgrade(server: &Arc<Server>, request: &mut Request<Incoming>, host: &str, client: Client) -> Reply {
     let headers = request.headers();
     let origin = header(headers, header::ORIGIN);
     if !access::origin_allowed(origin, host) {
-        eprintln!("local-studio-serve: refused a socket from {address} with origin {origin:?} for host {host:?}");
+        eprintln!("local-studio-serve: refused a socket from {client} with origin {origin:?} for host {host:?}");
         return reply(StatusCode::FORBIDDEN, "this origin is not allowed");
     }
     let wants_socket = header(headers, header::UPGRADE).is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
@@ -173,7 +214,7 @@ fn upgrade(server: &Arc<Server>, request: &mut Request<Incoming>, host: &str, ad
                     .max_message_size(Some(noise::MAX_MESSAGE))
                     .max_frame_size(Some(noise::MAX_MESSAGE));
                 let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config)).await;
-                session(server, socket, address).await;
+                session(server, socket, client).await;
             }
             Err(error) => eprintln!("local-studio-serve: the socket upgrade failed: {error}"),
         }
@@ -231,14 +272,14 @@ impl Refusal {
     }
 }
 
-async fn session(server: Arc<Server>, socket: Socket, address: IpAddr) {
+async fn session(server: Arc<Server>, socket: Socket, address: Client) {
     let (mut sink, mut stream) = socket.split();
-    if server.gate.banned(address) {
+    if server.gate.banned(&address) {
         eprintln!("local-studio-serve: refused {address}: too many failed handshakes");
         close(&mut sink, BANNED, "too many failed handshakes; try again later").await;
         return;
     }
-    let Some(opening) = server.gate.open() else {
+    let Some(opening) = server.gate.open(&address) else {
         eprintln!("local-studio-serve: refused {address}: too many sockets are mid-handshake");
         close(&mut sink, BUSY, "busy").await;
         return;
@@ -248,12 +289,12 @@ async fn session(server: Arc<Server>, socket: Socket, address: IpAddr) {
         Some(Next::Text(text)) => text,
         Some(Next::Gone) => return,
         Some(Next::Binary(_)) => {
-            server.gate.fail(address, "-", "the first message was not the opening header");
+            server.gate.fail(&address, "-", "the first message was not the opening header");
             close(&mut sink, BROKEN, "expected the opening header").await;
             return;
         }
         None => {
-            server.gate.fail(address, "-", "no opening header within 5 s");
+            server.gate.fail(&address, "-", "no opening header within 5 s");
             close(&mut sink, BROKEN, "no opening header").await;
             return;
         }
@@ -261,7 +302,7 @@ async fn session(server: Arc<Server>, socket: Socket, address: IpAddr) {
     let parsed = match noise::parse_header(&header) {
         Ok(parsed) => parsed,
         Err(reason) => {
-            server.gate.fail(address, "-", &reason);
+            server.gate.fail(&address, "-", &reason);
             close(&mut sink, BROKEN, "bad opening header").await;
             return;
         }
@@ -293,7 +334,7 @@ async fn session(server: Arc<Server>, socket: Socket, address: IpAddr) {
         Ok(opened) => opened,
         Err(refusal) => {
             if refusal.counts {
-                server.gate.fail(address, &parsed.pattern, &refusal.reason);
+                server.gate.fail(&address, &parsed.pattern, &refusal.reason);
             } else {
                 eprintln!("local-studio-serve: {address} ({}): {}", parsed.pattern, refusal.reason);
             }
@@ -313,7 +354,8 @@ fn noise_error(error: &snow::Error) -> Refusal {
 async fn handshake_message(stream: &mut Stream, deadline: Instant, step: &str) -> Result<Bytes, Refusal> {
     match next_by(stream, deadline).await {
         Some(Next::Binary(bytes)) => Ok(bytes),
-        Some(Next::Gone) => Err(Refusal { code: BROKEN, reason: format!("closed before {step}"), counts: false }),
+        // Counted, or a client could hold a pending slot for free by closing just before the timeout.
+        Some(Next::Gone) => Err(Refusal::failed(BROKEN, format!("closed before {step}"))),
         Some(Next::Text(_)) => Err(Refusal::failed(BROKEN, format!("a text message instead of {step}"))),
         None => Err(Refusal::failed(BROKEN, "the handshake did not finish within 10 s")),
     }
@@ -444,7 +486,7 @@ async fn attached(
     mut stream: Stream,
     opened: Opened,
     protocol: u64,
-    address: IpAddr,
+    address: Client,
 ) {
     let channel = Arc::new(opened.channel);
     let hello = match first_hello(&mut stream, &channel).await {
@@ -582,7 +624,11 @@ fn answer(hub: &Hub, device: &str, conn: ConnId, text: &str) -> Option<Value> {
             Ok(()) => return None,
             Err(error) => Err(error),
         },
-        _ => hub.request(device, conn, op, &args),
+        _ => match hub.request(device, conn, op, &args) {
+            Ok(true) => return Some(json!({ "re": id, "ok": true, "duplicate": true })),
+            Ok(false) => Ok(None),
+            Err(error) => Err(error),
+        },
     };
     Some(match result {
         Ok(None) => json!({ "re": id, "ok": true }),
