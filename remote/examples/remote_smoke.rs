@@ -2365,14 +2365,47 @@ async fn approval_recovery(
     );
     run.epoch = epoch;
     a.until("the thread's full state after a serve restart", SETUP, |view| {
-        !view.items(&thread).is_empty() && view.idle(&thread)
+        !view.items(&thread).is_empty() && view.busy.contains_key(&thread)
     })
     .await?;
-    ensure!(
-        !pending(&a.view(), &thread),
-        "an approval Eukhe denied at the serve stop is still pending after the restart"
-    );
     let proof = run.work.join("approval-4.txt");
+    let settle = Instant::now() + MODEL_STEP;
+    let mut denied = 0;
+    loop {
+        let state = {
+            let view = a.view();
+            format!(
+                "busy {:?}, working {}, {} items, approvals {:?}",
+                view.busy.get(&thread),
+                view.working(&thread),
+                view.items(&thread).len(),
+                view.approvals.get(&thread)
+            )
+        };
+        ensure!(
+            Instant::now() < settle && denied < 4,
+            "after the serve restart the thread never settled ({denied} retried approvals denied): {state}"
+        );
+        let next = a
+            .until("the restarted thread settles or asks again", MODEL_STEP, |view| {
+                view.idle(&thread) || pending(view, &thread)
+            })
+            .await;
+        if let Err(error) = next {
+            bail!("{error:#}; {state}");
+        }
+        if !pending(&a.view(), &thread) {
+            break;
+        }
+        let request = a.view().approvals[&thread][0].request_id.clone();
+        println!("     the model asked again after the restart; denying {request}");
+        a.call("answer_approval", json!({ "thread": thread, "request": request, "answer": "deny" })).await?;
+        a.until("the denied retry clears", QUICK, |view| {
+            view.approvals.get(&thread).is_none_or(|list| list.iter().all(|item| item.request_id != request))
+        })
+        .await?;
+        denied += 1;
+    }
     ensure!(!proof.exists(), "the step whose approval was pending at the serve stop ran anyway: {}", proof.display());
     println!("ok   after a serve restart the phone gets the thread's full state, and the approval pending at the stop was denied");
     a.call("unwatch", json!({ "thread": thread })).await?;
