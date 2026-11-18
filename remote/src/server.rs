@@ -27,7 +27,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::devices::{hex, unhex, DeviceInfo, Devices, StaticKey};
 use crate::hub::{self, ConnId, Hub, Out, Resume, Rx, Tx};
-use crate::limits::{self, Client, Gate};
+use crate::limits::{self, Client, Gate, Listener};
 use crate::noise::{self, Channel, Inbound, Joiner};
 use crate::{access, ops};
 
@@ -155,11 +155,24 @@ fn handle(server: &Arc<Server>, mut request: Request<Incoming>, peer: SocketAddr
             response
         }
         (&Method::GET, "/v1/ws") => match client_of(route, request.headers(), peer) {
-            Some(client) => upgrade(server, &mut request, &host, client),
+            Some(client) => upgrade(server, &mut request, &host, client, route),
             None => reply(StatusCode::BAD_REQUEST, "the tunnel sent no CF-Connecting-IP"),
         },
         (_, "/v1/health" | "/v1/ws") => reply(StatusCode::METHOD_NOT_ALLOWED, "use GET"),
         _ => reply(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+fn bucket(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(
+            || {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            },
+            |v4| v4.to_string(),
+        ),
     }
 }
 
@@ -168,6 +181,7 @@ fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Clie
         header(headers, name)
             .and_then(|value| value.split(',').next())
             .and_then(|value| value.trim().parse::<IpAddr>().ok())
+            .map(bucket)
     };
     match route {
         Route::Tunnel => address("cf-connecting-ip").map(|ip| Client::Key(format!("cf:{ip}"))),
@@ -179,12 +193,20 @@ fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Clie
             if let Some(ip) = address("x-forwarded-for") {
                 return Some(Client::Key(format!("xff:{ip}")));
             }
-            Some(if peer.ip().is_loopback() { Client::Loopback } else { Client::Key(format!("peer:{}", peer.ip())) })
+            Some(if peer.ip().is_loopback() {
+                Client::Loopback
+            } else {
+                Client::Key(format!("peer:{}", bucket(peer.ip())))
+            })
         }
     }
 }
 
-fn upgrade(server: &Arc<Server>, request: &mut Request<Incoming>, host: &str, client: Client) -> Reply {
+fn upgrade(server: &Arc<Server>, request: &mut Request<Incoming>, host: &str, client: Client, route: Route) -> Reply {
+    let listener = match route {
+        Route::Local => Listener::Local,
+        Route::Tunnel => Listener::Tunnel,
+    };
     let headers = request.headers();
     let origin = header(headers, header::ORIGIN);
     if !access::origin_allowed(origin, host) {
@@ -207,7 +229,7 @@ fn upgrade(server: &Arc<Server>, request: &mut Request<Incoming>, host: &str, cl
                     .max_message_size(Some(noise::MAX_MESSAGE))
                     .max_frame_size(Some(noise::MAX_MESSAGE));
                 let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config)).await;
-                session(server, socket, client).await;
+                session(server, socket, client, listener).await;
             }
             Err(error) => eprintln!("local-studio-serve: the socket upgrade failed: {error}"),
         }
@@ -265,14 +287,14 @@ impl Refusal {
     }
 }
 
-async fn session(server: Arc<Server>, socket: Socket, address: Client) {
+async fn session(server: Arc<Server>, socket: Socket, address: Client, listener: Listener) {
     let (mut sink, mut stream) = socket.split();
     if server.gate.banned(&address) {
         eprintln!("local-studio-serve: refused {address}: too many failed handshakes");
         close(&mut sink, BANNED, "too many failed handshakes; try again later").await;
         return;
     }
-    let Some(opening) = server.gate.open(&address) else {
+    let Some(opening) = server.gate.open(listener, &address) else {
         eprintln!("local-studio-serve: refused {address}: too many sockets are mid-handshake");
         close(&mut sink, BUSY, "busy").await;
         return;
@@ -336,8 +358,16 @@ async fn session(server: Arc<Server>, socket: Socket, address: Client) {
             return;
         }
     };
+    let hello = match first_hello(&mut stream, &opened.channel, deadline).await {
+        Ok(hello) => hello,
+        Err(reason) => {
+            server.gate.fail(&address, &parsed.pattern, &format!("device {}: {reason}", opened.device));
+            close(&mut sink, BROKEN, "expected hello").await;
+            return;
+        }
+    };
     drop(opening);
-    attached(&server, sink, stream, opened, protocol, address).await;
+    attached(&server, sink, stream, opened, hello, protocol, address).await;
 }
 
 fn noise_error(error: &snow::Error) -> Refusal {
@@ -450,12 +480,11 @@ async fn send_records(sink: &mut Sink, channel: &Channel, records: Vec<Vec<u8>>)
     true
 }
 
-async fn first_hello(stream: &mut Stream, channel: &Channel) -> Result<Value, String> {
+async fn first_hello(stream: &mut Stream, channel: &Channel, deadline: Instant) -> Result<Value, String> {
     let mut joiner = Joiner::default();
-    let deadline = Instant::now() + SILENCE;
     loop {
         let Some(Next::Binary(bytes)) = next_by(stream, deadline).await else {
-            return Err("no hello after the handshake".to_string());
+            return Err("no valid hello within 10 s of the opening".to_string());
         };
         let record = channel.open(&bytes).map_err(|_| "a record failed to decrypt".to_string())?;
         match joiner.feed(record)? {
@@ -474,21 +503,14 @@ async fn first_hello(stream: &mut Stream, channel: &Channel) -> Result<Value, St
 
 async fn attached(
     server: &Arc<Server>,
-    mut sink: Sink,
+    sink: Sink,
     mut stream: Stream,
     opened: Opened,
+    hello: Value,
     protocol: u64,
     address: Client,
 ) {
     let channel = Arc::new(opened.channel);
-    let hello = match first_hello(&mut stream, &channel).await {
-        Ok(hello) => hello,
-        Err(reason) => {
-            eprintln!("local-studio-serve: closed device {} from {address}: {reason}", opened.device);
-            close(&mut sink, BROKEN, "expected hello").await;
-            return;
-        }
-    };
     let said = |key: &str| hello.pointer(&format!("/device/{key}")).and_then(Value::as_str);
     if let Err(error) = server.devices.seen(&opened.device, said("name"), said("app"), said("channel")) {
         eprintln!("local-studio-serve: could not note the device as seen: {error:#}");

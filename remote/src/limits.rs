@@ -7,6 +7,7 @@ pub const HEADER_WITHIN: Duration = Duration::from_secs(5);
 pub const HANDSHAKE_WITHIN: Duration = Duration::from_secs(10);
 const OPENING_AT_ONCE: usize = 8;
 const OPENING_PER_CLIENT: usize = 2;
+const LOOPBACK_KEPT: usize = 2;
 const FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const BAN: Duration = Duration::from_secs(600);
@@ -38,20 +39,28 @@ struct Pending {
     per: HashMap<Client, usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listener {
+    Local,
+    Tunnel,
+}
+
 #[derive(Default)]
 pub struct Gate {
     records: Mutex<HashMap<Client, Record>>,
-    pending: Arc<Mutex<Pending>>,
+    pending: Arc<Mutex<[Pending; 2]>>,
 }
 
 pub struct Opening {
-    pending: Arc<Mutex<Pending>>,
+    pending: Arc<Mutex<[Pending; 2]>>,
+    listener: Listener,
     client: Client,
 }
 
 impl Drop for Opening {
     fn drop(&mut self) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let pending = &mut all[self.listener as usize];
         pending.total = pending.total.saturating_sub(1);
         if let Some(count) = pending.per.get_mut(&self.client) {
             *count -= 1;
@@ -71,15 +80,20 @@ impl Gate {
         records.get(client).and_then(|record| record.banned_until).is_some_and(|until| until > Instant::now())
     }
 
-    pub fn open(&self, client: &Client) -> Option<Opening> {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+    pub fn open(&self, listener: Listener, client: &Client) -> Option<Opening> {
+        let mut all = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let pending = &mut all[listener as usize];
         let mine = pending.per.get(client).copied().unwrap_or_default();
-        if pending.total >= OPENING_AT_ONCE || mine >= OPENING_PER_CLIENT {
+        let loopback = pending.per.get(&Client::Loopback).copied().unwrap_or_default();
+        let kept = listener == Listener::Local
+            && *client != Client::Loopback
+            && pending.total - loopback >= OPENING_AT_ONCE - LOOPBACK_KEPT;
+        if pending.total >= OPENING_AT_ONCE || mine >= OPENING_PER_CLIENT || kept {
             return None;
         }
         pending.total += 1;
         pending.per.insert(client.clone(), mine + 1);
-        Some(Opening { pending: Arc::clone(&self.pending), client: client.clone() })
+        Some(Opening { pending: Arc::clone(&self.pending), listener, client: client.clone() })
     }
 
     pub fn fail(&self, client: &Client, pattern: &str, reason: &str) {

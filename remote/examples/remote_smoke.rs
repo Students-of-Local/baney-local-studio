@@ -1638,6 +1638,112 @@ async fn limit_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Result<C
     last.context("no client")
 }
 
+async fn quiet(socket: &mut Socket) -> bool {
+    tokio::time::timeout(Duration::from_millis(400), socket.next()).await.is_err()
+}
+
+/// docs/remote.md, Limits: a KK socket is authenticated only once its hello decrypts, pending caps are per
+/// listener with 2 local slots kept for loopback, and IPv6 clients bucket by /64.
+#[allow(clippy::too_many_lines)]
+async fn listener_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Result<Client> {
+    let port = run.serve.port;
+    let mut socket = connect(port, &Route::default()).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
+    let header = header_text("KK", "device", &a_phone.id, 2, 2);
+    socket.send(Message::text(header.clone())).await?;
+    let mut state = snow::Builder::new(KK.parse()?)
+        .local_private_key(&a_phone.private)?
+        .remote_public_key(&run.server_key)?
+        .prologue(&prologue(&header))?
+        .build_initiator()?;
+    let first = noise_write(&mut state, &[])?;
+    socket.send(Message::binary(first.clone())).await?;
+    let Raw::Binary(second) = raw_next(&mut socket, QUICK).await? else { bail!("KK as phone A got no reply") };
+    let mut scratch = vec![0u8; 65_535];
+    state.read_message(&second, &mut scratch)?;
+    let live = Client::spawn(&a_phone.name, socket, state.into_transport_mode()?);
+    live.hello(json!({ "watch": [] })).await?;
+    a.closed_with("the hello of a new socket replaces phone A with 4409", 4409).await?;
+
+    let mut replay =
+        connect(port, &Route::tunnel("192.0.2.60")).await?.map_err(|status| anyhow::anyhow!("refused {status}"))?;
+    replay.send(Message::text(header)).await?;
+    replay.send(Message::binary(first)).await?;
+    let Raw::Binary(_) = raw_next(&mut replay, QUICK).await? else {
+        bail!("a replayed KK first message got no second message")
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    ensure!(!live.view().closed, "a replayed KK handshake closed the live socket before any hello");
+    replay.send(Message::binary(rand_bytes::<64>()?.to_vec())).await?;
+    let Raw::Closed(code) = raw_next(&mut replay, QUICK).await? else { bail!("the replayed socket was not closed") };
+    ensure!(code == Some(1002), "a replayed KK handshake with no valid hello closed with {code:?}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    ensure!(!live.view().closed, "a replayed KK handshake closed the live socket with {:?}", live.view().close_code);
+    ensure!(
+        run.serve.log().contains("refused cf:192.0.2.60 (KK)"),
+        "a replayed KK handshake was not counted as a failure:\n{}",
+        run.serve.log_tail()
+    );
+    println!(
+        "ok   a replayed KK first message completes the handshake, never closes the live socket, and fails with 1002"
+    );
+
+    let open = |route: Route| async move {
+        connect(port, &route).await?.map_err(|status| anyhow::anyhow!("refused {status}"))
+    };
+    let mut held = Vec::new();
+    for address in ["192.0.2.70", "192.0.2.71", "192.0.2.72", "192.0.2.73"] {
+        held.push(open(Route::tunnel(address)).await?);
+        held.push(open(Route::tunnel(address)).await?);
+    }
+    ensure!(
+        first_close(port, &Route::tunnel("192.0.2.74")).await? == Some(1013),
+        "the tunnel listener took a ninth pending socket"
+    );
+    for login in ["p1@example.com", "p2@example.com", "p3@example.com"] {
+        for _ in 0..2 {
+            let mut socket = open(Route::login(login)).await?;
+            ensure!(
+                quiet(&mut socket).await,
+                "a local socket from {login} was refused while the tunnel listener was full"
+            );
+            held.push(socket);
+        }
+    }
+    ensure!(
+        first_close(port, &Route::login("p4@example.com")).await? == Some(1013),
+        "a seventh non-loopback pending socket on the local listener took a slot kept for loopback"
+    );
+    let opened = kk_handshake(port, &Route::default(), &a_phone.id, &a_phone.private, &run.server_key).await?;
+    let Opened::Ready(socket, transport, _) = opened else {
+        bail!("a plain loopback client was refused while the kept slots were free")
+    };
+    let a = Client::spawn(&a_phone.name, socket, transport);
+    a.hello(json!({ "watch": [] })).await?;
+    live.closed_with("the loopback hello replaces the live socket with 4409", 4409).await?;
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    println!("ok   a full tunnel listener leaves the local listener open, and 6 non-loopback sockets leave 2 slots for loopback");
+
+    let mut held =
+        vec![open(Route::tunnel("2001:db8:1:2::1")).await?, open(Route::tunnel("2001:db8:1:2:ffff::2")).await?];
+    ensure!(
+        first_close(port, &Route::tunnel("2001:db8:1:2::3")).await? == Some(1013),
+        "a third pending socket inside one IPv6 /64 was not closed with 1013"
+    );
+    for socket in &mut held {
+        ensure!(quiet(socket).await, "a pending IPv6 socket was closed early");
+    }
+    drop(held);
+    for host in 1..=5 {
+        bad_headers(port, &Route::tunnel(&format!("2001:db8:1:3::{host:x}")), 1).await?;
+    }
+    let code = first_close(port, &Route::tunnel("2001:db8:1:3:abcd::99")).await?;
+    ensure!(code == Some(4429), "5 failures from rotating addresses in one IPv6 /64 closed with {code:?}");
+    ensure!(run.serve.log().contains("cf:2001:db8:1:3::/64"), "the IPv6 failures are not logged by /64");
+    println!("ok   sockets rotating inside one IPv6 /64 share one pending cap and one failure count");
+    Ok(a)
+}
+
 async fn revoke_one(run: &mut Run) -> anyhow::Result<()> {
     let b_phone = Phone::new("phone-b", "Smoke Phone B")?;
     let b = pair(run, &b_phone).await?;
@@ -2334,6 +2440,24 @@ async fn approval_recovery(
         approve_and_finish(&mut a, &thread, &run.work.join(file), mode).await?;
     }
 
+    a.call("unwatch", json!({ "thread": thread })).await?;
+    let seq = a.view().seq;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    approval_while_away(&mut c, &thread, "r-away-unwatched", "approval-5.txt").await?;
+    let (back, _) = reconnect(run, a_phone, json!({ "seq": seq, "epoch": run.epoch, "watch": [] })).await?;
+    a = back;
+    let said = a.view().hello.as_ref().map(|hello| hello["resume"].clone()).unwrap_or_default();
+    ensure!(said == json!("delta"), "the resume answered {said}, expected delta");
+    a.until("needs_approval on an unwatched thread replays after a delta resume", QUICK, |view| {
+        view.needs_approval.get(&thread).copied().unwrap_or_default() >= 1
+    })
+    .await?;
+    println!("ok   an approval raised on an unwatched thread during a disconnect shows on Home after a delta resume");
+    a.call("watch", json!({ "thread": thread })).await?;
+    a.until("watch sends the approval raised while away", QUICK, |view| pending(view, &thread)).await?;
+    approve_and_finish(&mut a, &thread, &run.work.join("approval-5.txt"), "unwatched delta").await?;
+
     drop(a);
     tokio::time::sleep(Duration::from_millis(300)).await;
     approval_while_away(&mut c, &thread, "r-away-restart", "approval-4.txt").await?;
@@ -2512,7 +2636,8 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let c_phone = Phone::new("phone-c", "Smoke Phone C")?;
     let mut c = pair(run, &c_phone).await?;
     let a = resume_checks(run, a, &a_phone, &mut c).await?;
-    let mut a = limit_checks(run, a, &a_phone).await?;
+    let a = limit_checks(run, a, &a_phone).await?;
+    let mut a = listener_checks(run, a, &a_phone).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
     duplicate_replay(&mut a).await?;
