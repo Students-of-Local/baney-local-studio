@@ -2337,6 +2337,9 @@ async fn approval_recovery(
     drop(a);
     tokio::time::sleep(Duration::from_millis(300)).await;
     approval_while_away(&mut c, &thread, "r-away-restart", "approval-4.txt").await?;
+    c.call("watch", json!({ "thread": thread })).await?;
+    c.until("phone C sees the approval pending before the serve stop", QUICK, |view| pending(view, &thread)).await?;
+    let original = c.view().approvals[&thread][0].request_id.clone();
     drop(c);
     run.serve.stop()?;
     run.serve.start(eukhe, &run.hook.clone())?;
@@ -2398,6 +2401,10 @@ async fn approval_recovery(
             break;
         }
         let request = a.view().approvals[&thread][0].request_id.clone();
+        ensure!(
+            request != original,
+            "the approval {original} pending at the serve stop is still pending after the restart: {state}"
+        );
         println!("     the model asked again after the restart; denying {request}");
         a.call("answer_approval", json!({ "thread": thread, "request": request, "answer": "deny" })).await?;
         a.until("the denied retry clears", QUICK, |view| {
@@ -2408,6 +2415,11 @@ async fn approval_recovery(
     }
     ensure!(!proof.exists(), "the step whose approval was pending at the serve stop ran anyway: {}", proof.display());
     println!("ok   after a serve restart the phone gets the thread's full state, and the approval pending at the stop was denied");
+    a.call("fork_thread", json!({ "thread": thread })).await?;
+    a.until("thread_started for a fork the phone asked for", SETUP, |view| {
+        view.started.keys().any(|draft| draft.starts_with("fork:"))
+    })
+    .await?;
     a.call("unwatch", json!({ "thread": thread })).await?;
     let (c, _) = reconnect(run, c_phone, json!({ "watch": [] })).await?;
     Ok((a, c))

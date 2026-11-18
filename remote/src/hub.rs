@@ -23,6 +23,9 @@ const MAX_ACK: usize = 64;
 const MAX_ID: usize = 128;
 const MAX_OUTSTANDING: usize = 64;
 const MAX_COMMANDS: usize = 512;
+const MAX_CONTROL: usize = 64;
+const MAX_OUTCOME: usize = 16 << 10;
+const MAX_MESSAGE: usize = 1024;
 const MAX_ACCEPTED: usize = 16_384;
 const SEND_LOG: Duration = Duration::from_secs(60);
 const MAX_SEND_LOG: usize = 256;
@@ -326,11 +329,24 @@ impl State {
         Some((device, value))
     }
 
-    fn remember_outcome(&mut self, tag: &str, text: &Arc<str>) {
+    fn remember_outcome(&mut self, tag: &str, routed: &Value, text: &Arc<str>) {
         let Some(Tag { device, op, given }) = self.tags.get(tag) else { return };
         let key = accepted_key(op, given);
-        if let Some(ledger) = self.ledgers.get_mut(device.as_str()) {
-            ledger.outcome(&key, text);
+        let kept = if text.len() <= MAX_OUTCOME {
+            Some(Arc::clone(text))
+        } else {
+            let mut short = routed.clone();
+            if let Some(message) = short.get("message").and_then(Value::as_str) {
+                let mut end = MAX_MESSAGE.min(message.len());
+                while !message.is_char_boundary(end) {
+                    end -= 1;
+                }
+                short["message"] = Value::String(format!("{} (cut at {MAX_MESSAGE} bytes)", &message[..end]));
+            }
+            Some(text_of(&short)).filter(|short| short.len() <= MAX_OUTCOME)
+        };
+        if let (Some(ledger), Some(kept)) = (self.ledgers.get_mut(device.as_str()), kept) {
+            ledger.outcome(&key, &kept);
         }
     }
 
@@ -603,13 +619,14 @@ impl Hub {
                         let tag =
                             ["request", "draft"].into_iter().find_map(|field| value.get(field).and_then(Value::as_str));
                         if let Some(tag) = tag {
-                            state.remember_outcome(tag, &text);
+                            state.remember_outcome(tag, &routed, &text);
                         }
                         state.deliver(&owner, text, None);
                         if let Some(tag) = tag {
                             state.finish(tag);
                         }
                     }
+                    None if kind == "thread_started" => state.broadcast(&text_of(&value)),
                     None => eprintln!("local-studio-serve: dropped a {kind} for a request no phone owns"),
                 },
                 "notice" => state.broadcast(&text_of(&value)),
@@ -740,8 +757,17 @@ impl Hub {
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
         let mut state = self.state();
         let session = state.live(device, conn)?;
-        if !session.watching.contains(thread) && session.watching.len() >= MAX_WATCH {
+        if session.watching.contains(thread) {
+            return Ok(());
+        }
+        if session.watching.len() >= MAX_WATCH {
             return Err(OpError::new("too_many", format!("watch at most {MAX_WATCH} threads at once")));
+        }
+        if self.studio.queued() >= MAX_COMMANDS {
+            return Err(OpError::new(
+                "busy",
+                "the machine is still working through earlier requests; try again shortly",
+            ));
         }
         state.watch(&self.studio, device, thread);
         Ok(())
@@ -815,7 +841,7 @@ impl Hub {
                 ));
             }
         }
-        self.admit(&mut state, device, conn, prompt_op, field.is_some() && !prompt_op)?;
+        self.admit(&mut state, device, conn, op, field.is_some() && !prompt_op)?;
         let mut args = args.clone();
         let tag = match (field, &given) {
             (Some(field), Some(given)) => {
@@ -872,15 +898,10 @@ impl Hub {
         Ok(false)
     }
 
-    fn admit(
-        &self,
-        state: &mut State,
-        device: &str,
-        conn: ConnId,
-        prompt_op: bool,
-        answered: bool,
-    ) -> Result<(), OpError> {
-        if self.studio.queued() >= MAX_COMMANDS {
+    fn admit(&self, state: &mut State, device: &str, conn: ConnId, op: &str, answered: bool) -> Result<(), OpError> {
+        let prompt_op = ops::idempotent(op);
+        let room = if matches!(op, "abort" | "answer_approval") { MAX_COMMANDS + MAX_CONTROL } else { MAX_COMMANDS };
+        if self.studio.queued() >= room {
             return Err(OpError::new(
                 "busy",
                 "the machine is still working through earlier requests; try again shortly",
