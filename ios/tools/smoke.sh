@@ -37,7 +37,7 @@ else
   LOCAL_STUDIO_REMOTE_URL="ws://127.0.0.1:$port/v1/ws"
   LOCAL_STUDIO_PAIR_ID="$(openssl rand -hex 8)"
   LOCAL_STUDIO_PAIR_SECRET="$(openssl rand 32 | base64 | tr '+/' '-_' | tr -d '=\n')"
-  "$bun" "$ios/tools/fake-studio.ts" --port "$port" --pair-id "$LOCAL_STUDIO_PAIR_ID" --pair-secret "$LOCAL_STUDIO_PAIR_SECRET" --busy-once-after 1 >"$work/fake-studio.log" 2>&1 &
+  "$bun" "$ios/tools/fake-studio.ts" --port "$port" --pair-id "$LOCAL_STUDIO_PAIR_ID" --pair-secret "$LOCAL_STUDIO_PAIR_SECRET" --busy-once-after 1 --smoke-hooks >"$work/fake-studio.log" 2>&1 &
   fake_pid=$!
   "$bun" "$ios/tools/fake-studio.ts" --port "$((port + 1))" --name future-studio --protocol 4 --min-protocol 3 >"$work/future-studio.log" 2>&1 &
   future_pid=$!

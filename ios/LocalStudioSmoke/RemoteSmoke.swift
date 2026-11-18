@@ -25,6 +25,8 @@ final class RemoteSmoke: XCTestCase {
 
         if fake {
             try fakeConversation(app)
+            let hellos = try JSONSerialization.jsonObject(with: try hook("hellos", method: "GET")) as? [String: Any]
+            XCTAssertEqual(hellos?["hellos"] as? Int, 1, "the app reconnected during the conversation: an update it could not decode, such as needs_answer, dropped the socket")
         } else {
             try realConversation(app)
         }
@@ -118,6 +120,23 @@ final class RemoteSmoke: XCTestCase {
         expectLabel(app, "transcript-window", "60 earlier · 200 loaded", timeout: 10)
         element(app, "load-earlier").tap()
         expectLabel(app, "transcript-window", "0 earlier · 260 loaded", timeout: 10)
+    }
+
+    private func hook(_ path: String, method: String) throws -> Data {
+        let socket = try XCTUnwrap(environment["LOCAL_STUDIO_REMOTE_URL"].flatMap(URLComponents.init(string:)))
+        let url = try XCTUnwrap(URL(string: "http://\(socket.host ?? "127.0.0.1"):\(socket.port ?? 80)/v1/smoke/\(path)"))
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        let done = expectation(description: "fake-studio \(path)")
+        nonisolated(unsafe) var body: Data?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
+                body = data
+            }
+            done.fulfill()
+        }.resume()
+        wait(for: [done], timeout: 10)
+        return try XCTUnwrap(body, "fake-studio refused \(path)")
     }
 
     @MainActor
