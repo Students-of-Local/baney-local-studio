@@ -2452,11 +2452,16 @@ fn usage_check(eukhe: &Path, data: &Path, model: &Target) -> anyhow::Result<()> 
         data,
         "usage report loaded",
         |_, update| {
-            if let Update::Usage { report: loaded, .. } = update {
-                report = Some(loaded);
-                return Ok(true);
+            match update {
+                Update::Usage { report: loaded, .. } => {
+                    report = Some(loaded);
+                    Ok(true)
+                }
+                Update::RequestFailed { request, message } if request == "usage-1" => {
+                    bail!("the usage report failed: {message}")
+                }
+                _ => Ok(false),
             }
-            Ok(false)
         },
         |studio| studio.load_usage("usage-1".to_string(), UsagePeriod::Day),
     )?;
