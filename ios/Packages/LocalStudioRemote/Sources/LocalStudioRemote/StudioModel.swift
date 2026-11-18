@@ -136,6 +136,8 @@ public final class MachineModel: Identifiable {
     public private(set) var lastNotification: StudioNotification?
     public private(set) var lastError: String?
     public private(set) var pendingSends: [String: String] = [:]
+    public private(set) var waitingSends: [String: String] = [:]
+    public private(set) var duplicateSends = 0
     public private(set) var cacheSaved = false
     public private(set) var lastSeq: UInt64 = 0
 
@@ -238,7 +240,18 @@ public final class MachineModel: Identifiable {
         guard let window = transcripts[thread], window.earlier > 0 else {
             return
         }
-        perform { try await $0.loadEarlier(thread: thread, before: window.earlier, limit: limit) }
+        let before = window.earlier
+        let remote = remote
+        Task {
+            do {
+                let page = try await remote.loadEarlier(thread: thread, before: before, limit: limit)
+                if self.transcripts[page.thread]?.prepend(page, before: before) == true {
+                    self.scheduleSave()
+                }
+            } catch {
+                self.lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
     }
 
     public func sendQueuedNow(_ queued: QueuedMessage, thread: String) {
@@ -289,10 +302,17 @@ public final class MachineModel: Identifiable {
             lastSeq = seq
             apply(update)
             scheduleSave()
-        case let .sendAccepted(request):
+        case let .sendAccepted(request, duplicate):
             pendingSends.removeValue(forKey: request)
+            waitingSends.removeValue(forKey: request)
+            if duplicate {
+                duplicateSends += 1
+            }
+        case let .sendWaiting(request, reason, _):
+            waitingSends[request] = reason
         case let .sendRejected(request, message):
             pendingSends.removeValue(forKey: request)
+            waitingSends.removeValue(forKey: request)
             lastError = message
         }
     }
@@ -305,8 +325,8 @@ public final class MachineModel: Identifiable {
             projects = list
         case let .threads(list):
             threads = list
-        case .threadStarted:
-            return
+        case let .threadStarted(draft, _):
+            waitingSends.removeValue(forKey: draft)
         case let .thread(thread, info):
             infos[thread] = info
         case let .transcript(thread, op):
@@ -325,6 +345,7 @@ public final class MachineModel: Identifiable {
             studio?.onNotification?(self, note)
         case let .requestDone(request, _):
             pendingSends.removeValue(forKey: request)
+            waitingSends.removeValue(forKey: request)
         case let .requestFailed(request, message):
             pendingSends.removeValue(forKey: request)
             lastError = message

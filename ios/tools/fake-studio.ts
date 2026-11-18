@@ -19,6 +19,9 @@ const streamMs = Number(flag("stream-ms", "400"));
 const newest = Number(flag("protocol", "2"));
 const oldest = Number(flag("min-protocol", String(newest)));
 const windowLimit = 200;
+const pageLimit = 500;
+const pendingLimit = 64;
+const busyOnceAfter = Number(flag("busy-once-after", "-1"));
 const bufferLimit = 2000;
 const bufferMs = 10 * 60 * 1000;
 const maxChunk = 65_535 - 16 - 1;
@@ -41,7 +44,6 @@ type Device = {
   seq: number;
   buffer: { seq: number; at: number; body: Json }[];
   watched: Set<string>;
-  windows: Map<string, number>;
   ws?: ServerWebSocket<Conn>;
 };
 
@@ -59,6 +61,7 @@ type Item = { id: number; turn: number; createdAt: number | null; kind: Json };
 const devices = new Map<string, Device>();
 let secretBurned = false;
 const accepted = new Set<string>();
+let sendCount = 0;
 const approvalWaiters = new Map<string, (answer: string) => void>();
 const busy = new Set<string>();
 let nextItem = 1;
@@ -228,8 +231,7 @@ function toWatchers(thread: string, body: (device: Device) => Json): void {
 
 function reset(device: Device, thread: string): Json {
   const items = transcripts.get(thread) ?? [];
-  const size = device.windows.get(thread) ?? windowLimit;
-  const start = Math.max(0, items.length - size);
+  const start = Math.max(0, items.length - windowLimit);
   return { type: "transcript", thread, op: { type: "reset", items: items.slice(start), earlier: start } };
 }
 
@@ -352,7 +354,21 @@ function enqueue(thread: string, text: string, request: string, steering: boolea
 }
 
 type Failure = { code: string; message: string };
-type Handler = (device: Device, args: Json) => Failure | string | undefined;
+type Answer = { result: Json };
+type Handler = (device: Device, args: Json) => Failure | Answer | string | undefined;
+
+function pendingPrompts(): number {
+  let total = 0;
+  for (const list of queues.values()) total += list.length;
+  return total;
+}
+
+function busyFailure(): Failure | undefined {
+  if (pendingPrompts() >= pendingLimit) {
+    return { code: "busy", message: `the machine holds ${pendingLimit} prompts it hasn't taken` };
+  }
+  return undefined;
+}
 
 const handlers: Record<string, Handler> = {
   ping() {
@@ -375,7 +391,14 @@ const handlers: Record<string, Handler> = {
     const prompt = args.prompt as { text?: string } | undefined;
     if (!threads.has(thread)) return "unknown thread";
     if (typeof prompt?.text !== "string") return "missing prompt";
-    if (accepted.has(request)) return undefined;
+    if (accepted.has(request)) return { result: { duplicate: true } };
+    sendCount += 1;
+    if (sendCount === busyOnceAfter + 1) {
+      console.log(`answered busy once to ${request}`);
+      return { code: "busy", message: "the fake answers busy once (--busy-once-after)" };
+    }
+    const full = busyFailure();
+    if (full) return full;
     accepted.add(request);
     if (busy.has(thread)) {
       enqueue(thread, prompt.text, request, args.delivery === "steer");
@@ -391,16 +414,14 @@ const handlers: Record<string, Handler> = {
     waiter(String(args.answer));
     return undefined;
   },
-  load_earlier(device, args) {
+  load_earlier(_device, args) {
     const thread = String(args.thread);
     const items = transcripts.get(thread);
     if (!items) return "unknown thread";
-    const before = Number(args.before);
-    const limit = Number(args.limit ?? 100);
+    const before = Math.min(Number(args.before), items.length);
+    const limit = Math.min(Number(args.limit ?? 100), pageLimit);
     const start = Math.max(0, before - limit);
-    device.windows.set(thread, items.length - start);
-    queueMicrotask(() => update(device, reset(device, thread)));
-    return undefined;
+    return { result: { thread, start, items: items.slice(start, before) } };
   },
   send_queued_now(_ws, args) {
     const thread = String(args.thread);
@@ -432,6 +453,8 @@ const handlers: Record<string, Handler> = {
     return undefined;
   },
   start_thread(_ws, args) {
+    const full = busyFailure();
+    if (full) return full;
     const prompt = args.prompt as { text?: string } | undefined;
     const text = prompt?.text ?? "";
     const id = `t${nextThread++}`;
@@ -507,7 +530,6 @@ function handshake(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
       seq: 0,
       buffer: [],
       watched: new Set(),
-      windows: new Map(),
     };
     devices.set(id, device);
     ws.data.device = device;
@@ -546,13 +568,13 @@ function hello(ws: ServerWebSocket<Conn>, device: Device, frame: Json): void {
     }
     return;
   }
-  device.windows = new Map();
   send(ws, {
     op: "hello",
     protocol: ws.data.protocol,
     epoch,
     machine,
     resume: "snapshot",
+    seq: device.seq,
     snapshot: [
       { type: "connection", state: { type: "ready" } },
       { type: "projects", projects },
@@ -586,11 +608,13 @@ function frame(ws: ServerWebSocket<Conn>, raw: string | Buffer): void {
   if (request.op === "hello") return hello(ws, device, request);
   if (!ws.data.ready) return fail(ws, 4400, "hello first");
   const handler = handlers[String(request.op)];
-  const result: Failure | string | undefined = handler
+  const result: Failure | Answer | string | undefined = handler
     ? handler(device, (request.args as Json) ?? {})
     : { code: "not_remote", message: `${String(request.op)} is not a remote op` };
   if (result === undefined) {
     send(ws, { re: request.id, ok: true });
+  } else if (typeof result === "object" && "result" in result) {
+    send(ws, { re: request.id, ok: true, result: result.result });
   } else {
     send(ws, { re: request.id, error: typeof result === "string" ? { code: "failed", message: result } : result });
   }

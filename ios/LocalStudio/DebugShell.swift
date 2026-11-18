@@ -62,6 +62,11 @@ struct MachineSection: View {
             if let note = machine.lastNotification {
                 Text("\(note.kind.rawValue): \(note.title)").accessibilityIdentifier("last-notification")
             }
+            if !machine.waitingSends.isEmpty {
+                Text("sends waiting \(machine.waitingSends.count): \(machine.waitingSends.values.sorted().joined(separator: ", "))")
+                    .font(.caption)
+                    .accessibilityIdentifier("sends-waiting")
+            }
             if let error = machine.lastError {
                 Text(error).foregroundStyle(.red).accessibilityIdentifier("machine-error")
             }
