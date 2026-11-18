@@ -2451,19 +2451,21 @@ fn usage_check(eukhe: &Path, data: &Path, model: &Target) -> anyhow::Result<()> 
         eukhe,
         data,
         "usage report loaded",
-        |_, update| {
-            match update {
-                Update::Usage { report: loaded, .. } => {
-                    report = Some(loaded);
-                    Ok(true)
-                }
-                Update::RequestFailed { request, message } if request == "usage-1" => {
-                    bail!("the usage report failed: {message}")
-                }
-                _ => Ok(false),
+        |studio, update| match update {
+            Update::Connection { state: local_studio_core::Connection::Ready } => {
+                studio.load_usage("usage-1".to_string(), UsagePeriod::Day);
+                Ok(false)
             }
+            Update::Usage { report: loaded, .. } => {
+                report = Some(loaded);
+                Ok(true)
+            }
+            Update::RequestFailed { request, message } if request == "usage-1" => {
+                bail!("the usage report failed: {message}")
+            }
+            _ => Ok(false),
         },
-        |studio| studio.load_usage("usage-1".to_string(), UsagePeriod::Day),
+        |_| {},
     )?;
     let report = report.context("no usage report")?;
     let entry = report.by_model.iter().find(|entry| entry.provider == model.provider && entry.model == model.model);
