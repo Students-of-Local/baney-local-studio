@@ -218,6 +218,7 @@ impl<T> Remembered<T> {
 
 struct Tag {
     device: String,
+    op: &'static str,
     given: String,
 }
 
@@ -325,15 +326,11 @@ impl State {
         Some((device, value))
     }
 
-    fn remember_outcome(&mut self, device: &str, value: &Value, text: &Arc<str>) {
-        let (op, field) = if value.get("draft").is_some_and(Value::is_string) {
-            ("start_thread", "draft")
-        } else {
-            ("send", "request")
-        };
-        let Some(given) = value.get(field).and_then(Value::as_str) else { return };
-        if let Some(ledger) = self.ledgers.get_mut(device) {
-            ledger.outcome(&accepted_key(op, given), text);
+    fn remember_outcome(&mut self, tag: &str, text: &Arc<str>) {
+        let Some(Tag { device, op, given }) = self.tags.get(tag) else { return };
+        let key = accepted_key(op, given);
+        if let Some(ledger) = self.ledgers.get_mut(device.as_str()) {
+            ledger.outcome(&key, text);
         }
     }
 
@@ -603,9 +600,13 @@ impl Hub {
                 "thread_started" | "request_done" | "request_failed" => match state.routed(&value) {
                     Some((owner, routed)) => {
                         let text = text_of(&routed);
-                        state.remember_outcome(&owner, &routed, &text);
+                        let tag =
+                            ["request", "draft"].into_iter().find_map(|field| value.get(field).and_then(Value::as_str));
+                        if let Some(tag) = tag {
+                            state.remember_outcome(tag, &text);
+                        }
                         state.deliver(&owner, text, None);
-                        if let Some(tag) = value.get("request").and_then(Value::as_str) {
+                        if let Some(tag) = tag {
                             state.finish(tag);
                         }
                     }
@@ -829,7 +830,12 @@ impl Hub {
         let mut prompt = |value: &Value| resolve_prompt(session, value);
         ops::dispatch(&self.studio, op, &args, &mut prompt)?;
         if let Some((tag, given)) = tag {
-            state.tags.insert(tag.clone(), Tag { device: device.to_string(), given });
+            let op = match op {
+                "send" => "send",
+                "start_thread" => "start_thread",
+                _ => "answered",
+            };
+            state.tags.insert(tag.clone(), Tag { device: device.to_string(), op, given });
             let session = state.live(device, conn)?;
             let mut evicted = Vec::new();
             if prompt_op {

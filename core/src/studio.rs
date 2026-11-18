@@ -399,6 +399,21 @@ impl Backlog {
     }
 }
 
+#[derive(Clone)]
+struct Inbox {
+    commands: mpsc::UnboundedSender<Command>,
+    backlog: Arc<Backlog>,
+}
+
+impl Inbox {
+    fn send(&self, command: Command) {
+        self.backlog.change(&command, true);
+        if let Err(mpsc::error::SendError(command)) = self.commands.send(command) {
+            self.backlog.change(&command, false);
+        }
+    }
+}
+
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Studio {
     commands: mpsc::UnboundedSender<Command>,
@@ -449,13 +464,14 @@ impl Studio {
         let pull_requests = workspace.pull_requests_changed();
         let (commands, receiver) = mpsc::unbounded_channel();
         let backlog = Arc::new(Backlog::default());
-        let adder = commands.clone();
+        let inbox = Inbox { commands: commands.clone(), backlog: Arc::clone(&backlog) };
+        let adder = inbox.clone();
         workspace.set_project_adder(Arc::new(move |path: String| {
-            adder.send(Command::AddProject { path }).ok();
+            adder.send(Command::AddProject { path });
         }));
-        let reloader = commands.clone();
+        let reloader = inbox.clone();
         workspace.set_models_reloader(Arc::new(move |answer| {
-            reloader.send(Command::LoadModels { answer }).ok();
+            reloader.send(Command::LoadModels { answer });
         }));
         let actor = Actor {
             socket,
@@ -467,7 +483,7 @@ impl Studio {
             settings,
             pull_requests,
             text,
-            itself: commands.clone(),
+            itself: inbox.clone(),
             client_slot,
             client: None,
             store,
@@ -799,7 +815,7 @@ struct Actor {
     settings: watch::Receiver<Settings>,
     pull_requests: watch::Receiver<u64>,
     text: TextGen,
-    itself: mpsc::UnboundedSender<Command>,
+    itself: Inbox,
     client_slot: watch::Sender<Option<DaemonClient>>,
     client: Option<DaemonClient>,
     store: Store,
@@ -1059,7 +1075,7 @@ impl Actor {
                 .map(|(id, _)| id.clone())
                 .collect();
             for thread in unsure {
-                self.itself.send(Command::Verify { thread, attempt: 0, relink: false }).ok();
+                self.itself.send(Command::Verify { thread, attempt: 0, relink: false });
             }
         }
         self.dirty = true;
@@ -2599,7 +2615,7 @@ impl Actor {
         let itself = self.itself.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            itself.send(command).ok();
+            itself.send(command);
         });
     }
 
@@ -2801,7 +2817,7 @@ impl Actor {
             Ok(_) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string() }),
             Err(error) => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("Eukhe did not take the stop request: {error}"));
-                self.itself.send(Command::StopCheck { thread: id.to_string() }).ok();
+                self.itself.send(Command::StopCheck { thread: id.to_string() });
             }
         }
     }
@@ -3116,7 +3132,7 @@ impl Actor {
             if attached && restarted {
                 self.later(RELINK_DELAY, Command::Verify { thread: id.clone(), attempt: 0, relink: true });
             } else if unsure && (idle || moved) {
-                self.itself.send(Command::Verify { thread: id.clone(), attempt: 0, relink: moved }).ok();
+                self.itself.send(Command::Verify { thread: id.clone(), attempt: 0, relink: moved });
             }
             if stopped && !self.running(&id) {
                 if let Some(thread) = self.threads.get_mut(&id) {
@@ -3266,7 +3282,7 @@ impl Actor {
             let thread = id.to_string();
             tokio::spawn(async move {
                 let result = text.one_shot(prompt, Some(provider), Some(model)).await;
-                itself.send(Command::TitleGenerated { thread, result }).ok();
+                itself.send(Command::TitleGenerated { thread, result });
             });
             return Ok(());
         }

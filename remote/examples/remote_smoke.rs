@@ -2217,6 +2217,31 @@ async fn duplicate_replay(a: &mut Client) -> anyhow::Result<()> {
     a.until("the duplicate's outcome is sent again", QUICK, |view| view.answer_counts.get("r-dup") == Some(&2)).await?;
     ensure!(a.view().answers["r-dup"] == "request_failed", "the replayed outcome is {}", a.view().answers["r-dup"]);
     println!("ok   a duplicate send is answered {again} and its request_failed is sent again");
+    let settings = serde_json::to_value(ThreadSettings {
+        provider: None,
+        model: None,
+        thinking_level: None,
+        access: AccessMode::Supervised,
+        worktree: WorktreeChoice::Local,
+    })?;
+    let args = json!({ "draft": "d-dup", "project": "/no-such-project-dup", "prompt": prompt("duplicate start"), "settings": settings });
+    let first = a.reply("start_thread", args.clone()).await?;
+    ensure!(
+        first.get("ok") == Some(&json!(true)) && first.get("duplicate").is_none(),
+        "the first start_thread answered {first}"
+    );
+    a.until("request_failed for d-dup", SETUP, |view| view.answer_counts.get("d-dup") == Some(&1)).await?;
+    let again = a.reply("start_thread", args).await?;
+    ensure!(
+        again.get("ok") == Some(&json!(true)) && again.get("duplicate") == Some(&json!(true)),
+        "a second start_thread d-dup answered {again}"
+    );
+    a.until("the failed start_thread's outcome is sent again", QUICK, |view| {
+        view.answer_counts.get("d-dup") == Some(&2)
+    })
+    .await?;
+    ensure!(a.view().answers["d-dup"] == "request_failed", "the replayed outcome is {}", a.view().answers["d-dup"]);
+    println!("ok   a duplicate of a failed start_thread is answered {again} and its request_failed is sent again");
     Ok(())
 }
 
