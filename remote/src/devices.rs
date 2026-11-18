@@ -126,10 +126,6 @@ impl Devices {
         }
     }
 
-    pub fn ledger_path(&self) -> &Path {
-        &self.ledger
-    }
-
     fn hold(&self) -> anyhow::Result<Held> {
         std::fs::create_dir_all(&self.folder).with_context(|| format!("create {}", self.folder.display()))?;
         std::fs::set_permissions(&self.folder, std::fs::Permissions::from_mode(0o700))

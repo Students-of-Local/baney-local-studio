@@ -1526,12 +1526,40 @@ async fn resume_checks(run: &mut Run, a: Client, a_phone: &Phone, c: &mut Client
     }
     run.report.push(format!("KK reconnect to hello latency {} ms", latency.as_millis()));
     drop(a);
-    let (a, _) = reconnect(run, a_phone, json!({ "seq": 3, "epoch": "not-this-epoch", "watch": [] })).await?;
+    let (mut a, _) = reconnect(run, a_phone, json!({ "seq": 3, "epoch": "not-this-epoch", "watch": [] })).await?;
     ensure!(
         a.view().hello.as_ref().is_some_and(|hello| hello["resume"] == json!("snapshot")),
         "a foreign epoch did not get a snapshot"
     );
     println!("ok   a resume from another epoch gets a full snapshot");
+    let replay = "r".repeat(1_500_000);
+    std::fs::write(run.work.join("replay.txt"), &replay)?;
+    let before = a.view().seq;
+    for at in 1..=48 {
+        a.call(
+            "read_file",
+            json!({ "request": format!("q-replay-{at}"), "project": run.project, "relative": "replay.txt" }),
+        )
+        .await?;
+    }
+    a.until("48 reads of replay.txt answer with blobs", SETUP, |view| {
+        view.blobs.values().filter(|blob| blob.request.starts_with("q-replay-") && blob.done).count() == 48
+    })
+    .await?;
+    let recent = a.view().seq - 2;
+    drop(a);
+    let (a, _) = reconnect(run, a_phone, json!({ "seq": before, "epoch": run.epoch, "watch": [] })).await?;
+    ensure!(
+        a.view().hello.as_ref().is_some_and(|hello| hello["resume"] == json!("snapshot")),
+        "a resume from before 72 MB of read_file blobs did not fall back to a snapshot"
+    );
+    drop(a);
+    let (a, _) = reconnect(run, a_phone, json!({ "seq": recent, "epoch": run.epoch, "watch": [] })).await?;
+    ensure!(
+        a.view().hello.as_ref().is_some_and(|hello| hello["resume"] == json!("delta")),
+        "a resume from the newest blobs did not get a delta"
+    );
+    println!("ok   the replay buffer holds a byte budget: 72 MB of blobs push an old seq to a snapshot, a recent one still gets a delta");
     Ok(a)
 }
 
@@ -1745,6 +1773,24 @@ async fn listener_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Resul
 }
 
 async fn revoke_one(run: &mut Run) -> anyhow::Result<()> {
+    let s_phone = Phone::new("phone-s", "Smoke Phone S")?;
+    let s = pair(run, &s_phone).await?;
+    let ledger = run.serve.data.join("remote").join("devices.json");
+    let text = std::fs::read_to_string(&ledger)?;
+    let parsed: Value = serde_json::from_str(&text)?;
+    let key = parsed["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|device| device.to_string().contains("phone-s"))
+        .and_then(|device| device["key"].as_str())
+        .context("phone-s has no key in the ledger")?
+        .to_string();
+    let flipped = format!("{}{}", &key[..key.len() - 1], if key.ends_with('0') { '1' } else { '0' });
+    let stamp = std::fs::metadata(&ledger)?.modified()?;
+    std::fs::write(&ledger, text.replacen(&key, &flipped, 1))?;
+    std::fs::File::options().write(true).open(&ledger)?.set_modified(stamp)?;
+    s.closed_with("a device whose key changes under an unchanged ledger stamp closes with 4401", 4401).await?;
     let b_phone = Phone::new("phone-b", "Smoke Phone B")?;
     let b = pair(run, &b_phone).await?;
     let started = Instant::now();

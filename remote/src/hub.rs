@@ -30,6 +30,7 @@ const MAX_ACCEPTED: usize = 16_384;
 const SEND_LOG: Duration = Duration::from_secs(60);
 const MAX_SEND_LOG: usize = 256;
 const BUFFERED: usize = 2000;
+const BUFFERED_BYTES: usize = 64 << 20;
 const KEPT: Duration = Duration::from_secs(600);
 const MAX_WATCH: usize = 64;
 const MAX_BLOB: usize = 25 << 20;
@@ -123,6 +124,10 @@ struct Entry {
     blob: Option<Arc<Blob>>,
 }
 
+fn weight(text: &str, blob: Option<&Blob>) -> usize {
+    text.len() + blob.map_or(0, |blob| blob.data.len())
+}
+
 struct Upload {
     mime: String,
     size: usize,
@@ -136,6 +141,7 @@ struct Session {
     conn: Option<(ConnId, Tx)>,
     seq: u64,
     buffer: VecDeque<Entry>,
+    buffered: usize,
     watching: HashSet<String>,
     left_at: Option<Instant>,
     uploads: HashMap<[u8; BLOB_ID], Upload>,
@@ -150,6 +156,7 @@ impl Session {
             conn: None,
             seq: 0,
             buffer: VecDeque::new(),
+            buffered: 0,
             watching: HashSet::new(),
             left_at: None,
             uploads: HashMap::new(),
@@ -162,10 +169,13 @@ impl Session {
         self.seq += 1;
         let now = Instant::now();
         self.buffer.push_back(Entry { seq: self.seq, at: now, text: Arc::clone(&text), blob: blob.clone() });
+        self.buffered += weight(&text, blob.as_deref());
         while self.buffer.len() > BUFFERED
+            || self.buffered > BUFFERED_BYTES
             || self.buffer.front().is_some_and(|entry| now.duration_since(entry.at) > KEPT)
         {
-            self.buffer.pop_front();
+            let Some(entry) = self.buffer.pop_front() else { break };
+            self.buffered -= weight(&entry.text, entry.blob.as_deref());
         }
         let gone = self.conn.as_ref().is_some_and(|(_, tx)| !tx.send(Out::Update { seq: self.seq, text, blob }));
         if gone {

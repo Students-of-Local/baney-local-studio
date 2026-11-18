@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -102,22 +102,14 @@ pub async fn run(local: TcpListener, tunnel: Option<TcpListener>, server: Arc<Se
 }
 
 async fn revocations(server: Arc<Server>) {
-    let mut seen: Option<(SystemTime, u64)> = None;
     let mut every = tokio::time::interval(REVOKE_POLL);
     loop {
         every.tick().await;
-        let stamp = std::fs::metadata(server.devices.ledger_path())
-            .ok()
-            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
-        if stamp.is_some() && stamp == seen {
-            continue;
-        }
         match server.devices.list() {
             Ok(devices) => {
                 let known: HashMap<String, String> =
                     devices.into_iter().map(|device| (device.info.id, device.key)).collect();
                 server.hub.retain(&known);
-                seen = stamp;
             }
             Err(error) => eprintln!("local-studio-serve: could not read the device list: {error:#}"),
         }
