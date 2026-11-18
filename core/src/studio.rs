@@ -2404,11 +2404,20 @@ impl Actor {
     }
 
     async fn utility_session(&mut self) -> Result<String, String> {
-        if let Some(active) = self.focused.as_deref().and_then(|id| self.live_active(id)) {
+        if let Some(active) = self
+            .focused
+            .as_deref()
+            .and_then(|id| self.live_active(id))
+            .filter(|active| self.by_active.contains_key(active))
+        {
             return Ok(active);
         }
-        if let Some(active) =
-            self.threads.values().find_map(|thread| thread.live.as_ref().map(|live| live.active.clone()))
+        if let Some(active) = self
+            .threads
+            .values()
+            .filter_map(|thread| thread.live.as_ref())
+            .find(|live| self.by_active.contains_key(&live.active))
+            .map(|live| live.active.clone())
         {
             return Ok(active);
         }
@@ -2521,7 +2530,7 @@ impl Actor {
         let project = project.and_then(|project| self.store.project_id(&project));
         let in_project = project.as_ref().and_then(|project| {
             self.threads.iter().find_map(|(id, thread)| {
-                let live = thread.live.as_ref()?;
+                let live = thread.live.as_ref().filter(|live| self.by_active.contains_key(&live.active))?;
                 let flags = self.store.flags(id);
                 (threads::project_for(&live.state.cwd, &flags, &self.store.projects).as_ref() == Some(project))
                     .then(|| live.active.clone())

@@ -67,6 +67,7 @@ struct Watch {
     resets: u32,
     errors: Vec<String>,
     usage: Option<UsageReport>,
+    resources: u32,
 }
 
 impl Watch {
@@ -151,6 +152,7 @@ fn apply(watch: &mut Watch, update: Update) {
             watch.approvals = approvals;
         }
         Update::Usage { report, .. } => watch.usage = Some(report),
+        Update::Commands { .. } | Update::Skills { .. } => watch.resources += 1,
         Update::Connection { state } => watch.connection = Some(state),
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
         Update::Threads { threads } => watch.threads = threads,
@@ -174,8 +176,6 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Queue { .. }
         | Update::ComposerText { .. }
         | Update::DaemonDefault { .. }
-        | Update::Commands { .. }
-        | Update::Skills { .. }
         | Update::Subagents { .. }
         | Update::MessageImage { .. }
         | Update::Notification { .. }
@@ -348,6 +348,10 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         let row = watch.row().context("thread row")?;
         ensure!(row.harness == target.harness, "the row shows harness {:?}", row.harness);
         println!("ok   row lists harness {:?}", row.harness);
+        studio.list_commands("harness-commands".to_string(), watch.projects.first().cloned());
+        pump(&studio, &signal, watch, "commands listed with the CLI thread focused", |watch| watch.resources == 1)?;
+        studio.list_skills("harness-skills".to_string(), watch.projects.first().cloned());
+        pump(&studio, &signal, watch, "skills listed with the CLI thread focused", |watch| watch.resources == 2)?;
 
         let denied = approval_turn(&studio, &signal, watch, &thread, "denied.txt", ApprovalAnswer::Deny)?;
         ensure!(denied > 0, "Supervised did not ask before writing denied.txt");
