@@ -323,6 +323,7 @@ async function runTurn(thread: string, text: string, request: string): Promise<v
   toWatchers(thread, () => ({ type: "approvals", thread, approvals: [] }));
   setStatus(thread, "working");
   const approved = answer !== "deny";
+  broadcast({ type: "notification", thread, kind: "needs_answer", title, body: "a question for the phone" });
   if (approved) {
     replace(thread, toolIndex, { ...tool, kind: { ...tool.kind, state: "running" } });
     await sleep(100);

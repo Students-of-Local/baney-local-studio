@@ -28,6 +28,7 @@ public enum ThreadStatus: String, WireEnum {
 public enum NotificationKind: String, WireEnum {
     case turnDone = "turn_done"
     case needsApproval = "needs_approval"
+    case needsAnswer = "needs_answer"
     case failed
 }
 
