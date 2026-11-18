@@ -1053,6 +1053,9 @@ struct Target {
     provider: String,
     model: String,
     thinking: String,
+    /// The model takes image input. A text-only model gets the tool turn without the image, and
+    /// the image round trip runs on a thread of the unreachable provider instead.
+    images: bool,
 }
 
 fn refuse_links(path: &Path) -> anyhow::Result<()> {
@@ -1107,7 +1110,7 @@ fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
         "baseUrl": format!("http://127.0.0.1:{}/v1", free_port()?),
         "api": "openai-completions",
         "apiKey": "absent",
-        "models": [{ "id": "absent", "input": ["text"], "contextWindow": 8192 }]
+        "models": [{ "id": "absent", "input": ["text", "image"], "contextWindow": 8192 }]
     });
     let Some(source) = std::env::var_os("LOCAL_STUDIO_SMOKE_AGENT").map(PathBuf::from) else {
         write("models.json", &serde_json::to_vec(&json!({ "providers": { "remote-smoke-absent": absent } }))?)?;
@@ -1143,8 +1146,17 @@ fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
     };
     let base = catalog.pointer(&format!("/providers/{provider}/baseUrl")).and_then(Value::as_str).unwrap_or("?");
     let thinking = std::env::var("REMOTE_SMOKE_THINKING").unwrap_or_else(|_| "off".to_string());
-    println!("     model {provider}/{model} at {base}, thinking {thinking}; auth.json is a scratch {{}} (no sign-in)");
-    Ok(Some(Target { provider, model, thinking }))
+    let images = catalog
+        .pointer(&format!("/providers/{provider}/models"))
+        .and_then(Value::as_array)
+        .and_then(|models| models.iter().find(|entry| entry["id"] == model.as_str()))
+        .and_then(|entry| entry["input"].as_array())
+        .is_some_and(|input| input.iter().any(|kind| kind == "image"));
+    println!(
+        "     model {provider}/{model} at {base}, thinking {thinking}, {}; auth.json is a scratch {{}} (no sign-in)",
+        if images { "takes images" } else { "text only" }
+    );
+    Ok(Some(Target { provider, model, thinking, images }))
 }
 
 struct Run {
@@ -1986,7 +1998,8 @@ async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) 
     let blob = a.upload(&image, "image/png").await?;
     let text = bash_prompt("printf remote-ok > remote-proof.txt");
     let started = Instant::now();
-    a.call("start_thread", json!({ "draft": "d-tool", "project": run.project, "prompt": { "text": text, "images": [blob], "files": [] }, "settings": settings })).await?;
+    let images = if model.images { vec![blob.clone()] } else { Vec::new() };
+    a.call("start_thread", json!({ "draft": "d-tool", "project": run.project, "prompt": { "text": text, "images": images, "files": [] }, "settings": settings })).await?;
     a.until("thread_started", MODEL_STEP, |view| view.started.contains_key("d-tool")).await?;
     let thread = a.view().started["d-tool"].clone();
     a.call("watch", json!({ "thread": thread })).await?;
@@ -2004,12 +2017,32 @@ async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) 
         "PASS model stage: a streamed turn with a real tool call over the wire\nok   the real bash call wrote remote-proof.txt ({:.0} s for the first turn)",
         started.elapsed().as_secs_f64()
     );
-    let entry = a.view().items(&thread).iter().find_map(|item| match &item.kind {
+    let image_thread = if model.images {
+        thread.clone()
+    } else {
+        // Eukhe refuses an image turn on a text-only model, so the image goes to a thread of the
+        // unreachable provider: its user item still holds the image for load_message_image.
+        let blob = a.upload(&image, "image/png").await?;
+        let absent = json!({ "provider": "remote-smoke-absent", "model": "absent", "thinkingLevel": "off", "access": "supervised", "worktree": { "type": "local" } });
+        a.call("start_thread", json!({ "draft": "d-image", "project": run.project, "prompt": { "text": "image round trip", "images": [blob], "files": [] }, "settings": absent })).await?;
+        a.until("a thread for the image round trip", MODEL_STEP, |view| view.started.contains_key("d-image")).await?;
+        let image_thread = a.view().started["d-image"].clone();
+        a.call("watch", json!({ "thread": image_thread })).await?;
+        image_thread
+    };
+    a.until("the user item with the image", MODEL_STEP, |view| {
+        view.items(&image_thread)
+            .iter()
+            .any(|item| matches!(&item.kind, ItemKind::User { images, entry: Some(_), .. } if *images > 0))
+    })
+    .await?;
+    let entry = a.view().items(&image_thread).iter().find_map(|item| match &item.kind {
         ItemKind::User { images, entry: Some(entry), .. } if *images > 0 => Some(entry.clone()),
         _ => None,
     });
     let entry = entry.context("the user item carries no image")?;
-    a.call("load_message_image", json!({ "request": "q-image", "thread": thread, "entry": entry, "index": 0 })).await?;
+    a.call("load_message_image", json!({ "request": "q-image", "thread": image_thread, "entry": entry, "index": 0 }))
+        .await?;
     a.until("load_message_image answers with a blob", MODEL_STEP, |view| {
         view.blobs.values().any(|blob| blob.request == "q-image" && blob.done)
     })
