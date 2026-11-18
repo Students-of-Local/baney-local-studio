@@ -455,6 +455,7 @@ public actor MachineConnection {
             device: HelloDevice(name: device.name, app: device.app, channel: device.channel),
             resume: ResumeState(seq: epoch == nil ? nil : lastSeq, epoch: epoch, watch: watched)
         )
+        let watchedAtHello = watched
         try transmit(try FrameCodec.encode(hello)) { _ in }
         switch try await receiveFrame(socket) {
         case let .hello(reply):
@@ -494,6 +495,12 @@ public actor MachineConnection {
         }
 
         startPinger()
+        for thread in watched where !watchedAtHello.contains(thread) {
+            Task { try? await self.request("watch", ThreadArgs(thread: thread)) }
+        }
+        for thread in watchedAtHello where !watched.contains(thread) {
+            Task { try? await self.request("unwatch", ThreadArgs(thread: thread)) }
+        }
         Task { await self.flushOutbox() }
         while true {
             try handle(try await receiveFrame(socket))
