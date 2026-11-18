@@ -76,6 +76,7 @@ pub struct Tx {
     out: mpsc::UnboundedSender<Out>,
     queued: Arc<Queued>,
     cut: Arc<Notify>,
+    stop: Arc<Notify>,
 }
 
 pub struct Rx {
@@ -83,11 +84,17 @@ pub struct Rx {
     queued: Arc<Queued>,
 }
 
-pub fn outbound() -> (Tx, Rx, Arc<Notify>) {
+pub fn outbound() -> (Tx, Rx, Arc<Notify>, Arc<Notify>) {
     let (out, rx) = mpsc::unbounded_channel();
     let queued = Arc::new(Queued::default());
     let cut = Arc::new(Notify::new());
-    (Tx { out, queued: Arc::clone(&queued), cut: Arc::clone(&cut) }, Rx { out: rx, queued }, cut)
+    let stop = Arc::new(Notify::new());
+    (
+        Tx { out, queued: Arc::clone(&queued), cut: Arc::clone(&cut), stop: Arc::clone(&stop) },
+        Rx { out: rx, queued },
+        cut,
+        stop,
+    )
 }
 
 impl Tx {
@@ -191,6 +198,7 @@ impl Session {
     fn close(&mut self, code: u16, reason: &str) {
         if let Some((_, tx)) = self.conn.take() {
             tx.send(Out::Close(code, reason.to_string()));
+            tx.stop.notify_one();
         }
     }
 }
@@ -677,8 +685,27 @@ impl Hub {
         }
     }
 
-    pub fn attach(&self, device: &str, name: &str, key: &str, protocol: u64, tx: Tx, resume: &Resume) -> ConnId {
+    pub fn attach(
+        &self,
+        device: &str,
+        name: &str,
+        key: &str,
+        protocol: u64,
+        tx: Tx,
+        resume: &Resume,
+    ) -> Option<ConnId> {
         let mut state = self.state();
+        let asked: HashSet<String> = resume.watch.iter().take(MAX_WATCH).cloned().collect();
+        let changes = state.sessions.get(device).map_or(asked.len(), |session| {
+            if session.key == key {
+                session.watching.symmetric_difference(&asked).count()
+            } else {
+                session.watching.len() + asked.len()
+            }
+        });
+        if changes > 0 && self.studio.queued() + changes > MAX_COMMANDS {
+            return None;
+        }
         state.next += 1;
         let conn = state.next;
         let fresh = state.sessions.get(device).is_none_or(|session| session.key != key);
@@ -691,7 +718,7 @@ impl Hub {
         }
         let snapshot: Vec<Value> =
             state.snapshot.iter().flatten().filter_map(|text| serde_json::from_str(text).ok()).collect();
-        let Some(session) = state.sessions.get_mut(device) else { return conn };
+        let Some(session) = state.sessions.get_mut(device) else { return Some(conn) };
         session.close(REPLACED, "replaced by a newer socket");
         let delta = !fresh
             && resume.epoch.as_deref() == Some(self.epoch.as_str())
@@ -736,7 +763,7 @@ impl Hub {
                 state.watch(&self.studio, device, thread);
             }
         }
-        conn
+        Some(conn)
     }
 
     pub fn detach(&self, device: &str, conn: ConnId) {

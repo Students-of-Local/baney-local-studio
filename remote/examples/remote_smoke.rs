@@ -2165,6 +2165,97 @@ async fn writer_abort(run: &Run, c_phone: &Phone) -> anyhow::Result<Client> {
     Ok(c)
 }
 
+async fn revoke_blocked(run: &mut Run) -> anyhow::Result<()> {
+    let pid = run.serve.child.as_ref().context("serve is not running")?.id();
+    let fds = || std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(usize::MAX, Iterator::count);
+    let steady = || async {
+        let mut least = usize::MAX;
+        for _ in 0..13 {
+            least = least.min(fds());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        least
+    };
+    let r_phone = Phone::new("phone-r", "Smoke Phone R")?;
+    drop(pair(run, &r_phone).await?);
+    let baseline = steady().await;
+    let Opened::Ready(mut socket, transport, _) =
+        kk_handshake(run.serve.port, &Route::default(), &r_phone.id, &r_phone.private, &run.server_key).await?
+    else {
+        bail!("phone R's KK was refused:\n{}", run.serve.log_tail())
+    };
+    let transport = Mutex::new(transport);
+    let mut frames = vec![
+        json!({ "op": "hello", "device": { "name": "Smoke Phone R", "app": "0.4.1", "channel": CHANNEL }, "resume": { "watch": [] } }),
+    ];
+    frames.extend((1..=12).map(|at| json!({ "id": at, "op": "read_file", "args": { "request": format!("q-revoked-{at}"), "project": run.project, "relative": "huge.txt" } })));
+    for frame in frames {
+        for record in records(1, frame.to_string().as_bytes(), 65_000) {
+            let message = seal(&transport, &record).context("seal")?;
+            socket.send(Message::binary(message)).await?;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let open = steady().await;
+    ensure!(open > baseline, "phone R's unread socket holds no fd: {open} open against a baseline of {baseline}");
+    run.serve.run(&["revoke", "phone-r"])?;
+    let revoked = Instant::now();
+    while fds() > baseline {
+        ensure!(
+            revoked.elapsed() < Duration::from_secs(4),
+            "4 s after revoke, serve still holds {} fds against a baseline of {baseline}: the revoked socket's blocked writer kept it open",
+            fds()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    println!(
+        "ok   revoke ends a socket whose writer is blocked on unread blobs: its fd closed {} ms after revoke",
+        revoked.elapsed().as_millis()
+    );
+    drop(socket);
+    Ok(())
+}
+
+async fn watch_churn(run: &mut Run, eukhe: &Path) -> anyhow::Result<()> {
+    let w_phone = Phone::new("phone-w", "Smoke Phone W")?;
+    drop(pair(run, &w_phone).await?);
+    let hold = hold_core(run).await?;
+    let mut refused = None;
+    let mut clients = Vec::new();
+    for at in 0..12 {
+        let watch: Vec<String> = (0..64).map(|thread| format!("churn-{}-{thread}", at % 2)).collect();
+        let Opened::Ready(socket, transport, _) =
+            kk_handshake(run.serve.port, &Route::default(), &w_phone.id, &w_phone.private, &run.server_key).await?
+        else {
+            bail!("phone W's KK was refused:\n{}", run.serve.log_tail())
+        };
+        let client = Client::spawn(&w_phone.name, socket, transport);
+        client.frame(&json!({ "op": "hello", "device": { "name": "Smoke Phone W", "app": "0.4.1", "channel": CHANNEL }, "resume": { "watch": watch } }));
+        client.until("hello or a close", QUICK, |view| view.hello.is_some() || view.closed).await?;
+        if client.view().hello.is_none() {
+            let code = client.view().close_code;
+            ensure!(code == Some(1013), "churn reconnect {at} closed with {code:?}, expected 1013");
+            refused = Some(at);
+            break;
+        }
+        clients.push(client);
+    }
+    drop(clients);
+    let held_for = release_core(run, eukhe, hold).await?;
+    let Some(refused) = refused else {
+        bail!(
+            "all 12 reconnects with alternating 64-thread watch sets were accepted while the core was held {} ms",
+            held_for.as_millis()
+        )
+    };
+    ensure!(refused >= 2, "churn reconnect {refused} was refused before the core queue could be near full");
+    println!(
+        "ok   watch churn: with the core held {} ms, reconnect {refused} of 12 that would grow the core queue past its cap was refused with 1013",
+        held_for.as_millis()
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) -> anyhow::Result<()> {
     let settings = serde_json::to_value(ThreadSettings {
@@ -2703,13 +2794,16 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     }
     if step("backlog") {
         prompt_backlog(run, eukhe, &mut a).await?;
+        watch_churn(run, eukhe).await?;
     }
     if step("tags") {
         tag_isolation(run, eukhe, &mut a, &mut c).await?;
     }
     let mut c = if step("writer") {
         drop(c);
-        writer_abort(run, &c_phone).await?
+        let c = writer_abort(run, &c_phone).await?;
+        revoke_blocked(run).await?;
+        c
     } else {
         c
     };

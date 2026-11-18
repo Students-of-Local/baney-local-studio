@@ -14,6 +14,8 @@ printf '%s\n' "$out"
 for want in \
   "a device whose key changes under an unchanged ledger stamp closes with 4401" \
   "the replay buffer holds a byte budget" \
+  "revoke ends a socket whose writer is blocked on unread blobs" \
+  "that would grow the core queue past its cap was refused with 1013" \
   "sockets rotating inside one IPv6 /64 share one pending cap and one failure count" \
   "an approval raised on an unwatched thread during a disconnect shows on Home after a delta resume"; do
   grep -qF "$want" <<<"$out" || { echo "remote_smoke did not report: $want"; exit 1; }

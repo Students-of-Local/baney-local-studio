@@ -33,6 +33,7 @@ use crate::{access, ops};
 
 const SILENCE: Duration = Duration::from_secs(60);
 const DRAIN: Duration = Duration::from_secs(2);
+const CLOSE_WITHIN: Duration = Duration::from_secs(1);
 const REVOKE_POLL: Duration = Duration::from_secs(1);
 const UNPAIRED: u16 = 4401;
 const BANNED: u16 = 4429;
@@ -508,9 +509,21 @@ async fn attached(
         eprintln!("local-studio-serve: could not note the device as seen: {error:#}");
     }
     let name = server.devices.device(&opened.device).ok().flatten().map(|device| device.info.name).unwrap_or_default();
-    let (tx, rx, cut) = hub::outbound();
-    let conn = server.hub.attach(&opened.device, &name, &opened.key, protocol, tx.clone(), &resume_of(&hello));
+    let (tx, rx, cut, stop) = hub::outbound();
     let mut writer = tokio::spawn(write(sink, rx, Arc::clone(&channel)));
+    let Some(conn) = server.hub.attach(&opened.device, &name, &opened.key, protocol, tx.clone(), &resume_of(&hello))
+    else {
+        eprintln!(
+            "local-studio-serve: refused device {} from {address}: its watch changes do not fit the core's queue",
+            opened.device
+        );
+        tx.send(Out::Close(BUSY, "busy".to_string()));
+        drop(tx);
+        if tokio::time::timeout(DRAIN, &mut writer).await.is_err() {
+            writer.abort();
+        }
+        return;
+    };
     let mut writing = true;
     let ended = tokio::select! {
         ended = read(server, &opened.device, conn, &tx, &mut stream, &channel) => ended,
@@ -522,6 +535,13 @@ async fn attached(
             writer.abort();
             writing = false;
             Err("it read too slowly and its outbound queue filled".to_string())
+        }
+        () = stop.notified() => {
+            if tokio::time::timeout(CLOSE_WITHIN, &mut writer).await.is_err() {
+                writer.abort();
+            }
+            writing = false;
+            Ok(())
         }
     };
     if let Err(reason) = ended {
