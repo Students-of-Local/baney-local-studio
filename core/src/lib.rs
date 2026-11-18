@@ -15,6 +15,8 @@ mod studio;
 mod threads;
 mod transcript;
 pub mod tunnel;
+#[cfg(feature = "wire")]
+mod wire;
 mod workspace;
 
 pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
@@ -26,6 +28,7 @@ pub use model::{
     Update, WorktreeChoice,
 };
 pub use scratch::{check_scratch_agent, stored_keys_empty};
+pub use store::data_dir;
 pub use studio::{DaemonLaunch, Studio, StudioConfig, StudioError, Waker};
 pub use workspace::model::*;
 pub use workspace::{endpoint_presets, terminal_preview};
