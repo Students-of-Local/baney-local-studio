@@ -68,6 +68,16 @@ pub enum ThreadStatus {
     Monitoring,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum Harness {
+    #[default]
+    Eukhe,
+    ClaudeCode,
+    Codex,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -95,6 +105,7 @@ pub struct ThreadRow {
     pub live_agents: u32,
     pub fan_out: Option<String>,
     pub pull_request: Option<PullRequest>,
+    pub harness: Harness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +141,7 @@ pub struct ThreadInfo {
     pub service_tier: Option<String>,
     pub service_tiers: Vec<String>,
     pub goal: Option<Goal>,
+    pub harness: Harness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
