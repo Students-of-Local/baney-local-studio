@@ -2051,7 +2051,7 @@ async fn prompt_backlog(run: &Run, eukhe: &Path, a: &mut Client) -> anyhow::Resu
 }
 
 async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
-    let flood = 2000;
+    let flood = 3000;
     let long = "r".repeat(65);
     let reply = c.reply("list_archived", json!({ "request": long })).await?;
     ensure!(reply.pointer("/error/code") == Some(&json!("bad_args")), "a 65 byte request id answered {reply}");
@@ -2065,7 +2065,7 @@ async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) 
         c.frame(&json!({ "id": c.next, "op": "list_archived", "args": { "request": format!("q-flood-{at}") } }));
     }
     let last = c.next;
-    c.until("2,000 flood requests answered while the core holds phone A's send", QUICK, |view| {
+    c.until("3,000 flood requests answered while the core holds phone A's send", QUICK, |view| {
         (first..=last).all(|id| view.replies.contains_key(&id))
     })
     .await?;
@@ -2109,27 +2109,33 @@ async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) 
     Ok(())
 }
 
-fn serve_fd(pid: u32, serve_port: u16, socket: &Socket) -> anyhow::Result<(String, impl Fn() -> bool)> {
+fn serve_fd(pid: u32, serve_port: u16, socket: &Socket) -> anyhow::Result<(String, impl Fn() -> anyhow::Result<bool>)> {
     let MaybeTlsStream::Plain(tcp) = socket.get_ref() else { bail!("the phone's socket is not plain TCP") };
     let local = tcp.local_addr()?.port();
     let port = |field: &str| field.rsplit(':').next().and_then(|hex| u16::from_str_radix(hex, 16).ok());
-    let inode = std::fs::read_to_string(format!("/proc/{pid}/net/tcp"))?
+    let table = std::fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
+    let rows: Vec<&str> = table
         .lines()
         .skip(1)
-        .find_map(|line| {
+        .filter_map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            (port(fields.get(1)?)? == serve_port && port(fields.get(2)?)? == local).then(|| fields.get(9).copied())?
+            let ours = port(fields.get(1)?)? == serve_port && port(fields.get(2)?)? == local;
+            (ours && *fields.get(3)? == "01" && *fields.get(9)? != "0").then(|| fields[9])
         })
-        .context("serve's end of the phone's connection is not in /proc/net/tcp")?
-        .to_string();
+        .collect();
+    let [inode] = rows[..] else {
+        bail!(
+            "{} established rows in /proc/net/tcp for serve's end of the phone's connection, expected one",
+            rows.len()
+        )
+    };
     let link = format!("socket:[{inode}]");
     let target = link.clone();
-    let held = move || {
-        std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .any(|entry| std::fs::read_link(entry.path()).is_ok_and(|to| to.as_os_str() == target.as_str()))
-        })
+    let held = move || -> anyhow::Result<bool> {
+        let entries = std::fs::read_dir(format!("/proc/{pid}/fd")).context("serve's fd table is gone")?;
+        Ok(entries
+            .filter_map(Result::ok)
+            .any(|entry| std::fs::read_link(entry.path()).is_ok_and(|to| to.as_os_str() == target.as_str())))
     };
     Ok((link, held))
 }
@@ -2159,10 +2165,10 @@ async fn writer_abort(run: &Run, c_phone: &Phone) -> anyhow::Result<Client> {
         }
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
-    ensure!(held(), "serve holds no fd for the unread socket {link} after 3 s");
+    ensure!(held()?, "serve holds no fd for the unread socket {link} after 3 s");
     socket.send(Message::binary(vec![0u8; 64])).await?;
     let sent = Instant::now();
-    while held() {
+    while held()? {
         ensure!(
             sent.elapsed() < Duration::from_secs(5),
             "5 s after a bad record ended the reader, serve still holds {link}: the writer is stuck on the unread socket"
@@ -2201,10 +2207,10 @@ async fn revoke_blocked(run: &mut Run) -> anyhow::Result<()> {
         }
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
-    ensure!(held(), "serve holds no fd for phone R's unread socket {link} after 3 s");
+    ensure!(held()?, "serve holds no fd for phone R's unread socket {link} after 3 s");
     run.serve.run(&["revoke", "phone-r"])?;
     let revoked = Instant::now();
-    while held() {
+    while held()? {
         ensure!(
             revoked.elapsed() < Duration::from_secs(4),
             "4 s after revoke, serve still holds {link}: the revoked socket's blocked writer kept it open"
