@@ -245,7 +245,6 @@ impl Devices {
             _ => return Ok(Err("the pairing was used or expired during the handshake")),
         }
         let mut ledger = self.read()?;
-        // The phone makes a new id for each pairing; a known id would replace another phone's key.
         if ledger.devices.iter().any(|device| device.info.id == info.id) {
             return Ok(Err("a device with this id is already paired"));
         }

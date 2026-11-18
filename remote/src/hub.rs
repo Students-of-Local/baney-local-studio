@@ -20,6 +20,12 @@ const MAX_BACKLOG: usize = 64;
 const MAX_UPLOADS: usize = 16;
 const MAX_MIME: usize = 255;
 const MAX_ACK: usize = 64;
+const MAX_ID: usize = 128;
+const MAX_OUTSTANDING: usize = 64;
+const MAX_COMMANDS: usize = 512;
+const MAX_ACCEPTED: usize = 16_384;
+const SEND_LOG: Duration = Duration::from_secs(60);
+const MAX_SEND_LOG: usize = 256;
 const BUFFERED: usize = 2000;
 const KEPT: Duration = Duration::from_secs(600);
 const MAX_WATCH: usize = 64;
@@ -130,9 +136,8 @@ struct Session {
     watching: HashSet<String>,
     left_at: Option<Instant>,
     uploads: HashMap<[u8; BLOB_ID], Upload>,
-    tags: VecDeque<String>,
-    /// Accepted `send` and `start_thread` ids for this epoch, with their outcome once known.
-    accepted: Remembered<Option<Arc<str>>>,
+    prompt_tags: VecDeque<String>,
+    outstanding: VecDeque<(String, Instant)>,
 }
 
 impl Session {
@@ -145,8 +150,8 @@ impl Session {
             watching: HashSet::new(),
             left_at: None,
             uploads: HashMap::new(),
-            tags: VecDeque::new(),
-            accepted: Remembered::default(),
+            prompt_tags: VecDeque::new(),
+            outstanding: VecDeque::new(),
         }
     }
 
@@ -216,6 +221,28 @@ struct Tag {
     given: String,
 }
 
+struct Ledger {
+    key: String,
+    ids: HashSet<String>,
+    outcomes: Remembered<Arc<str>>,
+}
+
+impl Ledger {
+    fn new(key: String) -> Self {
+        Self { key, ids: HashSet::new(), outcomes: Remembered::default() }
+    }
+
+    fn full(&self) -> bool {
+        self.ids.len() >= MAX_ACCEPTED
+    }
+
+    fn outcome(&mut self, id: &str, text: &Arc<str>) {
+        if self.ids.contains(id) && !self.outcomes.values.contains_key(id) {
+            self.outcomes.insert(id.to_string(), Arc::clone(text));
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     next: ConnId,
@@ -225,10 +252,9 @@ struct State {
     snapshot: [Option<Arc<str>>; SNAPSHOT.len()],
     tags: HashMap<String, Tag>,
     tagged: u64,
+    ledgers: HashMap<String, Ledger>,
     git: HashMap<String, HashSet<String>>,
     sends: HashMap<String, (String, Instant)>,
-    /// The last `worktree_setup` per thread, watched or not: the core doesn't send it again on a
-    /// watch, and a phone that watches mid-setup must still see it.
     setups: HashMap<String, Arc<str>>,
 }
 
@@ -281,6 +307,16 @@ impl State {
         self.tags.get(tag).map(|tag| (tag.device.clone(), tag.given.clone()))
     }
 
+    fn finish(&mut self, tag: &str) {
+        let Some(device) = self.tags.get(tag).map(|tag| tag.device.clone()) else { return };
+        let Some(session) = self.sessions.get_mut(&device) else { return };
+        let before = session.outstanding.len();
+        session.outstanding.retain(|(known, _)| known != tag);
+        if session.outstanding.len() < before {
+            self.tags.remove(tag);
+        }
+    }
+
     fn routed(&self, value: &Value) -> Option<(String, Value)> {
         let field = ["request", "draft"].into_iter().find(|field| value.get(*field).is_some_and(Value::is_string))?;
         let (device, given) = self.tagged(value.get(field).and_then(Value::as_str)?)?;
@@ -289,8 +325,6 @@ impl State {
         Some((device, value))
     }
 
-    /// Keeps a `send` or `start_thread` outcome so a duplicate of that request can be answered
-    /// with it again.
     fn remember_outcome(&mut self, device: &str, value: &Value, text: &Arc<str>) {
         let (op, field) = if value.get("draft").is_some_and(Value::is_string) {
             ("start_thread", "draft")
@@ -298,9 +332,8 @@ impl State {
             ("send", "request")
         };
         let Some(given) = value.get(field).and_then(Value::as_str) else { return };
-        let key = accepted_key(device, op, given);
-        if let Some(outcome) = self.sessions.get_mut(device).and_then(|session| session.accepted.values.get_mut(&key)) {
-            outcome.get_or_insert_with(|| Arc::clone(text));
+        if let Some(ledger) = self.ledgers.get_mut(device) {
+            ledger.outcome(&accepted_key(op, given), text);
         }
     }
 
@@ -341,7 +374,7 @@ impl State {
     fn drop_session(&mut self, studio: &Studio, device: &str, code: u16, reason: &str) {
         let Some(mut session) = self.sessions.remove(device) else { return };
         session.close(code, reason);
-        for tag in &session.tags {
+        for tag in session.prompt_tags.iter().chain(session.outstanding.iter().map(|(tag, _)| tag)) {
             self.tags.remove(tag);
         }
         for thread in session.watching {
@@ -353,8 +386,8 @@ impl State {
     }
 }
 
-fn accepted_key(device: &str, op: &str, given: &str) -> String {
-    format!("{}:{device}:{op}:{given}", device.len())
+fn accepted_key(op: &str, given: &str) -> String {
+    format!("{op}:{given}")
 }
 
 fn text_of(value: &Value) -> Arc<str> {
@@ -533,14 +566,16 @@ impl Hub {
                     state.deliver(&device, Arc::clone(&text), None);
                 }
             }
-            Update::MessageImage { request, mime_type, data } => {
-                let Some((owner, request)) = state.tagged(&request) else { return };
+            Update::MessageImage { request: tag, mime_type, data } => {
+                let Some((owner, request)) = state.tagged(&tag) else { return };
+                state.finish(&tag);
                 let Ok(id) = random::<BLOB_ID>() else { return };
                 let header = json!({ "type": "blob", "request": request, "blob": hex(&id), "size": data.len(), "mime": mime_type });
                 state.deliver(&owner, text_of(&header), Some(Arc::new(Blob { id, data })));
             }
-            Update::FileContent { request, path, content } => {
-                let Some((owner, request)) = state.tagged(&request) else { return };
+            Update::FileContent { request: tag, path, content } => {
+                let Some((owner, request)) = state.tagged(&tag) else { return };
+                state.finish(&tag);
                 let (mime, data, language) = match content {
                     FileContent::Text { text, language } => {
                         ("text/plain; charset=utf-8".to_string(), text.into_bytes(), language)
@@ -566,10 +601,13 @@ impl Hub {
                     state.broadcast(&text);
                 }
                 "thread_started" | "request_done" | "request_failed" => match state.routed(&value) {
-                    Some((owner, value)) => {
-                        let text = text_of(&value);
-                        state.remember_outcome(&owner, &value, &text);
+                    Some((owner, routed)) => {
+                        let text = text_of(&routed);
+                        state.remember_outcome(&owner, &routed, &text);
                         state.deliver(&owner, text, None);
+                        if let Some(tag) = value.get("request").and_then(Value::as_str) {
+                            state.finish(tag);
+                        }
                     }
                     None => eprintln!("local-studio-serve: dropped a {kind} for a request no phone owns"),
                 },
@@ -581,8 +619,11 @@ impl Hub {
                 | "diff"
                 | "pull_requests"
                 | "pull_request_detail" => {
-                    if let Some((owner, value)) = state.routed(&value) {
-                        state.deliver(&owner, text_of(&value), None);
+                    if let Some((owner, routed)) = state.routed(&value) {
+                        state.deliver(&owner, text_of(&routed), None);
+                        if let Some(tag) = value.get("request").and_then(Value::as_str) {
+                            state.finish(tag);
+                        }
                     }
                 }
                 _ => {}
@@ -616,6 +657,9 @@ impl Hub {
         if fresh {
             state.drop_session(&self.studio, device, REPLACED, "replaced");
             state.sessions.insert(device.to_string(), Session::new(key.to_string()));
+        }
+        if state.ledgers.get(device).is_none_or(|ledger| ledger.key != key) {
+            state.ledgers.insert(device.to_string(), Ledger::new(key.to_string()));
         }
         let snapshot: Vec<Value> =
             state.snapshot.iter().flatten().filter_map(|text| serde_json::from_str(text).ok()).collect();
@@ -689,6 +733,7 @@ impl Hub {
             eprintln!("local-studio-serve: device {device} was revoked; closing its socket");
             state.drop_session(&self.studio, &device, 4401, "revoked");
         }
+        state.ledgers.retain(|device, ledger| known.get(device) == Some(&ledger.key));
     }
 
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
@@ -734,29 +779,42 @@ impl Hub {
         }
     }
 
-    /// Runs a request op. `Ok(true)` means a duplicate of a `send` or `start_thread` this device
-    /// already made in this epoch: it isn't run again, and its outcome is sent again if known.
     pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<bool, OpError> {
         let mut state = self.state();
         state.live(device, conn)?;
-        let field = ops::correlation(op).filter(|field| args.get(*field).is_some_and(Value::is_string));
+        if args.get("thread").and_then(Value::as_str).is_some_and(|thread| thread.len() > MAX_ID) {
+            return Err(OpError::new("bad_args", format!("args.thread may be at most {MAX_ID} bytes")));
+        }
+        let prompt_op = ops::idempotent(op);
+        let field = ops::correlation(op)
+            .filter(|_| prompt_op || ops::answered(op))
+            .filter(|field| args.get(*field).is_some_and(Value::is_string));
         let given = field.and_then(|field| args.get(field)).and_then(Value::as_str).map(str::to_string);
-        let key = given.as_ref().filter(|_| ops::idempotent(op)).map(|given| accepted_key(device, op, given));
+        if let (Some(field), Some(given)) = (field, &given) {
+            if given.len() > MAX_ACK {
+                return Err(OpError::new("bad_args", format!("args.{field} may be at most {MAX_ACK} bytes")));
+            }
+        }
+        let key = given.as_ref().filter(|_| prompt_op).map(|given| accepted_key(op, given));
         if let Some(key) = &key {
-            let session = state.live(device, conn)?;
-            if let Some(outcome) = session.accepted.values.get(key) {
-                if let Some(outcome) = outcome.clone() {
-                    session.push(outcome, None);
+            let ledger = state.ledgers.get_mut(device);
+            if let Some(ledger) = ledger.as_ref().filter(|ledger| ledger.ids.contains(key)) {
+                let outcome = ledger.outcomes.values.get(key).cloned();
+                if let Some(outcome) = outcome {
+                    state.live(device, conn)?.push(outcome, None);
                 }
                 return Ok(true);
             }
-        }
-        if matches!(op, "send" | "start_thread") {
-            let (prompts, bytes) = self.studio.backlog();
-            if prompts >= MAX_BACKLOG || bytes >= MAX_PENDING {
-                return Err(OpError::new("busy", "the machine is still taking earlier prompts; try again shortly"));
+            if ledger.is_some_and(|ledger| ledger.full()) {
+                return Err(OpError::new(
+                    "too_many",
+                    format!(
+                        "this device has sent {MAX_ACCEPTED} prompts since serve started; restart serve to send more"
+                    ),
+                ));
             }
         }
+        self.admit(&mut state, device, conn, prompt_op, field.is_some() && !prompt_op)?;
         let mut args = args.clone();
         let tag = match (field, &given) {
             (Some(field), Some(given)) => {
@@ -773,10 +831,14 @@ impl Hub {
         if let Some((tag, given)) = tag {
             state.tags.insert(tag.clone(), Tag { device: device.to_string(), given });
             let session = state.live(device, conn)?;
-            session.tags.push_back(tag);
             let mut evicted = Vec::new();
-            while session.tags.len() > REMEMBERED {
-                evicted.extend(session.tags.pop_front());
+            if prompt_op {
+                session.prompt_tags.push_back(tag);
+                while session.prompt_tags.len() > REMEMBERED {
+                    evicted.extend(session.prompt_tags.pop_front());
+                }
+            } else {
+                session.outstanding.push_back((tag, Instant::now()));
             }
             for old in evicted {
                 state.tags.remove(&old);
@@ -788,15 +850,63 @@ impl Hub {
             }
         }
         if let Some(key) = key {
-            state.live(device, conn)?.accepted.insert(key, None);
+            if let Some(ledger) = state.ledgers.get_mut(device) {
+                ledger.ids.insert(key);
+            }
         }
         if op == "send" {
             if let (Some(request), Some(thread)) = (given.as_deref(), args.get("thread").and_then(Value::as_str)) {
                 eprintln!("local-studio-serve: send {request} accepted for thread {thread} at {} ms", now_ms());
-                state.sends.insert(thread.to_string(), (request.to_string(), Instant::now()));
+                state.sends.retain(|_, (_, at)| at.elapsed() < SEND_LOG);
+                if state.sends.len() < MAX_SEND_LOG {
+                    state.sends.insert(thread.to_string(), (request.to_string(), Instant::now()));
+                }
             }
         }
         Ok(false)
+    }
+
+    fn admit(
+        &self,
+        state: &mut State,
+        device: &str,
+        conn: ConnId,
+        prompt_op: bool,
+        answered: bool,
+    ) -> Result<(), OpError> {
+        if self.studio.queued() >= MAX_COMMANDS {
+            return Err(OpError::new(
+                "busy",
+                "the machine is still working through earlier requests; try again shortly",
+            ));
+        }
+        if prompt_op {
+            let (prompts, bytes) = self.studio.backlog();
+            if prompts >= MAX_BACKLOG || bytes >= MAX_PENDING {
+                return Err(OpError::new("busy", "the machine is still taking earlier prompts; try again shortly"));
+            }
+        }
+        if answered {
+            let now = Instant::now();
+            let session = state.live(device, conn)?;
+            let mut expired = Vec::new();
+            while session.outstanding.front().is_some_and(|(_, at)| now.duration_since(*at) > KEPT) {
+                expired.extend(session.outstanding.pop_front().map(|(tag, _)| tag));
+            }
+            let waiting = session.outstanding.len();
+            for tag in expired {
+                state.tags.remove(&tag);
+            }
+            if waiting >= MAX_OUTSTANDING {
+                return Err(OpError::new(
+                    "busy",
+                    format!(
+                        "{MAX_OUTSTANDING} requests from this device are still waiting for answers; try again shortly"
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn blob_put(&self, device: &str, conn: ConnId, id: Value, args: &Value) -> Result<(), OpError> {

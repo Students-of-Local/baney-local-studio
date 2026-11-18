@@ -54,13 +54,9 @@ pub struct Server {
     pub gate: Gate,
 }
 
-/// Which listener a request arrived on. The route decides the `Host` names allowed and which
-/// header names the client; nothing a client sends can change it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
-    /// Loopback clients and `tailscale serve`.
     Local,
-    /// The hosted Cloudflare tunnel only.
     Tunnel,
 }
 
@@ -167,9 +163,6 @@ fn handle(server: &Arc<Server>, mut request: Request<Incoming>, peer: SocketAddr
     }
 }
 
-/// The client a socket counts against (docs/remote.md, Transport). The tunnel listener trusts only
-/// `CF-Connecting-IP`, which Cloudflare overwrites; the local listener trusts only the headers
-/// `tailscale serve` sets. `None` refuses a tunnel request without the header.
 fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Client> {
     let address = |name: &str| {
         header(headers, name)
@@ -354,7 +347,6 @@ fn noise_error(error: &snow::Error) -> Refusal {
 async fn handshake_message(stream: &mut Stream, deadline: Instant, step: &str) -> Result<Bytes, Refusal> {
     match next_by(stream, deadline).await {
         Some(Next::Binary(bytes)) => Ok(bytes),
-        // Counted, or a client could hold a pending slot for free by closing just before the timeout.
         Some(Next::Gone) => Err(Refusal::failed(BROKEN, format!("closed before {step}"))),
         Some(Next::Text(_)) => Err(Refusal::failed(BROKEN, format!("a text message instead of {step}"))),
         None => Err(Refusal::failed(BROKEN, "the handshake did not finish within 10 s")),

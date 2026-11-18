@@ -34,6 +34,21 @@ pub fn idempotent(op: &str) -> bool {
     matches!(op, "send" | "start_thread")
 }
 
+pub fn answered(op: &str) -> bool {
+    matches!(
+        op,
+        "search_threads"
+            | "list_archived"
+            | "list_commands"
+            | "list_skills"
+            | "load_message_image"
+            | "load_diff"
+            | "list_pull_requests"
+            | "load_pull_request"
+            | "read_file"
+    )
+}
+
 pub fn dispatch(
     studio: &Studio,
     op: &str,

@@ -376,12 +376,18 @@ impl Command {
 
 #[derive(Default)]
 struct Backlog {
+    commands: AtomicUsize,
     prompts: AtomicUsize,
     bytes: AtomicUsize,
 }
 
 impl Backlog {
     fn change(&self, command: &Command, add: bool) {
+        if add {
+            self.commands.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.commands.fetch_sub(1, Ordering::SeqCst);
+        }
         let Some(bytes) = command.prompt_bytes() else { return };
         if add {
             self.prompts.fetch_add(1, Ordering::SeqCst);
@@ -726,6 +732,10 @@ fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, StudioError> {
 impl Studio {
     pub fn backlog(&self) -> (usize, usize) {
         (self.backlog.prompts.load(Ordering::SeqCst), self.backlog.bytes.load(Ordering::SeqCst))
+    }
+
+    pub fn queued(&self) -> usize {
+        self.backlog.commands.load(Ordering::SeqCst)
     }
 
     fn send_command(&self, command: Command) {

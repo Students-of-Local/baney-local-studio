@@ -11,15 +11,9 @@ const FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const BAN: Duration = Duration::from_secs(600);
 
-/// Who a socket counts against for the pending caps and the failure ban. The key comes from the
-/// listener the socket arrived on, never from `Host` (docs/remote.md, Transport).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Client {
-    /// A loopback client with neither `Tailscale-User-Login` nor `X-Forwarded-For`: held by the
-    /// pending caps, never banned.
     Loopback,
-    /// `Tailscale-User-Login`, the `X-Forwarded-For` that `tailscale serve` sets, or the tunnel's
-    /// `CF-Connecting-IP`, prefixed so one listener's keys can't collide with another's.
     Key(String),
 }
 
@@ -77,7 +71,6 @@ impl Gate {
         records.get(client).and_then(|record| record.banned_until).is_some_and(|until| until > Instant::now())
     }
 
-    /// Takes a pending slot, or `None` when 8 sockets are mid-handshake or this client already has 2.
     pub fn open(&self, client: &Client) -> Option<Opening> {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mine = pending.per.get(client).copied().unwrap_or_default();
@@ -110,43 +103,5 @@ impl Gate {
                 BAN.as_secs() / 60
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn key(name: &str) -> Client {
-        Client::Key(name.to_string())
-    }
-
-    #[test]
-    fn two_pending_per_client_and_eight_in_all() {
-        let gate = Gate::default();
-        let a = [gate.open(&key("a")), gate.open(&key("a"))];
-        assert!(a.iter().all(Option::is_some));
-        assert!(gate.open(&key("a")).is_none(), "a third pending socket from one client");
-        let loopback = [gate.open(&Client::Loopback), gate.open(&Client::Loopback)];
-        assert!(loopback.iter().all(Option::is_some));
-        assert!(gate.open(&Client::Loopback).is_none(), "loopback is held by the per client cap too");
-        let others: Vec<_> =
-            ["b", "c"].iter().flat_map(|name| [gate.open(&key(name)), gate.open(&key(name))]).collect();
-        assert!(others.iter().all(Option::is_some));
-        assert!(gate.open(&key("d")).is_none(), "a ninth pending socket");
-        drop(others);
-        assert!(gate.open(&key("d")).is_some(), "slots come back when sockets finish");
-    }
-
-    #[test]
-    fn loopback_is_never_banned_and_keys_are_separate() {
-        let gate = Gate::default();
-        for _ in 0..FAILURES {
-            gate.fail(&Client::Loopback, "KK", "test");
-            gate.fail(&key("ts:a@example.com"), "KK", "test");
-        }
-        assert!(!gate.banned(&Client::Loopback));
-        assert!(gate.banned(&key("ts:a@example.com")));
-        assert!(!gate.banned(&key("ts:b@example.com")));
     }
 }

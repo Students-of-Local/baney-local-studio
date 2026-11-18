@@ -1900,36 +1900,56 @@ async fn prompt_backlog(run: &Run, eukhe: &Path, a: &mut Client) -> anyhow::Resu
 
 async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
     let flood = 5000;
+    let long = "r".repeat(65);
+    let reply = c.reply("list_archived", json!({ "request": long })).await?;
+    ensure!(reply.pointer("/error/code") == Some(&json!("bad_args")), "a 65 byte request id answered {reply}");
     let known: HashSet<String> = c.view().answers.keys().cloned().collect();
     let hold = hold_core(run).await?;
     a.call("send", json!({ "request": "r-own", "thread": "no-such-thread-tags", "prompt": prompt("tag isolation"), "delivery": "queue" })).await?;
+    c.call("list_archived", json!({ "request": "q-first" })).await?;
     let first = c.next + 1;
     for at in 0..flood {
         c.next += 1;
         c.frame(&json!({ "id": c.next, "op": "list_archived", "args": { "request": format!("q-flood-{at}") } }));
     }
     let last = c.next;
-    c.until("5,000 tagged requests accepted while the core holds phone A's send", QUICK, |view| {
-        view.replies.len() >= flood && (first..=last).all(|id| view.replies.contains_key(&id))
+    c.until("5,000 flood requests answered while the core holds phone A's send", QUICK, |view| {
+        (first..=last).all(|id| view.replies.contains_key(&id))
     })
     .await?;
-    let refused = (first..=last).filter(|id| c.view().replies[id].get("error").is_some()).count();
+    let accepted: Vec<usize> =
+        (0..flood).filter(|at| c.view().replies[&(first + *at as u64)].get("ok") == Some(&json!(true))).collect();
+    let busy = (first..=last).filter(|id| c.view().replies[id].pointer("/error/code") == Some(&json!("busy"))).count();
+    ensure!(
+        accepted.len() == 63 && busy == flood - 63,
+        "with q-first waiting, {} flood requests were accepted and {busy} refused busy, expected 63 and {}",
+        accepted.len(),
+        flood - 63
+    );
     let held_for = release_core(run, eukhe, hold).await?;
     a.until("its own request_failed for r-own after the flood", SETUP, |view| {
         view.answers.get("r-own").is_some_and(|kind| kind == "request_failed")
     })
     .await?;
-    let tail = format!("q-flood-{}", flood - 1);
-    c.until("the answer to its last flood request", SETUP, |view| view.answers.contains_key(&tail) || view.closed)
-        .await?;
+    c.until("the answer to q-first, sent before the flood", SETUP, |view| {
+        view.answers.contains_key("q-first") || view.closed
+    })
+    .await?;
+    let tail = format!("q-flood-{}", accepted.last().copied().unwrap_or_default());
+    c.until("the answer to its last accepted flood request", SETUP, |view| {
+        view.answers.contains_key(&tail) || view.closed
+    })
+    .await?;
+    let reply = c.reply("list_archived", json!({ "request": "q-after" })).await?;
+    ensure!(reply.get("ok") == Some(&json!(true)), "a request after the answers came back answered {reply}");
     tokio::time::sleep(Duration::from_secs(2)).await;
     let view = c.view();
     ensure!(!view.closed, "phone C was disconnected during the flood: {:?}", view.close_code);
     let foreign: Vec<&String> =
-        view.answers.keys().filter(|request| !known.contains(*request) && !request.starts_with("q-flood-")).collect();
+        view.answers.keys().filter(|request| !known.contains(*request) && !request.starts_with("q-")).collect();
     ensure!(foreign.is_empty(), "phone C saw request outcomes that were not its own: {foreign:?}");
     println!(
-        "ok   tag isolation: phone A's request_failed r-own reached only phone A after 5,000 tagged requests from phone C ({refused} refused) while the core was held {} ms",
+        "ok   tag isolation: with the core held {} ms, phone C's q-first and its 63 accepted flood requests were answered, the other {busy} were refused busy, a 65 byte id was refused, and phone A's request_failed r-own reached only phone A",
         held_for.as_millis()
     );
     drop(view);
@@ -2319,12 +2339,17 @@ async fn approval_recovery(
         "after a serve restart the resume answered {said} in epoch {epoch}"
     );
     run.epoch = epoch;
-    a.until("the approval pending across a serve restart arrives on the new epoch", SETUP, |view| {
-        pending(view, &thread)
+    a.until("the thread's full state after a serve restart", SETUP, |view| {
+        !view.items(&thread).is_empty() && view.idle(&thread)
     })
     .await?;
-    println!("ok   an approval pending across a serve restart arrives after the snapshot in the new epoch");
-    approve_and_finish(&mut a, &thread, &run.work.join("approval-4.txt"), "serve restart").await?;
+    ensure!(
+        !pending(&a.view(), &thread),
+        "an approval Eukhe denied at the serve stop is still pending after the restart"
+    );
+    let proof = run.work.join("approval-4.txt");
+    ensure!(!proof.exists(), "the step whose approval was pending at the serve stop ran anyway: {}", proof.display());
+    println!("ok   after a serve restart the phone gets the thread's full state, and the approval pending at the stop was denied");
     a.call("unwatch", json!({ "thread": thread })).await?;
     let (c, _) = reconnect(run, c_phone, json!({ "watch": [] })).await?;
     Ok((a, c))
