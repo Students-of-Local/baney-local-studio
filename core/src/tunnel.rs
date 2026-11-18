@@ -176,6 +176,24 @@ impl Tunnel {
     }
 
     async fn call(&self, keys: &Keys, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
+        let mut answer = self.call_once(keys, method, path, body).await?;
+        for wait in [2, 4, 8] {
+            if answer.0 != 429 || answer.1.get("error").and_then(Value::as_str) != Some("slow_down") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            answer = self.call_once(keys, method, path, body).await?;
+        }
+        Ok(answer)
+    }
+
+    async fn call_once(
+        &self,
+        keys: &Keys,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(u16, Value), String> {
         let service = self.service()?;
         let url = reqwest::Url::parse(&format!("{service}{path}")).map_err(|error| error.to_string())?;
         let host = url.host_str().ok_or("the tunnel service address has no host")?.to_lowercase();
@@ -200,9 +218,19 @@ impl Tunnel {
     async fn remote(&self, keys: &Keys) -> Result<Value, String> {
         let (code, value) = self.call(keys, "GET", "/v1/tunnel", None).await?;
         if code == 200 {
-            Ok(value)
-        } else {
-            Err(refusal("status", code, &value))
+            return Ok(value);
+        }
+        if matches!(code, 401 | 403 | 404 | 410) {
+            self.stop();
+            let _ = fs::remove_file(self.token_path());
+        }
+        Err(refusal("status", code, &value))
+    }
+
+    fn settle(&self, status: &Status) {
+        if !RUNNABLE.contains(&status.state.as_str()) {
+            self.stop();
+            let _ = fs::remove_file(self.token_path());
         }
     }
 
@@ -218,10 +246,7 @@ impl Tunnel {
         self.flush_reports(&keys).await;
         let value = self.remote(&keys).await?;
         let status = self.status_from(&value, ports);
-        if !RUNNABLE.contains(&status.state.as_str()) {
-            self.stop();
-            let _ = fs::remove_file(self.token_path());
-        }
+        self.settle(&status);
         Ok(status)
     }
 
@@ -234,19 +259,17 @@ impl Tunnel {
             .unwrap_or(fallback);
         let runnable = RUNNABLE.contains(&state.as_str());
         let running = self.running().is_some();
-        if runnable && running {
-            state = "live".to_string();
+        let message = if state == "live" && running {
+            "Live. claude.ai, ChatGPT and grok.com can use the MCP address.".to_string()
         } else if state == "live" {
             state = "down".to_string();
-        }
-        let hostname = if runnable { text("hostname") } else { None };
-        let message = if state == "live" {
-            "Live. claude.ai, ChatGPT and grok.com can use the MCP address.".to_string()
-        } else if state == "down" && text("state").as_deref() == Some("live") {
-            "Another connector for this tunnel is live, but not from this machine.".to_string()
+            "Cloudflare still shows a connector for this tunnel. If this machine just stopped, that clears within a minute; if not, another machine holds this tunnel's token.".to_string()
+        } else if runnable && running {
+            "cloudflared is running on this machine. Cloudflare shows it connected within a minute.".to_string()
         } else {
             text("message").unwrap_or_default()
         };
+        let hostname = if runnable { text("hostname") } else { None };
         Status {
             route: if state == "none" { "none" } else { "hosted" }.to_string(),
             mcp_url: hostname.as_ref().map(|host| format!("https://{host}/mcp")),
@@ -303,7 +326,9 @@ impl Tunnel {
 
     pub async fn up(&self, cloudflared: &Path) -> Result<Status, String> {
         let keys = self.keys(false)?.ok_or("No tunnel yet. Run local-studio tunnel request first.")?;
-        let mut status = self.status_from(&self.remote(&keys).await?, self.saved().ports.unwrap_or(DEFAULT_PORTS));
+        let value = self.remote(&keys).await?;
+        let status = self.status_from(&value, self.saved().ports.unwrap_or(DEFAULT_PORTS));
+        self.settle(&status);
         if self.running().is_some() {
             return Ok(status);
         }
@@ -317,12 +342,22 @@ impl Tunnel {
         }
         let hostname = status.hostname.clone().ok_or("the service gave no hostname")?;
         self.going_live(&hostname, status.ports).await?;
-        let token = self.fetch_token(&keys).await?;
+        let request_id = value.get("requestId").and_then(Value::as_str).ok_or("the service gave no request id")?;
+        let token = self.fetch_token(&keys, request_id, &hostname).await?;
         self.private_write("token", token.as_bytes())?;
         drop(token);
+        let started = self.launch(&keys, cloudflared, hostname, status.ports).await;
+        if started.is_err() {
+            self.stop();
+            let _ = fs::remove_file(self.token_path());
+        }
+        started
+    }
+
+    async fn launch(&self, keys: &Keys, cloudflared: &Path, hostname: String, ports: Ports) -> Result<Status, String> {
         let mut saved = self.saved();
         saved.hostname = Some(hostname);
-        saved.ports = Some(status.ports);
+        saved.ports = Some(ports);
         self.save(&saved)?;
         let client_id = self.start(cloudflared)?;
         let mut saved = self.saved();
@@ -332,7 +367,7 @@ impl Tunnel {
         self.save(&saved)?;
         for wait in [0, 1, 2, 4] {
             tokio::time::sleep(Duration::from_secs(wait)).await;
-            self.flush_reports(&keys).await;
+            self.flush_reports(keys).await;
             if self.saved().pending.is_empty() {
                 break;
             }
@@ -340,8 +375,7 @@ impl Tunnel {
         if self.running().is_none() {
             return Err(format!("cloudflared stopped; see {}", self.dir.join("cloudflared.log").display()));
         }
-        status = self.status_from(&self.remote(&keys).await?, status.ports);
-        Ok(status)
+        Ok(self.status_from(&self.remote(keys).await?, ports))
     }
 
     pub async fn down(&self) -> Result<Status, String> {
@@ -361,11 +395,12 @@ impl Tunnel {
         let mut saved = self.saved();
         saved.hostname = None;
         saved.request_id = None;
+        let ports = saved.ports.unwrap_or(DEFAULT_PORTS);
         self.save(&saved)?;
-        self.status().await
+        Ok(self.status_from(&value, ports))
     }
 
-    async fn fetch_token(&self, keys: &Keys) -> Result<String, String> {
+    async fn fetch_token(&self, keys: &Keys, expect_request: &str, expect_host: &str) -> Result<String, String> {
         for _ in 0..2 {
             let (code, value) = self.call(keys, "GET", "/v1/tunnel?token=1", None).await?;
             if code == 409 {
@@ -376,6 +411,11 @@ impl Tunnel {
             }
             let request_id = value.get("requestId").and_then(Value::as_str).ok_or("no request id with the token")?;
             let hostname = value.get("hostname").and_then(Value::as_str).ok_or("no hostname with the token")?;
+            if request_id != expect_request || hostname != expect_host {
+                return Err(
+                    "The token came for a different request or hostname than the one checked. Run up again.".into()
+                );
+            }
             let sealed = value.get("sealed").ok_or("the service sent no token")?;
             return unseal(sealed, &keys.seal, request_id, hostname);
         }
@@ -528,6 +568,7 @@ fn refusal(what: &str, code: u16, value: &Value) -> String {
         "has_tunnel" => "This machine already has a hosted tunnel.",
         "waitlist_full" => "The waitlist is full. Use your own Cloudflare account: local-studio tunnel byo",
         "too_many_requests" | "rate_limited" => "Too many tries. Wait an hour and try again.",
+        "slow_down" => "The tunnel service asked to slow down. Try again in a minute.",
         "bad_ports" => "Those ports aren't allowed: use two different loopback ports from 1024 to 65535.",
         _ => "",
     };
