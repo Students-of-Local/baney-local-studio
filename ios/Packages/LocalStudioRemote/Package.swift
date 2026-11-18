@@ -9,5 +9,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "LocalStudioRemote"),
+        .testTarget(name: "LocalStudioRemoteTests", dependencies: ["LocalStudioRemote"]),
     ]
 )

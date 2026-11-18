@@ -3,6 +3,10 @@ import Foundation
 public struct OutboxEntry: Codable, Sendable, Hashable, Identifiable {
     public var args: SendArgs
     public var created: Date
+    /// The server epoch this send last went out in, once it has.
+    public var sentEpoch: String?
+    /// Sent in an earlier epoch and never acknowledged; waits for the user's Resend.
+    public var unconfirmed: Bool?
 
     public var id: String { args.request }
 }
@@ -32,6 +36,31 @@ public actor Outbox {
 
     public func pending() -> [OutboxEntry] {
         entries
+    }
+
+    public func markSent(_ request: String, epoch: String) {
+        update(request) { $0.sentEpoch = epoch }
+    }
+
+    public func markUnconfirmed(_ request: String) {
+        update(request) { $0.unconfirmed = true }
+    }
+
+    /// Clears the unconfirmed mark so the send goes out again, and returns it.
+    public func release(_ request: String) -> OutboxEntry? {
+        update(request) {
+            $0.unconfirmed = nil
+            $0.sentEpoch = nil
+        }
+        return entries.first { $0.args.request == request }
+    }
+
+    private func update(_ request: String, _ change: (inout OutboxEntry) -> Void) {
+        guard let index = entries.firstIndex(where: { $0.args.request == request }) else {
+            return
+        }
+        change(&entries[index])
+        persist()
     }
 
     public func remove(_ request: String) {

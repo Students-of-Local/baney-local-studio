@@ -41,6 +41,9 @@ public enum ConnectionEvent: Sendable {
     case sendAccepted(request: String, duplicate: Bool)
     case sendWaiting(request: String, reason: String, retryAt: Date)
     case sendRejected(request: String, message: String)
+    /// A send went out in an earlier server epoch and was never acknowledged. The phone doesn't
+    /// retry it on its own (docs/remote.md, Requests): the snapshot shows whether it landed.
+    case sendUnconfirmed(request: String)
 }
 
 enum DeliveryOutcome: Sendable {
@@ -115,6 +118,10 @@ struct SocketTransport: HandshakeTransport {
 
 public actor MachineConnection {
     public static let unpairedCloseCode = 4401
+    public static let replacedCloseCode = 4409
+    public static let refusedCloseCode = 4429
+    public static let busyCloseCode = 1013
+    public static let protocolCloseCode = 1002
 
     public nonisolated let events: AsyncStream<ConnectionEvent>
     private let sink: AsyncStream<ConnectionEvent>.Continuation
@@ -146,7 +153,7 @@ public actor MachineConnection {
     private var incompatible: ProtocolWindow?
     private var stopped = false
 
-    public init(config: ConnectionConfig, credentials: CredentialStore, outbox: Outbox, channel: any SecureChannel = PassThroughChannel(), pairing: PairingLink? = nil) {
+    public init(config: ConnectionConfig, credentials: CredentialStore, outbox: Outbox, channel: any SecureChannel = NoiseChannel(), pairing: PairingLink? = nil) {
         let (stream, sink) = AsyncStream<ConnectionEvent>.makeStream(bufferingPolicy: .unbounded)
         events = stream
         self.sink = sink
@@ -213,6 +220,14 @@ public actor MachineConnection {
             Task { await self.deliver(entry) }
         }
         return entry.args.request
+    }
+
+    /// Sends an unconfirmed message again, under the same request id.
+    public func resend(_ request: String) async {
+        guard let entry = await outbox.release(request), live, busyRetry == nil else {
+            return
+        }
+        Task { await self.deliver(entry) }
     }
 
     public func answerApproval(thread: String, request approval: String, answer: ApprovalAnswer) async throws {
@@ -326,11 +341,27 @@ public actor MachineConnection {
                 return
             }
             var reason = "closed"
+            var floor = 0.0
             for url in urls {
                 do {
                     try await connectOnce(url)
                 } catch {
                     reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+                switch socket?.closeCode.rawValue {
+                case Self.unpairedCloseCode:
+                    unpaired = true
+                case Self.replacedCloseCode:
+                    reason = "a newer connection from this phone replaced this one"
+                case Self.refusedCloseCode:
+                    reason = "the machine refuses this address for a few minutes after repeated failures"
+                    floor = 60
+                case Self.busyCloseCode:
+                    reason = "the machine has too many connections opening"
+                case Self.protocolCloseCode:
+                    reason = "the machine refused a message that broke the protocol"
+                default:
+                    break
                 }
                 let upFor = connectedAt.map { Date().timeIntervalSince($0) }
                 connectedAt = nil
@@ -354,7 +385,7 @@ public actor MachineConnection {
                 }
             }
             attempt += 1
-            let delay = Self.backoff(attempt: attempt)
+            let delay = max(floor, Self.backoff(attempt: attempt))
             sink.yield(.state(.waiting(attempt: attempt, retryAt: Date().addingTimeInterval(delay), reason: reason)))
             let sleeper = Task { _ = try? await Task.sleep(for: .seconds(delay)) }
             pause = sleeper
@@ -409,21 +440,14 @@ public actor MachineConnection {
         } catch let RemoteError.incompatible(window) {
             incompatible = window
             throw RemoteError.incompatible(window)
-        } catch {
-            if socket.closeCode.rawValue == Self.unpairedCloseCode {
-                unpaired = true
-                throw RemoteError.unpaired
-            }
-            throw error
         }
         secure = established
         reader = RecordReader()
+        // The pairing is trusted only once the server's hello decrypts: in XXpsk3 that is the
+        // first message whose keys prove the server holds the psk (docs/remote.md, Pairing).
+        var proposed: MachineCredential?
         if case let .pair(_, _, device) = role {
-            let credential = MachineCredential(device: device.id, staticKey: staticKey, machineKey: established.remoteStatic, urls: [url])
-            guard credentials.save(credential, for: config.account) else {
-                throw RemoteError.unexpected("the Keychain refused the machine credential")
-            }
-            pairing = nil
+            proposed = MachineCredential(device: device.id, staticKey: staticKey, machineKey: established.remoteStatic, urls: [url])
         }
 
         let device = config.device
@@ -439,6 +463,12 @@ public actor MachineConnection {
                 let machine = ProtocolWindow(newest: reply.protocolVersion, oldest: reply.protocolVersion)
                 incompatible = machine
                 throw RemoteError.incompatible(machine)
+            }
+            if let proposed {
+                guard credentials.save(proposed, for: config.account) else {
+                    throw RemoteError.unexpected("the Keychain refused the machine credential")
+                }
+                pairing = nil
             }
             if let baseline = reply.seq {
                 lastSeq = baseline
@@ -531,7 +561,16 @@ public actor MachineConnection {
     }
 
     private func flushOutbox() async {
+        let current = epoch ?? ""
         for entry in await outbox.pending() {
+            if let sent = entry.sentEpoch, sent != current {
+                await outbox.markUnconfirmed(entry.args.request)
+                sink.yield(.sendUnconfirmed(request: entry.args.request))
+                continue
+            }
+            if entry.unconfirmed == true {
+                continue
+            }
             guard live, await deliver(entry) != .busy else {
                 return
             }
@@ -546,9 +585,10 @@ public actor MachineConnection {
         }
         inFlight.insert(request)
         defer { inFlight.remove(request) }
+        await outbox.markSent(request, epoch: epoch ?? "")
         do {
             let reply = try await self.request("send", entry.args)
-            let duplicate = (try? JSONDecoder().decode(ResultEnvelope<SendResult>.self, from: reply))?.result.duplicate ?? false
+            let duplicate = (try? JSONDecoder().decode(DuplicateFlag.self, from: reply))?.duplicate ?? false
             await outbox.remove(request)
             busyAttempt = 0
             sink.yield(.sendAccepted(request: request, duplicate: duplicate))

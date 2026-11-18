@@ -10,6 +10,7 @@
 		32A4C1381415541FDFD48E78 /* LocalStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D06FDA3CCC5BDC8526501901 /* LocalStudioApp.swift */; };
 		6DB4FDFBF15BF9E107AEB956 /* RemoteSmoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD0F9A2AA72C82C10DE1DEEC /* RemoteSmoke.swift */; };
 		7EB94CFF6B10E90061501A3A /* LocalStudioRemote in Frameworks */ = {isa = PBXBuildFile; productRef = D37951FB634BB1D62E2DF439 /* LocalStudioRemote */; };
+		B34D93D40F49FD5DB2F9F959 /* PairScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82898A5094406843D9216D7 /* PairScanner.swift */; };
 		BAC2AA99EF15E0B297908126 /* DebugShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = E97FDDA94FA180A4077DC965 /* DebugShell.swift */; };
 		D25667F8B2395F7225A61951 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FA7454EC943E705769E32B6 /* Notifier.swift */; };
 /* End PBXBuildFile section */
@@ -33,6 +34,7 @@
 		CD0F9A2AA72C82C10DE1DEEC /* RemoteSmoke.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSmoke.swift; sourceTree = "<group>"; };
 		D06FDA3CCC5BDC8526501901 /* LocalStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalStudioApp.swift; sourceTree = "<group>"; };
 		E97FDDA94FA180A4077DC965 /* DebugShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugShell.swift; sourceTree = "<group>"; };
+		F82898A5094406843D9216D7 /* PairScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairScanner.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,6 +73,7 @@
 				9CF1F737438C8B71BB50ED5C /* Info.plist */,
 				D06FDA3CCC5BDC8526501901 /* LocalStudioApp.swift */,
 				8FA7454EC943E705769E32B6 /* Notifier.swift */,
+				F82898A5094406843D9216D7 /* PairScanner.swift */,
 			);
 			path = LocalStudio;
 			sourceTree = "<group>";
@@ -216,6 +219,7 @@
 				BAC2AA99EF15E0B297908126 /* DebugShell.swift in Sources */,
 				32A4C1381415541FDFD48E78 /* LocalStudioApp.swift in Sources */,
 				D25667F8B2395F7225A61951 /* Notifier.swift in Sources */,
+				B34D93D40F49FD5DB2F9F959 /* PairScanner.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

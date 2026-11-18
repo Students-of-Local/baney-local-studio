@@ -46,10 +46,7 @@ targets:
         LSVersion: $(LS_VERSION)
         LSRequiresIPhoneOS: true
         ITSAppUsesNonExemptEncryption: false
-        CFBundleURLTypes:
-          - CFBundleURLName: $(PRODUCT_BUNDLE_IDENTIFIER)
-            CFBundleURLSchemes:
-              - $(LS_URL_SCHEME)
+        LSPairScheme: $(LS_URL_SCHEME)
         NSCameraUsageDescription: Local Studio uses the camera to scan the pairing code a computer shows.
         NSMicrophoneUsageDescription: Local Studio uses the microphone when you dictate a message.
         NSSpeechRecognitionUsageDescription: Local Studio turns your dictation into message text.

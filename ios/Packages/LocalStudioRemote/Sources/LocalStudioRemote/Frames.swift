@@ -171,7 +171,8 @@ public struct LoadEarlierResult: Decodable, Sendable {
     public var items: [Item]
 }
 
-struct SendResult: Decodable {
+/// `{"re": id, "ok": true, "duplicate": true}`: the request was already accepted in this epoch.
+struct DuplicateFlag: Decodable {
     let duplicate: Bool?
 }
 
