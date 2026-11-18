@@ -165,6 +165,20 @@ struct LoadEarlierArgs: Encodable {
     let limit: Int
 }
 
+public struct LoadEarlierResult: Decodable, Sendable {
+    public var thread: String
+    public var start: Int
+    public var items: [Item]
+}
+
+struct SendResult: Decodable {
+    let duplicate: Bool?
+}
+
+struct ResultEnvelope<Result: Decodable>: Decodable {
+    let result: Result
+}
+
 struct QueuedArgs: Encodable {
     let thread: String
     let queued: String
@@ -193,6 +207,14 @@ struct ReplyError: Decodable {
     var text: String {
         message ?? code ?? "request failed"
     }
+
+    var failure: RemoteError {
+        switch code {
+        case "busy": .busy(text)
+        case "too_many": .tooMany(text)
+        default: .server(text)
+        }
+    }
 }
 
 struct ServerEnvelope: Decodable {
@@ -205,6 +227,7 @@ struct ServerEnvelope: Decodable {
 struct HelloReply: Decodable {
     let `protocol`: Int
     let epoch: String?
+    let seq: UInt64?
     let machine: MachineIdentity
     let resume: String?
     let snapshot: [Update]?
@@ -229,7 +252,7 @@ enum ServerFrame: Sendable {
     case hello(HelloReplyValue)
     case incompatible(ProtocolWindow)
     case update(seq: UInt64, update: Update)
-    case reply(id: Int, error: String?)
+    case reply(id: Int, result: Result<Data, RemoteError>)
     case unknown(String)
 }
 
@@ -241,6 +264,7 @@ public enum ResumeKind: String, Sendable {
 struct HelloReplyValue: Sendable {
     let protocolVersion: Int
     let epoch: String?
+    let seq: UInt64?
     let machine: MachineIdentity
     let resume: ResumeKind
     let snapshot: [Update]
@@ -251,7 +275,10 @@ enum FrameCodec {
         let decoder = JSONDecoder()
         let envelope = try decoder.decode(ServerEnvelope.self, from: data)
         if let re = envelope.re {
-            return .reply(id: re, error: envelope.ok == true ? nil : (envelope.error?.text ?? "request failed"))
+            if envelope.ok == true {
+                return .reply(id: re, result: .success(data))
+            }
+            return .reply(id: re, result: .failure(envelope.error?.failure ?? .server("request failed")))
         }
         switch envelope.op {
         case "update":
@@ -262,6 +289,7 @@ enum FrameCodec {
             return .hello(HelloReplyValue(
                 protocolVersion: reply.protocol,
                 epoch: reply.epoch,
+                seq: reply.seq,
                 machine: reply.machine,
                 resume: reply.resume.flatMap(ResumeKind.init(rawValue:)) ?? .snapshot,
                 snapshot: reply.snapshot ?? []
@@ -284,6 +312,8 @@ public enum RemoteError: Error, Sendable, Equatable, LocalizedError {
     case server(String)
     case unpaired
     case incompatible(ProtocolWindow)
+    case busy(String)
+    case tooMany(String)
     case handshake(String)
     case unexpected(String)
 
@@ -293,6 +323,8 @@ public enum RemoteError: Error, Sendable, Equatable, LocalizedError {
         case let .server(message): message
         case .unpaired: "this phone is not paired with that machine"
         case let .incompatible(machine): "the machine speaks protocol \(machine.label), this app speaks \(ProtocolWindow.app.label)"
+        case let .busy(message): "the machine is busy: \(message)"
+        case let .tooMany(message): "too many uploads: \(message)"
         case let .handshake(message): "handshake failed: \(message)"
         case let .unexpected(message): message
         }

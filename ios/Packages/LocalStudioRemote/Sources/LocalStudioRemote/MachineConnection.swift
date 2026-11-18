@@ -38,8 +38,15 @@ public enum ConnectionEvent: Sendable {
     case state(LinkState)
     case hello(MachineIdentity, protocolVersion: Int, resume: ResumeKind, snapshot: [Update])
     case update(seq: UInt64, update: Update)
-    case sendAccepted(request: String)
+    case sendAccepted(request: String, duplicate: Bool)
+    case sendWaiting(request: String, reason: String, retryAt: Date)
     case sendRejected(request: String, message: String)
+}
+
+enum DeliveryOutcome: Sendable {
+    case done
+    case busy
+    case failed
 }
 
 public struct ConnectionConfig: Sendable {
@@ -69,13 +76,13 @@ public struct ConnectionConfig: Sendable {
 
 private final class ReplyWaiter: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, any Error>?
+    private var continuation: CheckedContinuation<Data, any Error>?
 
-    init(_ continuation: CheckedContinuation<Void, any Error>) {
+    init(_ continuation: CheckedContinuation<Data, any Error>) {
         self.continuation = continuation
     }
 
-    func finish(_ result: Result<Void, any Error>) {
+    func finish(_ result: Result<Data, any Error>) {
         lock.lock()
         let pending = continuation
         continuation = nil
@@ -128,6 +135,8 @@ public actor MachineConnection {
     private var runner: Task<Void, Never>?
     private var pause: Task<Void, Never>?
     private var pinger: Task<Void, Never>?
+    private var busyRetry: Task<Void, Never>?
+    private var busyAttempt = 0
     private var attempt = 0
     private var live = false
     private var connectedAt: Date?
@@ -200,7 +209,7 @@ public actor MachineConnection {
 
     public func send(_ thread: String, prompt: PromptDraft, delivery: Delivery) async -> String {
         let entry = await outbox.enqueue(thread: thread, prompt: prompt, delivery: delivery)
-        if live {
+        if live && busyRetry == nil {
             Task { await self.deliver(entry) }
         }
         return entry.args.request
@@ -210,8 +219,8 @@ public actor MachineConnection {
         try await request("answer_approval", AnswerApprovalArgs(thread: thread, request: approval, answer: answer))
     }
 
-    public func loadEarlier(thread: String, before: Int, limit: Int) async throws {
-        try await request("load_earlier", LoadEarlierArgs(thread: thread, before: before, limit: limit))
+    public func loadEarlier(thread: String, before: Int, limit: Int) async throws -> LoadEarlierResult {
+        try await request("load_earlier", LoadEarlierArgs(thread: thread, before: before, limit: limit), as: LoadEarlierResult.self)
     }
 
     public func sendQueuedNow(thread: String, queued: String) async throws {
@@ -227,17 +236,39 @@ public actor MachineConnection {
     }
 
     public func startThread(_ args: StartThreadArgs) async throws {
-        try await request("start_thread", args)
+        var tries = 0
+        while true {
+            do {
+                try await request("start_thread", args)
+                sink.yield(.sendAccepted(request: args.draft, duplicate: false))
+                return
+            } catch let RemoteError.busy(reason) {
+                tries += 1
+                let delay = Self.backoff(attempt: tries)
+                sink.yield(.sendWaiting(request: args.draft, reason: reason, retryAt: Date().addingTimeInterval(delay)))
+                try await Task.sleep(for: .seconds(delay))
+            }
+        }
     }
 
-    public func request<Args: Encodable & Sendable>(_ op: String, _ args: Args) async throws {
+    public func request<Args: Encodable & Sendable, Answer: Decodable>(_ op: String, _ args: Args, as answer: Answer.Type) async throws -> Answer {
+        let data = try await request(op, args)
+        do {
+            return try JSONDecoder().decode(ResultEnvelope<Answer>.self, from: data).result
+        } catch {
+            throw RemoteError.unexpected("the \(op) result did not decode: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    public func request<Args: Encodable & Sendable>(_ op: String, _ args: Args) async throws -> Data {
         guard live, socket != nil else {
             throw RemoteError.notConnected
         }
         let id = nextID
         nextID += 1
         let json = try FrameCodec.encode(RequestFrame(id: id, op: op, args: args))
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
             let waiter = ReplyWaiter(continuation)
             waiters[id] = waiter
             do {
@@ -409,7 +440,9 @@ public actor MachineConnection {
                 incompatible = machine
                 throw RemoteError.incompatible(machine)
             }
-            if reply.resume == .snapshot || reply.epoch != epoch {
+            if let baseline = reply.seq {
+                lastSeq = baseline
+            } else if reply.resume == .snapshot || reply.epoch != epoch {
                 lastSeq = nil
             }
             epoch = reply.epoch
@@ -487,8 +520,8 @@ public actor MachineConnection {
         case let .update(seq, update):
             lastSeq = seq
             sink.yield(.update(seq: seq, update: update))
-        case let .reply(id, error):
-            waiters.removeValue(forKey: id)?.finish(error.map { .failure(RemoteError.server($0)) } ?? .success(()))
+        case let .reply(id, result):
+            waiters.removeValue(forKey: id)?.finish(result.mapError { $0 as any Error })
         case let .incompatible(machine):
             incompatible = machine
             throw RemoteError.incompatible(machine)
@@ -499,29 +532,53 @@ public actor MachineConnection {
 
     private func flushOutbox() async {
         for entry in await outbox.pending() {
-            guard live else {
+            guard live, await deliver(entry) != .busy else {
                 return
             }
-            await deliver(entry)
         }
     }
 
-    private func deliver(_ entry: OutboxEntry) async {
+    @discardableResult
+    private func deliver(_ entry: OutboxEntry) async -> DeliveryOutcome {
         let request = entry.args.request
         guard !inFlight.contains(request) else {
-            return
+            return .failed
         }
         inFlight.insert(request)
         defer { inFlight.remove(request) }
         do {
-            try await self.request("send", entry.args)
+            let reply = try await self.request("send", entry.args)
+            let duplicate = (try? JSONDecoder().decode(ResultEnvelope<SendResult>.self, from: reply))?.result.duplicate ?? false
             await outbox.remove(request)
-            sink.yield(.sendAccepted(request: request))
-        } catch RemoteError.server(let message) {
+            busyAttempt = 0
+            sink.yield(.sendAccepted(request: request, duplicate: duplicate))
+            return .done
+        } catch let RemoteError.busy(reason) {
+            retryWhenBusy(request: request, reason: reason)
+            return .busy
+        } catch let RemoteError.server(message) {
             await outbox.remove(request)
             sink.yield(.sendRejected(request: request, message: message))
+            return .failed
         } catch {
+            return .failed
+        }
+    }
+
+    private func retryWhenBusy(request: String, reason: String) {
+        guard busyRetry == nil else {
             return
+        }
+        busyAttempt += 1
+        let delay = Self.backoff(attempt: busyAttempt)
+        sink.yield(.sendWaiting(request: request, reason: reason, retryAt: Date().addingTimeInterval(delay)))
+        busyRetry = Task {
+            try? await Task.sleep(for: .seconds(delay))
+            if Task.isCancelled {
+                return
+            }
+            self.busyRetry = nil
+            await self.flushOutbox()
         }
     }
 
@@ -562,6 +619,8 @@ public actor MachineConnection {
         live = false
         pinger?.cancel()
         pinger = nil
+        busyRetry?.cancel()
+        busyRetry = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         secure = nil

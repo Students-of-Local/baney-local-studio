@@ -33,6 +33,15 @@ public struct TranscriptWindow: Codable, Sendable, Hashable {
         }
     }
 
+    public mutating func prepend(_ page: LoadEarlierResult, before: Int) -> Bool {
+        guard before == earlier, page.start <= before, page.items.count == before - page.start else {
+            return false
+        }
+        items = page.items + items
+        earlier = page.start
+        return true
+    }
+
     func trimmed(to limit: Int) -> TranscriptWindow {
         guard items.count > limit else {
             return self
