@@ -13,6 +13,7 @@ mod store;
 mod studio;
 mod threads;
 mod transcript;
+pub mod tunnel;
 mod workspace;
 
 pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
