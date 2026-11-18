@@ -1717,6 +1717,11 @@ async fn restart_watch(
     a.call("start_thread", json!({ "draft": "d-restart", "project": run.project, "prompt": prompt("restart watch"), "settings": settings })).await?;
     a.until("a thread for the restart check", SETUP, |view| view.started.contains_key("d-restart")).await?;
     let thread = a.view().started["d-restart"].clone();
+    // A worker still starting its first turn can outlive a forced Shutdown, so settle it first.
+    a.call("watch", json!({ "thread": thread })).await?;
+    a.call("abort", json!({ "thread": thread })).await?;
+    a.until("the restart thread idle before serve stops", SETUP, |view| view.idle(&thread)).await?;
+    a.call("unwatch", json!({ "thread": thread })).await?;
     let seq = a.view().seq;
     run.serve.stop()?;
     let root = run.serve.root.clone();
