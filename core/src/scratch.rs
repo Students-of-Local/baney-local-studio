@@ -1,4 +1,3 @@
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
 pub fn check_scratch_agent(agent: &Path) -> Result<(), String> {
@@ -12,7 +11,13 @@ pub fn check_scratch_agent(agent: &Path) -> Result<(), String> {
             auth.display()
         ));
     }
-    if !metadata.is_file() || metadata.nlink() != 1 {
+    let Some(links) = crate::platform::link_count(&metadata) else {
+        return Err(format!(
+            "{} has a link count this platform cannot read, so the run cannot rule out a hard link to real credentials",
+            auth.display()
+        ));
+    };
+    if !metadata.is_file() || links != 1 {
         return Err(format!("{} must be a regular file with a single link", auth.display()));
     }
     let resolved = std::fs::canonicalize(agent).map_err(|error| format!("{}: {error}", agent.display()))?;

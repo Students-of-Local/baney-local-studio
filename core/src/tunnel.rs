@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -17,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use crate::platform::Mode;
 
 pub const DEFAULT_PORTS: Ports = Ports { serve: 18093, mcp: 8787 };
 const STABLE_SERVICE: Option<&str> = None;
@@ -120,7 +121,7 @@ impl Tunnel {
             .mode(0o700)
             .create(&self.dir)
             .map_err(|error| format!("{}: {error}", self.dir.display()))?;
-        fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())
+        crate::platform::set_mode(&self.dir, 0o700).map_err(|error| error.to_string())
     }
 
     fn private_write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
