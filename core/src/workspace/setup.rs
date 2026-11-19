@@ -206,8 +206,7 @@ async fn run_script(
     if let Some(path) = process::joined_path() {
         command.env("PATH", path);
     }
-    #[cfg(unix)]
-    command.process_group(0);
+    crate::platform::own_group_async(&mut command);
     let mut child = command.spawn().map_err(|error| format!("could not run {}: {error}", script.name))?;
     let pid = child.id();
     setups.track(&progress.draft, pid);

@@ -31,6 +31,7 @@ impl Output {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn signal_pid_group(signal: &str, pid: u32) {
     let group = format!("-{pid}");
     let _ = std::process::Command::new("/bin/kill")
@@ -39,6 +40,11 @@ pub(crate) fn signal_pid_group(signal: &str, pid: u32) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(windows)]
+pub(crate) fn signal_pid_group(_signal: &str, pid: u32) {
+    crate::platform::taskkill(pid, true);
 }
 
 fn signal_group(signal: &str, child: &std::process::Child) {
@@ -60,11 +66,7 @@ pub(crate) fn stop_group(child: &mut std::process::Child, grace: Duration) {
 }
 
 pub(crate) fn own_group(command: &mut std::process::Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    crate::platform::own_group(command);
     if let Some(path) = joined_path() {
         command.env("PATH", path);
     }

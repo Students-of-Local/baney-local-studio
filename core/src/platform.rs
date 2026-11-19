@@ -175,3 +175,62 @@ pub(crate) fn executable(candidate: PathBuf) -> Option<PathBuf> {
         path.is_file().then_some(path)
     })
 }
+
+#[cfg(windows)]
+fn system32(name: &str) -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from(name), |root| PathBuf::from(root).join("System32").join(name))
+}
+
+#[cfg(windows)]
+pub(crate) fn taskkill(pid: u32, tree: bool) {
+    let mut command = std::process::Command::new(system32("taskkill.exe"));
+    command.args(["/PID", &pid.to_string(), "/F"]);
+    if tree {
+        command.arg("/T");
+    }
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(windows)]
+pub(crate) fn command_line(pid: u32) -> Option<String> {
+    let query = format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine");
+    let output = std::process::Command::new(system32("WindowsPowerShell\\v1.0\\powershell.exe"))
+        .args(["-NoProfile", "-NonInteractive", "-Command", &query])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !line.is_empty()).then_some(line)
+}
+
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+#[cfg(unix)]
+pub(crate) fn own_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+pub(crate) fn own_group(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(unix)]
+pub(crate) fn own_group_async(command: &mut tokio::process::Command) {
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+pub(crate) fn own_group_async(command: &mut tokio::process::Command) {
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
