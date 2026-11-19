@@ -43,8 +43,23 @@ def run-step [cmd: string, cwd: string, log: string, envs: record] {
     $code
 }
 
-def run-job [id: string, job: record, root: string, sha: string, log: string, has_nix: bool] {
+def unsupported [job: record] {
+    let job_keys = ($job | columns | where {|k| $k in ["if" "defaults" "container" "services" "strategy"] })
+    let step_keys = ($job.steps | each {|s|
+        let shell = ($s | get -o shell | default "bash")
+        let keys = ($s | columns | where {|k| $k == "if" })
+        if $shell != "bash" { $keys | append $"shell: ($shell)" } else { $keys }
+    } | flatten)
+    $job_keys | append $step_keys | uniq
+}
+
+def run-job [id: string, job: record, root: string, sha: string, log: string, has_nix: bool, workflow_env: record] {
     "" | save --force $log
+    let refused = (unsupported $job)
+    if ($refused | is-not-empty) {
+        $"local CI can't reproduce: ($refused | str join ', ')\n" | save --append $log
+        return {code: 1, notes: []}
+    }
     let temp = (mktemp -d -t local-ci-runner.XXXXXX)
     mut path = $env.PATH
     mut notes = []
@@ -88,7 +103,12 @@ def run-job [id: string, job: record, root: string, sha: string, log: string, ha
             $notes = ($notes | append "host libs for the nix shell")
         }
         let cwd = ($root | path join ($step | get -o "working-directory" | default "."))
-        let envs = ($base | merge ($job.env? | default {}) | merge ($step.env? | default {}) | merge {PATH: $path})
+        let envs = ($base | merge $workflow_env | merge ($job.env? | default {}) | merge ($step.env? | default {}) | merge {PATH: $path})
+        if ($envs | values | any {|v| $v | into string | str contains '${{' }) {
+            $"local CI can't evaluate an expression in the env of: ($cmd | lines | first)\n" | save --append $log
+            $code = 1
+            break
+        }
         let step_code = (run-step $cmd $cwd $log $envs)
         if $step_code != 0 and not ($step | get -o "continue-on-error" | default false) {
             $code = $step_code
@@ -120,7 +140,10 @@ def main [
     mkdir $logs
     let host = (sys host | get hostname)
     let has_nix = (which nix | is-not-empty)
-    let jobs = (^git -C $checkout show $"($sha):.github/workflows/ci.yml" | from yaml | get jobs | transpose id job)
+    let workflow = (^git -C $checkout show $"($sha):.github/workflows/ci.yml" | from yaml)
+    if ($workflow | get -o defaults | is-not-empty) { error make {msg: "local CI can't reproduce ci.yml's defaults"} }
+    let workflow_env = ($workflow | get -o env | default {})
+    let jobs = ($workflow.jobs | transpose id job)
     mut failed = []
     for entry in $jobs {
         let name = ($entry.job.name? | default $entry.id)
@@ -135,7 +158,7 @@ def main [
         let started = (date now)
         let root = (mktemp -d -t local-ci.XXXXXX)
         ^git -C $checkout worktree add --quiet --detach $root $sha
-        let result = (run-job $entry.id $entry.job $root $sha $log $has_nix)
+        let result = (run-job $entry.id $entry.job $root $sha $log $has_nix $workflow_env)
         ^git -C $checkout worktree remove --force $root
         let secs = (((date now) - $started) / 1sec | math round)
         let extra = (if ($result.notes | is-empty) { "" } else { $", ($result.notes | str join ', ')" })
