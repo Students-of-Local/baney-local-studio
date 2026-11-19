@@ -978,7 +978,12 @@ impl App {
         let web = url
             .split_once("://")
             .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"));
-        if web && self.state.borrow().settings.open_links_in == LinkTarget::App {
+        // The Browser panel lives beside the thread; on other pages it would open out of sight.
+        let in_app = {
+            let state = self.state.borrow();
+            state.settings.open_links_in == LinkTarget::App && state.page == Page::Thread
+        };
+        if web && in_app {
             self.open_surface("browser");
             self.panel.browser.view.load_uri(url);
             return;

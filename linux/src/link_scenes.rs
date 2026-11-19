@@ -9,8 +9,9 @@ use webkit::prelude::*;
 
 use crate::app::App;
 use crate::fixtures::{conversation, item, FOCUSED};
+use crate::state::Page;
 
-const SCENES: [&str; 2] = ["link-app", "link-system"];
+const SCENES: [&str; 3] = ["link-app", "link-system", "link-app-off-thread"];
 const LABEL: &str = "Open the studio";
 
 thread_local! {
@@ -22,9 +23,15 @@ fn url() -> Option<String> {
     std::env::var("LOCAL_STUDIO_SNAPSHOT_LINK").ok().filter(|url| !url.is_empty())
 }
 
+/// Links set to open in the app, clicked while another page shows: the panel would open out of
+/// sight, so the link goes to the system handler instead.
+fn off_thread(scene: &str) -> bool {
+    scene == "link-app-off-thread"
+}
+
 fn target(scene: &str) -> Option<LinkTarget> {
     match scene {
-        "link-app" => Some(LinkTarget::App),
+        "link-app" | "link-app-off-thread" => Some(LinkTarget::App),
         "link-system" => Some(LinkTarget::System),
         _ => None,
     }
@@ -57,6 +64,9 @@ pub fn stage(app: &Rc<App>, scene: &str) -> bool {
         Update::Settings { settings },
         Update::Transcript { thread: FOCUSED.to_string(), op: TranscriptOp::Insert { index: u64::MAX, item: reply } },
     ]);
+    if off_thread(scene) {
+        app.open_page(Page::Usage);
+    }
     true
 }
 
@@ -90,6 +100,9 @@ pub fn click(app: &Rc<App>, scene: &str) -> Result<(), String> {
 pub fn ready(app: &Rc<App>, scene: &str) -> bool {
     match target(scene) {
         None => return true,
+        Some(_) if off_thread(scene) => {
+            return CLICKED.with(Cell::get).is_none_or(|clicked| clicked.elapsed() >= Duration::from_secs(2));
+        }
         Some(LinkTarget::System) => {
             return CLICKED.with(Cell::get).is_none_or(|clicked| clicked.elapsed() >= Duration::from_secs(2));
         }
@@ -108,6 +121,13 @@ pub fn finish(scene: &str) -> bool {
 pub fn check(app: &Rc<App>, scene: &str) -> Result<(), String> {
     let (Some(target), Some(url)) = (target(scene), url()) else { return Ok(()) };
     let showing = app.panel.showing("browser");
+    if off_thread(scene) {
+        println!("{scene}: browser panel showing={showing}");
+        if showing {
+            return Err("the Browser panel opened while another page was showing".to_string());
+        }
+        return Ok(());
+    }
     match target {
         LinkTarget::App => {
             let view = &app.panel.browser.view;

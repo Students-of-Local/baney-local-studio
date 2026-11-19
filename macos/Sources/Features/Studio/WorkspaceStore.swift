@@ -537,7 +537,9 @@ final class PanelState {
     }
 
     func openLink(_ url: URL) -> Bool {
-        guard settings?.openLinksIn == .app, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
+        // The Browser panel lives beside the thread; on other pages it would open out of sight.
+        guard settings?.openLinksIn == .app, inbox?.shell.route == .thread,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
         openSurface(.browser)
         guard rightPanelOpen, case .browser(let model) = activeContent?.content else { return false }
         model.open(url)
