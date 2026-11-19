@@ -28,18 +28,36 @@ struct Target {
     id: String,
     command: String,
     model: String,
+    request: String,
+    expanded: String,
+    skill: String,
+    mark: String,
+    check: Option<String>,
+    step: Duration,
+    build: Duration,
 }
 
 impl Target {
-    fn from_env() -> Self {
-        let var = |name: &str, default: &str| {
-            std::env::var(name).ok().filter(|value| !value.is_empty()).unwrap_or_else(|| default.to_string())
+    fn from_env() -> anyhow::Result<Self> {
+        let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        let var = |name: &str, default: &str| set(name).unwrap_or_else(|| default.to_string());
+        let secs = |name: &str, default: Duration| -> anyhow::Result<Duration> {
+            set(name).map_or(Ok(default), |value| {
+                value.trim().parse().map(Duration::from_secs).with_context(|| format!("{name} must be whole seconds"))
+            })
         };
-        Self {
+        Ok(Self {
             id: var("PLUGIN_SMOKE_ID", "smoothstone"),
             command: var("PLUGIN_SMOKE_COMMAND", "stone"),
             model: var("PLUGIN_SMOKE_MODEL", MID),
-        }
+            request: var("PLUGIN_SMOKE_REQUEST", REQUEST),
+            expanded: var("PLUGIN_SMOKE_EXPANDED", "stone status"),
+            skill: var("PLUGIN_SMOKE_SKILL", "smoothstone"),
+            mark: var("PLUGIN_SMOKE_MARK", "NEXT:"),
+            check: set("PLUGIN_SMOKE_CHECK"),
+            step: secs("PLUGIN_SMOKE_STEP_SECS", STEP)?,
+            build: secs("PLUGIN_SMOKE_BUILD_SECS", BUILD)?,
+        })
     }
 
     fn source(&self) -> String {
@@ -108,6 +126,7 @@ struct Harness {
     studio: Arc<Studio>,
     signal: Arc<Signal>,
     view: View,
+    step: Duration,
 }
 
 impl Harness {
@@ -169,7 +188,7 @@ impl Harness {
 
     fn list_commands(&mut self, request: &str) -> anyhow::Result<Vec<SlashCommand>> {
         self.studio.list_commands(request.to_string(), None);
-        self.pump_until(&format!("command list {request}"), STEP, |view| view.commands(request).is_some())?;
+        self.pump_until(&format!("command list {request}"), self.step, |view| view.commands(request).is_some())?;
         Ok(self.view.commands(request).unwrap_or_default().to_vec())
     }
 }
@@ -198,11 +217,11 @@ fn user_text(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-fn stone_calls(items: &[Item]) -> usize {
+fn plugin_calls(items: &[Item], mark: &str) -> usize {
     items
         .iter()
         .filter(|item| {
-            matches!(&item.kind, ItemKind::Tool { state: ToolState::Succeeded | ToolState::Failed, output, .. } if output.contains("NEXT:"))
+            matches!(&item.kind, ItemKind::Tool { state: ToolState::Succeeded | ToolState::Failed, output, .. } if output.contains(mark))
         })
         .count()
 }
@@ -252,13 +271,13 @@ fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let usage = "usage: [PLUGIN_SMOKE_ID=smoothstone PLUGIN_SMOKE_COMMAND=stone PLUGIN_SMOKE_MODEL=<model>] plugin_smoke <eukhe> <scratch dir> <models.json> <plugin dir | catalog id> | plugin_smoke --stop <socket>";
+    let usage = "usage: [PLUGIN_SMOKE_ID=smoothstone PLUGIN_SMOKE_COMMAND=stone PLUGIN_SMOKE_MODEL=<model> PLUGIN_SMOKE_REQUEST=<text after /command> PLUGIN_SMOKE_EXPANDED='stone status' PLUGIN_SMOKE_SKILL=smoothstone PLUGIN_SMOKE_MARK='NEXT:' PLUGIN_SMOKE_CHECK=<sh command run in the work dir> PLUGIN_SMOKE_STEP_SECS=120 PLUGIN_SMOKE_BUILD_SECS=1500] plugin_smoke <eukhe> <scratch dir> <models.json> <plugin dir | catalog id> | plugin_smoke --stop <socket>";
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if args.first().is_some_and(|arg| arg.as_os_str() == "--stop") {
         return stop_daemon(args.get(1).context(usage)?);
     }
     let [daemon, root, models, plugin] = args.as_slice() else { bail!(usage) };
-    let target = Target::from_env();
+    let target = Target::from_env()?;
     ensure!(
         target.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
         "PLUGIN_SMOKE_ID must be a plain plugin id, not a path: {:?}",
@@ -289,7 +308,7 @@ fn main() -> anyhow::Result<()> {
     };
     let signal = Arc::new(Signal::default());
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
-    let mut harness = Harness { studio, signal, view: View::default() };
+    let mut harness = Harness { studio, signal, view: View::default(), step: target.step };
     let outcome = drive(&mut harness, &work, &plugins, &target).and_then(|()| no_plugin_servers(&agent));
     harness.studio.shutdown();
     let stopped = stop_daemon(&socket);
@@ -333,22 +352,24 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path, target: &Target) ->
     let studio = Arc::clone(&harness.studio);
     let source = target.source();
     let name = &target.command;
+    let step = target.step;
     let gone_prompt = format!("/{name} Reply with only the word gone.");
-    harness.pump_until("daemon connected", STEP, |view| matches!(view.connection, Some(Connection::Ready)))?;
+    harness.pump_until("daemon connected", step, |view| matches!(view.connection, Some(Connection::Ready)))?;
     studio.add_project(work.to_string_lossy().into_owned());
-    harness.pump_until("project added", STEP, |view| view.projects.len() == 1)?;
+    harness.pump_until("project added", step, |view| view.projects.len() == 1)?;
     let project = harness.view.projects[0].id.clone();
 
     let commands = harness.list_commands("before")?;
-    let stone = commands
+    let listed = commands
         .iter()
         .find(|command| command.name == *name)
         .with_context(|| format!("/{name} is not in the palette"))?;
-    ensure!(stone.source == source && stone.kind == CommandKind::Plugin, "/{name} has the wrong source: {stone:?}");
-    println!("ok   check 2 core: /{name} listed, source {}, kind {:?}", stone.source, stone.kind);
+    ensure!(listed.source == source && listed.kind == CommandKind::Plugin, "/{name} has the wrong source: {listed:?}");
+    println!("ok   check 2 core: /{name} listed, source {}, kind {:?}", listed.source, listed.kind);
+    let skill = format!("skill:{}", target.skill);
     ensure!(
-        commands.iter().any(|command| command.name == "skill:smoothstone" && command.source == source),
-        "the plugin skill is not in the palette"
+        commands.iter().any(|command| command.name == skill && command.source == source),
+        "the plugin skill {skill} is not in the palette"
     );
     ensure!(commands.iter().any(|command| command.name == "compact"), "session commands are missing");
     ensure!(
@@ -361,40 +382,56 @@ fn drive(harness: &mut Harness, work: &Path, plugins: &Path, target: &Target) ->
     studio.start_thread(
         "stone".to_string(),
         Some(project.clone()),
-        prompt(&format!("/{name} {REQUEST}")),
+        prompt(&format!("/{name} {}", target.request)),
         settings(&target.model),
     );
-    harness.pump_until("stone thread started", STEP, |view| view.thread("stone").is_some())?;
-    let thread = harness.view.thread("stone").context("no stone thread")?;
+    harness.pump_until("plugin thread started", step, |view| view.thread("stone").is_some())?;
+    let thread = harness.view.thread("stone").context("no plugin thread")?;
     studio.select_thread(Some(thread.clone()));
-    harness.pump_until(&format!("the /{name} prompt reached the model expanded"), STEP, |view| {
-        user_text(view.items(&thread)).iter().any(|text| text.contains("stone status") && text.contains(REQUEST))
+    harness.pump_until(&format!("the /{name} prompt reached the model expanded"), step, |view| {
+        user_text(view.items(&thread))
+            .iter()
+            .any(|text| text.contains(target.expanded.as_str()) && text.contains(target.request.as_str()))
     })?;
     let started = Instant::now();
-    harness.pump_until(&format!("the /{name} turn finished on {}", target.model), BUILD, |view| view.idle(&thread))?;
+    harness.pump_until(&format!("the /{name} turn finished on {}", target.model), target.build, |view| {
+        view.idle(&thread)
+    })?;
     studio.select_thread(Some(thread.clone()));
-    harness.pump_until("stone transcript reloaded", STEP, |view| !view.items(&thread).is_empty())?;
-    let calls = stone_calls(harness.view.items(&thread));
-    println!("     {calls} stone tool calls in {:?}", started.elapsed());
+    harness.pump_until("plugin transcript reloaded", step, |view| !view.items(&thread).is_empty())?;
+    let calls = plugin_calls(harness.view.items(&thread), &target.mark);
+    println!("     {calls} plugin tool calls in {:?}", started.elapsed());
     for item in harness.view.items(&thread).iter().rev().take(2) {
         println!("     last item {:.400}", format!("{:?}", item.kind));
     }
-    ensure!(calls > 0, "the /{name} turn ended without running stone");
-    check_part(work)?;
+    ensure!(calls > 0, "the /{name} turn ended without a plugin tool call");
+    match &target.check {
+        Some(check) => run_check(work, check)?,
+        None => check_part(work)?,
+    }
     std::fs::remove_dir_all(plugins.join(&target.id))?;
     let commands = harness.list_commands("after")?;
     ensure!(!commands.iter().any(|command| command.source == source), "the removed plugin is still listed");
     ensure!(commands.iter().any(|command| command.name == "compact"), "session commands vanished with the plugin");
     studio.start_thread("gone".to_string(), Some(project), prompt(&gone_prompt), settings(SMALL));
-    harness.pump_until("gone thread started", STEP, |view| view.thread("gone").is_some())?;
+    harness.pump_until("gone thread started", step, |view| view.thread("gone").is_some())?;
     let gone = harness.view.thread("gone").context("no gone thread")?;
     studio.select_thread(Some(gone.clone()));
-    harness.pump_until("the next turn after removal finished", STEP * 3, |view| {
+    harness.pump_until("the next turn after removal finished", step * 3, |view| {
         view.idle(&gone) && !user_text(view.items(&gone)).is_empty()
     })?;
     let sent = user_text(harness.view.items(&gone));
     ensure!(sent.iter().all(|text| text.trim() == gone_prompt), "/{name} still expanded after removal: {sent:?}");
     println!("ok   check 4: plugin folder removed, /{name} gone from the palette and sent as plain text on the next turn, no restart");
+    Ok(())
+}
+
+fn run_check(work: &Path, check: &str) -> anyhow::Result<()> {
+    let output = Command::new("sh").arg("-c").arg(check).current_dir(work).output().context("run the plugin check")?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    ensure!(output.status.success(), "the plugin check failed: {}", output.status);
+    println!("ok   check 3: the plugin check passed: {check}");
     Ok(())
 }
 
