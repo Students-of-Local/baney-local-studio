@@ -234,3 +234,20 @@ pub(crate) fn own_group_async(command: &mut tokio::process::Command) {
 pub(crate) fn own_group_async(command: &mut tokio::process::Command) {
     command.creation_flags(CREATE_NEW_PROCESS_GROUP);
 }
+
+#[cfg(windows)]
+pub(crate) fn command_interpreter() -> PathBuf {
+    std::env::var_os("COMSPEC")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| system32("cmd.exe"))
+}
+
+#[cfg(windows)]
+pub(crate) fn cmd_script(script: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = std::process::Command::new(command_interpreter());
+    command.args(["/D", "/S", "/C"]).raw_arg(format!("\"{script}\""));
+    command
+}

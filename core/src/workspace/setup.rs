@@ -171,8 +171,21 @@ fn forward_lines<R: AsyncRead + Unpin + Send + 'static>(reader: R, lines: mpsc::
     });
 }
 
+#[cfg(unix)]
 fn shell() -> String {
     std::env::var("SHELL").ok().filter(|shell| Path::new(shell).is_file()).unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+#[cfg(unix)]
+fn script_command(script: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(shell());
+    command.args(["-lc", script]);
+    command
+}
+
+#[cfg(windows)]
+fn script_command(script: &str) -> tokio::process::Command {
+    tokio::process::Command::from(crate::platform::cmd_script(script))
 }
 
 fn stop_script(pid: Option<u32>) {
@@ -193,9 +206,8 @@ async fn run_script(
     worktree: &Path,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<ScriptEnd, String> {
-    let mut command = tokio::process::Command::new(shell());
+    let mut command = script_command(&script.command);
     command
-        .args(["-lc", &script.command])
         .current_dir(worktree)
         .env("LOCAL_STUDIO_PROJECT_ROOT", project)
         .env("LOCAL_STUDIO_WORKTREE_PATH", worktree)
