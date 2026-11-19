@@ -228,6 +228,7 @@ final class PanelSmoke {
             panels.updateSettings { $0.openLinksIn = choice }
             guard await poll(5, { panels.settings?.openLinksIn == choice }) else { return "the core did not apply open links in \(choice)" }
             let before = panels.activeBrowser?.webView.url
+            let title = panels.activeBrowser?.title ?? ""
             view.clicked(onLink: value, at: index)
             guard opened.last == expected else { return "a click with links set to \(choice) opened in the app: \(opened)" }
             if !expected {
@@ -235,7 +236,7 @@ final class PanelSmoke {
                 print("ok link with open links in \(choice) went to the system handler; the Browser panel kept \(before?.absoluteString ?? "nil")")
                 continue
             }
-            guard await poll(10, { panels.activeBrowser?.webView.url == link && panels.activeBrowser?.loading == false && panels.activeBrowser?.title.isEmpty == false }),
+            guard await poll(10, { panels.activeBrowser.map { $0.current == link && !$0.loading && !$0.title.isEmpty && $0.title != title } ?? false }),
                   let model = panels.activeBrowser else {
                 return "the Browser panel did not load \(link.absoluteString) (\(panels.activeBrowser?.webView.url?.absoluteString ?? "no browser"))"
             }

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -10,6 +11,10 @@ use crate::fixtures::{conversation, item, FOCUSED};
 
 const SCENES: [&str; 2] = ["link-app", "link-system"];
 const LABEL: &str = "Open the studio";
+
+thread_local! {
+    static TITLE: RefCell<String> = const { RefCell::new(String::new()) };
+}
 
 fn url() -> Option<String> {
     std::env::var("LOCAL_STUDIO_SNAPSHOT_LINK").ok().filter(|url| !url.is_empty())
@@ -72,6 +77,8 @@ pub fn click(app: &Rc<App>, scene: &str) -> Result<(), String> {
         .filter_map(Result::ok)
         .find_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
         .ok_or("the transcript view has no click gesture")?;
+    let title = app.panel.browser.view.title().map(|title| title.to_string()).unwrap_or_default();
+    TITLE.with(|before| before.replace(title));
     gesture.emit_by_name::<()>("released", &[&1i32, &f64::from(x), &f64::from(y)]);
     println!("{scene}: clicked {LABEL} at {x},{y}");
     Ok(())
@@ -82,7 +89,9 @@ pub fn ready(app: &Rc<App>, scene: &str) -> bool {
         return true;
     }
     let view = &app.panel.browser.view;
-    !view.is_loading() && view.title().is_some_and(|title| !title.is_empty())
+    let fresh =
+        view.title().is_some_and(|title| !title.is_empty() && TITLE.with(|before| *before.borrow() != title.as_str()));
+    !view.is_loading() && fresh
 }
 
 pub fn check(app: &Rc<App>, scene: &str) -> Result<(), String> {
