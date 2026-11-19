@@ -1,5 +1,6 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::glib;
@@ -14,6 +15,7 @@ const LABEL: &str = "Open the studio";
 
 thread_local! {
     static TITLE: RefCell<String> = const { RefCell::new(String::new()) };
+    static CLICKED: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 fn url() -> Option<String> {
@@ -79,14 +81,19 @@ pub fn click(app: &Rc<App>, scene: &str) -> Result<(), String> {
         .ok_or("the transcript view has no click gesture")?;
     let title = app.panel.browser.view.title().map(|title| title.to_string()).unwrap_or_default();
     TITLE.with(|before| before.replace(title));
+    CLICKED.with(|clicked| clicked.set(Some(Instant::now())));
     gesture.emit_by_name::<()>("released", &[&1i32, &f64::from(x), &f64::from(y)]);
     println!("{scene}: clicked {LABEL} at {x},{y}");
     Ok(())
 }
 
 pub fn ready(app: &Rc<App>, scene: &str) -> bool {
-    if target(scene) != Some(LinkTarget::App) {
-        return true;
+    match target(scene) {
+        None => return true,
+        Some(LinkTarget::System) => {
+            return CLICKED.with(Cell::get).is_none_or(|clicked| clicked.elapsed() >= Duration::from_secs(2));
+        }
+        Some(LinkTarget::App) => {}
     }
     let view = &app.panel.browser.view;
     let fresh =
