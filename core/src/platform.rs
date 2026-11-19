@@ -251,3 +251,13 @@ pub(crate) fn cmd_script(script: &str) -> std::process::Command {
     command.args(["/D", "/S", "/C"]).raw_arg(format!("\"{script}\""));
     command
 }
+
+#[cfg(unix)]
+pub(crate) fn fill_random(bytes: &mut [u8]) -> bool {
+    std::fs::File::open("/dev/urandom").and_then(|mut file| std::io::Read::read_exact(&mut file, bytes)).is_ok()
+}
+
+#[cfg(windows)]
+pub(crate) fn fill_random(bytes: &mut [u8]) -> bool {
+    getrandom::getrandom(bytes).is_ok()
+}
