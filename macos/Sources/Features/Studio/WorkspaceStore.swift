@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 import LocalStudioKit
 import Observation
-import SwiftUI
 
 @MainActor
 @Observable
@@ -543,12 +542,6 @@ final class PanelState {
         guard rightPanelOpen, case .browser(let model) = activeContent?.content else { return false }
         model.open(url)
         return true
-    }
-
-    var openURLAction: OpenURLAction {
-        OpenURLAction { [weak self] url in
-            self?.openLink(url) == true ? .handled : .systemAction
-        }
     }
 
     private func present(_ kind: PanelSurfaceKind) {
