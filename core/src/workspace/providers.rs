@@ -387,6 +387,7 @@ fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Resul
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(temporary, target)?;
+    #[cfg(unix)]
     if let Some(parent) = target.parent() {
         fs::File::open(parent)?.sync_all()?;
     }

@@ -248,7 +248,8 @@ pub(crate) fn command_interpreter() -> PathBuf {
 pub(crate) fn cmd_script(script: &str) -> std::process::Command {
     use std::os::windows::process::CommandExt;
     let mut command = std::process::Command::new(command_interpreter());
-    command.args(["/D", "/S", "/C"]).raw_arg(format!("\"{script}\""));
+    let lines: Vec<&str> = script.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    command.args(["/D", "/S", "/C"]).raw_arg(format!("\"{}\"", lines.join(" & ")));
     command
 }
 

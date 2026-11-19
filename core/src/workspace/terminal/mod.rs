@@ -3,7 +3,6 @@ mod keys;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};

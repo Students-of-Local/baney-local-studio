@@ -267,7 +267,12 @@ fn walk(root: &Path, exclude: &[String]) -> Result<Vec<Entry>, String> {
                 continue;
             }
             let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
-            let text = path.to_str().ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))?.to_string();
+            let text = path
+                .components()
+                .map(|part| part.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))?
+                .join("/");
             let kind = if meta.file_type().is_symlink() {
                 Kind::Link(std::fs::read_link(item.path()).map_err(|error| error.to_string())?)
             } else if meta.is_dir() {
