@@ -42,7 +42,7 @@ pub fn start(app: &Rc<App>, dir: PathBuf, filter: Option<String>, failed: Rc<Cel
                     usage_scenes::retry(&app, scene);
                 }
             }
-            if usage_scenes::finish(&app, scene) {
+            if usage_scenes::finish(&app, scene) || link_scenes::finish(scene) {
                 settle(700).await;
             }
             if let Err(error) = link_scenes::check(&app, scene) {

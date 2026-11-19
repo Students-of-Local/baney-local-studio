@@ -101,6 +101,10 @@ pub fn ready(app: &Rc<App>, scene: &str) -> bool {
     !view.is_loading() && fresh
 }
 
+pub fn finish(scene: &str) -> bool {
+    target(scene).is_some()
+}
+
 pub fn check(app: &Rc<App>, scene: &str) -> Result<(), String> {
     let (Some(target), Some(url)) = (target(scene), url()) else { return Ok(()) };
     let showing = app.panel.showing("browser");
