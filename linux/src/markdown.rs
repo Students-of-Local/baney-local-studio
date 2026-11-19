@@ -119,8 +119,10 @@ fn create() -> (gtk::TextView, Rc<RefCell<Doc>>) {
             return;
         }
         let Some(url) = link_at(&view, &clicked.borrow(), x, y) else { return };
-        let window = view.root().and_downcast::<gtk::Window>();
-        gtk::UriLauncher::new(&url).launch(window.as_ref(), None::<&gio::Cancellable>, |_| {});
+        if view.activate_action("win.open-link", Some(&url.to_variant())).is_err() {
+            let window = view.root().and_downcast::<gtk::Window>();
+            gtk::UriLauncher::new(&url).launch(window.as_ref(), None::<&gio::Cancellable>, |_| {});
+        }
     });
     view.add_controller(click);
     let motion = gtk::EventControllerMotion::new();

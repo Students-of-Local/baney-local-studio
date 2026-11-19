@@ -27,6 +27,7 @@ mod highlight;
 mod icons;
 mod images;
 mod keyboard;
+mod link_scenes;
 mod markdown;
 mod numbers;
 mod options;

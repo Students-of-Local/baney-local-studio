@@ -22,6 +22,7 @@ pub fn scenes() -> Vec<&'static str> {
     all.extend(crate::dashboard_scenes::SCENES);
     all.extend(crate::keyboard::SCENES);
     all.extend(crate::usage_scenes::scenes());
+    all.extend(crate::link_scenes::scenes());
     all
 }
 
@@ -95,7 +96,7 @@ const MINUTE: i64 = 60_000;
 
 #[allow(clippy::too_many_lines)]
 pub fn stage(app: &Rc<App>, scene: &str) {
-    if crate::usage_scenes::stage(app, scene) {
+    if crate::usage_scenes::stage(app, scene) || crate::link_scenes::stage(app, scene) {
         return;
     }
     match scene {

@@ -5,8 +5,8 @@ use std::rc::{Rc, Weak};
 use adw::prelude::*;
 use gtk::gio;
 use local_studio_core::{
-    ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, NotificationKind, NotificationMode, PromptDraft,
-    Shelf, ThreadSettings, TranscriptOp, Update,
+    ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind, NotificationMode,
+    PromptDraft, Shelf, ThreadSettings, TranscriptOp, Update,
 };
 
 use crate::branches::BranchBar;
@@ -971,6 +971,18 @@ impl App {
         } else {
             self.panel.show(kind);
         }
+    }
+
+    pub fn open_link(self: &Rc<Self>, url: &str) {
+        let web = url
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"));
+        if web && self.state.borrow().settings.open_links_in == LinkTarget::App {
+            self.open_surface("browser");
+            self.panel.browser.view.load_uri(url);
+            return;
+        }
+        gtk::UriLauncher::new(url).launch(Some(&self.window), None::<&gio::Cancellable>, |_| {});
     }
 
     pub fn set_panel_maximized(&self, maximized: bool) {

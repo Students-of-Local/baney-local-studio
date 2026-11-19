@@ -58,7 +58,7 @@ pub fn install(app: &Rc<App>) {
         });
         app.window.add_action(&action);
     }
-    let strings: [(&str, StringAction); 7] = [
+    let strings: [(&str, StringAction); 8] = [
         ("run-script", |app, id| {
             let project = {
                 let state = app.state.borrow();
@@ -88,6 +88,7 @@ pub fn install(app: &Rc<App>) {
             app.panel.close_where(|position, _| position <= index);
         }),
         ("open-in", |app, id| open_in(app, &id)),
+        ("open-link", |app, url| app.open_link(&url)),
     ];
     for (name, activate) in strings {
         let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));

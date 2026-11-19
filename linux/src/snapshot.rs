@@ -8,6 +8,7 @@ use gtk::{gdk, glib, graphene};
 
 use crate::app::App;
 use crate::fixtures;
+use crate::link_scenes;
 use crate::usage_scenes;
 
 pub fn start(app: &Rc<App>, dir: PathBuf, filter: Option<String>, failed: Rc<Cell<bool>>) {
@@ -29,8 +30,12 @@ pub fn start(app: &Rc<App>, dir: PathBuf, filter: Option<String>, failed: Rc<Cel
             }
             fixtures::stage(&app, scene);
             settle(700).await;
+            if let Err(error) = link_scenes::click(&app, scene) {
+                eprintln!("FAIL {scene}: {error}");
+                failed.set(true);
+            }
             let mut waited = 0;
-            while !usage_scenes::ready(&app, scene) && waited < 120_000 {
+            while !(usage_scenes::ready(&app, scene) && link_scenes::ready(&app, scene)) && waited < 120_000 {
                 settle(250).await;
                 waited += 250;
                 if waited % 5_000 == 0 {
@@ -39,6 +44,10 @@ pub fn start(app: &Rc<App>, dir: PathBuf, filter: Option<String>, failed: Rc<Cel
             }
             if usage_scenes::finish(&app, scene) {
                 settle(700).await;
+            }
+            if let Err(error) = link_scenes::check(&app, scene) {
+                eprintln!("FAIL {scene}: {error}");
+                failed.set(true);
             }
             let path = dir.join(format!("{scene}.png"));
             match capture(&app.window, &path) {

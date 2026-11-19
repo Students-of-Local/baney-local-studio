@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import LocalStudioKit
 import Observation
+import SwiftUI
 
 @MainActor
 @Observable
@@ -534,6 +535,20 @@ final class PanelState {
     func openSurface(_ kind: PanelSurfaceKind) {
         userRevision += 1
         present(kind)
+    }
+
+    func openLink(_ url: URL) -> Bool {
+        guard settings?.openLinksIn == .app, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
+        openSurface(.browser)
+        guard rightPanelOpen, case .browser(let model) = activeContent?.content else { return false }
+        model.open(url)
+        return true
+    }
+
+    var openURLAction: OpenURLAction {
+        OpenURLAction { [weak self] url in
+            self?.openLink(url) == true ? .handled : .systemAction
+        }
     }
 
     private func present(_ kind: PanelSurfaceKind) {

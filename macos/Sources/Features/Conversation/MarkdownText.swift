@@ -494,10 +494,13 @@ struct MarkdownText: NSViewRepresentable {
     let rendering: MarkdownRendering
 
     func makeNSView(context: Context) -> MarkdownNSTextView {
-        MarkdownNSTextView()
+        let view = MarkdownNSTextView()
+        view.openURL = context.environment.openURL
+        return view
     }
 
     func updateNSView(_ view: MarkdownNSTextView, context: Context) {
+        view.openURL = context.environment.openURL
         view.show(rendering)
     }
 
@@ -514,6 +517,7 @@ final class MarkdownNSTextView: NSTextView {
     private var offset: CGFloat = 0
     private var headers: [NSHostingView<CodeBlockHeader>] = []
     private var highlighting = false
+    var openURL: OpenURLAction?
 
     init() {
         let storage = NSTextStorage()
@@ -542,6 +546,14 @@ final class MarkdownNSTextView: NSTextView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func clicked(onLink link: Any, at charIndex: Int) {
+        guard let openURL, let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) else {
+            super.clicked(onLink: link, at: charIndex)
+            return
+        }
+        openURL(url)
     }
 
     override var textContainerOrigin: NSPoint {

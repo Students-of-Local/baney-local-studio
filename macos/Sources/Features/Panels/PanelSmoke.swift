@@ -193,12 +193,61 @@ final class PanelSmoke {
             return finish(passed: false, "the browser reloaded across closing and reopening the right panel (“\(title)” → “\(model.title)”)")
         }
         print("ok browser kept its page (“\(title)”) across closing and reopening the right panel")
+        if let link = ProcessInfo.processInfo.environment["LOCAL_STUDIO_SMOKE_LINK"].flatMap(URL.init(string:)) {
+            if let problem = await checkLink(link) {
+                return finish(passed: false, problem)
+            }
+        }
         diff.setAllCollapsed(false)
         if let problem = render(diff) {
             return finish(passed: false, problem)
         }
         session?.close()
         finish(passed: true, "diff, files, read_file, list_devices, terminal, browser and Add to Chat round-trips; diff snapshot \(output.path)")
+    }
+
+    private func checkLink(_ link: URL) async -> String? {
+        let panels = store.workspace.panels
+        let view = MarkdownNSTextView()
+        var opened: [Bool] = []
+        view.openURL = OpenURLAction { url in
+            opened.append(panels.openLink(url))
+            return .handled
+        }
+        view.show(MarkdownRenderer.rendering(MarkdownSource(text: "The studio is running. [Open the studio](\(link.absoluteString)) to see the model.", size: 13.5, secondary: false)))
+        guard let storage = view.textStorage else { return "the transcript text view has no storage" }
+        var target: (Any, Int)?
+        storage.enumerateAttribute(.link, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if let value {
+                target = (value, range.location)
+                stop.pointee = true
+            }
+        }
+        guard let (value, index) = target else { return "the rendered reply has no link" }
+        for (choice, expected) in [(LinkTarget.system, false), (LinkTarget.app, true)] {
+            panels.updateSettings { $0.openLinksIn = choice }
+            guard await poll(5, { panels.settings?.openLinksIn == choice }) else { return "the core did not apply open links in \(choice)" }
+            let before = panels.activeBrowser?.webView.url
+            view.clicked(onLink: value, at: index)
+            guard opened.last == expected else { return "a click with links set to \(choice) opened in the app: \(opened)" }
+            if !expected {
+                guard panels.activeBrowser?.webView.url == before else { return "a click with links set to the default browser changed the Browser panel" }
+                print("ok link with open links in \(choice) went to the system handler; the Browser panel kept \(before?.absoluteString ?? "nil")")
+                continue
+            }
+            guard await poll(10, { panels.activeBrowser?.webView.url == link && panels.activeBrowser?.loading == false && panels.activeBrowser?.title.isEmpty == false }),
+                  let model = panels.activeBrowser else {
+                return "the Browser panel did not load \(link.absoluteString) (\(panels.activeBrowser?.webView.url?.absoluteString ?? "no browser"))"
+            }
+            print("ok link with open links in \(choice) loaded \(link.absoluteString) titled “\(model.title)” in the Browser panel")
+            let shot = output.deletingPathExtension().appendingPathExtension("link.png")
+            if let image = try? await model.webView.takeSnapshot(configuration: nil),
+               let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: shot)
+                print("ok link page snapshot \(shot.path)")
+            }
+        }
+        return nil
     }
 
     private func poll(_ seconds: TimeInterval, _ condition: () -> Bool) async -> Bool {

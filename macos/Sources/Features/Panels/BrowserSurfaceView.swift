@@ -48,6 +48,12 @@ final class BrowserModel: NSObject, WKNavigationDelegate {
         webView.load(URLRequest(url: url))
     }
 
+    func open(_ url: URL) {
+        address = url.absoluteString
+        failure = nil
+        webView.load(URLRequest(url: url))
+    }
+
     func back() { webView.goBack() }
     func forward() { webView.goForward() }
 
