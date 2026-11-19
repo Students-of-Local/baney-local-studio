@@ -794,7 +794,7 @@ fn session_file(cwd: &str, session: &str) -> Option<PathBuf> {
     let root = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
+        .or_else(|| crate::platform::home().map(|home| PathBuf::from(home).join(".claude")))?;
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let direct = root.join("projects").join(&escaped).join(format!("{session}.jsonl"));
     if direct.is_file() {

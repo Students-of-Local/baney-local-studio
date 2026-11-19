@@ -245,7 +245,7 @@ async fn initialize(rpc: &Rpc) -> Result<(), String> {
 }
 
 pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let home = crate::platform::home_or_root();
     let mut process = start(&home, None, Arc::default(), Arc::default())?;
     let listed = async {
         initialize(&process.rpc).await?;

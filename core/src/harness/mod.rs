@@ -281,7 +281,17 @@ pub(crate) fn new_session_id() -> String {
 }
 
 fn program(variable: &str, name: &str) -> PathBuf {
-    std::env::var_os(variable).filter(|value| !value.is_empty()).map_or_else(|| PathBuf::from(name), PathBuf::from)
+    std::env::var_os(variable).filter(|value| !value.is_empty()).map_or_else(|| bare_program(name), PathBuf::from)
+}
+
+#[cfg(unix)]
+fn bare_program(name: &str) -> PathBuf {
+    PathBuf::from(name)
+}
+
+#[cfg(windows)]
+fn bare_program(name: &str) -> PathBuf {
+    crate::workspace::process::which(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn command(program: &PathBuf, cwd: &str) -> Command {

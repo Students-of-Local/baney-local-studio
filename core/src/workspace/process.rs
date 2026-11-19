@@ -73,25 +73,7 @@ pub(crate) fn own_group(command: &mut std::process::Command) {
 static SEARCH_PATH: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
     let mut paths: Vec<PathBuf> =
         std::env::var_os("PATH").map(|value| std::env::split_paths(&value).collect()).unwrap_or_default();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let user = std::env::var("USER").unwrap_or_default();
-    let mut extra = vec![
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/run/current-system/sw/bin"),
-        PathBuf::from("/nix/var/nix/profiles/default/bin"),
-        PathBuf::from(format!("/etc/profiles/per-user/{user}/bin")),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-    ];
-    if let Some(home) = home {
-        extra.push(home.join(".nix-profile/bin"));
-        extra.push(home.join(".bun/bin"));
-        extra.push(home.join(".local/bin"));
-        extra.push(home.join(".local/share/mise/shims"));
-        extra.push(home.join(".local/share/mise/installs/bun/latest/bin"));
-    }
-    for path in extra {
+    for path in crate::platform::extra_search_paths() {
         if !paths.contains(&path) {
             paths.push(path);
         }
@@ -104,7 +86,7 @@ pub(crate) fn search_path() -> &'static [PathBuf] {
 }
 
 pub(crate) fn which(program: &str) -> Option<PathBuf> {
-    search_path().iter().map(|dir| dir.join(program)).find(|candidate| candidate.is_file())
+    search_path().iter().find_map(|dir| crate::platform::executable(dir.join(program)))
 }
 
 pub(crate) fn joined_path() -> Option<std::ffi::OsString> {

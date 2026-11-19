@@ -1,5 +1,6 @@
+use std::ffi::OsString;
 use std::fs::{DirBuilder, Metadata, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) trait Mode {
     fn mode(&mut self, mode: u32) -> &mut Self;
@@ -79,4 +80,98 @@ pub(crate) fn symlink(link: &Path, at: &Path, to_dir: bool) -> std::io::Result<(
     } else {
         std::os::windows::fs::symlink_file(link, at)
     }
+}
+
+#[cfg(unix)]
+pub(crate) const ROOT: &str = "/";
+#[cfg(windows)]
+pub(crate) const ROOT: &str = "\\";
+
+#[cfg(unix)]
+pub(crate) const HOME_VAR: &str = "HOME";
+#[cfg(windows)]
+pub(crate) const HOME_VAR: &str = "USERPROFILE";
+
+pub(crate) fn home() -> Option<OsString> {
+    std::env::var_os(HOME_VAR)
+}
+
+pub(crate) fn home_or_root() -> String {
+    std::env::var(HOME_VAR).unwrap_or_else(|_| ROOT.to_string())
+}
+
+#[cfg(windows)]
+pub(crate) fn local_app_data() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+#[cfg(unix)]
+pub(crate) fn extra_search_paths() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let user = std::env::var("USER").unwrap_or_default();
+    let mut extra = vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/run/current-system/sw/bin"),
+        PathBuf::from("/nix/var/nix/profiles/default/bin"),
+        PathBuf::from(format!("/etc/profiles/per-user/{user}/bin")),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ];
+    if let Some(home) = home {
+        extra.push(home.join(".nix-profile/bin"));
+        extra.push(home.join(".bun/bin"));
+        extra.push(home.join(".local/bin"));
+        extra.push(home.join(".local/share/mise/shims"));
+        extra.push(home.join(".local/share/mise/installs/bun/latest/bin"));
+    }
+    extra
+}
+
+#[cfg(windows)]
+pub(crate) fn extra_search_paths() -> Vec<PathBuf> {
+    let mut extra = Vec::new();
+    if let Some(home) = home().filter(|value| !value.is_empty()).map(PathBuf::from) {
+        extra.push(home.join(".bun").join("bin"));
+        extra.push(home.join(".local").join("bin"));
+    }
+    if let Some(local) = local_app_data() {
+        extra.push(local.join("mise").join("shims"));
+    }
+    extra
+}
+
+#[cfg(unix)]
+pub(crate) fn executable(candidate: PathBuf) -> Option<PathBuf> {
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(windows)]
+fn path_extensions() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .filter(|extension| extension.starts_with('.') && extension.len() > 1)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+#[cfg(windows)]
+pub(crate) fn executable(candidate: PathBuf) -> Option<PathBuf> {
+    let extensions = path_extensions();
+    let listed = candidate
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extensions.iter().any(|known| known[1..].eq_ignore_ascii_case(extension)));
+    if listed && candidate.is_file() {
+        return Some(candidate);
+    }
+    extensions.iter().find_map(|extension| {
+        let mut name = candidate.clone().into_os_string();
+        name.push(extension);
+        let path = PathBuf::from(name);
+        path.is_file().then_some(path)
+    })
 }

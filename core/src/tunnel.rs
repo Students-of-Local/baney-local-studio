@@ -94,7 +94,7 @@ impl Tunnel {
             Some(explicit) => PathBuf::from(explicit),
             None => match std::env::var_os("LOCAL_STUDIO_DATA_DIR").filter(|value| !value.is_empty()) {
                 Some(value) => PathBuf::from(value),
-                None => crate::store::home_dir().ok_or("HOME is not set")?.join(".local-studio"),
+                None => crate::store::dot_dir()?,
             },
         };
         let service = std::env::var("LS_TUNNEL_SERVICE")
