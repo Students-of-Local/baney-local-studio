@@ -3,6 +3,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use local_studio_core::{Block, ItemKind, LinkTarget, Settings, TranscriptOp, Update};
+use webkit::prelude::*;
 
 use crate::app::App;
 use crate::fixtures::{conversation, item, FOCUSED};

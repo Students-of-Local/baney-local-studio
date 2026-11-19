@@ -8,6 +8,7 @@ use local_studio_core::{
     ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind, NotificationMode,
     PromptDraft, Shelf, ThreadSettings, TranscriptOp, Update,
 };
+use webkit::prelude::*;
 
 use crate::branches::BranchBar;
 use crate::composer::Composer;
