@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -234,6 +234,8 @@ struct Request {
     op: String,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    applied: bool,
 }
 
 pub(crate) fn requests_dir(data_dir: &Path) -> PathBuf {
@@ -299,27 +301,35 @@ impl Requests {
         }
     }
 
-    fn failure(&mut self, about: &str) -> Option<String> {
-        let index = self.failures.iter().position(|text| text.contains(about))?;
+    fn failure(&mut self, fails: &impl Fn(&str) -> bool) -> Option<String> {
+        let index = self.failures.iter().position(|text| fails(text))?;
         self.failures.remove(index)
     }
 
-    fn forget(&mut self, about: &str) {
-        self.failures.retain(|text| !text.contains(about));
+    fn forget(&mut self, fails: &impl Fn(&str) -> bool) {
+        self.failures.retain(|text| !fails(text));
     }
 
     fn known(&self, project: &str) -> Option<&Project> {
-        self.projects.iter().find(|known| known.id == project || known.path == project)
+        self.projects.iter().find(|known| known.id == project || known.path == project).or_else(|| {
+            let wanted = std::fs::canonicalize(project).ok()?;
+            self.projects.iter().find(|known| std::fs::canonicalize(&known.path).is_ok_and(|path| path == wanted))
+        })
     }
 
-    async fn until(&mut self, about: &str, wait: Duration, done: impl Fn(&Self) -> bool) -> Option<Result<(), String>> {
+    async fn until(
+        &mut self,
+        fails: &impl Fn(&str) -> bool,
+        wait: Duration,
+        done: impl Fn(&Self) -> bool,
+    ) -> Option<Result<(), String>> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             self.drain();
             if done(self) {
                 return Some(Ok(()));
             }
-            if let Some(failure) = self.failure(about) {
+            if let Some(failure) = self.failure(fails) {
                 return Some(Err(failure));
             }
             if tokio::time::timeout_at(deadline, self.notify.notified()).await.is_err() {
@@ -328,8 +338,9 @@ impl Requests {
         }
     }
 
-    async fn answer(&mut self, request: Request, again: bool) -> Option<Value> {
+    async fn answer(&mut self, file: &Path, request: Request) -> Option<Value> {
         self.drain();
+        let again = request.applied;
         let path = request.path.unwrap_or_default();
         let wait = if again { Duration::ZERO } else { ANSWER_WITHIN };
         let (ok, message) = match request.op.as_str() {
@@ -338,11 +349,15 @@ impl Requests {
                 (true, if again { format!("added {path}") } else { format!("{path} is already a project") })
             }
             "add_project" => {
+                let fails = |text: &str| {
+                    text == format!("{path} is not a folder.") || text.starts_with(&format!("Cannot add {path}: "))
+                };
                 if !again {
-                    self.forget(&path);
+                    self.forget(&fails);
+                    mark_applied(file, &request.op, &path);
                     self.studio.add_project(path.clone());
                 }
-                match self.until(&path, wait, |requests| requests.known(&path).is_some()).await? {
+                match self.until(&fails, wait, |requests| requests.known(&path).is_some()).await? {
                     Ok(()) => (true, format!("added {path}")),
                     Err(message) => (false, message),
                 }
@@ -351,11 +366,13 @@ impl Requests {
             "remove_project" => match self.known(&path).map(|known| known.id.clone()) {
                 None => (false, format!("{path} is not a project")),
                 Some(id) => {
+                    let fails = |text: &str| text == format!("Unknown project {id}.");
                     if !again {
-                        self.forget(&id);
+                        self.forget(&fails);
+                        mark_applied(file, &request.op, &path);
                         self.studio.remove_project(id.clone());
                     }
-                    match self.until(&id, wait, |requests| requests.known(&id).is_none()).await? {
+                    match self.until(&fails, wait, |requests| requests.known(&id).is_none()).await? {
                         Ok(()) => (true, format!("removed {path}")),
                         Err(message) => (false, message),
                     }
@@ -364,6 +381,12 @@ impl Requests {
             other => (false, format!("unknown request {other:?}")),
         };
         Some(json!({ "ok": ok, "message": message, "projects": self.projects }))
+    }
+}
+
+fn mark_applied(file: &Path, op: &str, path: &str) {
+    if let Err(error) = write_private(file, &json!({ "op": op, "path": path, "applied": true })) {
+        eprintln!("local-studio-serve: could not mark {} applied: {error:#}", file.display());
     }
 }
 
@@ -386,11 +409,9 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
         projects: Vec::new(),
         failures: VecDeque::new(),
     };
-    let mut applied: HashSet<PathBuf> = HashSet::new();
     loop {
         tokio::time::sleep(REQUEST_EVERY).await;
         requests.drain();
-        applied.retain(|path| path.exists());
         let Ok(entries) = std::fs::read_dir(&folder) else { continue };
         let files: Vec<PathBuf> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
         for done in files.iter().filter(|path| path.to_string_lossy().ends_with(".done.json")) {
@@ -406,8 +427,8 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
             }
             let answer = match read_request(&path) {
                 Ok(request) => {
-                    let again = applied.contains(&path);
-                    let Some(answer) = requests.answer(request, again).await else {
+                    let again = request.applied;
+                    let Some(answer) = requests.answer(&path, request).await else {
                         if !again {
                             eprintln!(
                                 "local-studio-serve: the core has not applied {} within {} s; waiting on it",
@@ -415,7 +436,6 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
                                 ANSWER_WITHIN.as_secs()
                             );
                         }
-                        applied.insert(path);
                         continue;
                     };
                     answer
@@ -426,7 +446,6 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
             };
             match write_private(&path.with_extension("done.json"), &answer) {
                 Ok(()) => {
-                    applied.remove(&path);
                     std::fs::remove_file(&path).ok();
                 }
                 Err(error) => eprintln!("local-studio-serve: could not answer {}: {error:#}", path.display()),
