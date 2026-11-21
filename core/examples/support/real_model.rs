@@ -69,8 +69,16 @@ pub fn image_model() -> &'static str {
     TARGET.get().map_or("", |target| target.image.as_deref().unwrap_or(&target.model))
 }
 
+/// Removes whatever sits at `path` first (a link left by an older run, which pointed auth.json at the
+/// real ~/.eukhe/auth.json, goes; its target is never opened), then creates a fresh file.
 fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(error).with_context(|| format!("could not clear {}", path.display()));
+        }
+        _ => {}
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
     file.write_all(data)?;
     Ok(())
 }

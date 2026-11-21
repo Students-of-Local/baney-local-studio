@@ -15,7 +15,8 @@ window=${OLLAMA_WINDOW:-$(command -v ollama-window || echo "$HOME/.local/bin/oll
 window_who=${E2E_WINDOW_WHO:-local-studio-e2e}
 window_minutes=${E2E_WINDOW_MINUTES:-60}
 window_wait=${E2E_WINDOW_WAIT_MINUTES:-180}
-remote_ip=${E2E_REMOTE_IP:-$(ip -4 route get 1.1.1.1 2> /dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')}
+remote_ip=${E2E_REMOTE_IP:-}
+[ -n "$remote_ip" ] || remote_ip=$( (ip -4 route get 1.1.1.1 2> /dev/null || true) | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
 [ -n "$remote_ip" ] || remote_ip=$(ipconfig getifaddr en0 2> /dev/null || true)
 [ -n "$remote_ip" ] || { echo "no non-loopback IPv4 address for local_smoke's remote stub; set E2E_REMOTE_IP" >&2; exit 2; }
 context=local-studio/e2e
@@ -37,16 +38,20 @@ done
 
 status() {
   [ -n "$post" ] || return 0
-  gh api "repos/$repo/statuses/$commit" -f state="$1" -f context="$context" -f description="$2" > /dev/null
+  gh api "repos/$repo/statuses/$commit" -f state="$1" -f context="$context" -f description="${2:0:140}" > /dev/null
 }
 
 claimed=
+keeper=
 claim() {
   [ -x "$window" ] || return 0
   if [ -z "$claimed" ]; then
     echo "== waiting up to $window_wait min for the GPU window ($window)"
     timeout "$((window_wait * 60))" "$window" wait "$window_minutes" "$model" "$window_who" || { echo "the GPU window stayed busy for $window_wait min: $("$window" status)" >&2; return 1; }
     claimed=1
+    # One example can outlast the claim (15 min a model step), so keep it fresh in the background too.
+    (while sleep 600; do "$window" claim "$window_minutes" "$model" "$window_who" > /dev/null || true; done) &
+    keeper=$!
   else
     "$window" claim "$window_minutes" "$model" "$window_who" > /dev/null || { echo "lost the GPU window: $("$window" status)" >&2; return 1; }
   fi
@@ -64,6 +69,7 @@ cleanup() {
   for socket in "$scratch"/*/d.sock; do
     [ -S "$socket" ] && [ -n "$bin" ] && "$bin/smoke" --stop "$socket" || true
   done
+  [ -n "$keeper" ] && kill "$keeper" 2> /dev/null || true
   [ -n "$claimed" ] && "$window" release "$window_who" > /dev/null || true
   rm -rf "$scratch" 2> /dev/null || { sleep 5; rm -rf "$scratch"; }
 }
@@ -80,8 +86,8 @@ for example in "${examples[@]}" "${helpers[@]}"; do
   cp "$target/debug/examples/$example" "$bin/"
 done
 cp "$target/debug/local-studio" "$bin/"
-printf '{"providers":{"local-fleet":{"name":"local-fleet","baseUrl":"%s","api":"openai-completions","apiKey":"none","models":[{"id":"%s","contextWindow":%s}]}}}\n' "$base" "$model" "$context_window" > "$scratch/plugin-models.json"
 export PLUGIN_SMOKE_MODEL=${PLUGIN_SMOKE_MODEL:-$model}
+printf '{"providers":{"local-fleet":{"name":"local-fleet","baseUrl":"%s","api":"openai-completions","apiKey":"none","models":[{"id":"%s","contextWindow":%s}]}}}\n' "$base" "$PLUGIN_SMOKE_MODEL" "$context_window" > "$scratch/plugin-models.json"
 claim || { status failure "the GPU window on $(hostname -s) stayed busy"; exit 1; }
 status pending "local model $LOCAL_STUDIO_SMOKE_MODEL: core e2e running on $(hostname -s)"
 started=$SECONDS

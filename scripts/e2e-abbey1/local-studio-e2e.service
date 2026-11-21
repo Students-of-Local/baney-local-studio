@@ -1,7 +1,7 @@
 [Unit]
 Description=Local Studio e2e gate on main's head, local model
 Wants=network-online.target
-After=network-online.target ollama.service
+After=network-online.target
 
 [Service]
 Type=oneshot

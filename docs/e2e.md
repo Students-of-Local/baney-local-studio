@@ -24,7 +24,7 @@ The time limit for each model step is 900 s, sized for a slow local model, and t
 
 ## The GPU window
 
-abbey1's GPU is shared through `~/.local/bin/ollama-window`. After the build, `scripts/e2e.sh` waits for the window (`ollama-window wait`, giving up after `E2E_WINDOW_WAIT_MINUTES`, default 180), claims it for `E2E_WINDOW_MINUTES` (default 60) under `E2E_WINDOW_WHO` (default `local-studio-e2e`), claims again before each example so the claim never lapses mid-run, and releases it on exit. A host without `ollama-window` runs without one.
+abbey1's GPU is shared through `~/.local/bin/ollama-window`. After the build, `scripts/e2e.sh` waits for the window (`ollama-window wait`, giving up after `E2E_WINDOW_WAIT_MINUTES`, default 180), claims it for `E2E_WINDOW_MINUTES` (default 60) under `E2E_WINDOW_WHO` (default `local-studio-e2e`), renews the claim every 10 minutes and before each example so it never lapses mid-run, and releases it on exit. A host without `ollama-window` runs without one.
 
 ## Run it by hand
 
