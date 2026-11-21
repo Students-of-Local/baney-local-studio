@@ -14,7 +14,7 @@ thread_local! {
     static SHOWN: RefCell<Option<(String, adw::Dialog)>> = const { RefCell::new(None) };
 }
 
-pub fn show(app: &Rc<App>, consents: Vec<ConsentRequest>) {
+pub fn show(app: &Rc<App>, consents: &[ConsentRequest]) {
     let open = SHOWN.with(|slot| slot.borrow().clone());
     if let Some((request, dialog)) = open {
         if consents.iter().any(|consent| consent.request == request) {
@@ -23,7 +23,7 @@ pub fn show(app: &Rc<App>, consents: Vec<ConsentRequest>) {
         SHOWN.with(|slot| slot.replace(None));
         dialog.force_close();
     }
-    if let Some(consent) = consents.into_iter().next() {
+    if let Some(consent) = consents.first() {
         present(app, consent, false);
     }
 }
@@ -83,18 +83,15 @@ fn confirm(consent: &ConsentRequest, count: usize) -> String {
 }
 
 fn row_subtitle(row: &ConsentRow) -> String {
-    let mut text = format!("{}  <tt>{}</tt>", format::escape(&row.scope), format::escape(&row.id));
-    if let (Some(gates), ConsentNeed::Sensitive) = (&row.gates, row.need) {
-        text.push_str(&format!("\nOff means no {}.", format::escape(gates)));
+    let text = format!("{}  <tt>{}</tt>", format::escape(&row.scope), format::escape(&row.id));
+    match (&row.gates, row.need) {
+        (Some(gates), ConsentNeed::Sensitive) => format!("{text}\nOff means no {}.", format::escape(gates)),
+        _ => text,
     }
-    text
 }
 
 fn header(consent: &ConsentRequest) -> gtk::Box {
-    let tile = consent
-        .icon
-        .as_ref()
-        .map_or_else(|| gtk::Image::from_icon_name(icons::PLUGIN), |path| gtk::Image::from_file(path));
+    let tile = consent.icon.as_ref().map_or_else(|| gtk::Image::from_icon_name(icons::PLUGIN), gtk::Image::from_file);
     tile.set_pixel_size(24);
     let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
     frame.set_size_request(40, 40);
@@ -114,21 +111,22 @@ fn header(consent: &ConsentRequest) -> gtk::Box {
     row
 }
 
-fn present(app: &Rc<App>, consent: ConsentRequest, findings_open: bool) {
-    let dialog = adw::Dialog::builder().title(title(&consent)).content_width(540).build();
+#[allow(clippy::too_many_lines)]
+fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
+    let dialog = adw::Dialog::builder().title(title(consent)).content_width(540).build();
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let top = gtk::Box::new(gtk::Orientation::Vertical, 14);
     top.set_margin_top(18);
     top.set_margin_bottom(18);
     top.set_margin_start(18);
     top.set_margin_end(18);
-    top.append(&header(&consent));
+    top.append(&header(consent));
     let scan = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let clean = consent.findings.is_empty();
     let mark = gtk::Image::from_icon_name(if clean { icons::DONE } else { icons::WARNING });
     mark.add_css_class(if clean { "ls-consent-clean" } else { "ls-consent-finding" });
     scan.append(&mark);
-    scan.append(&label(&scan_line(&consent), "ls-consent-scan"));
+    scan.append(&label(&scan_line(consent), "ls-consent-scan"));
     top.append(&scan);
     let findings = gtk::Box::new(gtk::Orientation::Vertical, 2);
     findings.set_margin_start(22);
@@ -190,7 +188,7 @@ fn present(app: &Rc<App>, consent: ConsentRequest, findings_open: bool) {
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
-    let install = gtk::Button::with_label(&confirm(&consent, needed));
+    let install = gtk::Button::with_label(&confirm(consent, needed));
     install.add_css_class("suggested-action");
     install.set_sensitive(clean || findings_open);
     buttons.append(&cancel);
@@ -333,7 +331,7 @@ pub fn stage(app: &Rc<App>, scene: &str) -> bool {
     match scene.trim_end_matches("-light") {
         "consent-findings" => present(
             app,
-            fixture(
+            &fixture(
                 fixture_rows().into_iter().take(3).collect(),
                 vec!["executable not named in the manifest: bin/helper".to_string()],
                 None,
@@ -342,7 +340,7 @@ pub fn stage(app: &Rc<App>, scene: &str) -> bool {
         ),
         "consent-update" => present(
             app,
-            fixture(
+            &fixture(
                 vec![row(
                     "synthetic-input",
                     ConsentNeed::Sensitive,
@@ -355,7 +353,7 @@ pub fn stage(app: &Rc<App>, scene: &str) -> bool {
             ),
             false,
         ),
-        _ => present(app, fixture(fixture_rows(), Vec::new(), None), false),
+        _ => present(app, &fixture(fixture_rows(), Vec::new(), None), false),
     }
     true
 }
