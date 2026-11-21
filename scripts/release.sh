@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s inherit_errexit 2> /dev/null || true
 : "${REPO:?set REPO to owner/name}"
 : "${GH_TOKEN:?set GH_TOKEN}"
 semver=semver@7.6.3
@@ -30,7 +31,7 @@ feed() {
 
 feed_field() {
   local body
-  body=$(feed "$1")
+  body=$(feed "$1") || exit 1
   [ -n "$body" ] || return 0
   jq -r --arg f "$2" '.[$f] // empty' <<< "$body" || die "the $1 feed is not JSON"
 }
@@ -125,7 +126,7 @@ verify_promote() {
 
 notes() {
   local channel=$1 version=$2 commit=$3 previous
-  previous=$(feed_field "$channel" commit)
+  previous=$(feed_field "$channel" commit) || exit 1
   echo "$(name_of "$channel") $version, built from ${commit:0:7}."
   if [ -n "$previous" ] && git merge-base --is-ancestor "$previous" "$commit" 2> /dev/null; then
     git log --no-merges --format='- %s' "$previous..$commit" | head -n 50
