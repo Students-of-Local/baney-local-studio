@@ -63,7 +63,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 - `core/src/harness/mod.rs`: the `Driver` enum, the `Event` stream each driver sends to the Studio actor, the usage ledger, and the shared message builders.
 - `core/src/harness/claude.rs`: the Claude Code process, its stream translator, and the history reader for the CLI session file.
 - `core/src/harness/codex.rs`: the `codex app-server` JSON-RPC client, its item translator, and the model list.
-- `core/src/studio/cli.rs`: the Studio actor's side, one `Cli` per open CLI thread with a generation number so events from a killed process are dropped.
+- `core/src/studio/cli.rs`: the Studio actor's side, one `Cli` per open CLI thread with a generation number so events from a killed process are dropped. The actor never awaits a CLI: opening a process, reading history and every Codex request run in spawned tasks that report back as `Event::Opened`, `Event::Loaded` or `Event::Failed` on the same channel, so one stalled CLI cannot hold up another thread.
 - `core/src/store.rs`: `ThreadFlags` keeps `harness`, `nativeSession`, `cwd`, `title`, `model` and `thinkingLevel` for CLI threads. An entry without `harness` loads as Eukhe.
 
 ### Environment
@@ -110,7 +110,7 @@ History on reopen comes from `~/.claude/projects/<cwd with every non-alphanumeri
 
 ### Codex app-server (codex-cli 0.169.0) calls
 
-Requests we send: `initialize` (then the `initialized` notification), `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`, `thread/name/set`, `thread/compact/start`, `model/list`.
+Requests we send: `initialize` (then the `initialized` notification), `thread/start`, `thread/resume`, `thread/read` (with `includeTurns`, in a short-lived app-server, to show a thread's history without opening it), `turn/start`, `turn/steer`, `turn/interrupt`, `thread/name/set`, `thread/compact/start`, `model/list`. Each request after the open runs in its own task; a failure comes back as a notice, or as a failed request for the message that caused it.
 
 Access modes follow T3, except Supervised:
 
@@ -127,7 +127,7 @@ Notifications we read: `turn/started`, `turn/completed`, `serverRequest/resolved
 
 Items map to the Eukhe shapes: `userMessage` to a user message, `agentMessage` to assistant text, `reasoning` to thinking, `commandExecution` to a `bash` tool call with `command`, `fileChange` to an `edit` tool call with the diff, `mcpToolCall` to `server.tool`, `dynamicToolCall` to its tool name, `webSearch` to `web_search`.
 
-`turn/started` and `turn/completed` own the running turn; the `turn/start` response sets it only when that turn has not already completed. A message sent with Queue while a turn runs, or while a held message's `turn/start` is still pending, is held by the driver and sent with `turn/start` after `turn/completed`, one per completed turn; Steer uses `turn/steer`, and is held the same way while no turn id is known yet. If Codex refuses to start a held message, the transcript says so with its text and the next held message starts. A failed turn with a sign-in or quota word stops before the next held message is sent. Stop, an account stop and a Codex exit drop held messages and show each one in the transcript, including a held message whose `turn/start` is still pending. Clearing the finished turn and starting the next held message happen under one lock, so a new send never finds the thread idle while a message is held. `turn/completed` and `serverRequest/resolved` settle pending approvals, so a card never outlives its turn.
+`turn/started` and `turn/completed` own the running turn; the `turn/start` response sets it only when that turn has not already completed. A message sent with Queue while a turn runs, or while a held message's `turn/start` is still pending, is held by the driver and sent with `turn/start` after `turn/completed`, one per completed turn; Steer uses `turn/steer`, and is held the same way while no turn id is known yet. If Codex refuses to start a held message, the transcript says so with its text and the next held message starts. A failed turn with a sign-in or quota word stops before the next held message is sent. Stop, an account stop and a Codex exit drop held messages and show each one in the transcript, including a held message whose `turn/start` is still pending. Clearing the finished turn and starting the next held message happen under one lock, so a new send never finds the thread idle while a message is held. `turn/completed` and `serverRequest/resolved` settle pending approvals, so a card never outlives its turn. A Stop that lands while a direct `turn/start` is still pending is kept, and the driver sends `turn/interrupt` as soon as the response names the turn.
 
 Server requests we answer: `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept`, `acceptForSession` or `decline`; the legacy `execCommandApproval` and `applyPatchApproval` with `approved`, `approved_for_session` or `denied`. Every other server request (`item/permissions/requestApproval`, `tool/requestUserInput`, `mcpServer/elicitation` and so on) gets a JSON-RPC error.
 
@@ -166,6 +166,9 @@ Each turn's spend is appended to `<data dir>/harness/usage.jsonl` (`at`, `provid
 ## Lifecycle
 
 - A new thread gets a fresh UUID as its id. For Claude Code it is also the CLI session id (`--session-id`). For Codex the app-server thread id is stored as `nativeSession`.
+- Selecting a thread starts no process. Its transcript comes from the CLI's history: the Claude Code session file, or `thread/read` in an app-server that exits once it answers. Model and effort come from the thread's flags.
+- The first send, compact or restart starts the process. Sends and compacts issued while it starts wait for it and then run in order on that one process. Access, model and effort changed meanwhile apply once it is up.
+- Stop while the process is starting cancels the start and shows each message it dropped in the transcript.
 - One process per open thread. A process idle for 10 minutes with no run and no pending approval is killed; the next send resumes it (`--resume` or `thread/resume`) and reloads history.
 - Restart and stop-timeout kill the process and resume it.
 - If Codex cannot resume its thread, the driver starts a new Codex thread for the same Local Studio thread and says so.
