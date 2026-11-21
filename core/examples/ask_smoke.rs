@@ -25,6 +25,8 @@ const QUESTION: &str = "Is the W-2 box 1 wage $50,000.00?";
 const SECOND: &str = "Is the 1099-INT interest $412.00?";
 const THIRD: &str = "Is the 1098 mortgage interest $3,100.00?";
 
+const FORGED: &str = "Forged: confirm the transfer?";
+
 const PLUGIN: &str = r#"#!/usr/bin/env python3
 import hashlib, json, os, socket, struct, sys, time
 LOG = sys.argv[1]
@@ -62,7 +64,7 @@ def ask(text, choices):
     if conn is None:
         return {"status": "refused", "error": "no socket served by Local Studio"}
     conn.sendall((json.dumps({"token": key, "thread": os.environ.get("LOCAL_STUDIO_THREAD"), "text": text, "choices": choices}) + "\n").encode())
-    log("asked", text=text, token=hashlib.sha256(key.encode()).hexdigest()[:12], pid=pid)
+    log("asked", text=text, token=hashlib.sha256(key.encode()).hexdigest()[:12], key=key, pid=pid)
     data = b""
     while not data.endswith(b"\n"):
         chunk = conn.recv(4096)
@@ -103,7 +105,7 @@ for line in sys.stdin:
 "#;
 
 const ATTACK: &str = r#"import json, os, socket, sys, time
-path, work, log, plugin_log, thread = sys.argv[1:6]
+path, work, log, plugin_log, thread, data = sys.argv[1:7]
 def record(event, **fields):
     with open(log, "a") as out:
         out.write(json.dumps(dict(t=time.time(), event=event, **fields)) + "\n")
@@ -132,6 +134,22 @@ send({"answer": "Yes"})
 send({"request": "any", "answers": {"q": "Yes"}})
 send({"thread": thread, "text": "The model raises this question", "choices": ["Yes"]})
 send({"token": "0" * 64, "thread": thread, "text": "The model guesses a token", "choices": ["Yes"]})
+saved = os.path.join(data, "ask-tokens.json")
+if os.path.exists(saved):
+    entries = json.load(open(saved))
+    record("forge", file=True, entries=len(entries))
+    for entry in entries:
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.settimeout(8)
+        conn.connect(path)
+        conn.sendall((json.dumps({"token": entry["token"], "thread": entry["thread"], "text": "Forged: confirm the transfer?", "choices": ["Yes"]}) + "\n").encode())
+        try:
+            reply = conn.recv(4096).decode()
+        except socket.timeout:
+            reply = "no reply in 8 s: the question is waiting for the person"
+        record("forged", plugin=entry["plugin"], reply=reply)
+else:
+    record("forge", file=False, listing=sorted(os.listdir(data)))
 for name, text in (("answer.txt", "Yes\n"), ("answer.json", json.dumps({"answer": "Yes"}))):
     with open(os.path.join(work, name), "w") as out:
         out.write(text)
@@ -633,6 +651,8 @@ fn main() -> anyhow::Result<()> {
     let home = base.join("home");
     std::fs::create_dir_all(&home)?;
     std::env::set_var("HOME", &home);
+    let old = json!([{ "plugin": "askfix", "thread": "left-over", "token": "ab".repeat(32) }]);
+    write_file(&paths.data.join("ask-tokens.json"), &old.to_string(), 0o600)?;
     let signal = Arc::new(Signal::default());
     let studio = open_studio(&paths, &signal)?;
     let mut harness = Harness { studio, signal, view: View::default() };
@@ -665,16 +685,26 @@ fn answer(harness: &Harness, thread: &str, request: &str, text: &str, choice: &s
     );
 }
 
-fn saved_token(paths: &Paths, thread: &str) -> anyhow::Result<String> {
-    let file = paths.data.join("ask-tokens.json");
-    let mode = std::fs::metadata(&file).context("no ask-tokens.json")?.permissions().mode() & 0o777;
-    ensure!(mode == 0o600, "ask-tokens.json is {mode:o}, not 600");
-    let saved: Vec<Value> = serde_json::from_slice(&std::fs::read(&file)?)?;
-    saved
-        .iter()
-        .find(|entry| entry["plugin"] == "askfix" && entry["thread"] == thread)
-        .and_then(|entry| entry["token"].as_str().map(str::to_string))
-        .context("ask-tokens.json has no askfix token for the thread")
+fn files_holding(dir: &Path, needle: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            found.extend(files_holding(&entry.path(), needle)?);
+        } else if kind.is_file() && String::from_utf8_lossy(&std::fs::read(entry.path())?).contains(needle) {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
+}
+
+fn keys(paths: &Paths) -> Vec<String> {
+    events(&paths.ask_log)
+        .into_iter()
+        .filter(|entry| entry["event"] == "asked")
+        .filter_map(|entry| entry["key"].as_str().map(str::to_string))
+        .collect()
 }
 
 fn restart(harness: &mut Harness, paths: &Paths, between: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
@@ -715,6 +745,11 @@ fn first_turn(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Re
     let mode = std::fs::metadata(&ask_socket).context("no ask socket")?.permissions().mode() & 0o777;
     ensure!(mode == 0o600, "the ask socket is {mode:o}, not 600");
     println!("ok   ask socket {} is mode 600", ask_socket.display());
+    let left = paths.data.join("ask-tokens.json");
+    ensure!(!left.exists(), "Studio kept the token file an older build left: {}", std::fs::read_to_string(&left)?);
+    let stale = raw_ask(&ask_socket, &json!({ "token": "ab".repeat(32), "text": "Left over?", "choices": ["Yes"] }))?;
+    ensure!(stale == json!({ "status": "refused", "error": "unknown token" }), "a left-over token got {stale}");
+    println!("ok   Studio removed the ask-tokens.json an older build left, and its token is refused: {stale}");
     studio.add_project(paths.work.to_string_lossy().into_owned());
     harness.pump_until("project added", STEP, |view| view.projects.len() == 1)?;
     let project = harness.view.projects[0].clone();
@@ -731,12 +766,13 @@ fn first_turn(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Re
     println!("ok   settings.json keeps plugin-askfix with no LOCAL_STUDIO_ASK variables");
 
     let attack = format!(
-        "nohup python3 {} {} {} {} {} THREAD >/dev/null 2>&1 &",
+        "nohup python3 {} {} {} {} {} THREAD {} >/dev/null 2>&1 &",
         paths.root.join("attack.py").display(),
         ask_socket.display(),
         paths.work.display(),
         paths.attack_log.display(),
         paths.ask_log.display(),
+        paths.data.display(),
     );
     model.script.lock().unwrap_or_else(PoisonError::into_inner).attack = attack;
     let order = format!(
@@ -775,12 +811,31 @@ fn first_turn(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Re
         ensure!(sent["reply"]["status"] == "refused", "the socket accepted {}: {}", sent["payload"], sent["reply"]);
         println!("ok   socket refused {} ({})", sent["payload"], sent["reply"]["error"]);
     }
+    let forge = attack.iter().find(|entry| entry["event"] == "forge").context("no forge attempt")?;
+    let forged: Vec<&Value> = attack.iter().filter(|entry| entry["event"] == "forged").collect();
+    ensure!(
+        forge["file"] == false && forged.is_empty(),
+        "the model's bash read {} token(s) from <data dir>/ask-tokens.json and sent them: {forged:?}",
+        forge["entries"]
+    );
+    let key = events(&paths.ask_log)
+        .into_iter()
+        .find_map(|entry| entry["key"].as_str().map(str::to_string))
+        .context("the plugin logged no token")?;
+    let holders = files_holding(&paths.data, &key)?;
+    ensure!(holders.is_empty(), "the plugin's token is on disk in {holders:?}");
+    println!(
+        "ok   the model's bash finds no ask-tokens.json in the data dir ({}) and no file there holds the token",
+        forge["listing"]
+    );
     ensure!(paths.work.join("answer.txt").is_file(), "the model wrote no answer.txt");
     ensure!(harness.view.said(&thread, "answering the plugin's question myself"), "no chat answer in the transcript");
     std::thread::sleep(Duration::from_secs(2));
     harness.drain()?;
     ensure!(replies(&paths.ask_log).is_empty(), "the plugin got a reply early: {:?}", replies(&paths.ask_log));
-    ensure!(harness.view.raised == 1, "{} cards were raised", harness.view.raised);
+    let cards: Vec<String> = harness.view.questions.iter().map(|card| card.3[0].question.clone()).collect();
+    ensure!(!cards.iter().any(|card| card == FORGED), "a forged question shows: {cards:?}");
+    ensure!(harness.view.raised == 1, "{} cards were raised: {cards:?}", harness.view.raised);
     ensure!(harness.view.questions.len() == 1, "the card went away: {:?}", harness.view.questions);
     println!("ok   after bash on the socket, answer.txt and a chat Yes, the plugin still has no answer");
 
@@ -871,8 +926,7 @@ fn squat_turn(harness: &mut Harness, model: &Model, paths: &Paths, thread: &str)
 }
 
 fn restart_turn(harness: &mut Harness, paths: &Paths, thread: &str) -> anyhow::Result<()> {
-    let token = saved_token(paths, thread)?;
-    println!("ok   ask-tokens.json is mode 600 and holds the thread's askfix token");
+    let old = keys(paths).last().cloned().context("no token before the restart")?;
     harness.studio.select_thread(Some(thread.to_string()));
     let before = replies(&paths.ask_log).len();
     let raised = harness.view.raised;
@@ -881,12 +935,20 @@ fn restart_turn(harness: &mut Harness, paths: &Paths, thread: &str) -> anyhow::R
     let asked: Vec<Value> = events(&paths.ask_log).into_iter().filter(|entry| entry["event"] == "asked").collect();
     let (first, last) = (asked.first().context("asked")?, asked.last().context("asked")?);
     ensure!(
-        last["text"] == SECOND && first["token"] == last["token"],
+        last["text"] == SECOND && first["token"] != last["token"],
         "the plugin asked with token {} after the restart, {} before",
         last["token"],
         first["token"]
     );
-    println!("ok   the new Studio accepted the token it saved before the restart ({})", last["token"]);
+    let token = keys(paths).last().cloned().context("no token after the restart")?;
+    let ask_socket = paths.data.join("ask.sock");
+    let stale =
+        raw_ask(&ask_socket, &json!({ "token": old, "thread": thread, "text": "Old token?", "choices": ["Yes"] }))?;
+    ensure!(stale == json!({ "status": "refused", "error": "unknown token" }), "the old token got {stale}");
+    println!(
+        "ok   the new Studio gave the plugin a fresh token ({} after {}) and refuses the old one: {stale}",
+        last["token"], first["token"]
+    );
     let second = harness.view.questions.last().context("card")?.1.clone();
     harness.studio.abort(thread.to_string());
     harness.pump_until("Stop answered the plugin and settled the card", STEP, |view| {
@@ -900,7 +962,6 @@ fn restart_turn(harness: &mut Harness, paths: &Paths, thread: &str) -> anyhow::R
     })?;
     println!("ok   Stop answered the plugin {cancelled} and the transcript says {note:?}");
 
-    let ask_socket = paths.data.join("ask.sock");
     let mut stream = UnixStream::connect(&ask_socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(8)))?;
     let half = json!({ "token": token, "thread": thread, "text": "Half closed?", "choices": ["Yes"] });

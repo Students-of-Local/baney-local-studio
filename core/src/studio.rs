@@ -631,7 +631,10 @@ impl Studio {
         let links = crate::link::client::Links::new(runtime.handle().clone(), Arc::clone(&mailbox), &data_dir);
         #[cfg(feature = "link")]
         let link_dir = data_dir.clone();
-        let ask_tokens = plugins::ask::Tokens::load(&data_dir);
+        if let Err(error) = plugins::ask::Tokens::remove_old_file(&data_dir) {
+            mailbox.notice(NoticeLevel::Warning, error);
+        }
+        let ask_tokens = plugins::ask::Tokens::default();
         let (ask_socket, ask_task) = start_ask_server(&runtime, &data_dir, &ask_tokens, &inbox, &mailbox).unzip();
         let actor = Actor {
             socket,
