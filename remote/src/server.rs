@@ -184,7 +184,10 @@ fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Clie
                 .next_back()
                 .and_then(|value| value.trim().parse::<IpAddr>().ok())
                 .unwrap_or_else(|| peer.ip());
-            let hop = bucket(hop);
+            let hop = match hop {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(|| v6.to_string(), |v4| v4.to_string()),
+                IpAddr::V4(v4) => v4.to_string(),
+            };
             let login = header(headers, "tailscale-user-login").map(str::trim).filter(|login| !login.is_empty());
             if let Some(login) = login {
                 return Some(Client::Key(format!("ts:{}@{hop}", login.to_ascii_lowercase())));

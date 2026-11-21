@@ -1733,6 +1733,22 @@ async fn limit_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Result<C
     other.hello(json!({ "watch": [] })).await?;
     drop(other);
     println!("ok   a Tailscale login ban is keyed on login plus the rightmost X-Forwarded-For hop: another hop still connects");
+    bad_headers(port, &Route::forwarded(Some("mallory@example.com"), "fd7a:115c:a1e0::1"), 5).await?;
+    let opened = kk_handshake(
+        port,
+        &Route::forwarded(Some("mallory@example.com"), "fd7a:115c:a1e0::2"),
+        &a_phone.id,
+        &a_phone.private,
+        &run.server_key,
+    )
+    .await?;
+    let Opened::Ready(socket, transport, _) = opened else {
+        bail!("a ban on one tailnet IPv6 node refused the same login on another node in the same /64")
+    };
+    let other = Client::spawn(&a_phone.name, socket, transport);
+    other.hello(json!({ "watch": [] })).await?;
+    drop(other);
+    println!("ok   tailnet IPv6 hops are keyed on the whole address: a ban on one node leaves another node of the login connected");
     for at in 1..=5 {
         bad_headers(port, &Route::forwarded(None, &format!("10.9.{at}.1, 203.0.113.20")), 1).await?;
     }
