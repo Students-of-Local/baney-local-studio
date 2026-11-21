@@ -74,7 +74,7 @@ def ask(text, choices):
     return reply
 def env():
     seen = {name: name in os.environ for name in ("LOCAL_STUDIO_ASK", "LOCAL_STUDIO_ASK_TOKEN", "LOCAL_STUDIO_THREAD", "LOCAL_STUDIO_ASK_PID")}
-    log("env", seen=seen)
+    log("env", seen=seen, thread=os.environ.get("LOCAL_STUDIO_THREAD"))
     return seen
 TOOLS = [
     {"name": "confirm", "description": "Ask the person to confirm a fact", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "choices": {"type": "array", "items": {"type": "string"}}}, "required": ["text"]}},
@@ -198,6 +198,7 @@ struct Script {
     squat: String,
     tools: Vec<String>,
     saw_note: bool,
+    results: Vec<(String, String)>,
 }
 
 struct Model {
@@ -249,6 +250,8 @@ impl Model {
             ask_code(THIRD)
         } else if prompt.contains("ENV-CHECK") {
             "r = await mcp.call_tool(\"plugin-plainfix\", \"env\", {})\nprint(r)".to_string()
+        } else if prompt.contains("ASKENV") || prompt.contains("REVOKED") {
+            "r = await mcp.call_tool(\"plugin-askfix\", \"env\", {})\nprint(r)".to_string()
         } else {
             return json!({ "text": "Ask smoke" });
         };
@@ -257,12 +260,19 @@ impl Model {
             return json!({ "calls": [["python", { "code": format!("{}\n{code}\nsquatter.terminate()\nsquatter.wait()", script.squat) }]] });
         }
         if steps > 0 {
-            let timeouts = turn.iter().filter(|message| text_of(message).contains("TimeoutError")).count();
-            let last = turn.last().map(text_of).unwrap_or_default();
-            if last.contains("TimeoutError") && timeouts < 3 {
-                println!("     the plugin server was slow to start, so the model calls it again");
+            let result = turn.last().map(text_of).unwrap_or_default();
+            println!("     tool result: {}", result.chars().take(400).collect::<String>().replace('\n', " "));
+            let transient =
+                |text: &str| text.contains("TimeoutError") || text.contains("already has an active execution");
+            let retries = turn.iter().filter(|message| transient(&text_of(message))).count();
+            if transient(&result) && retries < 3 {
+                println!(
+                    "     the plugin server was slow to start or the kernel was busy, so the model calls it again"
+                );
+                std::thread::sleep(Duration::from_millis(500));
                 return json!({ "calls": [["python", { "code": code }]] });
             }
+            script.results.push((prompt.split_whitespace().next().unwrap_or_default().to_string(), result));
             return json!({ "text": "Done." });
         }
         if prompt.contains("ASK-ONE") {
@@ -667,13 +677,12 @@ fn saved_token(paths: &Paths, thread: &str) -> anyhow::Result<String> {
         .context("ask-tokens.json has no askfix token for the thread")
 }
 
-fn drive(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Result<String> {
-    let thread = first_turn(harness, model, paths)?;
-    squat_turn(harness, model, paths, &thread)?;
+fn restart(harness: &mut Harness, paths: &Paths, between: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    harness.studio.shutdown();
+    harness.drain()?;
+    between()?;
     let deadline = Instant::now() + STEP;
     harness.studio = loop {
-        harness.studio.shutdown();
-        harness.drain()?;
         match open_studio(paths, &harness.signal) {
             Ok(studio) => break studio,
             Err(error) if Instant::now() < deadline => {
@@ -684,10 +693,17 @@ fn drive(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Result<
         }
     };
     harness.view.connection = None;
-    harness.pump_until("a new Studio on the same data dir connected", STEP, |view| {
+    harness.pump_until("a new Studio on the same data dir connected, with the same daemon", STEP, |view| {
         matches!(view.connection, Some(Connection::Ready))
-    })?;
+    })
+}
+
+fn drive(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Result<String> {
+    let thread = first_turn(harness, model, paths)?;
+    squat_turn(harness, model, paths, &thread)?;
+    restart(harness, paths, || Ok(()))?;
     restart_turn(harness, paths, &thread)?;
+    revoke_turn(harness, model, paths)?;
     Ok(thread)
 }
 
@@ -914,6 +930,62 @@ fn restart_turn(harness: &mut Harness, paths: &Paths, thread: &str) -> anyhow::R
     };
     ensure!(reply == json!({ "status": "refused", "error": "the thread is archived" }), "archived: {reply}");
     println!("ok   a question on an archived thread is refused: {reply}");
+    Ok(())
+}
+
+/// A session the daemon keeps across a Studio restart still holds the plugin's ACP registration. When the
+/// plugin loses its grant while Studio is closed, the new Studio must take that registration away.
+fn revoke_turn(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Result<()> {
+    let project = harness.view.projects.first().cloned().context("project")?;
+    harness.studio.start_thread("two".to_string(), Some(project), prompt("ASKENV"), settings());
+    harness.pump_until("a second thread started", STEP, |view| view.thread("two").is_some())?;
+    let thread = harness.view.thread("two").context("thread two")?;
+    let registered = |view: &View| {
+        view.idle(&thread)
+            && events(&paths.ask_log).iter().any(|entry| {
+                entry["event"] == "env"
+                    && entry["thread"] == thread.as_str()
+                    && entry["seen"].as_object().is_some_and(|seen| seen.values().all(|value| *value == true))
+            })
+    };
+    harness.pump_until(
+        "askfix runs in thread two through its ACP registration, with the ask variables",
+        STEP,
+        registered,
+    )?;
+    let plugins_dir = paths.data.join("plugins");
+    restart(harness, paths, || {
+        let mut grants = Grants::load(&plugins_dir).map_err(anyhow::Error::msg)?;
+        ensure!(grants.revoke("askfix", &[Capability::AskUser]), "askfix held no ask-user grant");
+        grants.save(&plugins_dir).map_err(anyhow::Error::msg)?;
+        println!("ok   with Studio closed and the daemon keeping thread two, askfix's ask-user grant is revoked");
+        Ok(())
+    })?;
+    let before = events(&paths.ask_log).len();
+    let results = model.script.lock().unwrap_or_else(PoisonError::into_inner).results.len();
+    harness.studio.send("send-revoked".to_string(), thread.clone(), prompt("REVOKED"), Delivery::Queue);
+    harness.pump_until("the model called askfix in thread two after the restart", STEP, |view| {
+        view.idle(&thread)
+            && model.script.lock().unwrap_or_else(PoisonError::into_inner).results[results..]
+                .iter()
+                .any(|(marker, _)| marker == "REVOKED")
+    })?;
+    std::thread::sleep(Duration::from_secs(1));
+    let result = model.script.lock().unwrap_or_else(PoisonError::into_inner).results[results..]
+        .iter()
+        .find(|(marker, _)| marker == "REVOKED")
+        .map(|(_, result)| result.clone())
+        .unwrap_or_default();
+    let registered: Vec<Value> = events(&paths.ask_log)
+        .into_iter()
+        .skip(before)
+        .filter(|entry| entry["seen"].as_object().is_some_and(|seen| seen.values().any(|value| *value == true)))
+        .collect();
+    ensure!(
+        registered.is_empty() && !result.contains("\"LOCAL_STUDIO_ASK\": true"),
+        "after the revoke the daemon still ran askfix from its ACP registration, with the ask variables: {registered:?}, {result}"
+    );
+    println!("ok   the daemon dropped thread two's plugin-askfix ACP registration: the call got {result:?}");
     Ok(())
 }
 

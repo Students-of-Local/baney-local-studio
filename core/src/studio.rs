@@ -2440,8 +2440,8 @@ impl Actor {
         } else {
             if !self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy) {
                 self.flush_ask_notes(id).await;
-                self.sync_ask_servers(id, &active).await;
             }
+            self.sync_ask_servers(id, &active).await;
             let command = DaemonCommand::Prompt {
                 id: None,
                 active_session_id: active,
