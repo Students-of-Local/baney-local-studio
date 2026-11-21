@@ -480,7 +480,7 @@ impl Tunnel {
             "signKey": keys.sign_key(),
             "sealKey": keys.seal_key(),
             "channel": channel,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::VERSION,
             "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             "ports": ports,
             "confirmChallenge": URL_SAFE_NO_PAD.encode(Sha256::digest(verifier)),
