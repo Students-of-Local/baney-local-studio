@@ -8,6 +8,8 @@ use crate::model::{CommandKind, SlashCommand};
 
 mod grants;
 mod install;
+#[cfg(test)]
+mod tests;
 
 pub use grants::{Consent, Grants, GRANTS};
 pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, MAX_FILE};
