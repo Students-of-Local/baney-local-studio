@@ -317,7 +317,7 @@ impl Staged {
 /// The plugin's file count and the executables it ships besides the `[mcp]` command its manifest names.
 pub(crate) fn survey(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
     let command = plugin.mcp.as_ref().and_then(|mcp| mcp.command.strip_prefix(&plugin.dir).ok().map(Path::to_path_buf));
-    let entries = walk(&plugin.dir, &[], Walk::Install)?;
+    let entries = walk(&plugin.dir, &[], Walk::Consent)?;
     let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
     let binaries = entries
         .into_iter()
