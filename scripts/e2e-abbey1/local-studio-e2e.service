@@ -1,0 +1,12 @@
+[Unit]
+Description=Local Studio e2e gate on main's head, local model
+Wants=network-online.target
+After=network-online.target ollama.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/local-studio-e2e.env
+WorkingDirectory=%h/Projects/_work/local-studio-e2e
+ExecStart=/usr/bin/env bash -c 'git fetch -q origin main && git checkout -q --detach FETCH_HEAD && exec scripts/e2e.sh --post'
+TimeoutStartSec=8h
+Nice=10
