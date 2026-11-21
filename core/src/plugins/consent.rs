@@ -99,7 +99,7 @@ pub fn offer_install(root: &Path, arg: &str, request: String) -> Result<Offer, S
             ("the Local Studio catalog".to_string(), catalog.entry(id).map(|entry| entry.rev.clone()))
         }
     };
-    let (_, findings) = survey(plugin)?;
+    let (_, findings) = scanned(plugin)?;
     let mut request = sheet(request, plugin, (from, pin), staged.files(), findings, &asked);
     request.install = true;
     request.update_from = old.map(|old| old.version);
@@ -112,7 +112,7 @@ pub fn offer_grant(plugin: &Plugin, missing: &[Capability], grants: &Grants) -> 
         return None;
     }
     let tree = live_hash(&plugin.dir).ok()?;
-    let (files, findings) = survey(plugin).ok()?;
+    let (files, findings) = scanned(plugin).ok()?;
     let from = match grants.granted(&plugin.id).map(|(_, source, _)| source).unwrap_or_default() {
         source if source.starts_with("catalog ") => "the Local Studio catalog".to_string(),
         source if source.starts_with("git ") => source.trim_start_matches("git ").to_string(),
@@ -135,6 +135,12 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
     }
     let (plugin, note) = match pending.kind {
         Kind::Install(staged) => {
+            if scanned(staged.plugin())?.1 != pending.request.findings {
+                return Err(format!(
+                    "{} changed after the sheet opened, so nothing was installed or granted",
+                    staged.plugin().id
+                ));
+            }
             let installed = staged.commit(root).map_err(|errors| errors.join("; "))?;
             (installed.plugin, installed.note)
         }
@@ -152,6 +158,11 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
     }
     let message = format!("{} {} has {} new permissions", plugin.name, plugin.version, chosen.len());
     Ok(note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")))
+}
+
+fn scanned(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
+    let (files, findings) = survey(plugin)?;
+    Ok((files, findings.into_iter().map(|path| format!("executable not named in the manifest: {path}")).collect()))
 }
 
 fn grant_request(plugin: &Plugin) -> String {
@@ -192,7 +203,7 @@ fn sheet(
         source,
         pin: pin.map(|rev| rev.chars().take(7).collect()),
         files: files as u64,
-        findings: findings.into_iter().map(|path| format!("executable not named in the manifest: {path}")).collect(),
+        findings,
         rows,
     }
 }

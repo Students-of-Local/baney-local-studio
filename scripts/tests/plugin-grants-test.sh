@@ -641,5 +641,29 @@ else
   fi
 fi
 
+if [ -x "$DRIVER" ]; then
+  echo "== sol-F1: the staged copy changes while the install sheet is open"
+  for change in edit add; do
+    fresh "f1$change"
+    mkdir -p "$S/src/staged/bin"
+    printf 'id = "staged"\nversion = "1.0.0"\ndescription = "Staged"\ncapabilities = ["mcp-server"]\n[mcp]\ncommand = "bin/server"\n' > "$S/src/staged/plugin.toml"
+    script "$S/src/staged/bin/server" reviewed
+    if [ "$change" = edit ]; then
+      hook="for f in $D/plugins/.install-*/staged/bin/server; do printf '#!/bin/sh\necho swapped\n' > \"\$f\"; done"
+    else
+      hook="for d in $D/plugins/.install-*/staged/bin; do printf '#!/bin/sh\necho added\n' > \"\$d/extra\"; chmod 755 \"\$d/extra\"; done"
+    fi
+    out=$(CONSENT_DRIVER_HOOK=$hook drive "$S/src/staged" install)
+    echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+    echo "  installed: $(ls "$D/plugins/staged/bin" 2> /dev/null | tr '\n' ' ')server says '$(tail -1 "$D/plugins/staged/bin/server" 2> /dev/null)'; grants $(granted staged)"
+    if echo "$out" | grep -q '^HOOK exit status: 0$' && echo "$out" | grep -q '^FAILED .*changed after' \
+      && [ ! -e "$D/plugins/staged" ] && [ "$(granted staged)" = none ]; then
+      pass "sol-F1 a staged copy that gets an $change while the sheet is open is refused, nothing installed or granted"
+    else
+      fail "sol-F1 a staged copy that gets an $change while the sheet is open is refused, nothing installed or granted"
+    fi
+  done
+fi
+
 echo "failures: $failures"
 exit "$failures"

@@ -147,6 +147,7 @@ pub struct Staged {
     files: usize,
     tree: String,
     origin: String,
+    pin: Option<String>,
 }
 
 pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, Vec<String>> {
@@ -214,7 +215,7 @@ fn place(
     }
     let plugin = load(&staged)?;
     let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
-    Ok(Staged { staging, plugin, files, tree, origin })
+    Ok(Staged { staging, plugin, files, tree, origin, pin: expected.map(str::to_string) })
 }
 
 impl Staged {
@@ -238,9 +239,29 @@ impl Staged {
         self.files
     }
 
+    fn verify(&self, staged: &Path) -> Result<(), Vec<String>> {
+        let entries = walk(staged, &[], Walk::Consent).map_err(|error| vec![error])?;
+        let mut refused = refusals(staged, &entries, Walk::Install);
+        if refused.is_empty() {
+            let tree = hash_entries(staged, &entries).map_err(|error| vec![error])?;
+            if tree != self.tree || self.pin.as_ref().is_some_and(|pin| *pin != tree) {
+                refused.push(format!(
+                    "{} changed after it was checked ({} then, {tree} now), so nothing was installed or granted",
+                    self.plugin.id, self.tree
+                ));
+            }
+        }
+        if refused.is_empty() {
+            Ok(())
+        } else {
+            Err(refused)
+        }
+    }
+
     pub fn commit(self, root: &Path) -> Result<Installed, Vec<String>> {
         let id = &self.plugin.id;
         let staged = self.staging.0.join(id);
+        self.verify(&staged)?;
         let target = root.join(id);
         let replaced = load(&target).ok().map(|old| old.version);
         let old = self.staging.0.join(".old");
