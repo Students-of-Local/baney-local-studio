@@ -41,7 +41,7 @@ const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_QUEUED_ITEMS: usize = 2 * BUFFERED;
 const MAX_QUEUED_BYTES: usize = 256 << 20;
 const FRAME_BUDGET: usize = crate::noise::MAX_JSON - 4096;
-const SNAPSHOT: [&str; 5] = ["connection", "projects", "threads", "models", "daemon_default"];
+const SNAPSHOT: [&str; 6] = ["connection", "projects", "threads", "models", "daemon_default", "consents"];
 
 fn kept() -> Duration {
     static KEPT: OnceLock<Duration> = OnceLock::new();
@@ -883,7 +883,7 @@ impl Hub {
                 state.deliver(&owner, text_of(&header), Some(Arc::new(Blob { id, data })));
             }
             _ => match kind.as_str() {
-                "connection" | "projects" | "threads" | "models" | "daemon_default" => {
+                "connection" | "projects" | "threads" | "models" | "daemon_default" | "consents" => {
                     let text = text_of(&value);
                     if let Some(index) = SNAPSHOT.iter().position(|name| *name == kind) {
                         state.snapshot[index] = Some(Arc::clone(&text));

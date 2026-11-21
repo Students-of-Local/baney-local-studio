@@ -7,6 +7,7 @@ mod colors;
 mod commands;
 mod commit;
 mod composer;
+mod consent;
 mod core;
 mod dashboard;
 mod dashboard_charts;

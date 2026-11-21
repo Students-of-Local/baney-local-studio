@@ -70,6 +70,10 @@ final class RequestCenter {
         return id
     }
 
+    func watch(_ request: String, onOutcome: @escaping (RequestOutcome) -> Void) {
+        pending[request] = onOutcome
+    }
+
     func settle(_ request: String) {
         pending[request] = nil
     }

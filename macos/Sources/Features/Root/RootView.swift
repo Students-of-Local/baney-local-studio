@@ -71,6 +71,10 @@ struct RootView: View {
         .sheet(isPresented: Bindable(shell).cloneShown) {
             CloneRepositorySheet(store: store)
         }
+        .sheet(item: consentShown) { consent in
+            PluginConsentSheet(consent: consent) { store.answerConsent(consent, $0) }
+                .interactiveDismissDisabled()
+        }
         .themeRoot()
         .onAppear { PageCommands.install(store) }
         .transaction { $0.disablesAnimations = true }
@@ -130,6 +134,10 @@ struct RootView: View {
 
     private var snoozeShown: Binding<Bool> {
         Binding { !store.shell.snoozeTargets.isEmpty } set: { if !$0 { store.shell.snoozeTargets = [] } }
+    }
+
+    private var consentShown: Binding<ConsentRequest?> {
+        Binding { store.needsOnboarding ? nil : store.consents.first } set: { _ in }
     }
 
     private var onboardingShown: Binding<Bool> {

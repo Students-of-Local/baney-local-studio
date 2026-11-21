@@ -6,13 +6,15 @@ use serde_json::{json, Map, Value};
 
 use crate::model::{CommandKind, SlashCommand};
 
+mod consent;
 mod grants;
 mod install;
 #[cfg(all(test, unix))]
 mod tests;
 
+pub use consent::{answer, offer_grant, offer_install, Offer, Pending, Pendings};
 pub use grants::{Consent, Grants, GRANTS};
-pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, MAX_FILE};
+pub use install::{install, stage, tree_hash, Catalog, CatalogEntry, Installed, Source, Staged, MAX_FILE};
 
 pub const MANIFEST: &str = "plugin.toml";
 pub const MCP_PREFIX: &str = "plugin-";
@@ -72,6 +74,43 @@ impl Capability {
     }
 
     #[must_use]
+    pub fn sensitive(self) -> bool {
+        matches!(
+            self,
+            Capability::ScreenCapture
+                | Capability::SyntheticInput
+                | Capability::SiteSecrets
+                | Capability::Accessibility
+        )
+    }
+
+    #[must_use]
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Capability::McpServer => "Give agents tools",
+            Capability::NativeHost => "Talk to its browser extension",
+            Capability::AskUser => "Ask you questions in a thread",
+            Capability::ScreenCapture => "See the windows or tabs it opened",
+            Capability::SyntheticInput => "Click and type in those tabs",
+            Capability::SiteSecrets => "Fill sign-ins you approve",
+            Capability::Accessibility => "Read and control other apps",
+        }
+    }
+
+    #[must_use]
+    pub fn scope(self) -> &'static str {
+        match self {
+            Capability::McpServer => "Starts {command} when a thread uses it.",
+            Capability::NativeHost => "Through a local helper that only its pinned extension can reach.",
+            Capability::AskUser => "Shows a question card; it never answers for you.",
+            Capability::ScreenCapture => "Screenshots of its own tabs or windows, never your other windows.",
+            Capability::SyntheticInput => "Input goes only to what the plugin opened.",
+            Capability::SiteSecrets => "Reads one saved login per site, after you allow that site.",
+            Capability::Accessibility => "Uses the system accessibility API; macOS asks you separately.",
+        }
+    }
+
+    #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|capability| capability.name() == name)
     }
@@ -87,8 +126,11 @@ pub struct McpServer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plugin {
     pub id: String,
+    pub name: String,
+    pub icon: Option<PathBuf>,
     pub version: String,
     pub description: String,
+    pub gates: BTreeMap<Capability, String>,
     pub dir: PathBuf,
     pub skills: Vec<PluginFile>,
     pub prompts: Vec<PluginFile>,
@@ -156,8 +198,12 @@ impl Plugin {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     id: String,
+    name: Option<String>,
+    icon: Option<String>,
     version: String,
     description: String,
+    #[serde(default)]
+    gates: BTreeMap<String, String>,
     skills: Option<String>,
     prompts: Option<String>,
     #[serde(default)]
@@ -254,6 +300,19 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         errors.push("description is empty".to_string());
     }
     let capabilities = capabilities_in(&manifest.capabilities, &mut errors);
+    let gates = gates_in(&manifest.gates, &capabilities, &mut errors);
+    let icon = manifest.icon.as_deref().and_then(|relative| match inside(dir, relative) {
+        Ok(path) if path.is_file() => Some(path),
+        Ok(path) => {
+            errors.push(format!("icon is missing: {}", path.display()));
+            None
+        }
+        Err(error) => {
+            errors.push(format!("icon: {error}"));
+            None
+        }
+    });
+    let name = manifest.name.map(|name| name.trim().to_string()).unwrap_or_default();
     let mcp = match (manifest.mcp, capabilities.contains(&Capability::McpServer)) {
         (Some(mcp), true) => mcp_in(dir, &manifest.id, mcp, &mut errors),
         (Some(_), false) => {
@@ -282,9 +341,12 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         return Err(errors);
     }
     Ok(Plugin {
+        name: if name.is_empty() { manifest.id.clone() } else { name },
         id: manifest.id,
+        icon,
         version: manifest.version,
         description: manifest.description,
+        gates,
         dir: dir.to_path_buf(),
         skills,
         prompts,
@@ -307,6 +369,30 @@ fn capabilities_in(names: &[String], errors: &mut Vec<String>) -> Vec<Capability
         }
     }
     capabilities
+}
+
+fn gates_in(
+    listed: &BTreeMap<String, String>,
+    capabilities: &[Capability],
+    errors: &mut Vec<String>,
+) -> BTreeMap<Capability, String> {
+    let mut gates: BTreeMap<Capability, String> = BTreeMap::new();
+    for (name, what) in listed {
+        match Capability::parse(name) {
+            Some(capability) if !capabilities.contains(&capability) => {
+                errors.push(format!("gates {name}: the plugin does not ask for {name}"));
+            }
+            Some(capability) if !capability.sensitive() => {
+                errors.push(format!("gates {name}: only a sensitive capability can be switched off"));
+            }
+            Some(_) if what.trim().is_empty() => errors.push(format!("gates {name} is empty")),
+            Some(capability) => {
+                gates.insert(capability, what.trim().to_string());
+            }
+            None => errors.push(format!("gates: unknown capability: {name}")),
+        }
+    }
+    gates
 }
 
 fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> Option<McpServer> {
