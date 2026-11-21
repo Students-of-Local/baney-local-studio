@@ -9,10 +9,10 @@ Every product in the Local Studio family ships on three channels: **stable**, **
 | Channel | For | Built from | When | Gate |
 | --- | --- | --- | --- | --- |
 | stable | Everyone. The default install. | `stable` branch, tag `vX.Y.Z` | When a nightly is promoted (rule below) | Promotion rule |
-| nightly | Daily drivers who want new work first, Donovan included | `main` | Once a day at 07:00 UTC, from the newest `main` commit that passed the gate, skipped when that commit already shipped | CI green on Windows, macOS and Linux, plus the product's end-to-end checks from its AGENTS.md |
+| nightly | Daily drivers who want new work first, Donovan included | `main` | Once a day at 07:00 UTC, from the newest `main` commit that passed the gate, skipped when that commit already shipped | CI green, plus the product's end-to-end checks from its AGENTS.md (Promotion rule below says what each product enforces) |
 | dev | Developers and agents testing a change | `main` | Every merge to `main` | CI green |
 
-A channel never ships half a build: CI uploads every platform into a draft release and swaps it in only when all of them succeeded (Silas's `nightly.yml` does this today; copy it). Publishing on a channel is serialized with a workflow `concurrency` group per channel (a run in progress always finishes, so a swap is never cut off halfway; GitHub keeps only the newest waiting run), and a build refuses to publish when the feed already holds a version equal to or newer than its own.
+A channel never ships half a build: CI uploads every platform into a draft release and swaps it in only when all of them succeeded (Silas's `nightly.yml` does this today; copy it). Publishing on a channel is serialized with a workflow `concurrency` group per channel (a run in progress always finishes, so a swap is never cut off halfway; GitHub keeps only the newest waiting run), and a build refuses to publish when the feed already holds a version equal to or newer than its own, or, on dev and nightly, a commit that its own commit does not contain (so re-running an old run can never move a channel back).
 
 ## Branches and tags
 
@@ -120,13 +120,15 @@ The format is Tauri v2's updater manifest (Silas already serves it), with extra 
 
 **Nightly** publishes at 07:00 UTC. It builds the newest `main` commit for which all of these pass, and skips the day when that commit already is the nightly:
 
-1. CI green on Windows, macOS and Linux.
-2. The product's end-to-end checks from its AGENTS.md (Local Studio: the core smoke examples on a real model).
+1. CI green. For Local Studio this is `ci.yml`'s run on the push to `main` concluding success: Linux (core, app, channels) and macOS (core and kit, app) block it; the Windows job records its failures without blocking, so Windows is not part of the gate yet.
+2. The product's end-to-end checks from its AGENTS.md. For Local Studio this is a `local-studio/e2e` commit status of success on that commit (the core smoke examples on a real model, below); a commit without one is passed over.
 3. No open issue labeled `regression` and `blocks-nightly`.
+
+Nightly also stops, without publishing, when that commit does not contain the nightly feed's commit, or when its `build.yml` differs from `main`'s (the run would build it with `main`'s); the next commit that passes the gate fixes either.
 
 The real-model checks need a signed-in agent, which GitHub's runners never get, so they run on a Donovan machine. For Local Studio, `scripts/e2e.sh --post <commit>` runs the core smoke examples on a clean checkout of that commit and posts the `local-studio/e2e` commit status. Nightly reads that status and CI's own run for each of the last 30 `main` commits and takes the newest commit with both green. A commit nobody checked never ships as a nightly.
 
-Dev and nightly swap the rolling release by first renaming the current one to `<channel>-previous`. If publishing the new one fails, the old one gets its tag back. The old one is deleted only after the new one is live.
+Dev and nightly swap the rolling release by first renaming the current one to `<channel>-previous`. If publishing the new one fails, the old one gets its tag back on its own commit. The old one is deleted only after the new one is live. A run that finds `<channel>-previous` and no rolling release restores from it, on the commit of the `<channel>-previous` tag. A GitHub error other than not found is never taken to mean a missing tag or release: it stops the swap, and the swap restores the previous release. The immutable `nightly-YYYYMMDDHHMMSS` copy stays a draft until the rolling swap succeeded, so a failed run deletes it and only a build that nightly users received can be promoted.
 
 **Stable** promotes one nightly build when all of these hold:
 
