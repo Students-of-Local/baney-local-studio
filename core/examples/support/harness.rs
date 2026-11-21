@@ -16,6 +16,7 @@ use serde_json::Map;
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(240);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
+const SLASH_TIMEOUT: Duration = Duration::from_secs(20);
 const WORD: &str = "zeppelin";
 const QUEUED: &str = "marmalade";
 const PROOF: &str = "echo ls-proof-4711 > proof.txt";
@@ -365,11 +366,11 @@ fn stop_settles_approval(studio: &Studio, signal: &Signal, watch: &mut Watch, th
 }
 
 fn slash_command_settles(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str) -> anyhow::Result<()> {
-    for command in ["/cost", "/context"] {
+    for command in ["/clear"] {
         let finished = watch.begin();
         studio.send(format!("send-{command}"), thread.to_string(), prompt(command), Delivery::Queue);
         let sent = Instant::now();
-        let left = pump_within(studio, signal, watch, &format!("{command} left Working"), CHECK_TIMEOUT, |watch| {
+        let left = pump_within(studio, signal, watch, &format!("{command} left Working"), SLASH_TIMEOUT, |watch| {
             watch.finished > finished && watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
         });
         if let Err(error) = left {
@@ -400,10 +401,16 @@ fn queued_follow_up(studio: &Studio, signal: &Signal, watch: &mut Watch, thread:
     match ran {
         Ok(()) => {
             let users = watch.users.values().filter(|text| text.contains(QUEUED)).count();
-            if users == 1 {
-                println!("ok   the queued follow-up ran once after the running turn");
-            } else {
+            let counted = watch.answers.values().any(|text| text.to_ascii_lowercase().contains("forty"));
+            if users != 1 {
                 watch.miss(format!("the queued follow-up shows {users} times in the transcript"));
+            } else if !counted {
+                watch.miss(format!(
+                    "the running turn never finished counting to forty before {QUEUED} (latest {:?})",
+                    watch.latest
+                ));
+            } else {
+                println!("ok   the queued follow-up ran once after the running turn finished");
             }
         }
         Err(error) => {
@@ -557,9 +564,6 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         card_shows_command(&studio, &signal, watch, &thread, work)?;
         stop_settles_approval(&studio, &signal, watch, &thread)?;
         ensure!(!work.join("stopped.txt").exists(), "stopped.txt was written although its approval was never given");
-        if target.harness == Harness::ClaudeCode {
-            slash_command_settles(&studio, &signal, watch, &thread)?;
-        }
         queued_follow_up(&studio, &signal, watch, &thread)?;
 
         let finished = watch.begin();
@@ -621,6 +625,9 @@ fn second_run(config: &StudioConfig, target: &Target, thread: &str) -> anyhow::R
         )?;
         ensure!(reply.to_ascii_lowercase().contains(WORD), "the resumed session did not remember {WORD}");
         println!("ok   the session resumed: turn 1 word recalled");
+        if target.harness == Harness::ClaudeCode {
+            slash_command_settles(&studio, &signal, watch, thread)?;
+        }
         studio.load_usage("usage-1".to_string(), UsagePeriod::Day);
         pump(&studio, &signal, watch, "usage report loaded", |watch| watch.usage.is_some())?;
         let report = watch.usage.as_ref().context("usage")?;
