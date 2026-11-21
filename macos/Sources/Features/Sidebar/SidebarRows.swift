@@ -135,6 +135,20 @@ struct RowSnoozeMenu: View {
     }
 }
 
+struct RowMachine: Equatable {
+    let name: String
+    let symbol: String
+    let reachable: Bool
+    let status: String
+
+    init(_ machine: Machine?, id: String) {
+        name = machine?.name ?? id
+        symbol = MachineGlyph.symbol(machine?.os ?? "")
+        reachable = machine?.state.connected ?? false
+        status = machine.map(MachineStatus.text) ?? "not linked"
+    }
+}
+
 struct InboxRowView: View, Equatable {
     enum Variant {
         case card
@@ -152,6 +166,7 @@ struct InboxRowView: View, Equatable {
     private let pending: Bool
     private let project: Project?
     private let fanOut: FanOutPosition?
+    private let machine: RowMachine?
     @State private var hovering = false
 
     init(store: StudioStore, row: ThreadRow, variant: Variant, now: Date, jump: Int?) {
@@ -168,12 +183,14 @@ struct InboxRowView: View, Equatable {
         pending = inbox.isPending(row.id)
         project = inbox.project(row.project)
         fanOut = inbox.fanOut[row.id]
+        machine = row.machine.map { RowMachine(store.machines.machine($0), id: $0) }
     }
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.row == rhs.row && lhs.variant == rhs.variant && lhs.now == rhs.now && lhs.jump == rhs.jump
             && lhs.highlighted == rhs.highlighted && lhs.cursor == rhs.cursor && lhs.renaming == rhs.renaming
             && lhs.pending == rhs.pending && lhs.project == rhs.project && lhs.fanOut == rhs.fanOut
+            && lhs.machine == rhs.machine
     }
 
     var body: some View {
@@ -213,6 +230,7 @@ struct InboxRowView: View, Equatable {
 
     private var accessibilityText: String {
         var parts = [row.title.isEmpty ? "Untitled thread" : row.title, projectName]
+        if let machine { parts.append("On \(machine.name)") }
         if let glyph = StatusBadge.glyph(row.status) { parts.append(glyph.title) }
         if row.pinned { parts.append("Pinned") }
         if row.unread { parts.append("Unread") }
@@ -258,6 +276,12 @@ struct InboxRowView: View, Equatable {
                 UnreadDot()
             }
             titleText(weight: .regular)
+            if let machine {
+                Image(systemName: machine.symbol)
+                    .icon(.inline, .secondary)
+                    .opacity(machine.reachable ? 1 : 0.6)
+                    .accessibilityHidden(true)
+            }
             if row.pinned {
                 Image(systemName: "pin.fill")
                     .icon(.inline, .secondary)
@@ -341,6 +365,17 @@ struct InboxRowView: View, Equatable {
 
     private var metaLine: some View {
         HStack(spacing: 6) {
+            if let machine {
+                HStack(spacing: 3) {
+                    Image(systemName: machine.symbol)
+                        .icon(.inline)
+                        .accessibilityHidden(true)
+                    Text(machine.name)
+                        .lineLimit(1)
+                }
+                .opacity(machine.reachable ? 1 : 0.6)
+                .layoutPriority(1)
+            }
             if let branch = row.branch {
                 Image(systemName: row.worktree == nil ? "arrow.triangle.branch" : "folder")
                     .icon(.inline)
@@ -382,10 +417,12 @@ struct InboxRowView: View, Equatable {
 
     private var hasMeta: Bool {
         row.branch != nil || row.additions > 0 || row.deletions > 0 || row.provider != nil || row.pullRequest != nil || fanOut != nil
+            || machine != nil
     }
 
     private var tooltip: String {
         var lines = [row.title, projectName]
+        if let machine { lines.append(machine.reachable ? "On \(machine.name)" : "On \(machine.name), \(machine.status)") }
         if let branch = row.branch { lines.append(branch) }
         if let model = row.model { lines.append([row.provider, model].compactMap(\.self).joined(separator: " · ")) }
         if let note = row.note { lines.append(note) }

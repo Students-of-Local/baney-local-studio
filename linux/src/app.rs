@@ -657,7 +657,7 @@ impl App {
                 }
                 local_studio_core::NoticeLevel::Info => self.toast(&text),
             },
-            Update::Machines { .. } | Update::Pairing { .. } => {}
+            Update::Machines { .. } | Update::Pairing { .. } | Update::PairedDevices { .. } => {}
         }
     }
 

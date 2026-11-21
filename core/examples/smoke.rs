@@ -213,6 +213,7 @@ impl Harness {
             | Update::DaemonDefault { .. }
             | Update::Machines { .. }
             | Update::Pairing { .. }
+            | Update::PairedDevices { .. }
             | Update::LocalDashboard { .. }
             | Update::Providers { .. }
             | Update::ProviderModels { .. }

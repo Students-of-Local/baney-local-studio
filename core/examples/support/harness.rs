@@ -192,6 +192,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }
         | Update::Pairing { .. }
+        | Update::PairedDevices { .. }
         | Update::Subagents { .. }
         | Update::MessageImage { .. }
         | Update::Notification { .. }

@@ -53,6 +53,27 @@ extension SnapshotCatalog {
                 view: { store in AnyView(ProvidersSettings(store: store)) }
             ),
             SnapshotEntry(
+                name: "pages-settings-connections-full",
+                size: CGSize(width: 720, height: 1500),
+                updates: PagesFixtures.base + [.machines(machines: ShellFixtures.machines), .pairedDevices(devices: ShellFixtures.pairedDevices)],
+                view: { store in AnyView(ConnectionsSettings(store: store, open: { _ in })) }
+            ),
+            SnapshotEntry(
+                name: "pages-settings-connections-empty",
+                size: settingsSize,
+                updates: PagesFixtures.base + [.machines(machines: []), .pairedDevices(devices: [])],
+                view: { store in AnyView(SettingsView(store: store, pane: .connections)) }
+            ),
+            pairingEntry("pages-pairing-sheet", url: "wss://studio-mac.tail0000.ts.net/v1/ws", serving: true),
+            pairingEntry("pages-pairing-sheet-loopback", url: "ws://127.0.0.1:18093/v1/ws", serving: true),
+            pairingEntry("pages-pairing-sheet-not-serving", url: "wss://studio-mac.tail0000.ts.net/v1/ws", serving: false),
+            SnapshotEntry(
+                name: "pages-add-machine-sheet",
+                size: CGSize(width: 460, height: 260),
+                updates: PagesFixtures.base,
+                view: { _ in AnyView(AddMachineSheet { _ in }) }
+            ),
+            SnapshotEntry(
                 name: "pages-providers-add-endpoint",
                 size: CGSize(width: 500, height: 600),
                 updates: PagesFixtures.base,
@@ -352,6 +373,18 @@ extension SnapshotCatalog {
         }
     }
 
+    @MainActor private static func pairingEntry(_ name: String, url: String, serving: Bool) -> SnapshotEntry {
+        SnapshotEntry(name: name, size: CGSize(width: 420, height: 520), updates: PagesFixtures.base) { store in
+            store.machines.openPairing()
+            if let request = store.machines.offerRequest {
+                let link = "localstudio-dev://pair?url=\(url.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? url)&name=studio-mac&id=3f9d2c7a1b8e4d60#q2Vx0mJm1bN3c4Xr8tLk2wQe9yUo7pAs5dFg6hJk3lM"
+                let expires = Int64((Date.now.timeIntervalSince1970 + 540) * 1_000)
+                store.receive([.pairing(request: request, link: link, url: url, serving: serving, expiresAt: expires)])
+            }
+            return AnyView(PairingSheet(machines: store.machines) {})
+        }
+    }
+
     @MainActor private static var settingsEntries: [SnapshotEntry] {
         SettingsPane.allCases.map { pane in
             var updates = PagesFixtures.base
@@ -360,6 +393,8 @@ extension SnapshotCatalog {
                 updates.append(.archivedThreads(request: "fixture", threads: PagesFixtures.archived))
             case .local:
                 updates.append(.local(request: "fixture", snapshot: PagesFixtures.localSnapshot))
+            case .connections:
+                updates += [.machines(machines: ShellFixtures.machines), .pairedDevices(devices: ShellFixtures.pairedDevices)]
             default:
                 break
             }

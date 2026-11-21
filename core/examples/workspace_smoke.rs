@@ -292,6 +292,7 @@ impl Harness {
             | Update::DaemonDefault { .. }
             | Update::Machines { .. }
             | Update::Pairing { .. }
+            | Update::PairedDevices { .. }
             | Update::Commands { .. }
             | Update::Notification { .. }
             | Update::ArchivedThreads { .. }
