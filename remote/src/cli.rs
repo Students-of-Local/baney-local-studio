@@ -20,7 +20,9 @@ const HAND_OVER_WAIT: Duration = Duration::from_secs(20);
 const HAND_OVER_POLL: Duration = Duration::from_millis(200);
 const STOP_WITHIN: Duration = Duration::from_secs(2);
 const PICK_UP_WITHIN: Duration = Duration::from_secs(5);
-const ANSWER_WAIT: Duration = Duration::from_secs(5);
+const ANSWER_WAIT: Duration = Duration::from_secs(30);
+const FAILED: u8 = 1;
+const QUEUED: u8 = 2;
 const ANSWER_POLL: Duration = Duration::from_millis(100);
 
 const USAGE: &str = "usage:
@@ -37,13 +39,15 @@ const USAGE: &str = "usage:
 
 --json prints one object with a \"state\" field, and nothing else on stdout. No command ever prompts.
 serve reads <data dir>/remote/serve.json and rereads it on SIGHUP and when it changes; flags add to its lists and replace its other fields for that run.
-project asks the process that owns the data dir (serve, or the app while it serves) to add or remove a project, and waits up to 5 s for its answer; list reads state.json when nothing owns it.";
+project asks the process that owns the data dir (serve, or the app while it serves) to add or remove a project, and waits up to 30 s for its answer. It exits 1 when the owner refuses (failed) or nothing owns the data dir (no_owner), and 2 when the owner has not answered yet (queued: the request stays and may still land). list reads state.json when nothing owns it.";
 
 #[must_use]
 pub fn cli() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) if error.is::<Reported>() => ExitCode::FAILURE,
+        Err(error) if error.is::<Reported>() => {
+            ExitCode::from(error.downcast_ref::<Reported>().map_or(FAILED, |reported| reported.0))
+        }
         Err(error) => {
             if std::env::args().skip(1).any(|arg| arg == "--json") {
                 println!("{}", json!({ "state": "error", "error": format!("{error:#}") }));
@@ -56,7 +60,7 @@ pub fn cli() -> ExitCode {
 }
 
 #[derive(Debug)]
-struct Reported;
+struct Reported(u8);
 
 impl std::fmt::Display for Reported {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -612,7 +616,7 @@ fn revoke(mut args: Args) -> anyhow::Result<()> {
 enum Asked {
     Answer(Value),
     NoOwner,
-    Silent(Option<u32>),
+    Queued(Option<u32>),
 }
 
 fn ask(data_dir: &Path, op: &str, path: Option<&str>) -> anyhow::Result<Asked> {
@@ -630,17 +634,17 @@ fn ask(data_dir: &Path, op: &str, path: Option<&str>) -> anyhow::Result<Asked> {
         return Ok(Asked::NoOwner);
     };
     let since = Instant::now();
-    while since.elapsed() < ANSWER_WAIT {
+    loop {
         if let Ok(text) = std::fs::read_to_string(&answer) {
             std::fs::remove_file(&answer).ok();
             let value = serde_json::from_str(&text).with_context(|| format!("read {}", answer.display()))?;
             return Ok(Asked::Answer(value));
         }
+        if since.elapsed() >= ANSWER_WAIT {
+            return Ok(Asked::Queued(owner));
+        }
         std::thread::sleep(ANSWER_POLL);
     }
-    std::fs::remove_file(&request).ok();
-    std::fs::remove_file(&answer).ok();
-    Ok(Asked::Silent(owner))
 }
 
 fn stored_projects(data_dir: &Path) -> anyhow::Result<Value> {
@@ -692,11 +696,11 @@ fn project(mut args: Args) -> anyhow::Result<()> {
             Ok(path) if path.is_dir() => Some(path.to_string_lossy().into_owned()),
             Ok(path) => {
                 report(&out, "failed", &format!("{} is not a folder", path.display()), Some(&target), &json!([]));
-                return Err(Reported.into());
+                return Err(Reported(FAILED).into());
             }
             Err(error) => {
                 report(&out, "failed", &format!("cannot add {target}: {error}"), Some(&target), &json!([]));
-                return Err(Reported.into());
+                return Err(Reported(FAILED).into());
             }
         },
         (_, Some(target)) => {
@@ -713,7 +717,7 @@ fn project(mut args: Args) -> anyhow::Result<()> {
             if ok {
                 Ok(())
             } else {
-                Err(Reported.into())
+                Err(Reported(FAILED).into())
             }
         }
         Asked::NoOwner if verb == "list" => {
@@ -728,17 +732,17 @@ fn project(mut args: Args) -> anyhow::Result<()> {
                 data_dir.display()
             );
             report(&out, "no_owner", &message, path.as_deref(), &json!([]));
-            Err(Reported.into())
+            Err(Reported(FAILED).into())
         }
-        Asked::Silent(owner) => {
+        Asked::Queued(owner) => {
             let message = format!(
-                "{} owns {} but did not answer within {} s; it answers only while it serves, and the app serves only when serve.json exists",
+                "{} owns {} but has not answered within {} s; the request stays queued and the change may still land (it answers only while it serves, and the app serves only when serve.json exists)",
                 lock::describe(owner),
                 data_dir.display(),
                 ANSWER_WAIT.as_secs()
             );
-            report(&out, "failed", &message, path.as_deref(), &json!([]));
-            Err(Reported.into())
+            report(&out, "queued", &message, path.as_deref(), &json!([]));
+            Err(Reported(QUEUED).into())
         }
     }
 }
