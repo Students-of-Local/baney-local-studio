@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -169,7 +170,7 @@ fn place(
     flattened: &[PathBuf],
     origin: &str,
 ) -> Result<Installed, Vec<String>> {
-    let entries = walk(source, exclude, false).map_err(|error| vec![error])?;
+    let entries = walk(source, exclude, Walk::Install).map_err(|error| vec![error])?;
     let unlinked: Vec<String> = entries
         .iter()
         .filter(|entry| matches!(entry.kind, Kind::File { .. }) && flattened.contains(&source.join(&entry.path)))
@@ -183,18 +184,22 @@ fn place(
     if !unlinked.is_empty() {
         return Err(unlinked);
     }
+    let refusals = refusals(source, &entries, Walk::Install);
+    if !refusals.is_empty() {
+        return Err(refusals);
+    }
     let tree = hash_entries(source, &entries).map_err(|error| vec![error])?;
     if let Some(expected) = expected.filter(|expected| *expected != tree) {
         return Err(vec![format!("tree hash mismatch: the catalog pins {expected}, the fetched plugin is {tree}")]);
-    }
-    let refusals = refusals(source, &entries);
-    if !refusals.is_empty() {
-        return Err(refusals);
     }
     let id = manifest_id(source)?;
     let staging = Scratch::new(root, "install")?;
     let staged = staging.0.join(&id);
     copy(source, &staged, &entries).map_err(|error| vec![error])?;
+    let copied = hash_entries(&staged, &entries).map_err(|error| vec![error])?;
+    if copied != tree {
+        return Err(vec![format!("the plugin changed while it was installed: hashed {tree}, copied {copied}")]);
+    }
     load(&staged)?;
     let target = root.join(&id);
     let replaced = load(&target).ok().map(|old| old.version);
@@ -303,8 +308,32 @@ struct Entry {
 
 /// Finder writes `.DS_Store` into any folder it shows; no runtime loads one, so no hash covers it.
 pub const UNHASHED: &str = ".DS_Store";
+const GIT: &str = ".git";
 
-fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    Install,
+    Consent,
+}
+
+fn skipped(path: &Path, walk: Walk) -> bool {
+    walk == Walk::Install && path.components().next().is_some_and(|part| named(part.as_os_str(), GIT))
+}
+
+pub(crate) fn named(part: &std::ffi::OsStr, name: &str) -> bool {
+    part.to_str().is_some_and(|part| part.eq_ignore_ascii_case(name))
+}
+
+fn unhashed(real: &Path, walk: Walk) -> bool {
+    real.components().any(|part| named(part.as_os_str(), UNHASHED))
+        || (walk == Walk::Install && real.components().next().is_some_and(|part| named(part.as_os_str(), GIT)))
+}
+
+fn gone(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
+fn walk(root: &Path, exclude: &[String], mode: Walk) -> Result<Vec<Entry>, String> {
     let excluded: Vec<PathBuf> = exclude
         .iter()
         .map(|relative| inside(Path::new(""), relative).map(|path| path.components().collect()))
@@ -313,16 +342,24 @@ fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, S
     let mut pending: Vec<PathBuf> = vec![PathBuf::new()];
     while let Some(relative) = pending.pop() {
         let dir = root.join(&relative);
-        let listing = std::fs::read_dir(&dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+        let listing = match std::fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(error) if gone(&error) && !relative.as_os_str().is_empty() => continue,
+            Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
+        };
         for item in listing {
             let item = item.map_err(|error| error.to_string())?;
             let name = item.file_name();
             let path = relative.join(&name);
-            if (!keep_git && relative.as_os_str().is_empty() && name == ".git") || excluded.contains(&path) {
+            if skipped(&path, mode) || excluded.contains(&path) {
                 continue;
             }
-            let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
-            if name == UNHASHED && meta.is_file() {
+            let meta = match std::fs::symlink_metadata(item.path()) {
+                Ok(meta) => meta,
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            if named(&name, UNHASHED) && meta.is_file() {
                 continue;
             }
             let text = path
@@ -332,7 +369,11 @@ fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, S
                 .ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))?
                 .join("/");
             let kind = if meta.file_type().is_symlink() {
-                Kind::Link(std::fs::read_link(item.path()).map_err(|error| error.to_string())?)
+                match std::fs::read_link(item.path()) {
+                    Ok(target) => Kind::Link(target),
+                    Err(error) if gone(&error) => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
             } else if meta.is_dir() {
                 pending.push(path);
                 Kind::Dir
@@ -364,45 +405,93 @@ fn stays_inside(link: &str, target: &Path) -> bool {
     true
 }
 
-fn resolves_inside(root: &Path, link: &str) -> bool {
-    let Ok(base) = std::fs::canonicalize(root) else {
-        return false;
-    };
-    std::fs::canonicalize(root.join(link)).is_ok_and(|real| real.starts_with(&base))
+fn resolved(root: &Path, link: &str) -> Option<PathBuf> {
+    let base = std::fs::canonicalize(root).ok()?;
+    let real = std::fs::canonicalize(root.join(link)).ok()?;
+    real.strip_prefix(&base).ok().map(Path::to_path_buf)
 }
 
-fn refusals(root: &Path, entries: &[Entry]) -> Vec<String> {
+fn link_refusal(root: &Path, link: &str, target: &Path, mode: Walk) -> Option<String> {
+    let resolved = resolved(root, link).filter(|_| stays_inside(link, target));
+    match resolved {
+        None => Some(format!("symlink points outside the plugin or nowhere: {link} -> {}", target.display())),
+        Some(real) if unhashed(&real, mode) => {
+            Some(format!("symlink points at a file no hash covers: {link} -> {}", target.display()))
+        }
+        Some(_) => None,
+    }
+}
+
+fn refusals(root: &Path, entries: &[Entry], mode: Walk) -> Vec<String> {
     let mut refusals: Vec<String> = Vec::new();
     for entry in entries {
         match &entry.kind {
-            Kind::Link(target) if !stays_inside(&entry.path, target) || !resolves_inside(root, &entry.path) => {
-                refusals.push(format!(
-                    "symlink points outside the plugin or nowhere: {} -> {}",
-                    entry.path,
-                    target.display()
-                ));
-            }
+            Kind::Link(target) => refusals.extend(link_refusal(root, &entry.path, target, mode)),
             Kind::File { size, .. } if *size > MAX_FILE => {
                 refusals.push(format!("file over 10 MB: {} ({size} bytes)", entry.path));
             }
-            Kind::File { executable: true, .. } if !entry.path.starts_with("bin/") => {
+            Kind::File { executable: true, .. } if mode == Walk::Install && !entry.path.starts_with("bin/") => {
                 refusals.push(format!("executable outside bin/: {}", entry.path));
             }
-            Kind::Other => refusals.push(format!("not a regular file, folder or symlink: {}", entry.path)),
+            Kind::Other if mode == Walk::Install => {
+                refusals.push(format!("not a regular file, folder or symlink: {}", entry.path));
+            }
             _ => {}
         }
     }
     refusals
 }
 
+/// Reads a file only if it is still a regular file, without following a link or waiting on a FIFO.
+/// `None` means the path is now something else (a FIFO, a folder or a link).
+fn read_regular(path: &Path) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let file = match crate::platform::open_without_waiting(path) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    file.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+    Ok(Some((bytes, crate::platform::is_executable(&meta))))
+}
+
+/// Test hook for scripts/tests/plugin-grants-test.sh, built only with the `test-hooks` feature: touch
+/// `<gate>/<reached>` and wait for `<gate>/<resume>`, so the script can swap a file at that exact point.
+#[cfg(feature = "test-hooks")]
+fn test_gate(reached: &str, resume: &str) {
+    let Some(gate) = std::env::var_os("LOCAL_STUDIO_TEST_HASH_GATE").map(PathBuf::from) else { return };
+    let _ = std::fs::write(gate.join(reached), b"");
+    let started = std::time::Instant::now();
+    while !gate.join(resume).exists() && started.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
+    #[cfg(feature = "test-hooks")]
+    test_gate("walked", "go");
     let mut listing = String::new();
     for entry in entries {
         match &entry.kind {
-            Kind::File { executable, .. } => {
+            Kind::File { .. } => {
                 let path = root.join(&entry.path);
-                let bytes = std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-                let mode = if *executable { "x" } else { "-" };
+                let (bytes, executable) = match read_regular(&path) {
+                    Ok(Some(read)) => read,
+                    Ok(None) => {
+                        return Err(format!("{} changed while it was read: it is no longer a regular file", entry.path))
+                    }
+                    Err(error) if gone(&error) => continue,
+                    Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+                };
+                if bytes.len() as u64 > MAX_FILE {
+                    return Err(format!("file over 10 MB: {}", entry.path));
+                }
+                let mode = if executable { "x" } else { "-" };
                 let _ = writeln!(listing, "F {mode} {} {}", hex(&Sha256::digest(&bytes)), entry.path);
             }
             Kind::Link(target) => {
@@ -416,12 +505,40 @@ fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
 }
 
 pub fn tree_hash(root: &Path, exclude: &[String]) -> Result<String, String> {
-    hash_entries(root, &walk(root, exclude, false)?)
+    let entries = walk(root, exclude, Walk::Install)?;
+    let refused = refusals(root, &entries, Walk::Install);
+    if !refused.is_empty() {
+        return Err(refused.join("\n"));
+    }
+    hash_entries(root, &entries)
 }
 
-/// The hash consent checks: the whole folder as it is now, `.git` included, so code there is covered too.
+/// The folder consent checks: all of it as it is now, `.git` included, so code there is covered too.
+pub(crate) struct Live<'a> {
+    root: &'a Path,
+    entries: Vec<Entry>,
+}
+
+impl<'a> Live<'a> {
+    pub(crate) fn check(root: &'a Path) -> Result<Self, String> {
+        if std::fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(format!("the plugin folder is a symlink: {}", root.display()));
+        }
+        let entries = walk(root, &[], Walk::Consent)?;
+        let refused = refusals(root, &entries, Walk::Consent);
+        if !refused.is_empty() {
+            return Err(refused.join("; "));
+        }
+        Ok(Self { root, entries })
+    }
+
+    pub(crate) fn hash(&self) -> Result<String, String> {
+        hash_entries(self.root, &self.entries)
+    }
+}
+
 pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
-    hash_entries(root, &walk(root, &[], true)?)
+    Live::check(root)?.hash()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -431,18 +548,41 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Copies through the same open as the hash, so a file swapped for a FIFO or a link after the hash
+/// is refused instead of blocking or being followed. `place` then hashes the copy again.
 fn copy(source: &Path, target: &Path, entries: &[Entry]) -> Result<(), String> {
+    #[cfg(feature = "test-hooks")]
+    test_gate("copying", "copy-go");
     std::fs::create_dir_all(target).map_err(|error| format!("cannot create {}: {error}", target.display()))?;
     for entry in entries {
         let from = source.join(&entry.path);
         let to = target.join(&entry.path);
         let result = match &entry.kind {
             Kind::Dir => std::fs::create_dir_all(&to),
-            Kind::File { .. } => std::fs::copy(&from, &to).map(|_| ()),
+            Kind::File { .. } => match read_regular(&from) {
+                Ok(Some((bytes, executable))) => write_file(&to, &bytes, executable),
+                Ok(None) => {
+                    return Err(format!("{} changed while it was read: it is no longer a regular file", entry.path))
+                }
+                Err(error) if gone(&error) => Ok(()),
+                Err(error) => Err(error),
+            },
             Kind::Link(link) => crate::platform::symlink(link, &to, from.is_dir()),
             Kind::Other => Ok(()),
         };
         result.map_err(|error| format!("cannot copy {}: {error}", entry.path))?;
     }
+    Ok(())
+}
+
+fn write_file(to: &Path, bytes: &[u8], executable: bool) -> std::io::Result<()> {
+    std::fs::write(to, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
     Ok(())
 }
