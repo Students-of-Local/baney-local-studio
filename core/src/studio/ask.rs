@@ -158,25 +158,40 @@ impl Actor {
         }
     }
 
+    /// Registers the thread's asking plugins with its session. Until this core has sent the session a list,
+    /// the session may still hold one from before a restart, with a plugin whose grant is gone since, so an
+    /// unknown list is always replaced, even by an empty one. Eukhe refuses a non-empty list mid-run but
+    /// takes an empty one, so a busy session that may hold a server it should not is cleared and gets its
+    /// list again on the next idle prompt.
     pub(super) async fn sync_ask_servers(&mut self, id: &str, active: &str) {
-        let Some(socket) = self.ask_socket.clone() else { return };
-        if self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy) {
-            return;
-        }
         let (asking, grants) = self.granted_askers();
         self.ask_tokens.retain(|plugin, _| asking.iter().any(|known| known.id == plugin));
-        let foreign = crate::daemon::agent_dir()
-            .and_then(|agent| Some(plugins::foreign_servers(self.plugins_dir.as_deref()?, &agent)))
-            .unwrap_or_default();
-        let (servers, errors) = ask::acp_servers(&asking, &grants, &socket, id, &self.ask_tokens, &foreign);
-        if !errors.is_empty() {
-            self.mailbox.notice(NoticeLevel::Warning, format!("Plugins: {}", errors.join("; ")));
-        }
-        let servers = Value::Array(servers);
-        let before = self.ask_sent.get(active);
-        if before == Some(&servers) || (before.is_none() && servers.as_array().is_some_and(Vec::is_empty)) {
+        let mut servers = match self.ask_socket.clone() {
+            Some(socket) => {
+                let foreign = crate::daemon::agent_dir()
+                    .and_then(|agent| Some(plugins::foreign_servers(self.plugins_dir.as_deref()?, &agent)))
+                    .unwrap_or_default();
+                let (servers, errors) = ask::acp_servers(&asking, &grants, &socket, id, &self.ask_tokens, &foreign);
+                if !errors.is_empty() {
+                    self.mailbox.notice(NoticeLevel::Warning, format!("Plugins: {}", errors.join("; ")));
+                }
+                servers
+            }
+            None => Vec::new(),
+        };
+        let before = self.ask_sent.get(active).and_then(Value::as_array);
+        if before == Some(&servers) {
             return;
         }
+        let busy = self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy);
+        if busy {
+            let stale = before.is_none_or(|sent| sent.iter().any(|server| !servers.contains(server)));
+            if !stale {
+                return;
+            }
+            servers.clear();
+        }
+        let servers = Value::Array(servers);
         let command = DaemonCommand::ReplaceAcpMcpServers {
             id: None,
             active_session_id: active.to_string(),
