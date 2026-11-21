@@ -521,6 +521,19 @@ pub struct Machine {
     pub latency_ms: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub app: String,
+    pub channel: String,
+    pub first_seen: i64,
+    pub last_seen: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "wire",
@@ -728,6 +741,11 @@ pub enum Update {
     Pairing {
         request: String,
         link: String,
+        url: String,
+        serving: bool,
         expires_at: i64,
+    },
+    PairedDevices {
+        devices: Vec<PairedDevice>,
     },
 }

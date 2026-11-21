@@ -87,6 +87,15 @@ fn serve_settings(data_dir: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
+#[must_use]
+pub fn serving(data_dir: &Path) -> bool {
+    if !data_dir.join("remote").join("serve.json").is_file() {
+        return false;
+    }
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], serve_port(data_dir)));
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(300)).is_ok()
+}
+
 pub fn serve_port(data_dir: &Path) -> u16 {
     serve_settings(data_dir)
         .get("port")

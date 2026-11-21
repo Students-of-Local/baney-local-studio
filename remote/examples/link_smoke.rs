@@ -114,7 +114,7 @@ impl View {
                 println!("     request {request} failed: {message}");
                 self.failed.insert(request, message);
             }
-            Update::Pairing { request, link, expires_at } => self.pairing = Some((request, link, expires_at)),
+            Update::Pairing { request, link, expires_at, .. } => self.pairing = Some((request, link, expires_at)),
             Update::Usage { report, .. } => self.usage = Some(report),
             Update::Daemon { socket, pid, .. } => {
                 self.sockets.push(socket);

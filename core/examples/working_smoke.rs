@@ -157,6 +157,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }
         | Update::Pairing { .. }
+        | Update::PairedDevices { .. }
         | Update::Commands { .. }
         | Update::Skills { .. }
         | Update::Subagents { .. }

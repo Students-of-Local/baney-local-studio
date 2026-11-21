@@ -16,6 +16,7 @@ final class StudioStore {
     let conversation: ConversationStore
     let workspace: WorkspaceStore
     let pages: PagesStore
+    let machines: MachinesStore
 
     @ObservationIgnored let core = CoreHandle()
     @ObservationIgnored let requests = RequestCenter()
@@ -33,6 +34,7 @@ final class StudioStore {
         conversation = ConversationStore(core: core, requests: requests)
         workspace = WorkspaceStore(core: core, requests: requests)
         pages = PagesStore(core: core, requests: requests)
+        machines = MachinesStore(core: core, requests: requests)
         workspace.panels.bind(conversation: conversation, inbox: inbox, pages: pages)
         conversation.pendingsChanged = { [weak self] in self?.syncPendings() }
         conversation.onSendFailure = { [weak self] in self?.post(.error, $0) }
@@ -244,8 +246,12 @@ final class StudioStore {
             }
         case .notice(let level, let text):
             post(level, text)
-        case .machines, .pairing:
-            break
+        case .machines(let machines):
+            self.machines.setMachines(machines)
+        case .pairing(let request, let link, let url, let serving, let expiresAt):
+            machines.setPairing(request: request, link: link, url: url, serving: serving, expiresAt: expiresAt)
+        case .pairedDevices(let devices):
+            machines.setDevices(devices)
         }
     }
 }

@@ -226,7 +226,13 @@ impl Links {
         let mailbox = Arc::clone(&self.0.mailbox);
         self.0.handle.spawn_blocking(move || {
             let update = match pairing::mint(&data_dir, crate::CHANNEL, None, None) {
-                Ok(minted) => Update::Pairing { request, link: minted.link, expires_at: minted.expires_at },
+                Ok(minted) => Update::Pairing {
+                    request,
+                    link: minted.link,
+                    url: minted.url,
+                    serving: pairing::serving(&data_dir),
+                    expires_at: minted.expires_at,
+                },
                 Err(error) => {
                     Update::RequestFailed { request, message: format!("Could not open a pairing: {error:#}") }
                 }

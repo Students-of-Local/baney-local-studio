@@ -57,6 +57,7 @@ pub enum Target {
     TerminalCopy,
     TerminalChat,
     Provider,
+    Pairing,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -648,6 +649,7 @@ impl App {
                     Some(Target::Files | Target::Preview) => self.panel.files.failed(&message),
                     Some(Target::Devices) => self.panel.devices.failed(&message),
                     Some(Target::Provider) => crate::providers::failed(self, &request, &message),
+                    Some(Target::Pairing) => crate::machines::pairing_failed(self, &request, &message),
                     _ => self.toast(&message),
                 }
             }
@@ -657,7 +659,29 @@ impl App {
                 }
                 local_studio_core::NoticeLevel::Info => self.toast(&text),
             },
-            Update::Machines { .. } | Update::Pairing { .. } => {}
+            Update::Machines { mut machines } => {
+                machines.sort_by_cached_key(|machine| machine.name.to_lowercase());
+                self.state.borrow_mut().machines = machines;
+                dirty.sidebar = true;
+                dirty.settings = true;
+            }
+            Update::Pairing { request, link, url, serving, expires_at } => {
+                if self.take_request(&request) == Some(Target::Pairing) {
+                    let mut state = self.state.borrow_mut();
+                    if state.pairing.as_deref() == Some(request.as_str()) {
+                        state.offer = Some(crate::machines::Offer { link, url, serving, expires_at });
+                        state.offer_error = None;
+                        drop(state);
+                        crate::machines::render_pairing(self);
+                    }
+                }
+            }
+            Update::PairedDevices { devices } => {
+                let mut state = self.state.borrow_mut();
+                state.devices = devices;
+                state.devices_loaded = true;
+                dirty.settings = true;
+            }
         }
     }
 
@@ -946,6 +970,7 @@ impl App {
         self.settings.replace(Some(dialog));
         self.core.run(|studio| {
             studio.load_providers();
+            studio.list_paired_devices();
         });
         let request = self.core.request();
         self.core.run(|studio| studio.list_archived(request));
