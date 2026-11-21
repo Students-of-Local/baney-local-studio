@@ -84,6 +84,18 @@ fn machine_name(host: &str) -> String {
     host.split('.').next().unwrap_or(host).to_string()
 }
 
+#[cfg(unix)]
+fn shell(script: &str) -> Command {
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(script);
+    command
+}
+
+#[cfg(windows)]
+fn shell(script: &str) -> Command {
+    crate::platform::cmd_script(script)
+}
+
 impl Engines {
     fn secret(&self, raw: &str) -> Option<String> {
         let Some(command) = raw.strip_prefix('!') else { return providers::resolve_reference(raw) };
@@ -91,9 +103,7 @@ impl Engines {
         if let Some(found) = commands.get(raw) {
             return Some(found.clone());
         }
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(command)
+        let output = shell(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

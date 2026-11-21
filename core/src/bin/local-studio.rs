@@ -265,13 +265,24 @@ fn open_browser(url: &str) {
     if std::env::var_os("LS_TUNNEL_NO_BROWSER").is_some() {
         return;
     }
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let _ = std::process::Command::new(opener)
+    let _ = opener()
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+#[cfg(unix)]
+fn opener() -> std::process::Command {
+    std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" })
+}
+
+#[cfg(windows)]
+fn opener() -> std::process::Command {
+    let mut command = std::process::Command::new("rundll32.exe");
+    command.arg("url.dll,FileProtocolHandler");
+    command
 }
 
 fn byo() -> Result<(), String> {

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{ErrorKind, Write as _};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,6 +14,7 @@ use super::model::{
 };
 use super::{ModelsReloader, Workspace};
 use crate::model::{ModelOption, Update};
+use crate::platform::Mode;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -387,6 +387,7 @@ fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Resul
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(temporary, target)?;
+    #[cfg(unix)]
     if let Some(parent) = target.parent() {
         fs::File::open(parent)?.sync_all()?;
     }

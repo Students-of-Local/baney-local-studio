@@ -1,5 +1,4 @@
 use std::fmt::Write as _;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -268,14 +267,19 @@ fn walk(root: &Path, exclude: &[String]) -> Result<Vec<Entry>, String> {
                 continue;
             }
             let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
-            let text = path.to_str().ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))?.to_string();
+            let text = path
+                .components()
+                .map(|part| part.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))?
+                .join("/");
             let kind = if meta.file_type().is_symlink() {
                 Kind::Link(std::fs::read_link(item.path()).map_err(|error| error.to_string())?)
             } else if meta.is_dir() {
                 pending.push(path);
                 Kind::Dir
             } else if meta.is_file() {
-                Kind::File { size: meta.len(), executable: meta.permissions().mode() & 0o111 != 0 }
+                Kind::File { size: meta.len(), executable: crate::platform::is_executable(&meta) }
             } else {
                 Kind::Other
             };
@@ -372,7 +376,7 @@ fn copy(source: &Path, target: &Path, entries: &[Entry]) -> Result<(), String> {
         let result = match &entry.kind {
             Kind::Dir => std::fs::create_dir_all(&to),
             Kind::File { .. } => std::fs::copy(&from, &to).map(|_| ()),
-            Kind::Link(link) => std::os::unix::fs::symlink(link, &to),
+            Kind::Link(link) => crate::platform::symlink(link, &to, from.is_dir()),
             Kind::Other => Ok(()),
         };
         result.map_err(|error| format!("cannot copy {}: {error}", entry.path))?;

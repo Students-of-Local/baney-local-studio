@@ -185,7 +185,7 @@ pub fn plugins_dir(explicit_data_dir: Option<&str>) -> Option<PathBuf> {
     if let Some(value) = std::env::var_os("LOCAL_STUDIO_DATA_DIR").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(value).join("plugins"));
     }
-    crate::store::home_dir().map(|home| home.join(".local-studio").join("plugins"))
+    crate::store::dot_dir().ok().map(|dir| dir.join("plugins"))
 }
 
 #[must_use]

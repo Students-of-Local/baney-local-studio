@@ -1,8 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use crate::platform::Mode;
 
 pub const DEFAULT_PORTS: Ports = Ports { serve: 18093, mcp: 8787 };
 const STABLE_SERVICE: Option<&str> = None;
@@ -93,7 +93,7 @@ impl Tunnel {
             Some(explicit) => PathBuf::from(explicit),
             None => match std::env::var_os("LOCAL_STUDIO_DATA_DIR").filter(|value| !value.is_empty()) {
                 Some(value) => PathBuf::from(value),
-                None => crate::store::home_dir().ok_or("HOME is not set")?.join(".local-studio"),
+                None => crate::store::dot_dir()?,
             },
         };
         let service = std::env::var("LS_TUNNEL_SERVICE")
@@ -120,7 +120,7 @@ impl Tunnel {
             .mode(0o700)
             .create(&self.dir)
             .map_err(|error| format!("{}: {error}", self.dir.display()))?;
-        fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())
+        crate::platform::set_mode(&self.dir, 0o700).map_err(|error| error.to_string())
     }
 
     fn private_write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
@@ -499,15 +499,15 @@ impl Tunnel {
             .open(&log_path)
             .map_err(|error| error.to_string())?;
         let err = log.try_clone().map_err(|error| error.to_string())?;
-        let child = Command::new(cloudflared)
+        let mut command = Command::new(cloudflared);
+        command
             .args(["tunnel", "--no-autoupdate", "run", "--token-file"])
             .arg(self.token_path())
             .stdin(Stdio::null())
             .stdout(log)
-            .stderr(err)
-            .process_group(0)
-            .spawn()
-            .map_err(|error| format!("couldn't start {}: {error}", cloudflared.display()))?;
+            .stderr(err);
+        crate::platform::own_group(&mut command);
+        let child = command.spawn().map_err(|error| format!("couldn't start {}: {error}", cloudflared.display()))?;
         let pid = child.id();
         fs::write(self.dir.join("cloudflared.pid"), format!("{pid}\n")).map_err(|error| error.to_string())?;
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -525,6 +525,7 @@ impl Tunnel {
         Err(format!("cloudflared printed no connector id in 30 seconds; see {}", log_path.display()))
     }
 
+    #[cfg(unix)]
     fn running(&self) -> Option<u32> {
         let pid: u32 = fs::read_to_string(self.dir.join("cloudflared.pid")).ok()?.trim().parse().ok()?;
         let out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat=,command="]).output().ok()?;
@@ -536,18 +537,35 @@ impl Tunnel {
         .then_some(pid)
     }
 
+    #[cfg(windows)]
+    fn running(&self) -> Option<u32> {
+        let pid: u32 = fs::read_to_string(self.dir.join("cloudflared.pid")).ok()?.trim().parse().ok()?;
+        let line = crate::platform::command_line(pid)?;
+        (line.contains("--token-file") && line.contains("cloudflared")).then_some(pid)
+    }
+
+    #[cfg(unix)]
+    fn signal(pid: u32, signal: &str) {
+        let _ = Command::new("kill").args([signal, &pid.to_string()]).status();
+    }
+
+    #[cfg(windows)]
+    fn signal(pid: u32, _signal: &str) {
+        crate::platform::taskkill(pid, false);
+    }
+
     fn stop(&self) {
         let Some(pid) = self.running() else {
             let _ = fs::remove_file(self.dir.join("cloudflared.pid"));
             return;
         };
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        Self::signal(pid, "-TERM");
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.running().is_some() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
         if self.running().is_some() {
-            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            Self::signal(pid, "-KILL");
         }
         let _ = fs::remove_file(self.dir.join("cloudflared.pid"));
     }

@@ -172,6 +172,11 @@ pub fn data_dir(explicit: Option<&str>) -> Result<PathBuf, String> {
     if let Some(value) = std::env::var_os("LOCAL_STUDIO_DATA_DIR").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
+    default_data_dir()
+}
+
+#[cfg(unix)]
+fn default_data_dir() -> Result<PathBuf, String> {
     let home = home_dir().ok_or_else(|| "HOME is not set".to_string())?;
     if cfg!(target_os = "macos") {
         return Ok(home.join("Library").join("Application Support").join("Local Studio"));
@@ -182,6 +187,21 @@ pub fn data_dir(explicit: Option<&str>) -> Result<PathBuf, String> {
     Ok(base.join("local-studio"))
 }
 
+#[cfg(windows)]
+fn default_data_dir() -> Result<PathBuf, String> {
+    dot_dir()
+}
+
+#[cfg(unix)]
+pub(crate) fn dot_dir() -> Result<PathBuf, String> {
+    Ok(home_dir().ok_or("HOME is not set")?.join(".local-studio"))
+}
+
+#[cfg(windows)]
+pub(crate) fn dot_dir() -> Result<PathBuf, String> {
+    Ok(crate::platform::local_app_data().ok_or("LOCALAPPDATA is not set")?.join("Local Studio"))
+}
+
 pub(crate) fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+    crate::platform::home().filter(|value| !value.is_empty()).map(PathBuf::from)
 }

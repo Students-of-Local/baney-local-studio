@@ -262,9 +262,7 @@ pub(crate) fn provider_of(harness: Harness) -> &'static str {
 
 pub(crate) fn new_session_id() -> String {
     let mut bytes = [0_u8; 16];
-    let filled = std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut bytes))
-        .is_ok();
+    let filled = crate::platform::fill_random(&mut bytes);
     if !filled {
         let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
         for (index, byte) in bytes.iter_mut().enumerate() {
@@ -281,7 +279,17 @@ pub(crate) fn new_session_id() -> String {
 }
 
 fn program(variable: &str, name: &str) -> PathBuf {
-    std::env::var_os(variable).filter(|value| !value.is_empty()).map_or_else(|| PathBuf::from(name), PathBuf::from)
+    std::env::var_os(variable).filter(|value| !value.is_empty()).map_or_else(|| bare_program(name), PathBuf::from)
+}
+
+#[cfg(unix)]
+fn bare_program(name: &str) -> PathBuf {
+    PathBuf::from(name)
+}
+
+#[cfg(windows)]
+fn bare_program(name: &str) -> PathBuf {
+    crate::workspace::process::which(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn command(program: &PathBuf, cwd: &str) -> Command {

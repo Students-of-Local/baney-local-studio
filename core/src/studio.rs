@@ -442,7 +442,8 @@ impl Studio {
             .map_err(|error| StudioError::Config { message: format!("create {}: {error}", data_dir.display()) })?;
         let lock = lock_data_dir(&data_dir)?;
         let store = Store::open(&data_dir).map_err(|error| StudioError::Config { message: format!("{error:#}") })?;
-        let home = store::home_dir().ok_or_else(|| StudioError::Config { message: "HOME is not set".to_string() })?;
+        let home = store::home_dir()
+            .ok_or_else(|| StudioError::Config { message: format!("{} is not set", crate::platform::HOME_VAR) })?;
         let session_dir = config.session_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
