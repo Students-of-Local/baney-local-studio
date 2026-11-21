@@ -336,6 +336,7 @@ impl Actor {
                 Waiting::Compact => self.cli_compact_now(id),
             }
         }
+        self.cli_restart_due(id);
     }
 
     async fn cli_open_failed(&mut self, id: &str, opening: Opening, error: String) {

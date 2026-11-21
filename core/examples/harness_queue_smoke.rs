@@ -272,6 +272,15 @@ fn claude_restart_keeps_message(run: &mut Run) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn claude_effort_during_open(run: &mut Run) -> anyhow::Result<()> {
+    run.start("claude-reopen", ("claude-code", "haiku"), Some("low"))?;
+    run.studio.restart_thread(run.thread());
+    run.studio.set_thinking_level(run.thread(), "high".to_string());
+    run.until(Duration::from_secs(1), |_| false);
+    ran_at(run, "xray", "high");
+    Ok(())
+}
+
 fn claude_stop_drops_held(run: &mut Run) -> anyhow::Result<()> {
     run.start("claude-discard", ("claude-code", "haiku"), Some("low"))?;
     run.slow("slow discard tango")?;
@@ -404,6 +413,7 @@ fn codex_stall_keeps_others(run: &mut Run) -> anyhow::Result<()> {
 fn scenarios(run: &mut Run) -> anyhow::Result<()> {
     codex_stall_keeps_others(run)?;
     claude_restart_keeps_message(run)?;
+    claude_effort_during_open(run)?;
     claude_stop_after_effort_change(run)?;
     claude_stop_drops_held(run)?;
     codex_start_race(run)?;
