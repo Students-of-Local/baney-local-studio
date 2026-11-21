@@ -44,7 +44,7 @@ local-studio tunnel off                         stop and remove the route; the C
 
 ### Dev channel only, for now
 
-Donovan, 2026-11-21: tunnel setup ships on the dev channel only (docs/channels.md). On stable and nightly, `setup`, `adopt` and `request` don't run and the settings screen shows a waitlist signup instead. The gate reads the build channel (`LOCAL_STUDIO_BUILD_CHANNEL`); `status` and `off` work on every channel, so a machine that moves off dev can still see and remove its route.
+Donovan, 2026-11-21: tunnel setup ships on the dev channel only (docs/channels.md). On stable and nightly, `setup`, `adopt` and `request` don't run and the settings screen shows a waitlist signup instead. The gate reads `local_studio_core::CHANNEL`, which builds stamp from `LOCAL_STUDIO_BUILD_CHANNEL` and local builds set to `dev`. `status` and `off` work on every channel, so a machine that moves off dev can still see and remove its route. The waitlist is a signup-only Worker on a free workers.dev address that stores emails and holds no Cloudflare API token; it moves to the hosted route's own account when that exists.
 
 ### Agents can run it
 
