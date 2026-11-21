@@ -78,9 +78,12 @@ impl Grants {
 
     pub fn installed(&mut self, plugin: &Plugin, tree: &str, source: &str) -> Option<String> {
         let asked = |name: &String| Capability::parse(name).is_some_and(|capability| plugin.asks(capability));
+        // A tree with no source is a slice 2 grant renewed after the upgrade: its origin is unknown, so only a catalog update keeps it.
+        let unknown = |grant: &Grant| grant.source.is_empty() && !grant.tree.is_empty();
+        let catalog = source == format!("catalog {}", plugin.id);
         let (capabilities, kept_source, note) = match self.plugins.get(&plugin.id) {
             Some(grant) if grant.tree == tree => (grant.capabilities.clone(), grant.source.clone(), None),
-            Some(grant) if grant.source == source => {
+            Some(grant) if grant.source == source || (catalog && unknown(grant)) => {
                 let kept: BTreeSet<String> = grant.capabilities.iter().filter(|name| asked(name)).cloned().collect();
                 let dropped: Vec<&str> =
                     grant.capabilities.iter().filter(|name| !asked(name)).map(String::as_str).collect();
@@ -92,7 +95,7 @@ impl Grants {
                         dropped.join(", ")
                     )
                 });
-                (kept, grant.source.clone(), note)
+                (kept, source.to_string(), note)
             }
             Some(grant) if !grant.capabilities.is_empty() => {
                 let names: Vec<&str> = grant.capabilities.iter().map(String::as_str).collect();
@@ -118,8 +121,13 @@ impl Grants {
             return Err(format!("{} {} does not ask for {}", plugin.id, plugin.version, extra.name()));
         }
         let tree = live_hash(&plugin.dir)?;
-        let current = self.plugins.get(&plugin.id).filter(|grant| grant.tree == tree);
-        let source = current.map_or_else(|| format!("folder {}", plugin.dir.display()), |grant| grant.source.clone());
+        let record = self.plugins.get(&plugin.id);
+        let current = record.filter(|grant| grant.tree == tree);
+        // A slice 2 record has no tree: keep its source (empty, unknown origin) rather than invent one.
+        let source = match record.filter(|grant| grant.tree == tree || grant.tree.is_empty()) {
+            Some(grant) => grant.source.clone(),
+            None => format!("folder {}", plugin.dir.display()),
+        };
         let kept: BTreeSet<String> = current
             .map(|grant| grant.capabilities.clone())
             .unwrap_or_default()

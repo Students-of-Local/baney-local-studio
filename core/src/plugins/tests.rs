@@ -345,3 +345,27 @@ fn a_command_inside_dot_git_is_covered_by_consent() {
     write(&dir.join(".git/server"), "#!/bin/sh\necho swapped\n");
     assert_eq!(consent(&root, "toolbox"), needs(&[Capability::McpServer]), "an edit inside .git kept consent");
 }
+
+#[test]
+fn a_slice_two_grant_renewed_once_survives_a_catalog_update() {
+    let temp = Temp::new();
+    let root = temp.0.join("plugins");
+    let slice_two = r#"{"plugins": {"toolbox": {"version": "1.0.0", "capabilities": ["mcp-server"]}}}"#;
+    let reviewed = served(&temp.0.join("reviewed"), "toolbox", "1.0.0", &["mcp-server"], "one");
+    let one = catalog("toolbox", &reviewed, &repo(&reviewed));
+    installed(&root, &Source::Catalog("toolbox".to_string()), &one);
+    served(&reviewed, "toolbox", "2.0.0", &["mcp-server"], "two");
+    git(&reviewed, &["commit", "-q", "-am", "two"]);
+    let two = catalog("toolbox", &reviewed, &git(&reviewed, &["rev-parse", "HEAD"]));
+
+    write(&root.join("grants.json"), slice_two);
+    grant(&root, "toolbox", &[Capability::McpServer]);
+    let (_, updated) = installed(&root, &Source::Catalog("toolbox".to_string()), &two);
+    assert_eq!(updated, Consent::Ready, "a slice 2 grant asked twice");
+
+    write(&root.join("grants.json"), slice_two);
+    grant(&root, "toolbox", &[Capability::McpServer]);
+    let folder = served(&temp.0.join("folder"), "toolbox", "3.0.0", &["mcp-server"], "folder");
+    let (_, other) = installed(&root, &Source::Dir(folder), &two);
+    assert_eq!(other, needs(&[Capability::McpServer]), "a renewed slice 2 grant carried over to a folder install");
+}
