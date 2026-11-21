@@ -12,7 +12,7 @@ die() { echo "::error::$*" >&2; exit 1; }
 feed_url() {
   case $1 in
     stable) echo "https://github.com/$REPO/releases/latest/download/latest.json" ;;
-    nightly | dev) echo "https://github.com/$REPO/releases/download/$1/latest.json" ;;
+    nightly | dev | nightly-previous | dev-previous) echo "https://github.com/$REPO/releases/download/$1/latest.json" ;;
     *) die "unknown channel $1" ;;
   esac
 }
@@ -37,16 +37,20 @@ feed_field() {
 }
 
 check_newer() {
-  local channel=$1 version=$2 commit=${3:-} current previous
-  current=$(feed_field "$channel" version)
+  local channel=$1 version=$2 commit=${3:-} src=$1 current previous
+  current=$(feed_field "$src" version)
+  if [ -z "$current" ] && [ "$channel" != stable ]; then
+    src="$channel-previous"
+    current=$(feed_field "$src" version)
+  fi
   if [ -n "$current" ]; then
-    npx -y "$semver" -p -r ">${current%%+*}" "${version%%+*}" > /dev/null || die "the $channel feed already holds $current, which is not older than $version"
+    npx -y "$semver" -p -r ">${current%%+*}" "${version%%+*}" > /dev/null || die "the $src feed already holds $current, which is not older than $version"
   fi
   if [ -z "$commit" ] || [ "$channel" = stable ]; then return 0; fi
-  previous=$(feed_field "$channel" commit)
+  previous=$(feed_field "$src" commit)
   [ -n "$previous" ] || return 0
-  git cat-file -e "$previous^{commit}" 2> /dev/null || die "the $channel feed holds $previous, which this checkout does not have; check out with fetch-depth 0"
-  git merge-base --is-ancestor "$previous" "$commit" || die "the $channel feed holds $previous, which $commit does not contain; publishing it would move $channel back"
+  git cat-file -e "$previous^{commit}" 2> /dev/null || die "the $src feed holds $previous, which this checkout does not have; check out with fetch-depth 0"
+  git merge-base --is-ancestor "$previous" "$commit" || die "the $src feed holds $previous, which $commit does not contain; publishing it would move $channel back"
 }
 
 name_of() {
@@ -129,7 +133,7 @@ notes() {
   previous=$(feed_field "$channel" commit) || exit 1
   echo "$(name_of "$channel") $version, built from ${commit:0:7}."
   if [ -n "$previous" ] && git merge-base --is-ancestor "$previous" "$commit" 2> /dev/null; then
-    git log --no-merges --format='- %s' "$previous..$commit" | head -n 50
+    git log --no-merges -n 50 --format='- %s' "$previous..$commit"
   fi
   [ "${MAC_SIGNED:-}" = true ] || echo "No macOS build: the Apple signing secrets are not set."
 }
