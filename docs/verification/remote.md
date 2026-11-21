@@ -14,7 +14,9 @@ Every run isolates its state. `HOME`, `EUKHE_DAEMON_SOCKET`, `EUKHE_CODING_AGENT
 | iPhone client library against real serve | Verified | ServeInteropTests on the Mac host |
 | iPhone app against real serve | Not run | Needs a simulator run of `ios/tools/smoke.sh` |
 | Machines UI (macOS, Linux) | Snapshots only | Settings › Connections, pairing sheet, sidebar rows |
-| Mac to Parish1 over the tailnet | Not run yet | Waits for serve as a service (#41) |
+| Serve as a service on Linux | Deployed | Parish1, systemd user unit, `install --tailscale` |
+| Mac to Parish1 over the tailnet, core link client | Verified | link_probe, Claude Code haiku on Parish1 |
+| Mac to Parish1 over the tailnet, app screens | Not run | Polycarp computer use was down; steps below |
 | Mac to Parish1 over the shared tunnel | Not run yet | Waits for the tunnel |
 
 ## Protocol and serve: remote_smoke
@@ -57,6 +59,42 @@ cd ios/Packages/LocalStudioRemote && LOCAL_STUDIO_PAIR_LINK="$link" swift test -
 
 This covers the phone's client library, not the app's screens.
 
+## Serve on Parish1 and the Mac to Parish1 link
+
+2026-11-21. Main at 6ef29c044; `local-studio-serve` is a release build from chapel1, and Parish1 runs Eukhe 0.10.73.
+
+Install and read-back on Parish1:
+
+```sh
+local-studio-serve install --tailscale --name parish1 \
+  --bin ~/.local/opt/local-studio/local-studio-serve --eukhe ~/.local/opt/local-studio/eukhe --json
+local-studio-serve status --json
+tailscale serve status
+curl https://parish1.tail2b1ef8.ts.net/v1/health
+```
+
+- `install` wrote the `local-studio-serve.service` user unit, and `status --json` reported `serving` with the service as owner and `wss://parish1.tail2b1ef8.ts.net/v1/ws` as the effective URL.
+- `tailscale serve` mounts only `/v1/health` and `/v1/ws` on 443. From the Mac, health over the tailnet answered `{"ok":true,"protocol":2,"min_protocol":2}`, and `/` returned 404.
+
+A machine that only runs serve has no projects, and nothing can add one (#49). For this check, `state.json` was seeded by hand with one project, `~/local-studio-probe`, while the service was stopped.
+
+`remote/examples/link_probe.rs` drives the core link client that the desktop apps use, with no UI, against a real far machine:
+
+```sh
+LOCAL_STUDIO_PAIR_LINK="$(ssh parish1 'local-studio-serve pair' | grep '://pair?')" \
+  target/debug/examples/link_probe <local eukhe> "$(mktemp -d)"
+```
+
+Run from the Mac over the tailnet, PASS:
+
+- `pair_machine` reached Connected in 4.0 s. The far machine reported linux, `0.1.0-dev.0+local.6ef29c0`, at `wss://parish1.tail2b1ef8.ts.net/v1/ws`; latency was 8 ms once the first ping came back (20 s).
+- Parish1's project arrived as `@<machine>//home/baney75/local-studio-probe`.
+- `start_thread` with Claude Code haiku answered in 67 ms with an `@<machine>/` thread id. The reply "far pong" streamed back, partial text first, and the thread settled 1.4 s after the start.
+- A second send got "second" back in 1.3 s. Parish1's serve log shows the send accepted and its first update out 0 ms later, and Parish1's `state.json` holds the thread with its working folder.
+- `forget_machine` removed the machine locally. It does not revoke the desktop on the far side, so `local-studio-serve devices` still listed the Mac until `revoke` ran there.
+
+The iPhone client library also paired with Parish1 over the tailnet, reconnected with KK, and had a replayed handshake refused (serve log). Its flood stage hung: it relies on the loopback-only slot and on fake `Tailscale-User-Login` headers, and over the tailnet every socket carries the real login and none is loopback. The stage works on loopback only.
+
 ## Machines UI
 
 Snapshots, light and dark:
@@ -73,3 +111,5 @@ Untested live. Steps, with serve running on machine A:
 3. A's threads appear in B's sidebar with A's name. Open one and send; the reply streams.
 4. On A, revoke B. B's row turns to "Pair again".
 5. On B, forget A. A's threads leave the sidebar.
+
+With Parish1 as A, which has no desktop app, step 1 is `ssh parish1 'local-studio-serve pair'`, and step 4 is `local-studio-serve revoke <name>` on Parish1.
