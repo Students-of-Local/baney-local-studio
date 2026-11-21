@@ -13,7 +13,7 @@ mod install;
 mod tests;
 
 pub use consent::{answer, offer_grant, offer_install, Offer, Pending, Pendings};
-pub use grants::{Consent, Grants, GRANTS};
+pub use grants::{Consent, Grants, GrantsLock, GRANTS};
 pub use install::{install, stage, tree_hash, Catalog, CatalogEntry, Installed, Source, Staged, MAX_FILE};
 
 pub const MANIFEST: &str = "plugin.toml";
