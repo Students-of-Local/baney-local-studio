@@ -460,7 +460,7 @@ fn delete(app: &Rc<App>, id: String) {
     });
 }
 
-fn confirm_action(
+pub fn confirm_action(
     app: &Rc<App>,
     heading: &str,
     body: &str,

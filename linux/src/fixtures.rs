@@ -5,10 +5,10 @@ use local_studio_core::{
     AccessMode, Approval, Block, ColorScheme, Connection, ContextUsage, DiffHunk, DiffLine, DiffLineKind, FileChange,
     FileDiff, GitStatus, Harness, Item, ItemKind, Keybinding, LocalController, LocalEndpoint, LocalEngineState,
     LocalGpu, LocalHardware, LocalJob, LocalMachineStatus, LocalModelUsage, LocalRecipe, LocalRegistry,
-    LocalRegistryMatch, LocalSnapshot, LocalUsage, ModelKey, ModelOption, ModelRef, NoticeLevel, Project,
-    ProviderCredential, ProviderKind, ProviderStatus, QueuedMessage, RegistryModel, RegistryVariant, Settings, Shelf,
-    ThreadInfo, ThreadRow, ThreadStatus, TokenHistory, ToolKind, ToolState, TranscriptOp, Update, UsageDay,
-    UsagePeriod, UsageReport,
+    LocalRegistryMatch, LocalSnapshot, LocalUsage, Machine, MachineState, ModelKey, ModelOption, ModelRef, NoticeLevel,
+    PairedDevice, Project, ProviderCredential, ProviderKind, ProviderStatus, QueuedMessage, RegistryModel,
+    RegistryVariant, Settings, Shelf, ThreadInfo, ThreadRow, ThreadStatus, TokenHistory, ToolKind, ToolState,
+    TranscriptOp, Update, UsageDay, UsagePeriod, UsageReport,
 };
 
 use crate::app::{App, Dirty};
@@ -18,6 +18,7 @@ use crate::state::{Page, State};
 pub fn scenes() -> Vec<&'static str> {
     let mut all: Vec<&'static str> = SCENES.to_vec();
     all.extend(crate::scenes_providers::SCENES);
+    all.extend(crate::scenes_machines::SCENES);
     all.extend(crate::scenes_pickers::SCENES);
     all.extend(crate::dashboard_scenes::SCENES);
     all.extend(crate::keyboard::SCENES);
@@ -96,7 +97,10 @@ const MINUTE: i64 = 60_000;
 
 #[allow(clippy::too_many_lines)]
 pub fn stage(app: &Rc<App>, scene: &str) {
-    if crate::usage_scenes::stage(app, scene) || crate::link_scenes::stage(app, scene) {
+    if crate::usage_scenes::stage(app, scene)
+        || crate::link_scenes::stage(app, scene)
+        || crate::scenes_machines::stage(app, scene)
+    {
         return;
     }
     match scene {
@@ -305,7 +309,7 @@ pub fn project_id(name: &str) -> String {
     format!("/home/gil/code/{name}")
 }
 
-fn projects() -> Vec<Project> {
+pub fn projects() -> Vec<Project> {
     ["local-studio", "eukhe", "dashboards"]
         .into_iter()
         .map(|name| Project {
@@ -396,6 +400,100 @@ pub fn threads() -> Vec<ThreadRow> {
         }
     }
     rows
+}
+
+fn ago(minutes: i64) -> i64 {
+    format::now_ms() - minutes * MINUTE
+}
+
+fn machine(id: &str, name: &str, os: &str, version: &str, state: MachineState, latency_ms: Option<u32>) -> Machine {
+    Machine {
+        id: id.to_string(),
+        name: name.to_string(),
+        os: os.to_string(),
+        version: version.to_string(),
+        channel: "dev".to_string(),
+        url: format!("wss://{name}.tail0000.ts.net/v1/ws"),
+        state,
+        latency_ms,
+    }
+}
+
+pub fn machines() -> Vec<Machine> {
+    vec![
+        machine("7f3a9c21d4e8b6a0", "parish1", "linux", "0.18.0", MachineState::Connected, Some(34)),
+        machine("c19e44a7b20f8d53", "chapel1", "linux", "0.18.0", MachineState::Offline { since: ago(42) }, None),
+        machine(
+            "a0b1c2d3e4f50617",
+            "studio-mini",
+            "macos",
+            "0.17.2",
+            MachineState::Incompatible { protocol: 3, min_protocol: 3 },
+            None,
+        ),
+        machine("5e6f7a8b9c0d1e2f", "old-laptop", "macos", "0.16.0", MachineState::PairAgain, None),
+        machine("0123456789abcdef", "lab-box", "linux", "0.18.0", MachineState::Refused { until: ago(-9) }, None),
+        machine("9e8d7c6b5a493827", "build-box", "linux", "0.18.0", MachineState::Connecting, None),
+    ]
+}
+
+pub fn remote_projects() -> Vec<Project> {
+    vec![
+        Project {
+            id: "@7f3a9c21d4e8b6a0//home/demo/reranker".to_string(),
+            name: "reranker".to_string(),
+            path: "/home/demo/reranker".to_string(),
+            icon: None,
+            is_git: true,
+            machine: Some("7f3a9c21d4e8b6a0".to_string()),
+        },
+        Project {
+            id: "@c19e44a7b20f8d53//home/demo/dashboards".to_string(),
+            name: "dashboards".to_string(),
+            path: "/home/demo/dashboards".to_string(),
+            icon: Some("chart.bar".to_string()),
+            is_git: false,
+            machine: Some("c19e44a7b20f8d53".to_string()),
+        },
+    ]
+}
+
+pub fn remote_threads() -> Vec<ThreadRow> {
+    let projects = remote_projects();
+    let remote = |id: &str, project: usize, title: &str, status: ThreadStatus, minutes: i64, provider: &str| {
+        let mut row = row(id, "", title, Shelf::Active, status, minutes);
+        row.project = Some(projects[project].id.clone());
+        row.machine.clone_from(&projects[project].machine);
+        row.provider = (!provider.is_empty()).then(|| provider.to_string());
+        row.model = None;
+        row
+    };
+    let mut first =
+        remote("@7f3a9c21d4e8b6a0/r-1", 0, "Train the reranker on the new split", ThreadStatus::Working, 2, "ollama");
+    first.branch = Some("rerank/split-7".to_string());
+    first.additions = 64;
+    first.deletions = 12;
+    vec![
+        first,
+        remote("@7f3a9c21d4e8b6a0/r-2", 0, "Approve the GPU driver pin", ThreadStatus::Approval, 9, "anthropic"),
+        remote("@c19e44a7b20f8d53/r-3", 1, "Rotate the dashboard logs", ThreadStatus::Done, 50, ""),
+    ]
+}
+
+pub fn paired_devices() -> Vec<PairedDevice> {
+    let device = |id: &str, name: &str, platform: &str, app: &str, first: i64, last: i64| PairedDevice {
+        id: id.to_string(),
+        name: name.to_string(),
+        platform: platform.to_string(),
+        app: app.to_string(),
+        channel: "dev".to_string(),
+        first_seen: ago(first),
+        last_seen: ago(last),
+    };
+    vec![
+        device("9a8b7c6d5e4f3a2b", "Demo iPhone", "ios", "0.4.0", 20_000, 3),
+        device("1b2c3d4e5f6a7b8c", "parish1", "linux", "0.18.0", 9_000, 600),
+    ]
 }
 
 fn archived() -> Vec<ThreadRow> {

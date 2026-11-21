@@ -29,6 +29,9 @@ struct Inner {
     keys: RefCell<Vec<adw::PreferencesGroup>>,
     archive_page: adw::PreferencesPage,
     archive: RefCell<Vec<adw::PreferencesGroup>>,
+    connections_page: adw::PreferencesPage,
+    connections: RefCell<Vec<adw::PreferencesGroup>>,
+    connections_shown: RefCell<String>,
     fleet: crate::fleet::Fleet,
     kernel: adw::ActionRow,
     kernel_button: gtk::Button,
@@ -64,6 +67,8 @@ impl SettingsDialog {
         let fleet = crate::fleet::Fleet::new(&weak);
         fleet.render(&state);
         dialog.add(&local_page(&weak, &fleet));
+        let connections_page = page("connections", "Connections", icons::CONNECTIONS);
+        dialog.add(&connections_page);
         let archive_page = page("archive", "Archive", icons::ARCHIVE);
         dialog.add(&archive_page);
         drop(state);
@@ -77,6 +82,9 @@ impl SettingsDialog {
                 keys: RefCell::new(Vec::new()),
                 archive_page,
                 archive: RefCell::new(Vec::new()),
+                connections_page,
+                connections: RefCell::new(Vec::new()),
+                connections_shown: RefCell::new(String::new()),
                 fleet,
                 kernel,
                 kernel_button,
@@ -115,6 +123,24 @@ impl SettingsDialog {
         self.refresh_keys(&weak, &state);
         self.refresh_archive(&state);
         self.refresh_kernel(&state);
+        self.refresh_connections(&weak, &state);
+    }
+
+    fn refresh_connections(&self, app: &Weak<App>, state: &State) {
+        let shown =
+            format!("{:?}{:?}{}{:?}", state.machines, state.devices, state.devices_loaded, state.settings.time_format);
+        if *self.inner.connections_shown.borrow() == shown && !self.inner.connections.borrow().is_empty() {
+            return;
+        }
+        self.inner.connections_shown.replace(shown);
+        for group in self.inner.connections.take() {
+            self.inner.connections_page.remove(&group);
+        }
+        let groups = crate::machines::groups(app, state);
+        for group in &groups {
+            self.inner.connections_page.add(group);
+        }
+        self.inner.connections.replace(groups);
     }
 
     fn refresh_kernel(&self, state: &State) {
