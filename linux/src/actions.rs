@@ -466,9 +466,10 @@ pub fn local_only(app: &Rc<App>, thread: String, message: &str, local: Option<&l
         return;
     };
     let verb = format!("Switch to {} and Run", local.model);
+    let local = local.clone();
     confirm_action(app, "Runs only on local models", message, &verb, false, move |app| {
-        let thread = thread.clone();
-        app.core.run(|studio| studio.run_local(thread));
+        let (thread, local) = (thread.clone(), local.clone());
+        app.core.run(|studio| studio.run_local(thread, local));
     });
 }
 

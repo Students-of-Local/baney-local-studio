@@ -30,7 +30,7 @@ use crate::model::{
 use crate::oneshot::TextGen;
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
-use crate::skills::Resources;
+use crate::skills::{Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
@@ -377,6 +377,10 @@ enum Command {
         model: String,
     },
     RunLocal {
+        thread: String,
+        local: ModelKey,
+    },
+    SendHeld {
         thread: String,
     },
     SetThinkingLevel {
@@ -794,8 +798,8 @@ impl Studio {
         self.send_command(Command::SetModel { thread, provider, model });
     }
 
-    pub fn run_local(&self, thread: String) {
-        self.send_command(Command::RunLocal { thread });
+    pub fn run_local(&self, thread: String, local: ModelKey) {
+        self.send_command(Command::RunLocal { thread, local });
     }
 
     pub fn set_thinking_level(&self, thread: String, level: String) {
@@ -1051,6 +1055,8 @@ struct Thread {
     resources: Option<Resources>,
     rlm_children: Vec<Subagent>,
     refused: Option<PromptDraft>,
+    held: Vec<(PromptDraft, Delivery, Option<String>)>,
+    served: Option<String>,
 }
 
 struct Actor {
@@ -1490,7 +1496,8 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
-            Command::RunLocal { thread } => self.run_local(&thread).await,
+            Command::RunLocal { thread, local } => self.run_local(&thread, local).await,
+            Command::SendHeld { thread } => self.send_held(&thread).await,
             Command::SetThinkingLevel { thread, level } => {
                 if let Err(error) = self.apply_model(&thread, None, None, Some(level)).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
@@ -2263,14 +2270,21 @@ impl Actor {
         } else {
             self.ensure_open(id).await?
         };
-        if !self.local_only_gate(id, &active, &message, &prompt, request.clone()).await? {
+        if self.running(id) && self.threads.get(id).is_some_and(|thread| !thread.held.is_empty()) {
+            self.hold(id, &prompt, delivery, request);
             return Ok(());
         }
-        let message = if !cli && (message.starts_with('/') || message.contains('$')) {
-            self.resources(id, &active).await.expand(&message)
+        let expansion = if !(message.starts_with('/') || message.contains('$')) {
+            Expansion { text: message.clone(), plugins: Vec::new() }
+        } else if cli {
+            Resources::default().with_plugins(self.plugins()).expand(&message)
         } else {
-            message
+            self.resources(id, &active).await.expand(&message)
         };
+        if !self.local_only_gate(id, &active, &expansion.plugins, &prompt, delivery, request.clone()).await? {
+            return Ok(());
+        }
+        let message = if cli { message } else { expansion.text };
         let images = (!prompt.images.is_empty()).then(|| {
             Value::Array(
                 prompt
@@ -3573,6 +3587,7 @@ impl Actor {
                 if let Some(thread) = self.threads.get_mut(&id) {
                     thread.run_started_at = None;
                 }
+                self.itself.send(Command::SendHeld { thread: id.clone() });
             }
             if flipped {
                 self.emit_info(&id);
@@ -3879,6 +3894,7 @@ impl Actor {
             self.refresh_saved().await;
         }
         self.emit_info(id);
+        self.send_held(id).await;
         self.release(id).await;
     }
 
