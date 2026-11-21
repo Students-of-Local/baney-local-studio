@@ -222,6 +222,19 @@ impl Links {
         }
     }
 
+    pub(crate) fn open_pairing(&self, request: String, data_dir: PathBuf) {
+        let mailbox = Arc::clone(&self.0.mailbox);
+        self.0.handle.spawn_blocking(move || {
+            let update = match pairing::mint(&data_dir, crate::CHANNEL, None, None) {
+                Ok(minted) => Update::Pairing { request, link: minted.link, expires_at: minted.expires_at },
+                Err(error) => {
+                    Update::RequestFailed { request, message: format!("Could not open a pairing: {error:#}") }
+                }
+            };
+            mailbox.push(update);
+        });
+    }
+
     pub(crate) fn watch(&self, machine: &str, thread: &str) {
         let mut state = self.0.lock();
         let Some(link) = state.link(machine) else { return };
@@ -747,13 +760,17 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
         session.update(update).await;
     }
     let mut ping = tokio::time::interval_at(Instant::now() + PING, PING);
+    let silence = tokio::time::sleep(SILENT);
+    tokio::pin!(silence);
+    let mut unsent = None;
     let ended = loop {
         tokio::select! {
-            arrived = tokio::time::timeout(SILENT, next(&mut stream)) => {
+            arrived = next(&mut stream) => {
+                silence.as_mut().reset(Instant::now() + SILENT);
                 let bytes = match arrived {
-                    Err(_) | Ok(Next::Text(_)) => break End::Lost,
-                    Ok(Next::Closed(code)) => break End::Closed(code),
-                    Ok(Next::Binary(bytes)) => bytes,
+                    Next::Text(_) => break End::Lost,
+                    Next::Closed(code) => break End::Closed(code),
+                    Next::Binary(bytes) => bytes,
                 };
                 let Ok(record) = session.channel.open(&bytes) else { break End::Lost };
                 match joiner.feed(record) {
@@ -766,9 +783,15 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
                     Ok(_) => {}
                 }
             }
+            () = &mut silence => break End::Lost,
             out = rx.recv() => {
                 let Some(out) = out else { break End::Forgotten };
+                let request = match &out {
+                    Out::Request { request, .. } => request.clone(),
+                    Out::Watch(_) | Out::Unwatch(_) => None,
+                };
                 if !session.out(out).await {
+                    unsent = request;
                     break End::Lost;
                 }
             }
@@ -782,7 +805,25 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
     };
     let resume = session.epoch.clone().map(|epoch| (epoch, session.seq));
     session.sink.close().await.ok();
+    rx.close();
+    let mut failed: Vec<String> = unsent.into_iter().collect();
+    let pending = session.pending.drain().filter_map(|(_, pending)| match pending {
+        Pending::Request { request, .. } => request,
+        Pending::Earlier(_) | Pending::Blob | Pending::Watch(_) => None,
+    });
+    let queued = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|out| match out {
+        Out::Request { request, .. } => request,
+        Out::Watch(_) | Out::Unwatch(_) => None,
+    });
+    for request in pending.chain(queued).collect::<Vec<_>>() {
+        if !failed.contains(&request) {
+            failed.push(request);
+        }
+    }
     inner.disconnected(machine, resume);
+    for request in failed {
+        inner.mailbox.push(Update::RequestFailed { request, message: format!("{} disconnected", session.name) });
+    }
     ended
 }
 
@@ -960,7 +1001,6 @@ impl Session<'_> {
     async fn update(&mut self, update: Value) -> bool {
         let kind = update.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
         match kind.as_str() {
-            "connection" | "models" | "daemon_default" | "theme" | "blob" | "machines" | "pairing" => {}
             "threads" => {
                 let mut rows = update.get("threads").cloned().unwrap_or(Value::Null);
                 tag_rows(&mut rows, self.machine);
@@ -1002,7 +1042,26 @@ impl Session<'_> {
                 }
                 self.emit(update);
             }
-            _ => self.emit(update),
+            "thread"
+            | "approvals"
+            | "queue"
+            | "subagents"
+            | "notification"
+            | "thread_started"
+            | "composer_text"
+            | "worktree_setup"
+            | "git_status"
+            | "request_done"
+            | "request_failed"
+            | "diff"
+            | "pull_requests"
+            | "pull_request_detail"
+            | "thread_search"
+            | "archived_threads"
+            | "commands"
+            | "skills"
+            | "message_image" => self.emit(update),
+            _ => {}
         }
         true
     }

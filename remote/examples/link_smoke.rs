@@ -8,19 +8,26 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
-use local_studio_core::link::pairing;
+use futures_util::{SinkExt, StreamExt};
+use local_studio_core::link::devices::{unhex, Devices};
+use local_studio_core::link::{noise, pairing, snow};
 use local_studio_core::{
     AccessMode, Approval, ApprovalAnswer, Block, DaemonLaunch, Delivery, Harness, Item, ItemKind, Machine,
     MachineState, ModelOption, Project, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus,
     TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+use tokio_tungstenite::tungstenite::Message;
 
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 const QUICK: Duration = Duration::from_secs(30);
 const SETUP: Duration = Duration::from_secs(120);
 const MODEL_STEP: Duration = Duration::from_secs(300);
 const RECONNECT: Duration = Duration::from_secs(90);
+const SILENT: Duration = Duration::from_secs(50);
+const MARGIN: Duration = Duration::from_secs(15);
+const MARKER: &str = "the fake far side says hello";
+const FAKE_SOCKET: &str = "/fake-far-side/d.sock";
 const NAME: &str = "smoke-a";
 const PONG: &str = "Reply with only the word pong.";
 const PING: &str = "Reply with only the word ping.";
@@ -63,6 +70,8 @@ struct View {
     pairing: Option<(String, String, i64)>,
     usage: Option<UsageReport>,
     daemon: Option<u32>,
+    sockets: Vec<String>,
+    settings: usize,
     ready: bool,
 }
 
@@ -107,7 +116,13 @@ impl View {
             }
             Update::Pairing { request, link, expires_at } => self.pairing = Some((request, link, expires_at)),
             Update::Usage { report, .. } => self.usage = Some(report),
-            Update::Daemon { pid: Some(pid), .. } => self.daemon = Some(pid),
+            Update::Daemon { socket, pid, .. } => {
+                self.sockets.push(socket);
+                if pid.is_some() {
+                    self.daemon = pid;
+                }
+            }
+            Update::Settings { .. } => self.settings += 1,
             Update::Connection { state: local_studio_core::Connection::Ready } => self.ready = true,
             _ => {}
         }
@@ -283,6 +298,15 @@ impl Serve {
             ensure!(Instant::now() < deadline, "serve did not listen on {} within 30 s", self.port);
             std::thread::sleep(Duration::from_millis(100));
         }
+        Ok(())
+    }
+
+    fn pause(&self, signal: &str) -> anyhow::Result<()> {
+        let child = self.child.as_ref().context("serve is not running")?;
+        let pid = child.id().to_string();
+        let status = Command::new("kill").args([signal, &pid]).status()?;
+        ensure!(status.success(), "kill {signal} {pid} failed");
+        println!("ok   serve {pid} sent {signal}");
         Ok(())
     }
 
@@ -590,13 +614,116 @@ fn model_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<St
     Ok(thread)
 }
 
+fn connected(view: &View, machine: &str) -> bool {
+    view.machine(machine).is_some_and(|machine| machine.state == MachineState::Connected)
+}
+
+fn offline(view: &View, machine: &str) -> bool {
+    view.machine(machine).is_some_and(|machine| matches!(machine.state, MachineState::Offline { .. }))
+}
+
+fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
+    let project = b
+        .view
+        .projects
+        .iter()
+        .find(|project| project.machine.as_deref() == Some(machine))
+        .context("no remote project")?
+        .id
+        .clone();
+    b.until("the machine is connected before the freeze", QUICK, |view| connected(view, machine))?;
+    run.serve.pause("-STOP")?;
+    let frozen = (|| {
+        b.studio.list_commands("frozen-1".to_string(), Some(project));
+        let left = b.until("a frozen machine leaves Connected within the silence limit", SILENT + MARGIN, |view| {
+            !connected(view, machine)
+        })?;
+        b.until("the request sent during the freeze fails as disconnected", QUICK, |view| {
+            view.failed.get("frozen-1").is_some_and(|message| message.contains("disconnected"))
+        })?;
+        anyhow::Ok(left)
+    })();
+    run.serve.pause("-CONT")?;
+    let left = frozen?;
+    run.report.push(format!("SIGSTOP of serve to leaving Connected: {} ms", left.as_millis()));
+    b.until("B reconnects after the freeze ends", RECONNECT, |view| connected(view, machine))?;
+    Ok(())
+}
+
+fn fake_far_side(run: &Run) -> anyhow::Result<std::thread::JoinHandle<anyhow::Result<()>>> {
+    let devices = Devices::new(&run.a.data);
+    let key = devices.static_key()?;
+    let machine = devices.machine_id()?;
+    let known = devices.list()?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", run.serve.port))?;
+    listener.set_nonblocking(true)?;
+    Ok(std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            let (tcp, _) = tokio::time::timeout(RECONNECT, listener.accept()).await.context("B never came")??;
+            let mut socket = tokio_tungstenite::accept_async(tcp).await?;
+            let Some(Ok(Message::Text(header))) = socket.next().await else { bail!("B sent no KK header") };
+            let parsed = noise::parse_header(&header).map_err(|error| anyhow::anyhow!(error))?;
+            let device = known
+                .iter()
+                .find(|device| Some(&device.info.id) == parsed.device.as_ref())
+                .context("the KK header names no paired device")?;
+            let public = unhex(&device.key).context("the device key is not hex")?;
+            let mut state = snow::Builder::new(noise::KK.parse()?)
+                .local_private_key(&key.private)?
+                .remote_public_key(&public)?
+                .prologue(&noise::prologue(&header))?
+                .build_responder()?;
+            let Some(Ok(Message::Binary(first))) = socket.next().await else { bail!("B sent no KK message") };
+            noise::read(&mut state, &first)?;
+            socket.send(Message::binary(noise::write(&mut state, &[])?)).await?;
+            let channel = noise::Channel::new(state.into_transport_mode()?);
+            let Some(Ok(Message::Binary(_))) = socket.next().await else { bail!("B sent no hello") };
+            let hello = json!({
+                "op": "hello",
+                "machine": { "id": machine, "name": NAME, "os": std::env::consts::OS, "channel": CHANNEL, "version": "fake" },
+                "snapshot": [
+                    { "type": "daemon", "socket": FAKE_SOCKET, "version": "fake", "pid": null, "mismatch": null },
+                    { "type": "settings", "settings": {} },
+                    { "type": "notice", "level": "info", "text": MARKER },
+                ],
+            });
+            for record in noise::json_records(&hello.to_string()) {
+                socket.send(Message::binary(channel.seal(&record)?)).await?;
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(Ok(_)) = socket.next().await {}
+            })
+            .await;
+            socket.close(None).await.ok();
+            Ok(())
+        })
+    }))
+}
+
+fn far_side_checks(run: &Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
+    let settings = b.view.settings;
+    let fake = fake_far_side(run)?;
+    let heard = b.until("B reaches a fake far side and shows its notice", RECONNECT, |view| {
+        view.notices.iter().any(|notice| notice.contains(MARKER))
+    });
+    let joined = fake.join().map_err(|_| anyhow::anyhow!("the fake far side panicked"))?;
+    heard?;
+    joined?;
+    ensure!(!b.view.sockets.iter().any(|socket| socket == FAKE_SOCKET), "a daemon update from the far side reached B");
+    ensure!(b.view.settings == settings, "a settings update from the far side reached B");
+    println!("ok   the far side's daemon and settings updates stay off B while its notice arrives");
+    b.until("the machine shows offline after the fake far side closes", RECONNECT, |view| offline(view, machine))?;
+    Ok(())
+}
+
 fn reconnect_checks(run: &mut Run, b: &mut Desk, machine: &str, thread: &str) -> anyhow::Result<()> {
     let resets = b.view.resets.get(thread).copied().unwrap_or_default();
     run.serve.signal("-KILL")?;
-    b.until("the machine shows offline", RECONNECT, |view| {
-        view.machine(machine).is_some_and(|machine| matches!(machine.state, MachineState::Offline { .. }))
-    })?;
+    b.until("the machine shows offline", RECONNECT, |view| offline(view, machine))?;
     ensure!(b.view.row(thread).is_some(), "an offline machine dropped its rows");
+    far_side_checks(run, b, machine)?;
     let started = Instant::now();
     run.serve.start(&run.a, &run.eukhe)?;
     b.until("B reconnects through KK", RECONNECT, |view| {
@@ -682,6 +809,7 @@ fn drive(run: &mut Run) -> anyhow::Result<()> {
     let driven = (|| {
         let machine = pair_checks(run, &mut b)?;
         let thread = model_checks(run, &mut b, &machine)?;
+        freeze_checks(run, &mut b, &machine)?;
         reconnect_checks(run, &mut b, &machine, &thread)?;
         let seen = b.view.items(&thread).to_vec();
         revoke_checks(run, &mut b, &machine)?;

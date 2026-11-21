@@ -107,16 +107,7 @@ impl Studio {
 
     pub fn open_pairing(&self, request: String) {
         #[cfg(feature = "link")]
-        {
-            let channel = crate::CHANNEL;
-            let update = match crate::link::pairing::mint(&self.data_dir, channel, None, None) {
-                Ok(minted) => Update::Pairing { request, link: minted.link, expires_at: minted.expires_at },
-                Err(error) => {
-                    Update::RequestFailed { request, message: format!("Could not open a pairing: {error:#}") }
-                }
-            };
-            self.mailbox.push(update);
-        }
+        self.links.open_pairing(request, self.data_dir.clone());
         #[cfg(not(feature = "link"))]
         self.mailbox.push(Update::RequestFailed { request, message: "This build cannot pair devices".to_string() });
     }
