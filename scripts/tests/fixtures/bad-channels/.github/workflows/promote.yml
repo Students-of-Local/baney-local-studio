@@ -5,3 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: git push "$url" "$COMMIT:refs/heads/stable"
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: stable
