@@ -366,24 +366,20 @@ fn stop_settles_approval(studio: &Studio, signal: &Signal, watch: &mut Watch, th
 }
 
 fn slash_command_settles(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str) -> anyhow::Result<()> {
-    for command in ["/clear"] {
-        let finished = watch.begin();
-        studio.send(format!("send-{command}"), thread.to_string(), prompt(command), Delivery::Queue);
-        let sent = Instant::now();
-        let left = pump_within(studio, signal, watch, &format!("{command} left Working"), SLASH_TIMEOUT, |watch| {
-            watch.finished > finished && watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
-        });
-        if let Err(error) = left {
-            watch.miss(format!("{error} (busy {}, row {:?})", watch.busy, watch.row().map(|row| row.status)));
-            if watch.busy {
-                studio.abort(thread.to_string());
-                pump(studio, signal, watch, &format!("{command}: Stop took the thread out of Working"), |watch| {
-                    !watch.busy
-                })?;
-            }
-        } else {
-            println!("     {command} settled in {} ms", sent.elapsed().as_millis());
+    let finished = watch.begin();
+    studio.send("send-/clear".to_string(), thread.to_string(), prompt("/clear"), Delivery::Queue);
+    let sent = Instant::now();
+    let left = pump_within(studio, signal, watch, "/clear left Working", SLASH_TIMEOUT, |watch| {
+        watch.finished > finished && watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
+    });
+    if let Err(error) = left {
+        watch.miss(format!("{error} (busy {}, row {:?})", watch.busy, watch.row().map(|row| row.status)));
+        if watch.busy {
+            studio.abort(thread.to_string());
+            pump(studio, signal, watch, "/clear: Stop took the thread out of Working", |watch| !watch.busy)?;
         }
+    } else {
+        println!("     /clear settled in {} ms", sent.elapsed().as_millis());
     }
     Ok(())
 }
