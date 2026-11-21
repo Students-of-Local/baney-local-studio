@@ -39,7 +39,7 @@ const USAGE: &str = "usage:
 
 --json prints one object with a \"state\" field, and nothing else on stdout. No command ever prompts.
 serve reads <data dir>/remote/serve.json and rereads it on SIGHUP and when it changes; flags add to its lists and replace its other fields for that run.
-project asks the process that owns the data dir (serve, or the app while it serves) to add or remove a project, and waits up to 30 s for its answer. It exits 1 when the owner refuses (failed) or nothing owns the data dir (no_owner), and 2 when the owner has not answered yet (queued: the request stays and may still land). list reads state.json when nothing owns it.";
+project asks the process that owns the data dir (serve, or the app while it serves) to add or remove a project, and waits up to 30 s for its answer. It exits 1 when the owner refuses (failed) or nothing owns the data dir (no_owner), and 2 when the owner has not answered yet (queued: the request stays and may still land). list reads state.json when nothing owns it or the owner has not answered.";
 
 #[must_use]
 pub fn cli() -> ExitCode {
@@ -616,7 +616,7 @@ fn revoke(mut args: Args) -> anyhow::Result<()> {
 enum Asked {
     Answer(Value),
     NoOwner,
-    Queued(Option<u32>),
+    Queued(Option<u32>, PathBuf),
 }
 
 fn ask(data_dir: &Path, op: &str, path: Option<&str>) -> anyhow::Result<Asked> {
@@ -641,7 +641,7 @@ fn ask(data_dir: &Path, op: &str, path: Option<&str>) -> anyhow::Result<Asked> {
             return Ok(Asked::Answer(value));
         }
         if since.elapsed() >= ANSWER_WAIT {
-            return Ok(Asked::Queued(owner));
+            return Ok(Asked::Queued(owner, request));
         }
         std::thread::sleep(ANSWER_POLL);
     }
@@ -734,7 +734,19 @@ fn project(mut args: Args) -> anyhow::Result<()> {
             report(&out, "no_owner", &message, path.as_deref(), &json!([]));
             Err(Reported(FAILED).into())
         }
-        Asked::Queued(owner) => {
+        Asked::Queued(owner, request) if verb == "list" => {
+            std::fs::remove_file(&request).ok();
+            let projects = stored_projects(&data_dir)?;
+            let message = format!(
+                "{} owns {} but has not answered within {} s; these are the projects in its state.json, which may be behind",
+                lock::describe(owner),
+                data_dir.display(),
+                ANSWER_WAIT.as_secs()
+            );
+            report(&out, done, &message, None, &projects);
+            Ok(())
+        }
+        Asked::Queued(owner, _) => {
             let message = format!(
                 "{} owns {} but has not answered within {} s; the request stays queued and the change may still land (it answers only while it serves, and the app serves only when serve.json exists)",
                 lock::describe(owner),
