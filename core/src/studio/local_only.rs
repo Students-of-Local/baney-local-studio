@@ -242,17 +242,26 @@ impl Actor {
             self.mailbox.notice(NoticeLevel::Info, "That message was already sent or dropped.");
             return;
         };
-        if !Self::local_provider(&local.provider) {
-            self.mailbox.notice(NoticeLevel::Error, format!("{} is not a local model.", local.model));
-            return;
-        }
-        if let Err(error) = self.apply_model(id, Some(local.provider), Some(local.model), None).await {
-            self.mailbox.notice(NoticeLevel::Error, error);
-            return;
-        }
-        self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: String::new() });
-        if let Err(error) = self.send_prompt(id, prompt, Delivery::Queue, None).await {
-            self.mailbox.notice(NoticeLevel::Error, error);
+        let result = if !Self::local_provider(&local.provider) {
+            Err(format!("{} is not a local model.", local.model))
+        } else if let Err(error) = self.apply_model(id, Some(local.provider), Some(local.model), None).await {
+            Err(error)
+        } else {
+            self.send_prompt(id, prompt.clone(), Delivery::Queue, None).await
+        };
+        let refused = self.threads.get(id).is_some_and(|thread| thread.refused.is_some());
+        match result {
+            Ok(()) if !refused => {
+                self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: String::new() });
+            }
+            Ok(()) => {}
+            Err(error) => {
+                if let Some(thread) = self.threads.get_mut(id) {
+                    thread.refused = Some(prompt.clone());
+                }
+                self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: prompt.text });
+                self.mailbox.notice(NoticeLevel::Error, error);
+            }
         }
     }
 }

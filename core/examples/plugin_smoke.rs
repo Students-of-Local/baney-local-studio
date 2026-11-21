@@ -103,6 +103,7 @@ struct View {
     skills: Option<Vec<SkillEntry>>,
     refusals: Vec<(String, String, Option<ModelKey>)>,
     usage: Option<UsageReport>,
+    composer: Vec<(String, String)>,
 }
 
 impl View {
@@ -170,6 +171,10 @@ impl Harness {
                 self.view.refusals.push((thread, message, local));
             }
             Update::Usage { report, .. } => self.view.usage = Some(report),
+            Update::ComposerText { thread, text } => {
+                self.view.composer.retain(|(key, _)| *key != thread);
+                self.view.composer.push((thread, text));
+            }
             _ => {}
         }
         Ok(())
@@ -656,6 +661,14 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
     }
 
     fn connections(socket: &Path, thread: &str) -> anyhow::Result<Vec<(String, bool)>> {
+        session(socket, thread, |_| None)
+    }
+
+    fn session(
+        socket: &Path,
+        thread: &str,
+        then: impl FnOnce(&str) -> Option<DaemonCommand>,
+    ) -> anyhow::Result<Vec<(String, bool)>> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         runtime.block_on(async {
             let (client, _events) = DaemonClient::connect(socket).await?;
@@ -682,6 +695,9 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 .and_then(Value::as_str)
                 .with_context(|| format!("no active session id in {summary}"))?
                 .to_string();
+            if let Some(command) = then(&active) {
+                client.request_ok(command).await?;
+            }
             let data = client
                 .request_ok(DaemonCommand::GetMcpConnections {
                     id: None,
@@ -712,6 +728,20 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             println!("     usage {}/{}: {} tokens, {} requests", row.provider, row.model, row.tokens, row.requests);
         }
         Ok(report)
+    }
+
+    fn fence(socket: &Path, thread: &str, on: bool) -> anyhow::Result<()> {
+        let server = json!({ "type": "stdio", "name": "intruder", "command": "/usr/bin/true", "cwd": "/" });
+        session(socket, thread, |active| {
+            Some(DaemonCommand::ReplaceAcpMcpServers {
+                id: None,
+                active_session_id: active.to_string(),
+                owner_id: "smoke-intruder".to_string(),
+                servers: Value::Array(if on { vec![server] } else { Vec::new() }),
+                rest: Map::default(),
+            })
+        })?;
+        Ok(())
     }
 
     fn refused(
@@ -896,6 +926,21 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 failed.push(name.to_string());
             }
         };
+        fence(socket, &cloud, true)?;
+        studio.run_local(cloud.clone(), local.clone());
+        let fenced = harness.pump_until("RunLocal failed on the fenced session", step, |view| {
+            view.notices.iter().any(|notice| notice.contains("Could not start the plugin's tool server"))
+        });
+        fence(socket, &cloud, false)?;
+        harness.pump_until("composer settled", Duration::from_secs(3), |_| false).ok();
+        let text = harness.view.composer.iter().find(|(key, _)| *key == cloud).map(|(_, text)| text.clone());
+        record(
+            "run-local-error",
+            fenced.and_then(|()| {
+                ensure!(text.as_deref() == Some(ask), "after the failed RunLocal the composer holds {text:?}");
+                Ok(())
+            }),
+        );
         for (key, text) in [
             ("private", "/private"),
             ("bang", "Please use $ledger! now."),
