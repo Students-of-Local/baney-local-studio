@@ -5,9 +5,10 @@ use std::rc::{Rc, Weak};
 use adw::prelude::*;
 use gtk::gio;
 use local_studio_core::{
-    ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, NotificationKind, NotificationMode, PromptDraft,
-    Shelf, ThreadSettings, TranscriptOp, Update,
+    ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind, NotificationMode,
+    PromptDraft, Shelf, ThreadSettings, TranscriptOp, Update,
 };
+use webkit::prelude::*;
 
 use crate::branches::BranchBar;
 use crate::composer::Composer;
@@ -971,6 +972,23 @@ impl App {
         } else {
             self.panel.show(kind);
         }
+    }
+
+    pub fn open_link(self: &Rc<Self>, url: &str) {
+        let web = url
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"));
+        // The Browser panel lives beside the thread; on other pages it would open out of sight.
+        let in_app = {
+            let state = self.state.borrow();
+            state.settings.open_links_in == LinkTarget::App && state.page == Page::Thread
+        };
+        if web && in_app {
+            self.open_surface("browser");
+            self.panel.browser.view.load_uri(url);
+            return;
+        }
+        gtk::UriLauncher::new(url).launch(Some(&self.window), None::<&gio::Cancellable>, |_| {});
     }
 
     pub fn set_panel_maximized(&self, maximized: bool) {

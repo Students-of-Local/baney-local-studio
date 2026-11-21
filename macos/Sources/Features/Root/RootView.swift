@@ -44,6 +44,9 @@ struct RootView: View {
             PaletteLayer(store: store)
         }
         .background(Theme.canvas)
+        .environment(\.openURL, OpenURLAction { [panels = store.workspace.panels] url in
+            panels.openLink(url) ? .handled : .systemAction
+        })
         .ignoresSafeArea(.container, edges: .top)
         .toolbar {
             ToolbarItem(placement: .navigation) {

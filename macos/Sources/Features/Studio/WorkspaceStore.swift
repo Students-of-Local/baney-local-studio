@@ -536,6 +536,16 @@ final class PanelState {
         present(kind)
     }
 
+    func openLink(_ url: URL) -> Bool {
+        // The Browser panel lives beside the thread; on other pages it would open out of sight.
+        guard settings?.openLinksIn == .app, inbox?.shell.route == .thread,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
+        openSurface(.browser)
+        guard rightPanelOpen, case .browser(let model) = activeContent?.content else { return false }
+        model.open(url)
+        return true
+    }
+
     private func present(_ kind: PanelSurfaceKind) {
         guard let action = launcherActions().first(where: { $0.kind == kind }), action.available else { return }
         if kind != .terminal, let existing = surfaces.first(where: { $0.kind == kind }) {
