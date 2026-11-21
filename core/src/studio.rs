@@ -358,6 +358,10 @@ enum Command {
     StopCheck {
         thread: String,
     },
+    CliSettle {
+        thread: String,
+        epoch: u64,
+    },
     RestartDaemon {
         force: bool,
     },
@@ -811,6 +815,7 @@ struct Thread {
     pending_run: bool,
     pending_at: Option<i64>,
     stopping: Option<Instant>,
+    retired: Option<u64>,
     reopen: bool,
     ended_by_events: bool,
     allowed_effects: Vec<String>,
@@ -1369,6 +1374,7 @@ impl Actor {
             }
             Command::Verify { thread, attempt, relink } => self.verify(&thread, attempt, relink).await,
             Command::StopCheck { thread } => self.stop_check(&thread).await,
+            Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
             Command::HarnessModels { models } => {
                 self.codex_models = models;

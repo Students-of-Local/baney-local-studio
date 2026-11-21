@@ -77,29 +77,54 @@ struct PendingApproval {
 #[derive(Default)]
 struct Turns {
     running: Option<String>,
+    starting: bool,
+    launching: Option<Value>,
     finished: VecDeque<String>,
     held: VecDeque<Value>,
 }
 
 impl Turns {
+    fn busy(&self) -> bool {
+        self.running.is_some() || self.starting
+    }
+
     fn started(&mut self, id: &str) {
         if !self.finished.iter().any(|done| done == id) {
             self.running = Some(id.to_string());
+            self.starting = false;
+            self.launching = None;
         }
     }
 
-    fn completed(&mut self, id: Option<&str>) -> Option<Value> {
+    fn completed(&mut self, id: Option<&str>) -> bool {
         if let Some(id) = id {
             self.finished.push_back(id.to_string());
             if self.finished.len() > REMEMBERED_TURNS {
                 self.finished.pop_front();
             }
             if self.running.as_deref().is_some_and(|running| running != id) {
-                return None;
+                return false;
             }
         }
         self.running = None;
-        self.held.pop_front()
+        self.starting = false;
+        true
+    }
+
+    fn next(&mut self) -> Option<Value> {
+        self.launching = self.held.pop_front();
+        self.starting = self.launching.is_some();
+        self.launching.clone()
+    }
+
+    fn forget(&mut self) -> VecDeque<Value> {
+        self.running = None;
+        self.starting = false;
+        let mut dropped = std::mem::take(&mut self.held);
+        if let Some(launching) = self.launching.take() {
+            dropped.push_front(launching);
+        }
+        dropped
     }
 }
 
@@ -112,22 +137,45 @@ fn request_key(id: &Value) -> String {
     }
 }
 
-fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, params: Value) {
+fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
     tokio::spawn(async move {
-        match rpc.call("turn/start", params).await {
-            Ok(started) => {
-                if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-                    turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+        loop {
+            match rpc.call("turn/start", params.clone()).await {
+                Ok(started) => {
+                    if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
+                        turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                    }
+                    return;
                 }
-            }
-            Err(error) => {
-                if let Some(message) = notice(&format!("Codex did not start the queued message: {error}"), now_ms()) {
-                    emit_message(&sink, message);
+                Err(error) => {
+                    let next = {
+                        let mut turns = turns.lock().unwrap_or_else(PoisonError::into_inner);
+                        if turns.launching.take().is_none() {
+                            return;
+                        }
+                        turns.next()
+                    };
+                    let text = format!("Codex did not start this queued message ({error}): {}", held_text(&params));
+                    if let Some(message) = notice(&text, now_ms()) {
+                        emit_message(&sink, message);
+                    }
+                    let Some(next) = next else {
+                        sink.send(Event::Idle);
+                        return;
+                    };
+                    params = next;
                 }
-                sink.send(Event::Idle);
             }
         }
     });
+}
+
+fn report_dropped(sink: &Sink, held: VecDeque<Value>, lead: &str) {
+    for params in held {
+        if let Some(message) = notice(&format!("{lead} this queued message: {}", held_text(&params)), now_ms()) {
+            emit_message(sink, message);
+        }
+    }
 }
 
 fn held_text(params: &Value) -> String {
@@ -410,13 +458,12 @@ impl Codex {
         let params = self.turn_params(&input);
         let running = {
             let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
-            match turns.running.clone() {
-                Some(_) if !steer => {
-                    turns.held.push_back(params);
-                    return Ok(());
-                }
-                running => running,
+            if turns.busy() && (!steer || turns.running.is_none()) {
+                turns.held.push_back(params);
+                return Ok(());
             }
+            turns.starting = turns.running.is_none();
+            turns.running.clone()
         };
         if let Some(turn) = running {
             self.rpc
@@ -424,7 +471,13 @@ impl Codex {
                 .await?;
             return Ok(());
         }
-        let started = self.rpc.call("turn/start", params).await?;
+        let started = match self.rpc.call("turn/start", params).await {
+            Ok(started) => started,
+            Err(error) => {
+                self.turns.lock().unwrap_or_else(PoisonError::into_inner).starting = false;
+                return Err(error);
+            }
+        };
         if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
             self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
         }
@@ -454,12 +507,7 @@ impl Codex {
             let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
             (turns.running.clone(), std::mem::take(&mut turns.held))
         };
-        for params in dropped {
-            let text = format!("Stop dropped this queued message: {}", held_text(&params));
-            if let Some(message) = notice(&text, now_ms()) {
-                emit_message(&self.sink, message);
-            }
-        }
+        report_dropped(&self.sink, dropped, "Stop dropped");
         let turn = turn.ok_or_else(|| "Codex has no turn running.".to_string())?;
         self.rpc.call("turn/interrupt", json!({ "threadId": self.thread, "turnId": turn })).await.map(|_| ())
     }
@@ -580,23 +628,19 @@ impl Translator {
             return;
         }
         self.stopped = true;
-        self.forget_turns();
+        let dropped = self.turns.lock().unwrap_or_else(PoisonError::into_inner).forget();
         if let Some(message) = notice(&reason, now_ms()) {
             emit_message(&self.sink, message);
         }
+        report_dropped(&self.sink, dropped, "The account stop dropped");
         self.end(Some(reason.clone()));
         self.sink.send(Event::Stopped(reason));
     }
 
     fn finish(&mut self) {
-        self.forget_turns();
+        let dropped = self.turns.lock().unwrap_or_else(PoisonError::into_inner).forget();
+        report_dropped(&self.sink, dropped, "Codex exited and dropped");
         self.end(None);
-    }
-
-    fn forget_turns(&self) {
-        let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
-        turns.running = None;
-        turns.held.clear();
     }
 
     fn message(&self, kind: &str, text: &str, stop: &str, at: u64) -> Option<AgentMessage> {
@@ -630,7 +674,6 @@ impl Translator {
             "turn/completed" => {
                 let turn = params.get("turn");
                 let id = turn.and_then(|turn| turn.get("id")).and_then(Value::as_str);
-                let next = self.turns.lock().unwrap_or_else(PoisonError::into_inner).completed(id);
                 let status = text(turn, "status");
                 let error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null()).map(|error| {
                     error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string)
@@ -646,6 +689,10 @@ impl Translator {
                     Some(reason)
                 } else {
                     None
+                };
+                let next = {
+                    let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+                    turns.completed(id).then(|| turns.next()).flatten()
                 };
                 self.end(failure);
                 if let Some(params) = next {
@@ -1023,4 +1070,43 @@ fn history(thread: &Value) -> Vec<AgentMessage> {
         }
     }
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    #[test]
+    fn a_held_message_never_looks_idle_when_its_turn_completes() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let _guard = runtime.enter();
+        let (events, _received) = mpsc::unbounded_channel();
+        let (lines, _written) = mpsc::unbounded_channel();
+        let rpc = Rpc { lines, replies: Replies::default(), next: Arc::default() };
+        let turns = SharedTurns::default();
+        let mut translator = Translator::new(Sink::new("t", 0, events), rpc, Arc::default(), Arc::clone(&turns));
+        let gap = Arc::new(AtomicBool::new(false));
+        for round in 0..2000 {
+            let id = format!("turn-{round}");
+            *turns.lock().unwrap_or_else(PoisonError::into_inner) =
+                Turns { running: Some(id.clone()), held: [json!({ "input": [] })].into(), ..Turns::default() };
+            translator.begin();
+            let (shared, seen) = (Arc::clone(&turns), Arc::clone(&gap));
+            let watcher = std::thread::spawn(move || loop {
+                let turns = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                if turns.held.is_empty() {
+                    break;
+                }
+                if !turns.busy() {
+                    seen.store(true, Ordering::Relaxed);
+                }
+            });
+            translator.notification("turn/completed", &json!({ "turn": { "id": id, "status": "completed" } }));
+            watcher.join().map_err(|_| anyhow::anyhow!("the watcher panicked"))?;
+        }
+        assert!(!gap.load(Ordering::Relaxed), "a send could start a turn while a held message was waiting to start");
+        Ok(())
+    }
 }

@@ -495,26 +495,45 @@ fn efforts_running() -> Vec<String> {
         .collect()
 }
 
-fn effort_restarts(studio: &Studio, signal: &Signal, watch: &mut Watch, old: &str) {
+fn effort_restarts(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    thread: &str,
+    (old, new): (&str, &str),
+) -> anyhow::Result<()> {
     let deadline = Instant::now() + CHECK_TIMEOUT;
     loop {
         for update in studio.tick() {
             apply(watch, update);
         }
-        let running = efforts_running();
-        if !running.iter().any(|effort| effort == old) {
-            println!("ok   the effort change restarted the process after the turn (running: {running:?})");
-            return;
+        if !efforts_running().iter().any(|effort| effort == old) {
+            break;
         }
         if Instant::now() >= deadline {
             watch.miss(format!(
-                "the Claude Code process still runs at --effort {old} {} s after the turn that changed it (running: {running:?})",
-                CHECK_TIMEOUT.as_secs()
+                "the Claude Code process still runs at --effort {old} {} s after the turn that changed it (running: {:?})",
+                CHECK_TIMEOUT.as_secs(),
+                efforts_running()
             ));
-            return;
+            return Ok(());
         }
         signal.wait(Duration::from_millis(500));
     }
+    let mut running = efforts_running();
+    if running.is_empty() {
+        println!("     no Claude Code process runs after the restart; the next send must open one at --effort {new}");
+        turn(studio, signal, watch, thread, "Reply with only the word ready.", "effort check turn")?;
+        running = efforts_running();
+    }
+    if running.iter().any(|effort| effort == new) && !running.iter().any(|effort| effort == old) {
+        println!("ok   the Claude Code process runs at the new --effort {new} (running: {running:?})");
+    } else {
+        watch.miss(format!(
+            "after the effort change to {new} no Claude Code process runs at --effort {new} (running: {running:?})"
+        ));
+    }
+    Ok(())
 }
 
 fn git(work: &Path, args: &[&str]) -> anyhow::Result<()> {
@@ -640,7 +659,7 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         let status = watch.row().map(|row| row.status);
         println!("ok   aborted turn left Working in {} ms (row {status:?})", aborted.elapsed().as_millis());
         if target.harness == Harness::ClaudeCode {
-            effort_restarts(&studio, &signal, watch, old);
+            effort_restarts(&studio, &signal, watch, &thread, (old, new))?;
         }
         Ok(thread)
     })();
