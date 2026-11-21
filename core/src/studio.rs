@@ -811,6 +811,7 @@ struct Thread {
     pending_run: bool,
     pending_at: Option<i64>,
     stopping: Option<Instant>,
+    retired: Option<u64>,
     reopen: bool,
     ended_by_events: bool,
     allowed_effects: Vec<String>,

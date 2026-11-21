@@ -68,7 +68,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 
 - `LOCAL_STUDIO_CLAUDE_BIN` and `LOCAL_STUDIO_CODEX_BIN` override the programs; otherwise `claude` and `codex` come from `PATH`.
 - Every child loses `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`.
-- Error frames, failed results and Codex `error` notifications are matched against sign-in, billing and quota words (`/login`, `not logged in`, `authentication_error`, `refresh token`, `unauthorized`, `credit balance`, `billing`, `usage limit`, `quota` and similar). A match ends the turn with that error, kills the process, raises a failed notification and sends nothing more until Donovan sends again. Raw stderr is never matched (an MCP server logging an expired OAuth login is not an account problem); it only feeds the exit message.
+- Error frames, failed results and Codex `error` notifications are matched against sign-in, billing and quota words (`/login`, `not logged in`, `authentication_error`, `refresh token`, `unauthorized`, `credit balance`, `billing`, `usage limit`, `quota` and similar). A match ends the turn with that error, kills the process, raises a failed notification and sends nothing more until Donovan sends again. The notice and notification show even when a thinking level change restarted the process as that turn ended: Studio remembers the generation it retired and still takes that process's stop. Raw stderr is never matched (an MCP server logging an expired OAuth login is not an account problem); it only feeds the exit message.
 
 ### Claude Code 2.1.328 frames
 
@@ -123,7 +123,7 @@ Notifications we read: `turn/started`, `turn/completed`, `serverRequest/resolved
 
 Items map to the Eukhe shapes: `userMessage` to a user message, `agentMessage` to assistant text, `reasoning` to thinking, `commandExecution` to a `bash` tool call with `command`, `fileChange` to an `edit` tool call with the diff, `mcpToolCall` to `server.tool`, `dynamicToolCall` to its tool name, `webSearch` to `web_search`.
 
-`turn/started` and `turn/completed` own the running turn; the `turn/start` response sets it only when that turn has not already completed. A message sent with Queue while a turn runs is held by the driver and sent with `turn/start` after `turn/completed`, one per completed turn; Steer uses `turn/steer`. Stop drops held messages and shows each one in the transcript. `turn/completed` and `serverRequest/resolved` settle pending approvals, so a card never outlives its turn.
+`turn/started` and `turn/completed` own the running turn; the `turn/start` response sets it only when that turn has not already completed. A message sent with Queue while a turn runs, or while a held message's `turn/start` is still pending, is held by the driver and sent with `turn/start` after `turn/completed`, one per completed turn; Steer uses `turn/steer`, and is held the same way while no turn id is known yet. If Codex refuses to start a held message, the transcript says so with its text and the next held message starts. A failed turn with a sign-in or quota word stops before the next held message is sent. Stop, an account stop and a Codex exit drop held messages and show each one in the transcript. `turn/completed` and `serverRequest/resolved` settle pending approvals, so a card never outlives its turn.
 
 Server requests we answer: `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept`, `acceptForSession` or `decline`; the legacy `execCommandApproval` and `applyPatchApproval` with `approved`, `approved_for_session` or `denied`. Every other server request (`item/permissions/requestApproval`, `tool/requestUserInput`, `mcpServer/elicitation` and so on) gets a JSON-RPC error.
 
@@ -146,7 +146,7 @@ Each turn's spend is appended to `<data dir>/harness/usage.jsonl` (`at`, `provid
 | Steer a running turn | Same as queue: the CLI holds a mid-turn message and runs it as the next turn | `turn/steer` |
 | Send now / remove a queued message | No queue is visible; messages go straight to the CLI | No queue is visible; the driver holds queued messages until the turn ends |
 | Images in a prompt | Yes | Error: not supported yet |
-| Change thinking level mid-thread | Applies from the next process start; an idle process is restarted at once, a running one is restarted when its turn ends | Next turn |
+| Change thinking level mid-thread | Applies from the next process start; an idle process is restarted at once, a running one is restarted when its turn ends and every message written to it has ended its own turn (a message sent during the turn runs on the old process first) | Next turn |
 | Compact | Sends `/compact` as a message | `thread/compact/start` |
 | Rename | Local Studio title only | `thread/name/set` too |
 | Delete | Forgets the thread; the CLI session file stays | Same |
