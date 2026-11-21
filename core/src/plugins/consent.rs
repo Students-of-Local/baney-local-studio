@@ -72,20 +72,11 @@ pub fn offer_install(root: &Path, arg: &str, request: String) -> Result<Offer, S
     let source = Source::parse(arg)?;
     let catalog = Catalog::bundled()?;
     let staged = stage(root, &source, &catalog).map_err(|errors| errors.join("; "))?;
-    let grants = Grants::load(root)?;
     let plugin = staged.plugin();
-    let mut trial = grants.clone();
-    trial.installed(plugin, staged.tree(), staged.origin());
-    let carried = trial.granted(&plugin.id).is_some_and(|(_, _, granted)| !granted.is_empty());
     let old = load(&root.join(&plugin.id)).ok();
-    let asked: Vec<Capability> = plugin
-        .capabilities
-        .iter()
-        .copied()
-        .filter(|capability| !carried || old.as_ref().is_none_or(|old| !old.asks(*capability)))
-        .collect();
+    let asked = asked(plugin, staged.tree(), staged.origin(), &Grants::load(root)?, old.as_ref());
     if asked.is_empty() {
-        let installed = staged.commit(root).map_err(|errors| errors.join("; "))?;
+        let installed = staged.commit_with(root, Some((&[], &[]))).map_err(|errors| errors.join("; "))?;
         let message = summary(&installed.plugin, &installed.consent, true, 0);
         return Ok(Offer::Installed(
             installed.note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")),
@@ -132,8 +123,7 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
             _ => return Err(format!("{name} is not a sensitive permission this sheet asked for")),
         }
     }
-    let install = matches!(pending.kind, Kind::Install(_));
-    let (plugin, note) = match pending.kind {
+    match pending.kind {
         Kind::Install(staged) => {
             if scanned(staged.plugin())?.1 != pending.request.findings {
                 return Err(format!(
@@ -141,23 +131,37 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
                     staged.plugin().id
                 ));
             }
-            let installed = staged.commit(root).map_err(|errors| errors.join("; "))?;
-            (installed.plugin, installed.note)
+            let installed =
+                staged.commit_with(root, Some((&pending.asked, &chosen))).map_err(|errors| errors.join("; "))?;
+            let message = summary(&installed.plugin, &installed.consent, true, chosen.len());
+            Ok(installed.note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")))
         }
         Kind::Grant { plugin, tree } => {
-            if live_hash(&plugin.dir)? != tree {
-                return Err(format!("{} changed after the sheet opened, so nothing was granted", plugin.id));
-            }
-            (plugin, None)
+            let _grants = super::grants::lock();
+            let mut grants = Grants::load(root)?;
+            grants.grant(&plugin, &chosen, Some(&tree))?;
+            grants.save(root)?;
+            Ok(summary(&plugin, &grants.consent(&plugin), false, chosen.len()))
         }
-    };
-    let mut grants = Grants::load(root)?;
-    if !chosen.is_empty() {
-        grants.grant(&plugin, &chosen)?;
-        grants.save(root)?;
     }
-    let message = summary(&plugin, &grants.consent(&plugin), install, chosen.len());
-    Ok(note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")))
+}
+
+pub(super) fn asked(
+    plugin: &Plugin,
+    tree: &str,
+    origin: &str,
+    grants: &Grants,
+    old: Option<&Plugin>,
+) -> Vec<Capability> {
+    let mut trial = grants.clone();
+    trial.installed(plugin, tree, origin);
+    let carried = trial.granted(&plugin.id).is_some_and(|(_, _, granted)| !granted.is_empty());
+    plugin
+        .capabilities
+        .iter()
+        .copied()
+        .filter(|capability| !carried || old.is_none_or(|old| !old.asks(*capability)))
+        .collect()
 }
 
 fn summary(plugin: &Plugin, consent: &Consent, install: bool, granted: usize) -> String {

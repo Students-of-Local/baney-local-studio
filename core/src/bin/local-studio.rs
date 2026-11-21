@@ -259,7 +259,7 @@ fn grant(id: &str, names: &[&str]) -> Result<(), String> {
     let plugin = installed(&root, id)?;
     let capabilities = capabilities(names)?;
     let mut grants = Grants::load(&root)?;
-    grants.grant(&plugin, &capabilities)?;
+    grants.grant(&plugin, &capabilities, None)?;
     grants.save(&root)?;
     println!("{} {}: {}", plugin.id, plugin.version, consent_line(&plugin, &grants));
     sync(&root)

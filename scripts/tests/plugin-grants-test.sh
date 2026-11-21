@@ -668,6 +668,41 @@ if [ -x "$DRIVER" ]; then
   else
     fail "first-F3 the answer's sync runs in Studio's scan: mcpServers has the plugin and the scan offers the dropped-in plugin"
   fi
+  echo "== second-G2: two grant sheets answered at once"
+  fresh g2
+  for id in biga bigb; do
+    manifest "$D/plugins/$id"
+    script "$D/plugins/$id/bin/server" "$id"
+    head -c 9000000 /dev/zero > "$D/plugins/$id/data.bin"
+  done
+  out=$(drive scan consent:biga@1.0.0=install consent:bigb@1.0.0=install)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  grants: biga '$(granted biga)', bigb '$(granted bigb)'"
+  if echo "$out" | grep -q '^DONE consent:biga@1.0.0: ' && echo "$out" | grep -q '^DONE consent:bigb@1.0.0: ' \
+    && [ "$(granted biga)" = mcp-server ] && [ "$(granted bigb)" = mcp-server ]; then
+    pass "second-G2 two answers at once both keep their grant"
+  else
+    fail "second-G2 two answers at once both keep their grant"
+  fi
+
+  echo "== second-G3: the grant an update would carry is revoked while its sheet is open"
+  fresh g3
+  sheeted 1.0.0 '"mcp-server", "screen-capture"'
+  drive "$S/src/sheet" install:screen-capture > /dev/null
+  echo "  1.0.0 installed, grants $(granted sheet)"
+  sheeted 2.0.0 '"mcp-server", "screen-capture", "synthetic-input"'
+  out=$(CONSENT_DRIVER_HOOK="HOME=$S/h LOCAL_STUDIO_DATA_DIR=$D EUKHE_CODING_AGENT_DIR=$A $BIN plugin revoke sheet" drive "$S/src/sheet" install:synthetic-input)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
+  echo "  installed $version, grants '$(granted sheet)'"
+  if echo "$out" | grep -q '^SHEET Sheet 2.0.0 from=1.0.0 .* rows=synthetic-input:sensitive$' \
+    && echo "$out" | grep -q '^FAILED the permissions sheet needs changed after they were checked' \
+    && [ "$version" = 1.0.0 ] && [ -z "$(granted sheet)" ]; then
+    pass "second-G3 a sheet whose rows went stale is refused and installs nothing"
+  else
+    fail "second-G3 a sheet whose rows went stale is refused and installs nothing"
+  fi
+
   echo "== sol-F1: the staged copy changes while the install sheet is open"
   for change in edit add; do
     fresh "f1$change"

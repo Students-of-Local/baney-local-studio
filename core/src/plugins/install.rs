@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::{inside, load, valid_id, Consent, Grants, Plugin, MANIFEST};
+use super::{inside, load, valid_id, Capability, Consent, Grants, Plugin, MANIFEST};
 
 pub const MAX_FILE: u64 = 10 * 1024 * 1024;
 const BUNDLED_CATALOG: &str = include_str!("../../../examples/plugins/catalog.toml");
@@ -259,11 +259,29 @@ impl Staged {
     }
 
     pub fn commit(self, root: &Path) -> Result<Installed, Vec<String>> {
+        self.commit_with(root, None)
+    }
+
+    pub(crate) fn commit_with(
+        self,
+        root: &Path,
+        sheet: Option<(&[Capability], &[Capability])>,
+    ) -> Result<Installed, Vec<String>> {
+        let _grants = super::grants::lock();
         let id = &self.plugin.id;
         let staged = self.staging.0.join(id);
         self.verify(&staged)?;
         let target = root.join(id);
-        let replaced = load(&target).ok().map(|old| old.version);
+        let previous = load(&target).ok();
+        let mut grants = Grants::load(root).map_err(|error| vec![error])?;
+        if let Some((asked, _)) = sheet {
+            if super::consent::asked(&self.plugin, &self.tree, &self.origin, &grants, previous.as_ref()) != asked {
+                return Err(vec![format!(
+                    "the permissions {id} needs changed after they were checked, so nothing was installed or granted; install it again to see them"
+                )]);
+            }
+        }
+        let replaced = previous.map(|old| old.version);
         let old = self.staging.0.join(".old");
         let moved = target.exists();
         if moved {
@@ -276,10 +294,21 @@ impl Staged {
             }
             return Err(vec![format!("cannot install {}: {error}", target.display())]);
         }
-        let plugin = load(&target)?;
-        let mut grants = Grants::load(root).map_err(|error| vec![error])?;
-        let note = grants.installed(&plugin, &self.tree, &self.origin);
-        grants.save(root).map_err(|error| vec![error])?;
+        let recorded = (|| -> Result<(Plugin, Option<String>), Vec<String>> {
+            let plugin = load(&target)?;
+            let note = grants.installed(&plugin, &self.tree, &self.origin);
+            if let Some((_, chosen)) = sheet.filter(|(_, chosen)| !chosen.is_empty()) {
+                grants.grant(&plugin, chosen, Some(&self.tree)).map_err(|error| vec![error])?;
+            }
+            grants.save(root).map_err(|error| vec![error])?;
+            Ok((plugin, note))
+        })();
+        let (plugin, note) = recorded.inspect_err(|_| {
+            let _ = std::fs::rename(&target, &staged);
+            if moved {
+                let _ = std::fs::rename(&old, &target);
+            }
+        })?;
         let consent = grants.consent(&plugin);
         Ok(Installed { plugin, replaced, consent, files: self.files, tree: self.tree, source: self.origin, note })
     }

@@ -9,6 +9,12 @@ use super::{Capability, Plugin};
 
 pub const GRANTS: &str = "grants.json";
 
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grants {
@@ -125,11 +131,19 @@ impl Grants {
         note
     }
 
-    pub fn grant(&mut self, plugin: &Plugin, capabilities: &[Capability]) -> Result<(), String> {
+    pub fn grant(
+        &mut self,
+        plugin: &Plugin,
+        capabilities: &[Capability],
+        reviewed: Option<&str>,
+    ) -> Result<(), String> {
         if let Some(extra) = capabilities.iter().find(|capability| !plugin.asks(**capability)) {
             return Err(format!("{} {} does not ask for {}", plugin.id, plugin.version, extra.name()));
         }
         let tree = live_hash(&plugin.dir)?;
+        if reviewed.is_some_and(|reviewed| reviewed != tree) {
+            return Err(format!("{} changed after the sheet opened, so nothing was granted", plugin.id));
+        }
         let record = self.plugins.get(&plugin.id);
         let current = record.filter(|grant| grant.tree == tree);
         // A slice 2 record has no tree: keep its source (empty, unknown origin) rather than invent one.
