@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use local_studio_core::plugins::{self, Capability, Catalog, Consent, Grants, Plugin, Source};
 use local_studio_core::tunnel::{self, Ports, Status, Tunnel};
 
-const USAGE: &str = "usage: local-studio plugin validate <dir>
+const USAGE: &str = "usage: local-studio --version
+       local-studio plugin validate <dir>
        local-studio plugin list
        local-studio plugin install <dir | catalog id | git url@full sha>
        local-studio plugin grant <id> <capability...>
@@ -20,6 +21,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match args.as_slice() {
+        ["--version"] => {
+            println!("local-studio {} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL);
+            Ok(())
+        }
         ["plugin", "validate", dir] => validate(Path::new(dir)),
         ["plugin", "list"] => list(),
         ["plugin", "install", source] => install(source),

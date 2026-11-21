@@ -73,7 +73,7 @@ use gtk::{gio, glib};
 use crate::app::App;
 
 const USAGE: &str =
-    "usage: local-studio [--smoke | --smoke-kernel [install|installed] | --smoke-providers | --snapshot <dir> [name-filter]]";
+    "usage: local-studio [--version | --smoke | --smoke-kernel [install|installed] | --smoke-providers | --snapshot <dir> [name-filter]]";
 
 #[derive(Clone)]
 enum Mode {
@@ -104,6 +104,10 @@ fn parse() -> Result<Mode, String> {
 }
 
 fn main() -> glib::ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("local-studio {} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL);
+        return glib::ExitCode::SUCCESS;
+    }
     let mode = match parse() {
         Ok(mode) => mode,
         Err(message) => {

@@ -1,0 +1,7 @@
+on:
+  workflow_call:
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - run: nu scripts/version.nu "$CHANNEL" --stamp --at "$AT" --commit "$COMMIT"

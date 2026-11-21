@@ -300,7 +300,7 @@ fn start(
 async fn initialize(rpc: &Rpc) -> Result<(), String> {
     rpc.call(
         "initialize",
-        json!({ "clientInfo": { "name": "local-studio", "title": "Local Studio", "version": env!("CARGO_PKG_VERSION") } }),
+        json!({ "clientInfo": { "name": "local-studio", "title": "Local Studio", "version": crate::VERSION } }),
     )
     .await?;
     rpc.notify("initialized", &json!({}));

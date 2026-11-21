@@ -42,6 +42,12 @@ impl SettingsDialog {
         let state = app.state.borrow();
         let general = general_page(&weak, &state);
         let diagnostics = group(&general, "Diagnostics");
+        let version = adw::ActionRow::builder()
+            .title("Version")
+            .subtitle(format!("{} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL))
+            .subtitle_selectable(true)
+            .build();
+        diagnostics.add(&version);
         let kernel_button =
             gtk::Button::builder().action_name("win.install-kernel").valign(gtk::Align::Center).visible(false).build();
         let kernel = adw::ActionRow::builder().title("Python kernel").subtitle_selectable(true).build();
