@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -11,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, user,
-    Agent, Event, Image, Launch, Sink, Spend, CODEX_PROVIDER,
+    Agent, Event, Failure, Image, Launch, Sink, Spend, CODEX_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -29,19 +30,23 @@ struct Rpc {
 }
 
 impl Rpc {
-    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+    fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> + Send + 'static {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (reply, answer) = oneshot::channel();
         self.replies.lock().unwrap_or_else(PoisonError::into_inner).insert(id, reply);
-        self.lines
-            .send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string())
-            .map_err(|_| "Codex has stopped.".to_string())?;
-        match tokio::time::timeout(CALL_TIMEOUT, answer).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("Codex stopped before it answered.".to_string()),
-            Err(_) => {
-                self.replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
-                Err(format!("Codex did not answer {method} within {} s.", CALL_TIMEOUT.as_secs()))
+        let mut frame = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        frame["params"] = params;
+        let sent = self.lines.send(frame.to_string()).map_err(|_| "Codex has stopped.".to_string());
+        let (replies, method) = (Arc::clone(&self.replies), method.to_string());
+        async move {
+            sent?;
+            match tokio::time::timeout(CALL_TIMEOUT, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("Codex stopped before it answered.".to_string()),
+                Err(_) => {
+                    replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+                    Err(format!("Codex did not answer {method} within {} s.", CALL_TIMEOUT.as_secs()))
+                }
             }
         }
     }
@@ -81,6 +86,8 @@ struct Turns {
     launching: Option<Value>,
     finished: VecDeque<String>,
     held: VecDeque<Value>,
+    thread: String,
+    stop: bool,
 }
 
 impl Turns {
@@ -88,12 +95,14 @@ impl Turns {
         self.running.is_some() || self.starting
     }
 
-    fn started(&mut self, id: &str) {
-        if !self.finished.iter().any(|done| done == id) {
-            self.running = Some(id.to_string());
-            self.starting = false;
-            self.launching = None;
+    fn started(&mut self, id: &str) -> Option<Value> {
+        if self.finished.iter().any(|done| done == id) {
+            return None;
         }
+        self.running = Some(id.to_string());
+        self.starting = false;
+        self.launching = None;
+        std::mem::take(&mut self.stop).then(|| json!({ "threadId": self.thread, "turnId": id }))
     }
 
     fn completed(&mut self, id: Option<&str>) -> bool {
@@ -108,6 +117,7 @@ impl Turns {
         }
         self.running = None;
         self.starting = false;
+        self.stop = false;
         true
     }
 
@@ -120,6 +130,7 @@ impl Turns {
     fn forget(&mut self) -> VecDeque<Value> {
         self.running = None;
         self.starting = false;
+        self.stop = false;
         let mut dropped = std::mem::take(&mut self.held);
         if let Some(launching) = self.launching.take() {
             dropped.push_front(launching);
@@ -137,13 +148,25 @@ fn request_key(id: &Value) -> String {
     }
 }
 
+fn interrupt_turn(rpc: &Rpc, sink: Sink, params: Option<Value>) {
+    let Some(params) = params else { return };
+    let reply = rpc.call("turn/interrupt", params);
+    tokio::spawn(async move {
+        if let Err(error) = reply.await {
+            sink.send(Event::Failed(Failure::Interrupt, error));
+        }
+    });
+}
+
 fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
+    let mut reply = rpc.call("turn/start", params.clone());
     tokio::spawn(async move {
         loop {
-            match rpc.call("turn/start", params.clone()).await {
+            match reply.await {
                 Ok(started) => {
                     if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-                        turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                        let stop = turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                        interrupt_turn(&rpc, sink, stop);
                     }
                     return;
                 }
@@ -163,6 +186,7 @@ fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
                         sink.send(Event::Idle);
                         return;
                     };
+                    reply = rpc.call("turn/start", next.clone());
                     params = next;
                 }
             }
@@ -394,6 +418,19 @@ pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
         .collect())
 }
 
+pub(crate) async fn read(cwd: &str, thread: &str) -> Result<Vec<AgentMessage>, String> {
+    let mut process = start(cwd, None, Arc::default(), Arc::default())?;
+    let read = async {
+        initialize(&process.rpc).await?;
+        process.rpc.call("thread/read", json!({ "threadId": thread, "includeTurns": true })).await
+    }
+    .await;
+    if let Some(kill) = process.kill.take() {
+        kill.send(()).ok();
+    }
+    Ok(history(read?.get("thread").unwrap_or(&Value::Null)))
+}
+
 impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
         let approvals = Arc::new(Mutex::new(HashMap::new()));
@@ -435,6 +472,7 @@ impl Codex {
                 return Err(error);
             }
         };
+        turns.lock().unwrap_or_else(PoisonError::into_inner).thread.clone_from(&thread);
         let codex = Self {
             rpc: process.rpc.clone(),
             sink,
@@ -450,7 +488,13 @@ impl Codex {
         Ok((codex, thread, history))
     }
 
-    pub(crate) async fn send(&mut self, text: &str, images: &[Image], steer: bool) -> Result<(), String> {
+    pub(crate) fn send(
+        &mut self,
+        text: &str,
+        images: &[Image],
+        steer: bool,
+        request: Option<String>,
+    ) -> Result<(), String> {
         if !images.is_empty() {
             return Err("Codex threads in Local Studio do not take images yet.".to_string());
         }
@@ -465,23 +509,55 @@ impl Codex {
             turns.starting = turns.running.is_none();
             turns.running.clone()
         };
+        let (rpc, sink, turns) = (self.rpc.clone(), self.sink.clone(), Arc::clone(&self.turns));
         if let Some(turn) = running {
-            self.rpc
-                .call("turn/steer", json!({ "threadId": self.thread, "expectedTurnId": turn, "input": input }))
-                .await?;
+            let steer = json!({ "threadId": self.thread, "expectedTurnId": turn, "input": input });
+            let reply = rpc.call("turn/steer", steer);
+            tokio::spawn(async move {
+                if let Err(error) = reply.await {
+                    sink.send(Event::Failed(Failure::Send(request), error));
+                }
+            });
             return Ok(());
         }
-        let started = match self.rpc.call("turn/start", params).await {
-            Ok(started) => started,
-            Err(error) => {
-                self.turns.lock().unwrap_or_else(PoisonError::into_inner).starting = false;
-                return Err(error);
+        let reply = rpc.call("turn/start", params);
+        tokio::spawn(async move {
+            match reply.await {
+                Ok(started) => {
+                    if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
+                        let stop = turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                        interrupt_turn(&rpc, sink, stop);
+                    }
+                }
+                Err(error) => {
+                    let next = {
+                        let mut turns = turns.lock().unwrap_or_else(PoisonError::into_inner);
+                        turns.starting = false;
+                        turns.stop = false;
+                        if turns.running.is_none() {
+                            turns.next()
+                        } else {
+                            None
+                        }
+                    };
+                    sink.send(Event::Failed(Failure::Send(request), error));
+                    match next {
+                        Some(next) => start_turn(rpc, sink, turns, next),
+                        None => sink.send(Event::Idle),
+                    }
+                }
             }
-        };
-        if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-            self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
-        }
+        });
         Ok(())
+    }
+
+    fn call(&self, method: &'static str, params: Value, failure: Failure) {
+        let (reply, sink) = (self.rpc.call(method, params), self.sink.clone());
+        tokio::spawn(async move {
+            if let Err(error) = reply.await {
+                sink.send(Event::Failed(failure, error));
+            }
+        });
     }
 
     fn turn_params(&self, input: &Value) -> Value {
@@ -502,14 +578,20 @@ impl Codex {
         params
     }
 
-    pub(crate) async fn interrupt(&mut self) -> Result<(), String> {
-        let (turn, dropped) = {
+    pub(crate) fn interrupt(&mut self) -> Result<(), String> {
+        let (turn, dropped, deferred) = {
             let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
-            (turns.running.clone(), std::mem::take(&mut turns.held))
+            let deferred = turns.running.is_none() && turns.starting && turns.launching.is_none();
+            turns.stop = deferred;
+            (turns.running.clone(), std::mem::take(&mut turns.held), deferred)
         };
         report_dropped(&self.sink, dropped, "Stop dropped");
+        if deferred {
+            return Ok(());
+        }
         let turn = turn.ok_or_else(|| "Codex has no turn running.".to_string())?;
-        self.rpc.call("turn/interrupt", json!({ "threadId": self.thread, "turnId": turn })).await.map(|_| ())
+        self.call("turn/interrupt", json!({ "threadId": self.thread, "turnId": turn }), Failure::Interrupt);
+        Ok(())
     }
 
     pub(crate) fn answer(&mut self, request: &str, answer: ApprovalAnswer) -> Result<(), String> {
@@ -542,12 +624,12 @@ impl Codex {
         self.effort = Some(effort.to_string());
     }
 
-    pub(crate) async fn rename(&mut self, title: &str) -> Result<(), String> {
-        self.rpc.call("thread/name/set", json!({ "threadId": self.thread, "name": title })).await.map(|_| ())
+    pub(crate) fn rename(&mut self, title: &str) {
+        self.call("thread/name/set", json!({ "threadId": self.thread, "name": title }), Failure::Rename);
     }
 
-    pub(crate) async fn compact(&mut self) -> Result<(), String> {
-        self.rpc.call("thread/compact/start", json!({ "threadId": self.thread })).await.map(|_| ())
+    pub(crate) fn compact(&mut self) {
+        self.call("thread/compact/start", json!({ "threadId": self.thread }), Failure::Compact);
     }
 
     pub(crate) fn kill(&mut self) {
@@ -660,7 +742,8 @@ impl Translator {
         match method {
             "turn/started" => {
                 if let Some(id) = params.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-                    self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                    let stop = self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                    interrupt_turn(&self.rpc, self.sink.clone(), stop);
                 }
                 self.begin();
             }

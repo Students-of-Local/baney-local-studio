@@ -1,4 +1,5 @@
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -8,6 +9,9 @@ use serde_json::{json, Value};
 
 const SLOW: Duration = Duration::from_millis(1500);
 const LAG: Duration = Duration::from_millis(1500);
+const STALL: Duration = Duration::from_secs(5);
+const RESUME_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_RESUME_MS";
+const START_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_START_MS";
 const STOP_WORDS: &str = "You've hit your usage limit.";
 const SKILL_READ: &str = "cat ~/.codex/skills/writing/SKILL.md";
 
@@ -16,8 +20,10 @@ struct Shared {
     out: Mutex<()>,
     busy: Mutex<bool>,
     interrupted: AtomicBool,
+    compacted: AtomicBool,
     turns: AtomicU64,
     answers: Mutex<Vec<(Value, Sender<String>)>>,
+    thread: Mutex<String>,
 }
 
 impl Shared {
@@ -72,6 +78,36 @@ impl Shared {
         *self.busy.lock().unwrap_or_else(PoisonError::into_inner) = false;
     }
 
+    fn store(thread: &str) -> Option<PathBuf> {
+        let root = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
+        Some(root.join("fake-threads").join(format!("{thread}.jsonl")))
+    }
+
+    fn remember(&self, turn: &Value) {
+        let thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let Some(file) = Self::store(&thread) else { return };
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+            writeln!(out, "{turn}").ok();
+        }
+    }
+
+    fn thread(&self, id: &Value) -> Value {
+        let id = id.as_str().unwrap_or_default();
+        *self.thread.lock().unwrap_or_else(PoisonError::into_inner) = id.to_string();
+        let turns: Vec<Value> = Self::store(id)
+            .and_then(|file| std::fs::read_to_string(file).ok())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        json!({ "thread": { "id": id, "turns": turns } })
+    }
+
     fn completed(&self, turn: &str, status: &str, error: Option<&str>) {
         self.idle();
         let error = error.map_or(Value::Null, |message| json!({ "message": message }));
@@ -94,6 +130,9 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
     let turn = format!("turn-{number}");
     if text.contains("lag") {
         std::thread::sleep(LAG);
+    }
+    if text.contains("stall") {
+        std::thread::sleep(STALL);
     }
     shared.respond(id, &json!({ "turn": { "id": turn } }));
     shared.notify("turn/started", &json!({ "turn": { "id": turn } }));
@@ -134,8 +173,15 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
     }
     let agent = format!("agent-{number}");
     shared.notify("item/started", &json!({ "item": { "id": agent, "type": "agentMessage" } }));
-    shared.notify("item/completed", &json!({ "item": { "id": agent, "type": "agentMessage", "text": reply } }));
+    let reply = json!({ "id": agent, "type": "agentMessage", "text": reply });
+    shared.notify("item/completed", &json!({ "item": reply }));
+    shared.remember(&json!({ "id": turn, "items": [user, reply] }));
     shared.completed(&turn, "completed", None);
+}
+
+fn pause(variable: &str) {
+    let delay = std::env::var(variable).ok().and_then(|ms| ms.parse().ok()).unwrap_or(0);
+    std::thread::sleep(Duration::from_millis(delay));
 }
 
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
@@ -149,11 +195,24 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
             }] }),
         ),
         "thread/start" => {
-            shared.respond(id, &json!({ "thread": { "id": format!("fake-thread-{}", std::process::id()) } }));
+            pause(START_DELAY);
+            let thread = format!("fake-thread-{}", std::process::id());
+            shared.respond(id, &shared.thread(&json!(thread)));
         }
-        "thread/resume" => shared.respond(id, &json!({ "thread": { "id": params["threadId"], "turns": [] } })),
+        "thread/resume" => {
+            pause(RESUME_DELAY);
+            shared.respond(id, &shared.thread(&params["threadId"]));
+        }
+        "thread/read" => shared.respond(id, &shared.thread(&params["threadId"])),
+        "thread/compact/start" => {
+            shared.compacted.store(true, Ordering::Relaxed);
+            shared.respond(id, &json!({}));
+        }
         "turn/start" => {
-            let text = input_text(params);
+            let mut text = input_text(params);
+            if shared.compacted.swap(false, Ordering::Relaxed) {
+                text.push_str(" after compact");
+            }
             if text.contains("crash") {
                 std::process::exit(1);
             }

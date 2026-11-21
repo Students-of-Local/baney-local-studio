@@ -551,6 +551,8 @@ impl Studio {
             data_dir,
             cli,
             drivers: HashMap::new(),
+            opening: HashMap::new(),
+            loading: HashMap::new(),
             generation: 0,
             codex_models: Vec::new(),
             plugin_consent: Vec::new(),
@@ -906,6 +908,8 @@ struct Actor {
     data_dir: PathBuf,
     cli: mpsc::UnboundedSender<Envelope>,
     drivers: HashMap<String, cli::Cli>,
+    opening: HashMap<String, cli::Opening>,
+    loading: HashMap<String, u64>,
     generation: u64,
     codex_models: Vec<ModelOption>,
     plugin_consent: Vec<String>,
@@ -1242,7 +1246,7 @@ impl Actor {
                 self.start_threads(&draft, project, prompt, settings, models).await;
             }
             Command::Send { request, thread, prompt, delivery } => {
-                if let Err(message) = self.send_prompt(&thread, prompt, delivery).await {
+                if let Err(message) = self.send_prompt(&thread, prompt, delivery, Some(request.clone())).await {
                     self.mailbox.push(Update::RequestFailed { request, message });
                 }
             }
@@ -1283,7 +1287,7 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
-            Command::Compact { thread } if self.harness(&thread).is_some() => self.cli_compact(&thread).await,
+            Command::Compact { thread } if self.harness(&thread).is_some() => self.cli_compact(&thread),
             Command::Compact { thread } => match self.ensure_open(&thread).await {
                 Ok(active) => {
                     let command = DaemonCommand::Compact {
@@ -1712,7 +1716,7 @@ impl Actor {
 
     async fn ensure_open(&mut self, id: &str) -> Result<String, String> {
         if self.harness(id).is_some() {
-            return self.cli_open(id).await;
+            return Ok(self.cli_view(id));
         }
         if let Some(active) = self.live_active(id) {
             return Ok(active);
@@ -1913,7 +1917,7 @@ impl Actor {
     ) {
         match self.create_thread(draft, project, settings, fan_out, &prompt.text).await {
             Ok(id) => {
-                if let Err(error) = self.send_prompt(&id, prompt, Delivery::Queue).await {
+                if let Err(error) = self.send_prompt(&id, prompt, Delivery::Queue, None).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
@@ -1968,9 +1972,17 @@ impl Actor {
         if harness != Harness::Eukhe {
             let model = if settings.provider.is_some() { settings.model } else { effective.default_model };
             let thinking = settings.thinking_level.or(effective.default_thinking_level);
-            return self
-                .cli_create(draft, harness, cwd, project_path, settings.access, model, thinking, fan_out, prompt)
-                .await;
+            return self.cli_create(
+                draft,
+                harness,
+                cwd,
+                project_path,
+                settings.access,
+                model,
+                thinking,
+                fan_out,
+                prompt,
+            );
         }
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let created = saved_sessions::create_resident(&client, None, self.create_config(&cwd))
@@ -2044,7 +2056,13 @@ impl Actor {
         }
     }
 
-    async fn send_prompt(&mut self, id: &str, prompt: PromptDraft, delivery: Delivery) -> Result<(), String> {
+    async fn send_prompt(
+        &mut self,
+        id: &str,
+        prompt: PromptDraft,
+        delivery: Delivery,
+        request: Option<String>,
+    ) -> Result<(), String> {
         if !self.known(id) {
             return Err(format!("Unknown thread {id}."));
         }
@@ -2052,8 +2070,13 @@ impl Actor {
         if message.trim().is_empty() && prompt.images.is_empty() {
             return Err("Write a message first.".to_string());
         }
-        let active = self.ensure_open(id).await?;
         let cli = self.harness(id).is_some();
+        let active = if cli {
+            self.threads.entry(id.to_string()).or_default();
+            String::new()
+        } else {
+            self.ensure_open(id).await?
+        };
         let message = if !cli && (message.starts_with('/') || message.contains('$')) {
             self.resources(id, &active).await.expand(&message)
         } else {
@@ -2101,7 +2124,7 @@ impl Actor {
         self.dirty = true;
         let result = if cli {
             let steer = matches!(delivery, Delivery::Steer);
-            self.cli_send(id, &message, Self::cli_images(&prompt), steer).await
+            self.cli_send(id, &message, Self::cli_images(&prompt), steer, request)
         } else {
             let command = DaemonCommand::Prompt {
                 id: None,
@@ -2334,7 +2357,7 @@ impl Actor {
             return;
         }
         if self.harness(id).is_some() {
-            self.cli_rename(id, &title).await;
+            self.cli_rename(id, &title);
             return;
         }
         let command = if let Some(active) = self.live_active(id) {
