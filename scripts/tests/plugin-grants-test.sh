@@ -606,11 +606,12 @@ else
   out=$(drive "$S/src/sheet" install:screen-capture)
   echo "$out" | grep -v '^ROW' | sed 's/^/  /'
   echo "  after Install with screen-capture on: grants $(granted sheet); plugin list: $(status sheet)"
-  if echo "$out" | grep -q '^DONE ' && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ] \
+  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 3 new permissions, but it is off: its tools stay off until every permission it asks for is on (local-studio plugin grant sheet site-secrets)$' \
+    && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ] \
     && [ "$(status sheet)" = "needs consent for site-secrets (local-studio plugin grant sheet site-secrets)" ]; then
-    pass "#14 Install grants exactly the needed capabilities plus the one switched on"
+    pass "#14 / second-G1 Install grants the needed capabilities plus the one switched on and says the plugin is installed but off"
   else
-    fail "#14 Install grants exactly the needed capabilities plus the one switched on"
+    fail "#14 / second-G1 Install grants the needed capabilities plus the one switched on and says the plugin is installed but off"
   fi
   sheeted 2.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets", "synthetic-input"'
   out=$(drive "$S/src/sheet" install:site-secrets)

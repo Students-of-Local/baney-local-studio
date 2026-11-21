@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::install::{live_hash, survey};
-use super::{load, stage, Capability, Catalog, Grants, Plugin, Source, Staged};
+use super::{load, stage, Capability, Catalog, Consent, Grants, Plugin, Source, Staged};
 use crate::model::{ConsentNeed, ConsentRequest, ConsentRow};
 
 pub enum Offer {
@@ -86,8 +86,7 @@ pub fn offer_install(root: &Path, arg: &str, request: String) -> Result<Offer, S
         .collect();
     if asked.is_empty() {
         let installed = staged.commit(root).map_err(|errors| errors.join("; "))?;
-        let plugin = &installed.plugin;
-        let message = format!("Installed {} {} with no new permissions", plugin.name, plugin.version);
+        let message = summary(&installed.plugin, &installed.consent, true, 0);
         return Ok(Offer::Installed(
             installed.note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")),
         ));
@@ -133,6 +132,7 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
             _ => return Err(format!("{name} is not a sensitive permission this sheet asked for")),
         }
     }
+    let install = matches!(pending.kind, Kind::Install(_));
     let (plugin, note) = match pending.kind {
         Kind::Install(staged) => {
             if scanned(staged.plugin())?.1 != pending.request.findings {
@@ -151,13 +151,34 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
             (plugin, None)
         }
     };
+    let mut grants = Grants::load(root)?;
     if !chosen.is_empty() {
-        let mut grants = Grants::load(root)?;
         grants.grant(&plugin, &chosen)?;
         grants.save(root)?;
     }
-    let message = format!("{} {} has {} new permissions", plugin.name, plugin.version, chosen.len());
+    let message = summary(&plugin, &grants.consent(&plugin), install, chosen.len());
     Ok(note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")))
+}
+
+fn summary(plugin: &Plugin, consent: &Consent, install: bool, granted: usize) -> String {
+    let count = if granted == 0 { "no new permissions".to_string() } else { format!("{granted} new permissions") };
+    let done = if install {
+        format!("Installed {} {} with {count}", plugin.name, plugin.version)
+    } else {
+        format!("{} {} has {count}", plugin.name, plugin.version)
+    };
+    match consent {
+        Consent::Ready => done,
+        Consent::NeedsConsent { missing } => {
+            let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+            format!(
+                "{done}, but it is off: its tools stay off until every permission it asks for is on (local-studio plugin grant {} {})",
+                plugin.id,
+                names.join(" ")
+            )
+        }
+        Consent::Refused { reason } => format!("{done}, but it is off: {reason}"),
+    }
 }
 
 fn scanned(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {

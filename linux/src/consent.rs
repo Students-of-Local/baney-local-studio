@@ -71,11 +71,14 @@ fn title(consent: &ConsentRequest) -> String {
 
 fn confirm(consent: &ConsentRequest, count: usize) -> String {
     let noun = if count == 1 { "permission" } else { "permissions" };
+    let off = count < consent.rows.len();
     if !consent.install {
-        return format!("Allow {count} {noun}");
+        return if off { format!("Allow {count} {noun}, tools off") } else { format!("Allow {count} {noun}") };
     }
     let verb = if consent.update_from.is_some() { "Update" } else { "Install" };
-    if count == 0 {
+    if off {
+        format!("{verb} with tools off")
+    } else if count == 0 {
         format!("{verb} with no new permissions")
     } else {
         format!("{verb} with {count} {noun}")
@@ -83,11 +86,16 @@ fn confirm(consent: &ConsentRequest, count: usize) -> String {
 }
 
 fn row_subtitle(row: &ConsentRow) -> String {
-    let text = format!("{}  <tt>{}</tt>", format::escape(&row.scope), format::escape(&row.id));
-    match (&row.gates, row.need) {
-        (Some(gates), ConsentNeed::Sensitive) => format!("{text}\nOff means no {}.", format::escape(gates)),
-        _ => text,
-    }
+    format!("{}  <tt>{}</tt>", format::escape(&row.scope), format::escape(&row.id))
+}
+
+fn stays_off(consent: &ConsentRequest) -> Option<String> {
+    consent.rows.iter().any(|row| row.need == ConsentNeed::Sensitive).then(|| {
+        format!(
+            "The plugin's tools stay off until every permission it asks for is on. To grant one later, run local-studio plugin grant {} <capability>.",
+            consent.plugin
+        )
+    })
 }
 
 fn header(consent: &ConsentRequest) -> gtk::Box {
@@ -181,10 +189,9 @@ fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
     column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let footer = gtk::Box::new(gtk::Orientation::Vertical, 12);
     footer.add_css_class("ls-consent-footer");
-    footer.append(&label(
-        "Sensitive permissions start off. Change any of them later in Settings, Plugins.",
-        "ls-consent-secondary",
-    ));
+    if let Some(text) = stays_off(consent) {
+        footer.append(&label(&text, "ls-consent-secondary"));
+    }
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
