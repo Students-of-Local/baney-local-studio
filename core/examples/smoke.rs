@@ -21,7 +21,7 @@ mod real_model;
 const STEP_TIMEOUT: Duration = Duration::from_secs(600);
 const MARK: &str = "smoke-ok";
 const RENAMED: &str = "Renamed smoke";
-const STEER: &str = "Also include the word steered in your final reply.";
+const STEER: &str = "Change of plan: after the command, reply with only the word steered instead of done.";
 
 fn bash_prompt(command: &str) -> String {
     format!("Use the bash tool to run exactly this command once: `{command}`. Then reply with only the word done.")
