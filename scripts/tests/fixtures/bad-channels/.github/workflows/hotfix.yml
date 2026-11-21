@@ -1,0 +1,7 @@
+on:
+  workflow_dispatch:
+jobs:
+  h:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git push -q origin stable

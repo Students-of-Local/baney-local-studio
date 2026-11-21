@@ -34,7 +34,7 @@ pub(crate) async fn load(
     period: UsagePeriod,
     now_ms: i64,
 ) -> Result<UsageReport, String> {
-    let cwd = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    let cwd = crate::platform::home().map_or_else(|| PathBuf::from(crate::platform::ROOT), PathBuf::from);
     let mut data = daemon
         .call(DaemonCommand::ListSavedSessions {
             id: None,

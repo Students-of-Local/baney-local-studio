@@ -14,12 +14,26 @@ for wf in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
   if awk '/^on:/{on=1;next} on&&/^[^ #]/{on=0} on&&/^  push:/{p=1;next} on&&/^  [a-z_]+:/{p=0} on&&p&&/^    tags:/{f=1} END{exit !f}' "$wf"; then
     err "$name starts on a pushed tag; stable builds start only from promote.yml"
   fi
+  if grep -qE ':(refs/heads/)?stable(["'"'"' ]|$)|git +push( [^#]*)? (refs/heads/)?stable(["'"'"' ]|$)' "$wf"; then
+    err "$name pushes to the stable branch; only scripts/release-stable.sh moves it"
+  fi
+  if grep -q 'uses: \./\.github/workflows/build\.yml' "$wf" && grep -qE '^ +channel: *stable *$' "$wf" &&
+    ! grep -qF 'git diff --quiet "$commit" "$GITHUB_SHA" -- .github/workflows/build.yml' "$wf"; then
+    err "$name builds stable with main's build.yml but does not refuse a commit whose build.yml differs"
+  fi
+  if [ -n "$(grep -E 'version\.nu .*--stamp' "$wf" | grep -v -- '--root' | grep -vE -- '--build-env.*(>>|tee -a) *"?\$GITHUB_ENV')" ]; then
+    err "$name stamps a build without exporting its version: pipe version.nu --stamp --build-env into \$GITHUB_ENV"
+  fi
   if awk '/^ +environment: *["'"'"']?stable["'"'"']? *$/{f=1} /^ +environment: *$/{e=1;next} e&&/^ +name: *["'"'"']?stable["'"'"']? *$/{f=1} {e=0} END{exit !f}' "$wf"; then
     for t in $(triggers "$wf"); do
       case $t in workflow_call|workflow_dispatch) ;; *) err "$name uses the stable environment but also runs on $t" ;; esac
     done
   fi
 done
+
+if [ -f "$root/scripts/release.sh" ] && grep -nE '\| *(head|grep +-q)' "$root/scripts/release.sh" > /dev/null; then
+  err "scripts/release.sh pipes into head or grep -q; with inherit_errexit the writer dies of SIGPIPE and stops the publish"
+fi
 
 order=(0.2.0 0.2.1 0.3.0-dev.20261117131042 0.3.0-dev.20261118090500 0.3.0-nightly.202611160700 0.3.0-nightly.20261117070000 0.3.0)
 if [ "$(npx -y semver@7.6.3 "${order[@]}" 2>/dev/null)" != "$(printf '%s\n' "${order[@]}")" ]; then

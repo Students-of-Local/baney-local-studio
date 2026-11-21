@@ -15,6 +15,13 @@ extension SnapshotCatalog {
             SnapshotEntry(name: "shell-sidebar-populated", size: sidebar, focus: "t-active-1", updates: ShellFixtures.updates) { store in
                 AnyView(SidebarView(store: store))
             },
+            SnapshotEntry(name: "shell-sidebar-machines", size: sidebar, focus: "t-active-1", updates: ShellFixtures.machineUpdates) { store in
+                AnyView(SidebarView(store: store))
+            },
+            SnapshotEntry(name: "shell-sidebar-machines-slim", size: sidebar, focus: "t-active-1", updates: ShellFixtures.machineUpdates) { store in
+                store.inbox.collapsed = [.settled]
+                return AnyView(SidebarView(store: store))
+            },
             SnapshotEntry(name: "shell-sidebar-draft-hints", size: sidebar, updates: ShellFixtures.updates) { store in
                 store.inbox.selection = ["t-active-2", "t-pinned"]
                 store.shell.commandHeld = true
@@ -153,7 +160,8 @@ enum ShellFixtures {
     private static func row(
         _ id: String, _ project: Int?, _ title: String, shelf: Shelf, status: ThreadStatus = .idle, minutes: Double,
         pinned: Bool = false, unread: Bool = false, branch: String? = nil, provider: String? = nil, model: String? = nil,
-        diff: (UInt32, UInt32) = (0, 0), snoozeHours: Double? = nil, fanOut: String? = nil, pull: PullRequest? = nil
+        diff: (UInt32, UInt32) = (0, 0), snoozeHours: Double? = nil, fanOut: String? = nil, pull: PullRequest? = nil,
+        machine: String? = nil
     ) -> ThreadRow {
         ThreadRow(
             id: id, project: project.map { projects[$0].id }, title: title, shelf: shelf, status: status,
@@ -161,7 +169,7 @@ enum ShellFixtures {
             snoozedUntil: snoozeHours.map { Int64((Date.now.timeIntervalSince1970 + $0 * 3_600) * 1_000) },
             pinned: pinned, unread: unread, branch: branch, worktree: nil, provider: provider, model: model,
             additions: diff.0, deletions: diff.1, note: nil, archived: false, autoSettle: true,
-            liveAgents: 0, fanOut: fanOut, pullRequest: pull, harness: .eukhe
+            liveAgents: 0, fanOut: fanOut, pullRequest: pull, harness: .eukhe, machine: machine
         )
     }
 
@@ -196,6 +204,44 @@ enum ShellFixtures {
         .projects(projects: projects),
         .threads(threads: threads),
         .keybindings(bindings: keybindings),
+    ]
+
+    static let machines: [Machine] = [
+        Machine(id: "7f3a9c21d4e8b6a0", name: "parish1", os: "linux", version: "0.18.0", channel: "dev", url: "wss://parish1.tail0000.ts.net/v1/ws", state: .connected, latencyMs: 34),
+        Machine(id: "c19e44a7b20f8d53", name: "chapel1", os: "linux", version: "0.18.0", channel: "dev", url: "wss://chapel1.tail0000.ts.net/v1/ws", state: .offline(since: ago(42)), latencyMs: nil),
+        Machine(id: "a0b1c2d3e4f50617", name: "studio-mini", os: "macos", version: "0.17.2", channel: "dev", url: "wss://studio-mini.tail0000.ts.net/v1/ws", state: .incompatible(protocol: 3, minProtocol: 3), latencyMs: nil),
+        Machine(id: "5e6f7a8b9c0d1e2f", name: "old-laptop", os: "macos", version: "0.16.0", channel: "dev", url: "wss://old-laptop.tail0000.ts.net/v1/ws", state: .pairAgain, latencyMs: nil),
+        Machine(id: "0123456789abcdef", name: "lab-box", os: "linux", version: "0.18.0", channel: "dev", url: "wss://lab-box.tail0000.ts.net/v1/ws", state: .refused(until: ago(-9)), latencyMs: nil),
+    ]
+
+    static let remoteProjects = [
+        Project(id: "@7f3a9c21d4e8b6a0//home/demo/reranker", name: "reranker", path: "/home/demo/reranker", icon: nil, isGit: true, machine: "7f3a9c21d4e8b6a0"),
+        Project(id: "@c19e44a7b20f8d53//home/demo/dashboards", name: "dashboards", path: "/home/demo/dashboards", icon: "chart.bar", isGit: false, machine: "c19e44a7b20f8d53"),
+    ]
+
+    private static func remote(_ row: ThreadRow, _ project: Int) -> ThreadRow {
+        var row = row
+        row.project = remoteProjects[project].id
+        return row
+    }
+
+    static let remoteThreads: [ThreadRow] = [
+        remote(row("@7f3a9c21d4e8b6a0/r-1", nil, "Train the reranker on the new split", shelf: .active, status: .working, minutes: 2, branch: "rerank/split-7", provider: "ollama", diff: (64, 12), machine: "7f3a9c21d4e8b6a0"), 0),
+        remote(row("@7f3a9c21d4e8b6a0/r-2", nil, "Approve the GPU driver pin", shelf: .active, status: .approval, minutes: 9, provider: "anthropic", machine: "7f3a9c21d4e8b6a0"), 0),
+        remote(row("@c19e44a7b20f8d53/r-3", nil, "Rotate the dashboard logs", shelf: .active, status: .done, minutes: 50, unread: true, machine: "c19e44a7b20f8d53"), 1),
+    ]
+
+    static let machineUpdates: [Update] = [
+        .connection(state: .ready),
+        .projects(projects: projects + remoteProjects),
+        .threads(threads: remoteThreads + threads),
+        .keybindings(bindings: keybindings),
+        .machines(machines: machines),
+    ]
+
+    static let pairedDevices: [PairedDevice] = [
+        PairedDevice(id: "9a8b7c6d5e4f3a2b", name: "Demo iPhone", platform: "ios", app: "0.4.0", channel: "dev", firstSeen: ago(20_000), lastSeen: ago(3)),
+        PairedDevice(id: "1b2c3d4e5f6a7b8c", name: "parish1", platform: "linux", app: "0.18.0", channel: "dev", firstSeen: ago(9_000), lastSeen: ago(600)),
     ]
 
     static let focused: [Update] = [

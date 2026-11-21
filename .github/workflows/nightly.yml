@@ -30,6 +30,8 @@ jobs:
       - name: Refuse anything but main
         run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::nightly builds only from main"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: hustcer/setup-nu@1b8faed9a8ff673c8ce0beae243e0b72d0787241 # v3.30
         with:
           version: 0.117.0
@@ -57,10 +59,14 @@ jobs:
           fi
           blockers=$(gh api "repos/$REPO/issues?state=open&labels=regression,blocks-nightly&per_page=100" -q '[.[] | select(.pull_request | not)] | length')
           [ "$blockers" = 0 ] || { echo "::error::$blockers open issue(s) labeled regression and blocks-nightly"; exit 1; }
-          git fetch -q --depth 1 origin "$commit" && git checkout -q FETCH_HEAD
+          if ! git diff --quiet "$commit" "$GITHUB_SHA" -- .github/workflows/build.yml; then
+            echo "::error::build.yml on main differs from $commit's, and this run would build $commit with main's; no nightly until a commit with main's build.yml passes CI and e2e"
+            exit 1
+          fi
+          git checkout -q "$commit"
           at=$(date -u +%Y%m%d%H%M%S)
           version=$(nu scripts/version.nu nightly --at "$at" --commit "$commit")
-          scripts/release.sh check-newer nightly "$version"
+          scripts/release.sh check-newer nightly "$version" "$commit"
           printf 'skip=false\nat=%s\nversion=%s\ncommit=%s\n' "$at" "$version" "$commit" >> "$GITHUB_OUTPUT"
 
   draft:

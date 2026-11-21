@@ -236,14 +236,8 @@ struct ConnectionsSettings: View {
                     }
                 }
             }
-            SettingsSection(.unsupported) {
-                SettingRow(.remoteEnvironments) {
-                    SettingsNote(
-                        symbol: "network",
-                        text: "Remote environments, pairing links, authorized clients and SSH hosts have no backend in the Eukhe daemon, which only listens on a local socket, so Local Studio cannot offer them. Other machines join through the Local fleet instead: connect them from Settings › Local."
-                    )
-                }
-            }
+            PairedDevicesSection(machines: store.machines)
+            OtherMachinesSection(machines: store.machines)
         }
     }
 

@@ -1,0 +1,8 @@
+on:
+  workflow_call:
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - run: nu scripts/version.nu "$CHANNEL" --stamp --build-env --at "$AT" --commit "$COMMIT" | tee -a "$GITHUB_ENV"
+      - run: nu scripts/version.nu "$CHANNEL" --stamp --json --root "$RUNNER_TEMP/scratch"

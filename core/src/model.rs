@@ -42,6 +42,9 @@ pub struct Project {
     pub path: String,
     pub icon: Option<String>,
     pub is_git: bool,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +109,9 @@ pub struct ThreadRow {
     pub fan_out: Option<String>,
     pub pull_request: Option<PullRequest>,
     pub harness: Harness,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,6 +491,49 @@ pub struct DaemonMismatch {
     pub busy_sessions: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum MachineState {
+    Connecting,
+    Connected,
+    Offline { since: i64 },
+    PairAgain,
+    Incompatible { protocol: u64, min_protocol: u64 },
+    Refused { until: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct Machine {
+    pub id: String,
+    pub name: String,
+    pub os: String,
+    pub version: String,
+    pub channel: String,
+    pub url: String,
+    pub state: MachineState,
+    pub latency_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub app: String,
+    pub channel: String,
+    pub first_seen: i64,
+    pub last_seen: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "wire",
@@ -674,6 +723,12 @@ pub enum Update {
     Kernel {
         state: KernelState,
     },
+    LocalOnly {
+        thread: String,
+        plugin: String,
+        message: String,
+        local: Option<ModelKey>,
+    },
     RequestDone {
         request: String,
         message: String,
@@ -685,5 +740,18 @@ pub enum Update {
     Notice {
         level: NoticeLevel,
         text: String,
+    },
+    Machines {
+        machines: Vec<Machine>,
+    },
+    Pairing {
+        request: String,
+        link: String,
+        url: String,
+        serving: bool,
+        expires_at: i64,
+    },
+    PairedDevices {
+        devices: Vec<PairedDevice>,
     },
 }

@@ -95,12 +95,10 @@ impl Workspace {
     }
 
     async fn kernel_install(&self, program: &Path) -> Result<String, String> {
-        let mut child = command(program, &["kernel", "install"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .map_err(|error| format!("Could not run {}: {error}", program.display()))?;
+        let mut command = command(program, &["kernel", "install"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        crate::platform::own_group_async(&mut command);
+        let mut child = command.spawn().map_err(|error| format!("Could not run {}: {error}", program.display()))?;
         *self.inner.kernel.install.lock().unwrap_or_else(PoisonError::into_inner) = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
