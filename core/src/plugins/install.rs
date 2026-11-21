@@ -138,14 +138,26 @@ impl Drop for Scratch {
 }
 
 pub fn install(root: &Path, source: &Source, catalog: &Catalog) -> Result<Installed, Vec<String>> {
+    stage(root, source, catalog)?.commit(root)
+}
+
+pub struct Staged {
+    staging: Scratch,
+    plugin: Plugin,
+    files: usize,
+    tree: String,
+    origin: String,
+}
+
+pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, Vec<String>> {
     std::fs::create_dir_all(root).map_err(|error| vec![format!("cannot create {}: {error}", root.display())])?;
     let origin = source.origin();
     match source {
-        Source::Dir(dir) => place(root, dir, &[], None, &[], &origin),
+        Source::Dir(dir) => place(root, dir, &[], None, &[], origin),
         Source::Git { url, rev } => {
             let fetched = Scratch::new(root, "fetch")?;
             let flattened = fetch(url, rev, &fetched.0)?;
-            place(root, &fetched.0, &[], None, &flattened, &origin)
+            place(root, &fetched.0, &[], None, &flattened, origin)
         }
         Source::Catalog(id) => {
             let entry = catalog
@@ -157,7 +169,7 @@ pub fn install(root: &Path, source: &Source, catalog: &Catalog) -> Result<Instal
                 Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
                 None => fetched.0.clone(),
             };
-            place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, &origin)
+            place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, origin)
         }
     }
 }
@@ -168,8 +180,8 @@ fn place(
     exclude: &[String],
     expected: Option<&str>,
     flattened: &[PathBuf],
-    origin: &str,
-) -> Result<Installed, Vec<String>> {
+    origin: String,
+) -> Result<Staged, Vec<String>> {
     let entries = walk(source, exclude, Walk::Install).map_err(|error| vec![error])?;
     let unlinked: Vec<String> = entries
         .iter()
@@ -200,35 +212,70 @@ fn place(
     if copied != tree {
         return Err(vec![format!("the plugin changed while it was installed: hashed {tree}, copied {copied}")]);
     }
-    load(&staged)?;
-    let target = root.join(&id);
-    let replaced = load(&target).ok().map(|old| old.version);
-    let old = staging.0.join(".old");
-    let moved = target.exists();
-    if moved {
-        std::fs::rename(&target, &old)
-            .map_err(|error| vec![format!("cannot move the installed {id} aside: {error}")])?;
+    let plugin = load(&staged)?;
+    let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
+    Ok(Staged { staging, plugin, files, tree, origin })
+}
+
+impl Staged {
+    #[must_use]
+    pub fn plugin(&self) -> &Plugin {
+        &self.plugin
     }
-    if let Err(error) = std::fs::rename(&staged, &target) {
+
+    #[must_use]
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    #[must_use]
+    pub fn files(&self) -> usize {
+        self.files
+    }
+
+    pub fn commit(self, root: &Path) -> Result<Installed, Vec<String>> {
+        let id = &self.plugin.id;
+        let staged = self.staging.0.join(id);
+        let target = root.join(id);
+        let replaced = load(&target).ok().map(|old| old.version);
+        let old = self.staging.0.join(".old");
+        let moved = target.exists();
         if moved {
-            let _ = std::fs::rename(&old, &target);
+            std::fs::rename(&target, &old)
+                .map_err(|error| vec![format!("cannot move the installed {id} aside: {error}")])?;
         }
-        return Err(vec![format!("cannot install {}: {error}", target.display())]);
+        if let Err(error) = std::fs::rename(&staged, &target) {
+            if moved {
+                let _ = std::fs::rename(&old, &target);
+            }
+            return Err(vec![format!("cannot install {}: {error}", target.display())]);
+        }
+        let plugin = load(&target)?;
+        let mut grants = Grants::load(root).map_err(|error| vec![error])?;
+        let note = grants.installed(&plugin, &self.tree, &self.origin);
+        grants.save(root).map_err(|error| vec![error])?;
+        let consent = grants.consent(&plugin);
+        Ok(Installed { plugin, replaced, consent, files: self.files, tree: self.tree, source: self.origin, note })
     }
-    let plugin = load(&target)?;
-    let mut grants = Grants::load(root).map_err(|error| vec![error])?;
-    let note = grants.installed(&plugin, &tree, origin);
-    grants.save(root).map_err(|error| vec![error])?;
-    let consent = grants.consent(&plugin);
-    Ok(Installed {
-        plugin,
-        replaced,
-        consent,
-        files: entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count(),
-        tree,
-        source: origin.to_string(),
-        note,
-    })
+}
+
+/// The plugin's file count and the executables it ships besides the `[mcp]` command its manifest names.
+pub(crate) fn survey(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
+    let command = plugin.mcp.as_ref().and_then(|mcp| mcp.command.strip_prefix(&plugin.dir).ok().map(Path::to_path_buf));
+    let entries = walk(&plugin.dir, &[], Walk::Install)?;
+    let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
+    let binaries = entries
+        .into_iter()
+        .filter(|entry| matches!(entry.kind, Kind::File { executable: true, .. }))
+        .filter(|entry| command.as_deref() != Some(Path::new(&entry.path)))
+        .map(|entry| entry.path)
+        .collect();
+    Ok((files, binaries))
 }
 
 fn manifest_id(source: &Path) -> Result<String, Vec<String>> {

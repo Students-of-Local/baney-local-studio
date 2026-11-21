@@ -26,7 +26,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Plugin grants end to end
         run: |
-          cargo build -p local-studio-core --bin local-studio --features test-hooks
+          cargo build -p local-studio-core --bin local-studio --example consent_driver --features test-hooks
           scripts/tests/plugin-grants-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/pg"
 
   linux:

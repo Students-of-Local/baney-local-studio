@@ -193,6 +193,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Machines { .. }
         | Update::Pairing { .. }
         | Update::PairedDevices { .. }
+        | Update::Consents { .. }
         | Update::Subagents { .. }
         | Update::MessageImage { .. }
         | Update::Notification { .. }

@@ -6,6 +6,7 @@ mod branches;
 mod colors;
 mod commands;
 mod commit;
+mod consent;
 mod composer;
 mod core;
 mod dashboard;

@@ -559,5 +559,82 @@ line=$(ls_ plugin list 2>&1 | grep 'granted mcp-server')
 echo "  plugin list: '$line'"
 case $line in *"from ") fail "first-F6 empty source named";; *"from "?*) pass "first-F6 empty source named";; *) fail "first-F6 empty source named";; esac
 
+echo "== #14: the consent sheet, driven through Studio's install_plugin and answer_consent"
+DRIVER=$(dirname "$BIN")/examples/consent_driver
+if [ ! -x "$DRIVER" ]; then
+  skip "consent sheet (build the consent_driver example beside $BIN)"
+else
+  fresh sheet
+  drive() { HOME=$S/h LOCAL_STUDIO_DATA_DIR=$D EUKHE_CODING_AGENT_DIR=$A "$DRIVER" "$D" "$S/n.sock" "$@" 2>&1; }
+  granted() {
+    python3 -I -c 'import json,sys; g=json.load(open(sys.argv[1])).get("plugins",{}).get(sys.argv[2]); print("none" if g is None else ",".join(sorted(g["capabilities"])))' \
+      "$D/plugins/grants.json" "$1" 2> /dev/null || echo none
+  }
+  sheeted() {
+    local src=$S/src/sheet version=$1 caps=$2
+    rm -rf "$src"
+    mkdir -p "$src/bin"
+    printf 'id = "sheet"\nname = "Sheet"\nversion = "%s"\ndescription = "A consent sheet test plugin"\ncapabilities = [%s]\n[gates]\nscreen-capture = "page screenshots"\n[mcp]\ncommand = "bin/server"\nargs = ["mcp"]\n' \
+      "$version" "$caps" > "$src/plugin.toml"
+    script "$src/bin/server" "$version"
+    script "$src/bin/helper" helper
+  }
+  sheeted 1.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets"'
+  out=$(drive "$S/src/sheet" cancel)
+  echo "$out" | sed 's/^/  /'
+  rows=$(echo "$out" | sed -n 's/^SHEET .* rows=//p')
+  if [ "$rows" = "mcp-server:needed,ask-user:needed,screen-capture:sensitive,site-secrets:sensitive" ] \
+    && echo "$out" | grep -q '^SHEET Sheet 1.0.0 from=- source=a local folder pin=- files=3 findings=1 ' \
+    && echo "$out" | grep -q '^ROW mcp-server | Give agents tools | Starts server mcp when a thread uses it. | -$' \
+    && echo "$out" | grep -q '^ROW screen-capture | See the windows or tabs it opened | .* | page screenshots$'; then
+    pass "#14 a new install lists every capability, needed and sensitive, with the scan finding"
+  else
+    fail "#14 a new install lists every capability, needed and sensitive, with the scan finding"
+  fi
+  leftovers=$(find "$D/plugins" -mindepth 1 -maxdepth 1 ! -name grants.json | wc -l | tr -d ' ')
+  echo "  after Cancel: grants $(granted sheet), entries in the plugins folder besides grants.json: $leftovers"
+  if echo "$out" | grep -q '^DONE ' && [ "$(granted sheet)" = none ] && [ "$leftovers" = 0 ]; then
+    pass "#14 Cancel installs nothing and grants nothing"
+  else
+    fail "#14 Cancel installs nothing and grants nothing"
+  fi
+  out=$(drive "$S/src/sheet" install:screen-capture)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  after Install with screen-capture on: grants $(granted sheet); plugin list: $(status sheet)"
+  if echo "$out" | grep -q '^DONE ' && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ] \
+    && [ "$(status sheet)" = "needs consent for site-secrets (local-studio plugin grant sheet site-secrets)" ]; then
+    pass "#14 Install grants exactly the needed capabilities plus the one switched on"
+  else
+    fail "#14 Install grants exactly the needed capabilities plus the one switched on"
+  fi
+  sheeted 2.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets", "synthetic-input"'
+  out=$(drive "$S/src/sheet" install:site-secrets)
+  version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
+  echo "  Install with site-secrets on a sheet that lists only synthetic-input: $(echo "$out" | tail -1); installed $version"
+  if echo "$out" | grep -q '^FAILED .*not a sensitive permission this sheet asked for' && [ "$version" = 1.0.0 ] \
+    && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ]; then
+    pass "#14 a sensitive id the sheet did not list is refused and installs nothing"
+  else
+    fail "#14 a sensitive id the sheet did not list is refused and installs nothing"
+  fi
+  out=$(drive "$S/src/sheet" install)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  if [ "$(echo "$out" | sed -n 's/^SHEET .* rows=//p')" = "synthetic-input:sensitive" ] && echo "$out" | grep -q '^SHEET Sheet 2.0.0 from=1.0.0 ' \
+    && echo "$out" | grep -q '^DONE ' && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ]; then
+    pass "#14 an update that adds a capability asks only for it"
+  else
+    fail "#14 an update that adds a capability asks only for it"
+  fi
+  sheeted 3.0.0 '"mcp-server", "ask-user", "screen-capture", "synthetic-input"'
+  out=$(drive "$S/src/sheet" cancel)
+  echo "$out" | sed 's/^/  /'
+  version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
+  if ! echo "$out" | grep -q '^SHEET' && echo "$out" | grep -q '^DONE Installed Sheet 3.0.0 with no new permissions' && [ "$version" = 3.0.0 ]; then
+    pass "#14 an update that removes a capability installs without asking"
+  else
+    fail "#14 an update that removes a capability installs without asking"
+  fi
+fi
+
 echo "failures: $failures"
 exit "$failures"

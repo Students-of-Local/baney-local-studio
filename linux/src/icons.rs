@@ -54,6 +54,7 @@ pub const DEVICE: &str = "phone-symbolic";
 pub const USAGE: &str = "power-profile-performance-symbolic";
 pub const SERVER: &str = "network-server-symbolic";
 pub const OFFLINE: &str = "network-offline-symbolic";
+pub const PLUGIN: &str = "application-x-addon-symbolic";
 pub const UNREACHABLE: &str = "network-error-symbolic";
 pub const KEYBOARD: &str = "input-keyboard-symbolic";
 pub const PROVIDERS: &str = "application-x-addon-symbolic";

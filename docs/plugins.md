@@ -33,6 +33,37 @@ The source is the catalog id, the git URL without its commit, or the folder's ab
 
 `plugin revoke <id>` with no capabilities clears every capability and keeps the tree and source, so a later update from the same source still counts as an update.
 
+## Consent sheet
+
+The app asks for consent with a sheet, built in core so macOS, Linux and a phone attached over the client protocol show the same one. The code is `core/src/plugins/consent.rs`.
+
+- `Studio::install_plugin(request, source)` takes what `local-studio plugin install` takes. It fetches, checks, hashes and copies the plugin into a scratch folder inside the plugins folder, exactly as install does, and installs nothing yet. When the plugin asks for capabilities the person has not answered, Studio sends `Update::Consents` with one `ConsentRequest` per open sheet; otherwise it installs at once and answers `RequestDone`.
+- `Studio::answer_consent(request, answer)` closes the sheet. `Cancel` (Esc or Cancel) installs nothing, grants nothing and deletes the scratch copy. `Install { sensitive }` installs the scratch copy through the same step as `plugin install` (same tree and source record, same update rules), then grants the needed capabilities the sheet listed plus the sensitive ones in `sensitive`, through the same code as `plugin grant`. A sensitive id the sheet did not list is refused and installs nothing.
+- On the wire it is the `consents` update and the `answer_consent` op (docs/remote.md).
+
+Which rows a sheet lists:
+
+- A new install, a reinstall that carries no grant, or an install from another source: every capability the plugin asks for.
+- An update whose grant carries over (same tree or same source, per the rules above): only the capabilities the new version asks for that the installed version did not. An update that asks for nothing new, including one that drops a capability, installs without a sheet.
+- A plugin that is already installed but lacks a needed capability (copied in by hand, changed in place, or installed by `plugin install` and never granted): Studio offers a sheet with its missing capabilities when it scans the plugins folder, at most once per plugin version while Studio runs. Its Install grants; Cancel leaves the plugin as it was. Studio hashes the folder when it offers the sheet and again before it grants, and refuses the grant if the folder changed in between.
+
+Needed capabilities (`mcp-server`, `native-host`, `ask-user`) have no switch: the plugin cannot work without them, so declining means Cancel. Sensitive capabilities (`screen-capture`, `synthetic-input`, `site-secrets`, `accessibility`) each have a switch that starts off. The grant rules above are unchanged: a plugin whose sensitive capability stays off counts as needing consent for it, so its MCP server stays off until that capability is granted with `local-studio plugin grant`. Studio does not offer the sheet again for a plugin that lacks only sensitive capabilities.
+
+Each row carries the capability id, `needed` or `sensitive`, a plain sentence of what it allows and one scope line, both fixed per capability in `Capability::sentence` and `Capability::scope` (`mcp-server`'s scope names the `[mcp]` command and its args). The sheet also carries the plugin's name, icon, description and version, the version it updates, the source (the Local Studio catalog with its commit, a git URL with its commit, or a local folder), the file count and the scan's findings: each executable the plugin ships besides its `[mcp]` command. Install stays off until the person opens the findings.
+
+Three optional manifest fields feed the sheet. A build from before them refuses a manifest that uses them.
+
+```toml
+name = "Tychicus"
+icon = "icon.png"
+
+[gates]
+screen-capture = "page screenshots for the agent"
+synthetic-input = "clicking and typing in its own tabs"
+```
+
+`name` is the display name (the id when absent). `icon` is a path inside the plugin to the image the sheet shows. `gates` names, for each sensitive capability, the features it turns on, so the row says what stops working when its switch is off; a key that is not a sensitive capability the plugin asks for is an error.
+
 ## MCP server entries
 
 Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true` and `"PYTHONDONTWRITEBYTECODE": {"env": "PATH"}` in its `env` (Eukhe takes env values only as host variable names, and Python needs any non-empty value). Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
