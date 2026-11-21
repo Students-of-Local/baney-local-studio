@@ -84,6 +84,7 @@ impl Actor {
         active: &str,
         invoked: &[String],
         prompt: &PromptDraft,
+        delivery: Delivery,
         request: Option<String>,
     ) -> Result<bool, String> {
         let plugins = self.plugins();
@@ -116,10 +117,45 @@ impl Actor {
             self.refuse(id, plugin, text, None, prompt, request);
             return Ok(false);
         }
-        self.pin_local(id, active, &provider, &model, &plugins).await?;
+        let grants =
+            self.plugins_dir.as_deref().map(|dir| plugins::Grants::load(dir).unwrap_or_default()).unwrap_or_default();
+        let servers = plugins::session_servers(&plugins, &grants);
+        let running = self.running(id);
+        let served = self.threads.get(id).and_then(|thread| thread.served.as_deref()) == Some(active);
+        if running && !served && !servers.is_empty() {
+            self.hold(id, prompt, delivery, request);
+            return Ok(false);
+        }
+        self.pin_local(id, active, &provider, &model, (!running).then_some(servers)).await?;
         self.store.update(id, |flags| flags.local_only = Some(plugin.clone()));
         self.save();
         Ok(true)
+    }
+
+    pub(super) fn hold(&mut self, id: &str, prompt: &PromptDraft, delivery: Delivery, request: Option<String>) {
+        if let Some(thread) = self.threads.get_mut(id) {
+            thread.held.push((prompt.clone(), delivery, request));
+        }
+        self.mailbox.notice(
+            NoticeLevel::Info,
+            "This message waits for the current turn to end, so a local-only plugin's tool server can start first.",
+        );
+    }
+
+    pub(super) async fn send_held(&mut self, id: &str) {
+        if self.running(id) {
+            return;
+        }
+        let held = self.threads.get_mut(id).map(|thread| std::mem::take(&mut thread.held)).unwrap_or_default();
+        for (prompt, delivery, request) in held {
+            if let Err(error) = self.send_prompt(id, prompt.clone(), delivery, request.clone()).await {
+                match request {
+                    Some(request) => self.mailbox.push(Update::RequestFailed { request, message: error.clone() }),
+                    None => self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: prompt.text }),
+                }
+                self.mailbox.notice(NoticeLevel::Error, error);
+            }
+        }
     }
 
     fn refuse(
@@ -168,7 +204,7 @@ impl Actor {
         active: &str,
         provider: &str,
         model: &str,
-        plugins: &[Plugin],
+        servers: Option<Vec<Value>>,
     ) -> Result<(), String> {
         let selector = quoted(&format!("{provider}/{model}"));
         let mut sets: Vec<String> = OFF.iter().map(|name| format!("set {name} false")).collect();
@@ -186,19 +222,18 @@ impl Actor {
         if let Some(errors) = reply.get("errors").and_then(Value::as_array).filter(|errors| !errors.is_empty()) {
             return Err(format!("Could not keep this thread on local models: {}", Value::Array(errors.clone())));
         }
-        if self.running(id) {
-            return Ok(());
-        }
-        let grants =
-            self.plugins_dir.as_deref().map(|dir| plugins::Grants::load(dir).unwrap_or_default()).unwrap_or_default();
+        let Some(servers) = servers else { return Ok(()) };
         let command = DaemonCommand::ReplaceAcpMcpServers {
             id: None,
             active_session_id: active.to_string(),
             owner_id: plugins::SESSION_OWNER.to_string(),
-            servers: Value::Array(plugins::session_servers(plugins, &grants)),
+            servers: Value::Array(servers),
             rest: Map::default(),
         };
         self.call(command).await.map_err(|error| format!("Could not start the plugin's tool server: {error}"))?;
+        if let Some(thread) = self.threads.get_mut(id) {
+            thread.served = Some(active.to_string());
+        }
         Ok(())
     }
 

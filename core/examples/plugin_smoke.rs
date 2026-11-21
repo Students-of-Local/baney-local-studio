@@ -12,9 +12,9 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::plugins::{self as plugin_store, Capability, Catalog, Consent, Grants, Source};
 use local_studio_core::{
-    AccessMode, CommandKind, Connection, DaemonLaunch, Item, ItemKind, ModelKey, Project, PromptDraft, SkillEntry,
-    SlashCommand, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, ToolState, TranscriptOp, Update,
-    UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    AccessMode, CommandKind, Connection, DaemonLaunch, Delivery, Item, ItemKind, ModelKey, Project, PromptDraft,
+    SkillEntry, SlashCommand, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, ToolState, TranscriptOp,
+    Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
 
@@ -484,9 +484,9 @@ const LOCAL_USAGE: &str =
 mod local_only {
     use super::{
         ensure, json, plugin_store, prompt, stop_daemon, user_text, write_private, Arc, AtomicUsize, Capability,
-        Command, Connection, Context, DaemonClient, DaemonCommand, DaemonLaunch, Duration, Grants, Harness, Instant,
-        Map, OpenOptionsExt, Ordering, Path, PathBuf, Read, Signal, Studio, StudioConfig, TcpListener, ThreadSettings,
-        ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MAX_TOKENS, MID, STEP,
+        Command, Connection, Context, DaemonClient, DaemonCommand, DaemonLaunch, Delivery, Duration, Grants, Harness,
+        Instant, Map, OpenOptionsExt, Ordering, Path, PathBuf, Read, Signal, Studio, StudioConfig, TcpListener,
+        ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MAX_TOKENS, MID, STEP,
     };
 
     const LOCAL: &str = "ollama-local";
@@ -494,6 +494,7 @@ mod local_only {
     const CLOUD_MODEL: &str = "stub-1";
     const CLOUD_HOST: &str = "localtest.me";
     const MARK: &str = "LEDGER-SKILL-7Q";
+    const ASK: &str = "/ledger File today's entry. You must call the python tool before you answer.";
     const SERVER: &str = r#"#!/usr/bin/env python3
 import json, os, sys
 name = sys.argv[1]
@@ -743,6 +744,31 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(())
     }
 
+    fn queued_during_run(harness: &mut Harness, ledger_out: &Path) -> anyhow::Result<()> {
+        let studio = Arc::clone(&harness.studio);
+        let project = harness.view.projects[0].id.clone();
+        let before = server_starts(ledger_out, "plugin-ledger").len();
+        let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
+        studio.start_thread("busy".to_string(), Some(project), prompt(long), settings(LOCAL, MID));
+        harness.pump_until("busy thread started", STEP, |view| view.thread("busy").is_some())?;
+        let thread = harness.view.thread("busy").context("busy thread")?;
+        studio.select_thread(Some(thread.clone()));
+        harness.pump_until("busy thread working", STEP, |view| !view.idle(&thread))?;
+        studio.send("queued".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
+        harness
+            .pump_until("still working after the queued /ledger", Duration::from_secs(2), |view| !view.idle(&thread))?;
+        harness.pump_until("the queued /ledger ran", STEP * 5, |view| {
+            view.idle(&thread) && user_text(view.items(&thread)).iter().any(|text| text.contains(MARK))
+        })?;
+        let starts = server_starts(ledger_out, "plugin-ledger").split_off(before);
+        ensure!(
+            !starts.is_empty()
+                && starts.iter().all(|row| row.get("LOCAL_STUDIO_LOCAL_ONLY").and_then(Value::as_str) == Some("1")),
+            "plugin-ledger did not start for the /ledger queued during a local turn: {starts:?}"
+        );
+        Ok(())
+    }
+
     fn cloud_tokens(report: &UsageReport) -> (u64, u64) {
         report
             .by_model
@@ -805,7 +831,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
     ) -> anyhow::Result<()> {
         let studio = Arc::clone(&harness.studio);
         let step = STEP;
-        let ask = "/ledger File today's entry. You must call the python tool before you answer.";
+        let ask = ASK;
         harness.pump_until("daemon connected", step, |view| matches!(view.connection, Some(Connection::Ready)))?;
         studio.add_project(work.to_string_lossy().into_owned());
         harness.pump_until("project added", step, |view| view.projects.len() == 1)?;
@@ -882,6 +908,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         put_server(agent, "web-off", Some(off))?;
         record("server-off", refused(harness, "off", ask, settings(LOCAL, MID), hits));
         put_server(agent, "web-off", None)?;
+        record("queued", queued_during_run(harness, ledger_out));
         ensure!(failed.is_empty(), "failed scenarios: {}", failed.join(", "));
         studio.run_local(cloud.clone());
         harness.pump_until("switched to the local model and running", step, |view| {
