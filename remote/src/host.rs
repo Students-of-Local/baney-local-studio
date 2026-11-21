@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
-use local_studio_core::{Project, Studio, Subscription, Update};
+use local_studio_core::{NoticeLevel, Project, Studio, Subscription, Update};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -27,6 +27,8 @@ const STOP_WITHIN: Duration = Duration::from_secs(2);
 const WAIT_EVERY: Duration = Duration::from_secs(1);
 const REQUEST_EVERY: Duration = Duration::from_millis(500);
 const ANSWER_WITHIN: Duration = Duration::from_secs(25);
+const ANSWERS_KEPT: Duration = Duration::from_secs(600);
+const FAILURES_KEPT: usize = 64;
 const GOING_AWAY: u16 = 1001;
 const RESTARTING: u16 = 1012;
 
@@ -242,6 +244,7 @@ pub(crate) fn write_private(path: &Path, value: &Value) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let partial = path.with_extension("tmp");
+    std::fs::remove_file(&partial).ok();
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -259,6 +262,10 @@ fn pending(path: &Path) -> bool {
     name.strip_suffix(".json").is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+fn modified(path: &Path) -> SystemTime {
+    std::fs::metadata(path).and_then(|metadata| metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
 fn private_to(path: &Path, me: u32) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     std::fs::symlink_metadata(path).is_ok_and(|metadata| {
@@ -271,36 +278,49 @@ struct Requests {
     subscription: Subscription,
     notify: Arc<Notify>,
     projects: Vec<Project>,
+    failures: VecDeque<String>,
 }
 
 impl Requests {
-    fn drain(&mut self) -> Vec<String> {
-        let mut notices = Vec::new();
+    fn drain(&mut self) {
         for update in self.subscription.tick() {
             match update {
                 Update::Projects { projects } => {
                     self.projects = projects.into_iter().filter(|project| project.machine.is_none()).collect();
                 }
-                Update::Notice { text, .. } => notices.push(text),
+                Update::Notice { level: NoticeLevel::Error, text } => {
+                    if self.failures.len() == FAILURES_KEPT {
+                        self.failures.pop_front();
+                    }
+                    self.failures.push_back(text);
+                }
                 _ => {}
             }
         }
-        notices
+    }
+
+    fn failure(&mut self, about: &str) -> Option<String> {
+        let index = self.failures.iter().position(|text| text.contains(about))?;
+        self.failures.remove(index)
+    }
+
+    fn forget(&mut self, about: &str) {
+        self.failures.retain(|text| !text.contains(about));
     }
 
     fn known(&self, project: &str) -> Option<&Project> {
         self.projects.iter().find(|known| known.id == project || known.path == project)
     }
 
-    async fn until(&mut self, done: impl Fn(&Self) -> bool) -> Option<Result<(), String>> {
-        let deadline = tokio::time::Instant::now() + ANSWER_WITHIN;
+    async fn until(&mut self, about: &str, wait: Duration, done: impl Fn(&Self) -> bool) -> Option<Result<(), String>> {
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
-            let notices = self.drain();
+            self.drain();
             if done(self) {
                 return Some(Ok(()));
             }
-            if let Some(notice) = notices.into_iter().next() {
-                return Some(Err(notice));
+            if let Some(failure) = self.failure(about) {
+                return Some(Err(failure));
             }
             if tokio::time::timeout_at(deadline, self.notify.notified()).await.is_err() {
                 return None;
@@ -311,6 +331,7 @@ impl Requests {
     async fn answer(&mut self, request: Request, again: bool) -> Option<Value> {
         self.drain();
         let path = request.path.unwrap_or_default();
+        let wait = if again { Duration::ZERO } else { ANSWER_WITHIN };
         let (ok, message) = match request.op.as_str() {
             "list_projects" => (true, format!("{} projects", self.projects.len())),
             "add_project" if self.known(&path).is_some() => {
@@ -318,9 +339,10 @@ impl Requests {
             }
             "add_project" => {
                 if !again {
+                    self.forget(&path);
                     self.studio.add_project(path.clone());
                 }
-                match self.until(|requests| requests.known(&path).is_some()).await? {
+                match self.until(&path, wait, |requests| requests.known(&path).is_some()).await? {
                     Ok(()) => (true, format!("added {path}")),
                     Err(message) => (false, message),
                 }
@@ -330,9 +352,10 @@ impl Requests {
                 None => (false, format!("{path} is not a project")),
                 Some(id) => {
                     if !again {
+                        self.forget(&id);
                         self.studio.remove_project(id.clone());
                     }
-                    match self.until(|requests| requests.known(&id).is_none()).await? {
+                    match self.until(&id, wait, |requests| requests.known(&id).is_none()).await? {
                         Ok(()) => (true, format!("removed {path}")),
                         Err(message) => (false, message),
                     }
@@ -356,16 +379,27 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
     };
     let folder = requests_dir(&data_dir);
     let (waker, notify) = hub::signal();
-    let mut requests = Requests { subscription: studio.subscribe(waker), studio, notify, projects: Vec::new() };
+    let mut requests = Requests {
+        subscription: studio.subscribe(waker),
+        studio,
+        notify,
+        projects: Vec::new(),
+        failures: VecDeque::new(),
+    };
     let mut applied: HashSet<PathBuf> = HashSet::new();
     loop {
         tokio::time::sleep(REQUEST_EVERY).await;
         requests.drain();
         applied.retain(|path| path.exists());
         let Ok(entries) = std::fs::read_dir(&folder) else { continue };
-        let mut waiting: Vec<PathBuf> =
-            entries.filter_map(Result::ok).map(|entry| entry.path()).filter(|path| pending(path)).collect();
-        waiting.sort();
+        let files: Vec<PathBuf> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+        for done in files.iter().filter(|path| path.to_string_lossy().ends_with(".done.json")) {
+            if modified(done).elapsed().is_ok_and(|age| age > ANSWERS_KEPT) {
+                std::fs::remove_file(done).ok();
+            }
+        }
+        let mut waiting: Vec<PathBuf> = files.into_iter().filter(|path| pending(path)).collect();
+        waiting.sort_by_cached_key(|path| (modified(path), path.clone()));
         for path in waiting {
             if !private_to(&path, me) {
                 continue;
@@ -390,11 +424,13 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
                     json!({ "ok": false, "message": format!("unreadable request: {error:#}"), "projects": [] })
                 }
             };
-            applied.remove(&path);
-            if let Err(error) = write_private(&path.with_extension("done.json"), &answer) {
-                eprintln!("local-studio-serve: could not answer {}: {error:#}", path.display());
+            match write_private(&path.with_extension("done.json"), &answer) {
+                Ok(()) => {
+                    applied.remove(&path);
+                    std::fs::remove_file(&path).ok();
+                }
+                Err(error) => eprintln!("local-studio-serve: could not answer {}: {error:#}", path.display()),
             }
-            std::fs::remove_file(&path).ok();
         }
     }
 }
