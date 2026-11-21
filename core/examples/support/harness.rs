@@ -33,7 +33,7 @@ pub struct Target {
 }
 
 #[derive(Default)]
-struct Signal {
+pub struct Signal {
     pending: Mutex<bool>,
     ready: Condvar,
 }
@@ -46,7 +46,7 @@ impl Waker for Signal {
 }
 
 impl Signal {
-    fn wait(&self, timeout: Duration) {
+    pub fn wait(&self, timeout: Duration) {
         let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let (mut pending, _) = self
             .ready
@@ -57,15 +57,16 @@ impl Signal {
 }
 
 #[derive(Default)]
-struct Watch {
+pub struct Watch {
     connection: Option<Connection>,
     projects: Vec<String>,
     threads: Vec<ThreadRow>,
     models: Vec<ModelOption>,
-    thread: Option<String>,
+    pub thread: Option<String>,
     busy: bool,
     finished: u32,
     approvals: Vec<Approval>,
+    pub denied: Vec<(Approval, Instant)>,
     answers: BTreeMap<u64, String>,
     users: BTreeMap<u64, String>,
     latest: Option<String>,
@@ -238,31 +239,83 @@ fn pump_within(
     timeout: Duration,
     done: impl Fn(&Watch) -> bool,
 ) -> anyhow::Result<()> {
+    settle(studio, signal, watch, (step, timeout), true, done)
+}
+
+fn expecting(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    (step, timeout): (&str, Duration),
+    done: impl Fn(&Watch) -> bool,
+) -> anyhow::Result<()> {
+    settle(studio, signal, watch, (step, timeout), false, done)
+}
+
+fn settle(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    (step, timeout): (&str, Duration),
+    deny: bool,
+    done: impl Fn(&Watch) -> bool,
+) -> anyhow::Result<()> {
     let deadline = Instant::now() + timeout;
     let errors = watch.errors.len();
     loop {
         for update in studio.tick() {
             apply(watch, update);
         }
+        if deny {
+            deny_unexpected(studio, watch, step)?;
+        }
         if done(watch) {
             println!("ok   {step}");
             return Ok(());
         }
         if let Some(error) = watch.errors.get(errors) {
-            bail!("{step}: {error}");
+            bail!("{step}: {error}{}", pending(watch));
         }
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-            bail!("timed out waiting for: {step}");
+            bail!("timed out waiting for: {step}{}", pending(watch));
         };
         signal.wait(left.min(Duration::from_millis(100)));
     }
+}
+
+fn pending(watch: &Watch) -> String {
+    if watch.approvals.is_empty() {
+        return String::new();
+    }
+    let cards: Vec<String> = watch.approvals.iter().map(|approval| format!("`{}`", approval.command)).collect();
+    format!(" (approval pending: {})", cards.join(", "))
+}
+
+fn deny_unexpected(studio: &Studio, watch: &mut Watch, step: &str) -> anyhow::Result<()> {
+    let Some(thread) = watch.thread.clone() else { return Ok(()) };
+    for approval in watch.approvals.clone() {
+        match watch.denied.iter().find(|(known, _)| known.request_id == approval.request_id) {
+            Some((_, at)) if at.elapsed() > CHECK_TIMEOUT => bail!(
+                "{step}: the approval `{}` is still pending {} s after a deny",
+                approval.command,
+                CHECK_TIMEOUT.as_secs()
+            ),
+            Some(_) => {}
+            None => {
+                println!("     {step}: denied an approval this step does not expect: {}", approval.command);
+                studio.answer_approval(thread.clone(), approval.request_id.clone(), ApprovalAnswer::Deny);
+                watch.denied.push((approval, Instant::now()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn prompt(text: &str) -> PromptDraft {
     PromptDraft { text: text.to_string(), images: Vec::new(), files: Vec::new() }
 }
 
-fn turn(
+pub fn turn(
     studio: &Studio,
     signal: &Signal,
     watch: &mut Watch,
@@ -278,7 +331,7 @@ fn turn(
 
 fn write_prompt(file: &str) -> String {
     format!(
-        "Create a file named {file} in the current directory containing the single line hello. Use a file writing tool, not a shell command, and do not ask me first."
+        "Create a file named {file} in the current directory containing the single line hello. Use your built-in file editing tool (Write for Claude Code, apply_patch for Codex), not a shell command or an MCP tool, and do not ask me first."
     )
 }
 
@@ -294,11 +347,11 @@ fn approval_turn(
     (label, text): (&str, &str),
     answer: ApprovalAnswer,
 ) -> anyhow::Result<Vec<Approval>> {
-    let finished = watch.finished;
+    let finished = watch.begin();
     studio.send(format!("send-{label}"), thread.to_string(), prompt(text), Delivery::Queue);
     let mut asked = Vec::new();
     loop {
-        pump(studio, signal, watch, &format!("{label}: approval asked or turn ended"), |watch| {
+        expecting(studio, signal, watch, (&format!("{label}: approval asked or turn ended"), STEP_TIMEOUT), |watch| {
             !watch.approvals.is_empty() || watch.finished > finished
         })?;
         let Some(approval) = watch.approvals.first().cloned() else { break };
@@ -306,9 +359,13 @@ fn approval_turn(
         studio.answer_approval(thread.to_string(), approval.request_id.clone(), answer);
         let request = approval.request_id.clone();
         asked.push(approval);
-        pump(studio, signal, watch, &format!("{label}: approval {} settled", asked.len()), |watch| {
-            watch.approvals.iter().all(|known| known.request_id != request)
-        })?;
+        expecting(
+            studio,
+            signal,
+            watch,
+            (&format!("{label}: approval {} settled", asked.len()), STEP_TIMEOUT),
+            |watch| watch.approvals.iter().all(|known| known.request_id != request),
+        )?;
     }
     Ok(asked)
 }
@@ -361,7 +418,15 @@ fn untrusted_command_asks(
     let asked = approval_turn(studio, signal, watch, thread, ("touch", &shell_prompt(TOUCH)), ApprovalAnswer::Deny)?;
     ensure!(!asked.is_empty(), "Supervised did not ask before running `{TOUCH}`");
     ensure!(!work.join("touched.txt").exists(), "touched.txt was written after a deny");
-    println!("ok   `{TOUCH}` asked first and deny left no file ({} approvals denied)", asked.len());
+    match asked.iter().find(|approval| approval.command.contains("touched.txt")) {
+        Some(card) => {
+            println!("ok   `{TOUCH}` asked first and deny left no file: {}", card.command.replace('\n', " | "));
+        }
+        None => watch.miss(format!(
+            "no approval card for `{TOUCH}` names touched.txt: {:?}",
+            asked.iter().map(|approval| approval.command.clone()).collect::<Vec<_>>()
+        )),
+    }
     Ok(())
 }
 
@@ -376,7 +441,7 @@ fn outside_write_held(
     std::fs::create_dir_all(&outside)?;
     let target = outside.join("outside.txt");
     let text = format!(
-        "Create a file at the absolute path {} containing the single line hello. Use a file writing tool, and do not ask me first.",
+        "Create a file at the absolute path {} containing the single line hello. Use your built-in file editing tool (Write for Claude Code, apply_patch for Codex), not a shell command or an MCP tool, and do not ask me first.",
         target.display()
     );
     let asked = approval_turn(studio, signal, watch, thread, ("outside.txt", &text), ApprovalAnswer::Deny)?;
@@ -394,16 +459,16 @@ fn outside_write_held(
 }
 
 fn stop_settles_approval(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str) -> anyhow::Result<()> {
-    let finished = watch.finished;
+    let finished = watch.begin();
     studio.send("send-stop-approval".to_string(), thread.to_string(), prompt(&shell_prompt(STOPPED)), Delivery::Queue);
-    pump(studio, signal, watch, "stop-approval: approval asked", |watch| {
+    expecting(studio, signal, watch, ("stop-approval: approval asked", STEP_TIMEOUT), |watch| {
         !watch.approvals.is_empty() || watch.finished > finished
     })?;
     ensure!(!watch.approvals.is_empty(), "Supervised did not ask before running {STOPPED}");
     println!("     approval left unanswered: {}", watch.approvals[0].command);
     studio.abort(thread.to_string());
     let stopped = Instant::now();
-    let settled = pump_within(studio, signal, watch, "Stop settled the unanswered approval", CHECK_TIMEOUT, |watch| {
+    let settled = expecting(studio, signal, watch, ("Stop settled the unanswered approval", CHECK_TIMEOUT), |watch| {
         watch.approvals.is_empty() && !watch.busy && watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
     });
     if let Err(error) = settled {
@@ -411,7 +476,9 @@ fn stop_settles_approval(studio: &Studio, signal: &Signal, watch: &mut Watch, th
         for approval in watch.approvals.clone() {
             studio.answer_approval(thread.to_string(), approval.request_id, ApprovalAnswer::Deny);
         }
-        pump(studio, signal, watch, "stale approvals cleared after the miss", |watch| watch.approvals.is_empty())?;
+        expecting(studio, signal, watch, ("stale approvals cleared after the miss", STEP_TIMEOUT), |watch| {
+            watch.approvals.is_empty()
+        })?;
         if watch.busy {
             studio.abort(thread.to_string());
             pump(studio, signal, watch, "the thread left Working after the miss", |watch| !watch.busy)?;
@@ -507,6 +574,7 @@ fn effort_restarts(
         for update in studio.tick() {
             apply(watch, update);
         }
+        deny_unexpected(studio, watch, "effort restart")?;
         if !efforts_running().iter().any(|effort| effort == old) {
             break;
         }
@@ -551,6 +619,53 @@ fn scratch_repo(work: &Path) -> anyhow::Result<()> {
     std::fs::write(work.join("README.md"), "Scratch repo for the harness smoke.\n")?;
     git(work, &["add", "README.md"])?;
     git(work, &["-c", "user.name=smoke", "-c", "user.email=smoke@localhost", "commit", "-q", "-m", "init"])
+}
+
+fn long_turn_aborts(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    (target, thread): (&Target, &str),
+) -> anyhow::Result<()> {
+    let finished = watch.begin();
+    studio.send("send-long".to_string(), thread.to_string(), prompt(LONG), Delivery::Queue);
+    pump(studio, signal, watch, "long turn is working", |watch| watch.busy)?;
+    pump(studio, signal, watch, "long turn is streaming text", |watch| watch.streamed || watch.finished > finished)?;
+    ensure!(
+        watch.finished == finished,
+        "the long turn ended before the abort: {:?} (approvals denied: {:?})",
+        watch.failure,
+        watch.denied.iter().map(|(approval, _)| approval.command.clone()).collect::<Vec<_>>()
+    );
+    let old = target.thinking.unwrap_or("none");
+    let new = if old == "medium" { "low" } else { "medium" };
+    studio.set_thinking_level(thread.to_string(), new.to_string());
+    println!("     thinking level {old} -> {new} during the running turn");
+    studio.abort(thread.to_string());
+    let aborted = Instant::now();
+    pump(studio, signal, watch, "abort ended the turn", |watch| watch.finished > finished && !watch.busy)?;
+    pump(studio, signal, watch, "abort took the row out of Working", |watch| {
+        watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
+    })?;
+    let status = watch.row().map(|row| row.status);
+    println!("ok   aborted turn left Working in {} ms (row {status:?})", aborted.elapsed().as_millis());
+    if target.harness == Harness::ClaudeCode {
+        effort_restarts(studio, signal, watch, thread, (old, new))?;
+    }
+    Ok(())
+}
+
+fn clear_outputs(root: &Path, work: &Path) -> anyhow::Result<()> {
+    let files = ["denied.txt", "approved.txt", "touched.txt", "proof.txt", "stopped.txt"].map(|name| work.join(name));
+    for path in files.iter().chain([root.join("outside").join("outside.txt")].iter()) {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("remove {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn open(config: &StudioConfig) -> anyhow::Result<(Arc<Studio>, Arc<Signal>, Watch)> {
@@ -638,29 +753,7 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         stop_settles_approval(&studio, &signal, watch, &thread)?;
         ensure!(!work.join("stopped.txt").exists(), "stopped.txt was written although its approval was never given");
         queued_follow_up(&studio, &signal, watch, &thread)?;
-
-        let finished = watch.begin();
-        studio.send("send-long".to_string(), thread.clone(), prompt(LONG), Delivery::Queue);
-        pump(&studio, &signal, watch, "long turn is working", |watch| watch.busy)?;
-        pump(&studio, &signal, watch, "long turn is streaming text", |watch| {
-            watch.streamed || watch.finished > finished
-        })?;
-        ensure!(watch.finished == finished, "the long turn ended before the abort: {:?}", watch.failure);
-        let old = target.thinking.unwrap_or("none");
-        let new = if old == "medium" { "low" } else { "medium" };
-        studio.set_thinking_level(thread.clone(), new.to_string());
-        println!("     thinking level {old} -> {new} during the running turn");
-        studio.abort(thread.clone());
-        let aborted = Instant::now();
-        pump(&studio, &signal, watch, "abort ended the turn", |watch| watch.finished > finished && !watch.busy)?;
-        pump(&studio, &signal, watch, "abort took the row out of Working", |watch| {
-            watch.row().is_some_and(|row| row.status != ThreadStatus::Working)
-        })?;
-        let status = watch.row().map(|row| row.status);
-        println!("ok   aborted turn left Working in {} ms (row {status:?})", aborted.elapsed().as_millis());
-        if target.harness == Harness::ClaudeCode {
-            effort_restarts(&studio, &signal, watch, &thread, (old, new))?;
-        }
+        long_turn_aborts(&studio, &signal, watch, (target, &thread))?;
         Ok(thread)
     })();
     let misses = std::mem::take(&mut watch.misses);
@@ -751,6 +844,7 @@ pub fn run(target: &Target) -> anyhow::Result<()> {
     let work = root.join("work");
     std::fs::create_dir_all(&agent_dir)?;
     scratch_repo(&work)?;
+    clear_outputs(&root, &work)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     let socket = root.join("d.sock");
