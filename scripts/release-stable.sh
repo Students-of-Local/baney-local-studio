@@ -16,19 +16,23 @@ REPO=$(sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)
 
 ids=$(gh api "repos/$REPO/releases" --paginate -q ".[] | select(.draft and .tag_name == \"$tag\") | .id")
 [ "$(wc -w <<< "$ids")" -eq 1 ] || die "expected one draft for $tag, found: ${ids:-none}; run promote.yml first"
-commit=$(gh api "repos/$REPO/releases/$ids" -q .target_commitish)
-[[ $commit =~ ^[0-9a-f]{40}$ ]] || die "the $tag draft names $commit, not a commit"
-gh api "repos/$REPO/releases/$ids/assets" --paginate -q '.[].name' | grep -qx 'local-studio-linux-x86_64.tar.gz' ||
-  die "the $tag draft has no Linux build; promote.yml did not finish"
+export REPO
+GH_TOKEN=${GH_TOKEN:-$(gh auth token)}
+export GH_TOKEN
+manifest=$(mktemp)
+trap 'rm -f "$manifest"' EXIT
+"$(dirname "$0")/release.sh" verify-promote "$ids" "$version" "$manifest"
+commit=$(jq -r .commit "$manifest")
+kind=$(jq -r .kind "$manifest")
 
 git fetch -q "$remote" "+refs/heads/stable:refs/remotes/$remote/stable" "+refs/tags/*:refs/tags/*"
 git cat-file -e "$commit^{commit}" 2> /dev/null || git fetch -q "$remote" "$commit"
 head=$(git rev-parse "refs/remotes/$remote/stable")
 
-if [ "$head" != "$commit" ]; then
+if [ "$kind" = hotfix ]; then
+  [ "$head" = "$commit" ] || die "the $tag hotfix draft is built from $commit but stable's head is $head"
+elif [ "$head" != "$commit" ]; then
   git merge-base --is-ancestor "$head" "$commit" || die "stable's head $head is not an ancestor of $commit"
-  open=$(gh api "repos/$REPO/issues?state=open&labels=regression&per_page=100" -q '[.[] | select(.pull_request | not)] | length')
-  [ "$open" = 0 ] || die "$open open issue(s) labeled regression"
 fi
 
 existing=$(git ls-remote "$remote" "refs/tags/$tag" | cut -f1)

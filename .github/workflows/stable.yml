@@ -1,5 +1,5 @@
 name: Stable
-# Started only by scripts/release-stable.sh, after it moved `stable` to the draft's commit and tagged it vX.Y.Z. It runs on that new head, so it is this commit's own workflow, and only the stable environment can read the stable signing key. A failed run changes nothing that blocks a rerun (docs/channels.md).
+# Started only by scripts/release-stable.sh, after it moved `stable` to the draft's commit and tagged it vX.Y.Z. It runs on stable's head, so it uses that commit's own workflow, and only the stable environment can read the stable signing key. It signs only the assets the promote.yml run recorded in its manifest. A failed run changes nothing that blocks a rerun (docs/channels.md).
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +9,8 @@ on:
         required: true
 permissions:
   contents: write
+  actions: read
+  issues: read
 concurrency:
   group: stable
   cancel-in-progress: false
@@ -34,9 +36,10 @@ jobs:
           [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be X.Y.Z"
           ids=$(gh api "repos/$REPO/releases" --paginate -q ".[] | select(.draft and .tag_name == \"v$VERSION\") | .id")
           [ "$(wc -w <<< "$ids")" = 1 ] || die "expected one draft for v$VERSION, found: ${ids:-none}"
-          commit=$(gh api "repos/$REPO/releases/$ids" -q .target_commitish)
-          [ "$commit" = "$GITHUB_SHA" ] || die "the draft is built from $commit but stable's head is $GITHUB_SHA"
+          scripts/release.sh verify-promote "$ids" "$VERSION" "$RUNNER_TEMP/promote.json"
+          commit=$(jq -r .commit "$RUNNER_TEMP/promote.json")
           [ "$(git rev-parse "v$VERSION^{commit}" 2> /dev/null)" = "$commit" ] || die "tag v$VERSION is missing or not on $commit"
+          git merge-base --is-ancestor "$commit" "$GITHUB_SHA" || die "the draft's commit $commit is not on stable ($GITHUB_SHA)"
           mac=false
           gh api "repos/$REPO/releases/$ids/assets" --paginate -q '.[].name' | grep -qx 'local-studio-darwin-aarch64.app.tar.gz' && mac=true
           echo "id=$ids" >> "$GITHUB_OUTPUT"
@@ -50,6 +53,7 @@ jobs:
           UPDATER_SIGNING_KEY_PASSWORD: ${{ secrets.STABLE_UPDATER_SIGNING_KEY_PASSWORD }}
           DRAFT: ${{ steps.d.outputs.id }}
           COMMIT: ${{ steps.d.outputs.commit }}
+          PROMOTE_MANIFEST: ${{ runner.temp }}/promote.json
         run: |
           [ -n "$UPDATER_SIGNING_KEY" ] || echo "::warning title=Unsigned feed::STABLE_UPDATER_SIGNING_KEY is not set in the stable environment, so latest.json has no signatures and updaters will not install this build."
           scripts/release.sh publish stable "$DRAFT" "$VERSION" "$COMMIT"

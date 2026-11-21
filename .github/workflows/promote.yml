@@ -108,15 +108,37 @@ jobs:
   ready:
     needs: [pick, build]
     runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.pick.outputs.version }}
+      COMMIT: ${{ needs.pick.outputs.commit }}
+      DRAFT: ${{ needs.pick.outputs.draft }}
+      KIND: ${{ inputs.hotfix && 'hotfix' || 'nightly' }}
     steps:
-      - env:
-          VERSION: ${{ needs.pick.outputs.version }}
-          COMMIT: ${{ needs.pick.outputs.commit }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record what this run built
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/manifest"
+          scripts/release.sh manifest "$DRAFT" "$VERSION" "$COMMIT" "$KIND" > "$RUNNER_TEMP/manifest/promote.json"
+          cat "$RUNNER_TEMP/manifest/promote.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: promote-manifest
+          path: ${{ runner.temp }}/manifest/promote.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Point the draft at this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/$REPO/releases/$DRAFT" -f body="promote run $GITHUB_RUN_ID" > /dev/null
           {
-            echo "Draft v$VERSION is built from $COMMIT."
+            echo "Draft v$VERSION ($KIND) is built from $COMMIT."
             echo
-            echo "A repository admin finishes the release from a checkout: \`scripts/release-stable.sh $VERSION\`"
+            echo "Once this run has finished green, a repository admin finishes the release from a checkout: \`scripts/release-stable.sh $VERSION\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   cleanup:
