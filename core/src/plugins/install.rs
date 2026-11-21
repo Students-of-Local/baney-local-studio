@@ -301,6 +301,9 @@ struct Entry {
     kind: Kind,
 }
 
+/// Finder writes `.DS_Store` into any folder it shows; no runtime loads one, so no hash covers it.
+pub const UNHASHED: &str = ".DS_Store";
+
 fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, String> {
     let excluded: Vec<PathBuf> = exclude
         .iter()
@@ -319,6 +322,9 @@ fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, S
                 continue;
             }
             let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
+            if name == UNHASHED && meta.is_file() {
+                continue;
+            }
             let text = path
                 .components()
                 .map(|part| part.as_os_str().to_str())

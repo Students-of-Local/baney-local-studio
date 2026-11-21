@@ -295,6 +295,27 @@ fn servers_at(agent: &Path, name: &str) -> Option<Value> {
 }
 
 #[test]
+fn files_the_runtime_or_finder_write_do_not_end_consent() {
+    let temp = Temp::new();
+    let root = temp.0.join("plugins");
+    let agent = temp.0.join("agent");
+    write(&agent.join("settings.json"), "{}");
+    let source = served(&temp.0.join("src/toolbox"), "toolbox", "1.0.0", &["mcp-server"], "box");
+    installed(&root, &Source::Dir(source), &Catalog::default());
+    grant(&root, "toolbox", &[Capability::McpServer]);
+    write(&root.join("toolbox/.DS_Store"), "finder");
+    write(&root.join("toolbox/bin/.DS_Store"), "finder");
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready, "a .DS_Store file ended consent");
+    sync(&root, &agent);
+    assert_eq!(servers(&agent)["plugin-toolbox"]["env"]["PYTHONDONTWRITEBYTECODE"], json!({"env": "PATH"}));
+
+    let manifest = root.join("toolbox/plugin.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+    write(&manifest, &text.replace("command = \"bin/server\"", "command = \"bin/server\"\nargs = [\"bin/.DS_Store\"]"));
+    assert!(load(&root.join("toolbox")).is_err(), "a server that runs an unhashed .DS_Store file loaded");
+}
+
+#[test]
 fn a_command_inside_dot_git_is_covered_by_consent() {
     let temp = Temp::new();
     let root = temp.0.join("plugins");

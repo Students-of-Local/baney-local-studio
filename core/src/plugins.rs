@@ -17,6 +17,8 @@ pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, 
 pub const MANIFEST: &str = "plugin.toml";
 pub const MCP_PREFIX: &str = "plugin-";
 pub const MCP_TAG: &str = "localStudioPlugin";
+/// Eukhe's settings take env values only as host variable names; Python needs any non-empty value, and every kernel has PATH.
+pub const NO_BYTECODE: (&str, &str) = ("PYTHONDONTWRITEBYTECODE", "PATH");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -306,8 +308,12 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
             return None;
         }
     };
-    let prefix = env_prefix(id);
     let before = errors.len();
+    let unhashed = |path: &str| Path::new(path).components().any(|part| part.as_os_str() == install::UNHASHED);
+    if unhashed(&mcp.command) || mcp.args.iter().any(|arg| unhashed(arg)) {
+        errors.push(format!("[mcp] runs a {} file, which no hash covers", install::UNHASHED));
+    }
+    let prefix = env_prefix(id);
     for (name, host) in &mcp.env {
         if !valid_env_name(name) {
             errors.push(format!("[mcp] env: bad variable name: {name:?}"));
@@ -337,8 +343,9 @@ pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
         .filter_map(|plugin| {
             let mcp = plugin.mcp.as_ref()?;
             let dir = absolute(&plugin.dir);
-            let env: Map<String, Value> =
+            let mut env: Map<String, Value> =
                 mcp.env.iter().map(|(name, host)| (name.clone(), json!({ "env": host }))).collect();
+            env.insert(NO_BYTECODE.0.to_string(), json!({ "env": NO_BYTECODE.1 }));
             let mut entry = json!({
                 "type": "stdio",
                 "command": absolute(&mcp.command).to_string_lossy(),
@@ -346,9 +353,7 @@ pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
                 "cwd": dir.to_string_lossy(),
                 MCP_TAG: true,
             });
-            if !env.is_empty() {
-                entry["env"] = Value::Object(env);
-            }
+            entry["env"] = Value::Object(env);
             Some((plugin.mcp_name(), entry))
         })
         .collect()

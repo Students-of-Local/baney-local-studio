@@ -9,7 +9,7 @@ What a capability grant covers, when it carries over to an update, and which `mc
 - the record's `tree` equals the hash of the plugin folder as it is now, and
 - every capability it asks for is in the record.
 
-Anything else is "needs consent": its skills, prompts and commands still work, and it gets no MCP server. Local Studio hashes the folder each time it checks consent, so a folder changed in place, or replaced by hand, needs consent again. A plugin that keeps state should keep it outside its own folder.
+Anything else is "needs consent": its skills, prompts and commands still work, and it gets no MCP server. Local Studio hashes the folder each time it checks consent, so a folder changed in place, or replaced by hand, needs consent again. That hash covers the whole folder, `.git` included (`plugin hash` skips a top-level `.git` for catalog pins), and skips only `.DS_Store` files, which Finder writes and no runtime loads. A plugin whose `[mcp]` command or args name a `.DS_Store` file does not load. A plugin that keeps state should keep it outside its own folder; Local Studio's entry for its server sets `PYTHONDONTWRITEBYTECODE`, so Python writes no `__pycache__` there.
 
 Grants from before this rule have no `tree`, so each plugin with capabilities asks once more after the upgrade.
 
@@ -27,7 +27,7 @@ The source is the catalog id, the git URL without its commit, or the folder's ab
 
 ## MCP server entries
 
-Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true`. Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
+Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true` and `"PYTHONDONTWRITEBYTECODE": {"env": "PATH"}` in its `env` (Eukhe takes env values only as host variable names, and Python needs any non-empty value). Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
 
 - an entry tagged `"localStudioPlugin": true`, or
 - an untagged entry named `plugin-<id>` where `<id>` is an installed plugin and `command` is exactly the path Local Studio would write for it (entries from before the tag).
