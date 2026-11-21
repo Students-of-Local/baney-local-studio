@@ -67,6 +67,41 @@ fetch_assets() {
     done
 }
 
+draft_digests() {
+  gh api "repos/$REPO/releases/$1/assets" --paginate -q '.[] | select(.name != "latest.json") | [.name, (.digest // "" | ltrimstr("sha256:"))] | @tsv' |
+    jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries'
+}
+
+manifest() {
+  local id=$1 version=$2 commit=$3 kind=$4 assets
+  assets=$(draft_digests "$id")
+  jq -e 'length > 0 and all(.[]; test("^[0-9a-f]{64}$"))' <<< "$assets" > /dev/null || die "draft $id has an asset without a sha256 digest"
+  jq -n --argjson draft "$id" --arg version "$version" --arg commit "$commit" --arg kind "$kind" --argjson assets "$assets" \
+    '{draft: $draft, version: $version, commit: $commit, kind: $kind, assets: $assets}'
+}
+
+verify_promote() {
+  local id=$1 version=$2 out=$3 body run info dir target open
+  body=$(gh api "repos/$REPO/releases/$id" -q .body)
+  [[ $body =~ ^promote\ run\ ([0-9]+)$ ]] || die "draft $id does not name the promote.yml run that built it; run promote.yml again"
+  run=${BASH_REMATCH[1]}
+  info=$(gh api "repos/$REPO/actions/runs/$run" -q '[(.path | split("@")[0]), .head_branch, .event, .status, .conclusion] | join(" ")')
+  [ "$info" = ".github/workflows/promote.yml main workflow_dispatch completed success" ] || die "promote.yml run $run is not a finished, successful dispatch on main ($info)"
+  dir=$(mktemp -d)
+  gh run download "$run" -R "$REPO" -n promote-manifest -D "$dir" > /dev/null || die "promote.yml run $run has no promote-manifest artifact"
+  target=$(gh api "repos/$REPO/releases/$id" -q .target_commitish)
+  jq -e --argjson id "$id" --arg v "$version" --arg c "$target" \
+    '.draft == $id and .version == $v and .commit == $c and (.kind == "nightly" or .kind == "hotfix") and (.assets | has("local-studio-linux-x86_64.tar.gz"))' \
+    "$dir/promote.json" > /dev/null || die "promote.yml run $run built another draft, version or commit than draft $id ($version, $target)"
+  jq -e --argjson now "$(draft_digests "$id")" '.assets == $now' "$dir/promote.json" > /dev/null || die "draft $id's assets changed after promote.yml run $run built them"
+  if [ "$(jq -r .kind "$dir/promote.json")" = nightly ]; then
+    open=$(gh api "repos/$REPO/issues?state=open&labels=regression&per_page=100" -q '[.[] | select(.pull_request | not)] | length')
+    [ "$open" = 0 ] || die "$open open issue(s) labeled regression"
+  fi
+  cp "$dir/promote.json" "$out"
+  rm -r -f "$dir"
+}
+
 notes() {
   local channel=$1 version=$2 commit=$3 previous
   previous=$(feed_field "$channel" commit)
@@ -191,9 +226,14 @@ swap_rolling() {
 }
 
 publish() {
-  local channel=$1 id=$2 version=$3 commit=$4 dir="$RUNNER_TEMP/assets" text base
+  local channel=$1 id=$2 version=$3 commit=$4 dir="$RUNNER_TEMP/assets" text base stale got
   check_newer "$channel" "$version"
   fetch_assets "$id" "$dir"
+  if [ -n "${PROMOTE_MANIFEST:-}" ]; then
+    got=$(for file in "$dir"/*; do printf '%s\t%s\n' "$(basename "$file")" "$(sha256sum "$file" | cut -d' ' -f1)"; done |
+      jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries')
+    jq -e --argjson got "$got" '.assets == $got' "$PROMOTE_MANIFEST" > /dev/null || die "the downloaded assets do not match the promote manifest"
+  fi
   text=$(notes "$channel" "$version" "$commit")
   [ "$channel" = nightly ] && keep_nightly "$version" "$commit" "$dir" "$text"
   case $channel in
@@ -202,6 +242,9 @@ publish() {
   esac
   feed_json "$channel" "$version" "$commit" "$dir" "$base" "$text" > "$RUNNER_TEMP/latest.json"
   cat "$RUNNER_TEMP/latest.json"
+  for stale in $(gh api "repos/$REPO/releases/$id/assets" --paginate -q '.[] | select(.name == "latest.json") | .id'); do
+    gh api -X DELETE "repos/$REPO/releases/assets/$stale"
+  done
   upload "$id" "$RUNNER_TEMP/latest.json"
   check_newer "$channel" "$version"
   if [ "$channel" = stable ]; then
@@ -221,6 +264,8 @@ case $command in
   draft) draft "$@" ;;
   upload) upload "$@" ;;
   discard) discard "$@" ;;
+  manifest) manifest "$@" ;;
+  verify-promote) verify_promote "$@" ;;
   publish) publish "$@" ;;
-  *) die "usage: release.sh feed-field|check-newer|draft|upload|discard|publish ..." ;;
+  *) die "usage: release.sh feed-field|check-newer|draft|upload|discard|manifest|verify-promote|publish ..." ;;
 esac
