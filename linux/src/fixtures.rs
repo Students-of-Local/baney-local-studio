@@ -462,7 +462,6 @@ pub fn info(live: bool) -> ThreadInfo {
         service_tiers: Vec::new(),
         goal: None,
         harness: Harness::Eukhe,
-        machine: None,
     }
 }
 
