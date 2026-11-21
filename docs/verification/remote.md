@@ -16,7 +16,8 @@ Every run isolates its state. `HOME`, `EUKHE_DAEMON_SOCKET`, `EUKHE_CODING_AGENT
 | Machines UI (macOS, Linux) | Snapshots only | Settings › Connections, pairing sheet, sidebar rows |
 | Serve as a service on Linux | Deployed | Parish1, systemd user unit, `install --tailscale` |
 | Serve as a service on macOS, handoff with the app | Verified | The Mac, launchd agent, `install --tailscale` |
-| The app serving while it runs | Not built | #53 |
+| The app serving while it runs | Verified | The Mac, app launched after `serve.json` existed |
+| The app starting to serve when `serve.json` appears later | Not built | #53 |
 | Mac to Parish1 over the tailnet, core link client | Verified | link_probe, Claude Code haiku on Parish1 |
 | Mac to Parish1 over the tailnet, app screens | Not run | Polycarp computer use was down; steps below |
 | Mac to Parish1 over the shared tunnel | Not run yet | Waits for the tunnel |
@@ -115,7 +116,8 @@ local-studio-serve install --tailscale --name <mac> --bin ~/.local/opt/local-stu
 - With the app running, `install` wrote `org.local.studio.serve.plist` and loaded it, and mounted `/v1/health` and `/v1/ws` on 443. Serve logged that the app owns the data dir and waited. `status --json` reported `owned` by the app.
 - App quit: serve took the lock about 1 s after the app exited (`status --json`: `serving`, owner `serve`). Health over the tailnet answered from the Mac and from Parish1.
 - App launched: it sent `SIGUSR1`. Serve closed every remote socket with 1012, released the lock, and logged that the app took it over. The app owned the data dir about 40 s after launch, with the Mac's load average around 300, and serve went back to waiting.
-- Not built: while the app owns the lock, nothing serves remote clients, so the Mac is unreachable whenever the app is open (#53).
+- The relaunched app served in process: it listened on 18093, `status --json` reported `serving` with the app as owner, and health over the tailnet answered from the Mac and from Parish1.
+- Gap (#53): the first app instance was already running when `install` wrote `serve.json`. It owned the lock but served nothing, because the app checks for `serve.json` only at launch. The Mac was unreachable until that app quit.
 
 ## Machines UI
 
