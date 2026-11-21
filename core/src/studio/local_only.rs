@@ -119,9 +119,9 @@ impl Actor {
             self.refuse(id, plugin, text, None, prompt, request);
             return Ok(false);
         }
+        self.pin_local(id, active, &provider, &model, &plugins).await?;
         self.store.update(id, |flags| flags.local_only = Some(plugin.clone()));
         self.save();
-        self.pin_local(id, active, &provider, &model, &plugins).await?;
         Ok(true)
     }
 
