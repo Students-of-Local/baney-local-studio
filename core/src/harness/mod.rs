@@ -47,6 +47,7 @@ pub(crate) enum Event {
     Context(ContextUsage),
     Model(String),
     Usage(Spend),
+    Idle,
     Stopped(String),
     Exited(Option<String>),
 }
