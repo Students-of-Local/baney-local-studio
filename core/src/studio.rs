@@ -2119,7 +2119,7 @@ impl Actor {
             }
         }
         if let Some(agent) = crate::daemon::agent_dir() {
-            if let Err(error) = plugins::sync_mcp_servers(&agent, &scan.plugins, &grants) {
+            if let Err(error) = plugins::sync_mcp_servers(dir, &agent, &scan.plugins, &grants) {
                 notes.push(error);
             }
         }

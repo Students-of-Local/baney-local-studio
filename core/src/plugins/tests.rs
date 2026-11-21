@@ -261,7 +261,7 @@ fn settings_keep_mcp_servers_local_studio_did_not_write() {
 }
 
 #[test]
-fn untagged_entries_count_as_ours_only_when_they_match_an_installed_plugin() {
+fn untagged_entries_count_as_ours_only_when_they_run_code_under_the_plugins_root() {
     let temp = Temp::new();
     let root = temp.0.join("plugins");
     let agent = temp.0.join("agent");
@@ -281,6 +281,22 @@ fn untagged_entries_count_as_ours_only_when_they_match_an_installed_plugin() {
         "an entry Local Studio wrote before tags stayed after consent ended"
     );
     assert_eq!(servers.get("plugin-gone"), Some(&gone), "an untagged entry for no installed plugin was removed");
+
+    let moved = json!({"type": "stdio", "command": plugin.dir.join("bin/old-server").to_string_lossy()});
+    write(&root.join("broken/plugin.toml"), "id = \"broken\"\n");
+    let broken = json!({"type": "stdio", "command": "/usr/bin/env", "cwd": root.join("broken").to_string_lossy()});
+    write(
+        &agent.join("settings.json"),
+        &json!({ "mcpServers": { "plugin-toolbox": moved, "plugin-broken": broken } }).to_string(),
+    );
+    sync(&root, &agent);
+    for name in ["plugin-toolbox", "plugin-broken"] {
+        assert_eq!(
+            servers_at(&agent, name),
+            None,
+            "{name} stayed after its command moved or its plugin stopped loading"
+        );
+    }
 
     let mine = json!({"type": "stdio", "command": "/usr/local/bin/toolbox"});
     write(&agent.join("settings.json"), &json!({ "mcpServers": { "plugin-toolbox": mine } }).to_string());

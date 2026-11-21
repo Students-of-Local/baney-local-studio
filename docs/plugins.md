@@ -30,6 +30,6 @@ The source is the catalog id, the git URL without its commit, or the folder's ab
 Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true` and `"PYTHONDONTWRITEBYTECODE": {"env": "PATH"}` in its `env` (Eukhe takes env values only as host variable names, and Python needs any non-empty value). Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
 
 - an entry tagged `"localStudioPlugin": true`, or
-- an untagged entry named `plugin-<id>` where `<id>` is an installed plugin and `command` is exactly the path Local Studio would write for it (entries from before the tag).
+- an untagged entry named `plugin-<name>` whose `command` or `cwd` lies inside the plugins folder (entries from before the tag, including one whose plugin moved its command or no longer loads).
 
-Every other entry stays, whatever its name, including `plugin-manager` or an untagged `plugin-<id>` for a plugin that is no longer installed. If a ready plugin's name is already taken by an entry Local Studio did not write, the user's entry stays, that plugin's server is off, and sync reports the name as an error (a notice in the app, an `error:` line in the CLI).
+Every other entry stays, whatever its name, including `plugin-manager` or an untagged `plugin-<name>` that runs code from outside the plugins folder. If a ready plugin's name is already taken by an entry Local Studio did not write, the user's entry stays, that plugin's server is off, and sync reports the name as an error (a notice in the app, an `error:` line in the CLI).

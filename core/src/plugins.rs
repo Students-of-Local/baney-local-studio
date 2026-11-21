@@ -359,20 +359,19 @@ pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
         .collect()
 }
 
-fn written_by_us(plugins: &[Plugin], name: &str, entry: &Value) -> bool {
+fn written_by_us(root: &Path, name: &str, entry: &Value) -> bool {
     match entry.get(MCP_TAG) {
         Some(tag) => tag == &Value::Bool(true),
-        None => plugins.iter().any(|plugin| {
-            plugin.mcp_name() == name
-                && plugin.mcp.as_ref().is_some_and(|mcp| {
-                    entry.get("command").and_then(Value::as_str)
-                        == Some(absolute(&mcp.command).to_string_lossy().as_ref())
+        None => {
+            name.starts_with(MCP_PREFIX)
+                && ["command", "cwd"].iter().any(|key| {
+                    entry.get(*key).and_then(Value::as_str).is_some_and(|path| Path::new(path).starts_with(root))
                 })
-        }),
+        }
     }
 }
 
-pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Result<bool, String> {
+pub fn sync_mcp_servers(root: &Path, agent: &Path, plugins: &[Plugin], grants: &Grants) -> Result<bool, String> {
     let path = agent.join("settings.json");
     let mut settings = crate::workspace::providers::read_object(&path)?;
     let mut servers = match settings.remove("mcpServers") {
@@ -380,7 +379,8 @@ pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Re
         Some(Value::Object(servers)) => servers,
         Some(_) => return Err(format!("{}: mcpServers is not a JSON object", path.display())),
     };
-    let ours = |name: &str, entry: &Value| written_by_us(plugins, name, entry);
+    let root = absolute(root);
+    let ours = |name: &str, entry: &Value| written_by_us(&root, name, entry);
     let (wanted, taken): (Map<String, Value>, Map<String, Value>) = mcp_servers(plugins, grants)
         .into_iter()
         .partition(|(name, _)| servers.get(name).is_none_or(|entry| ours(name, entry)));
@@ -411,7 +411,7 @@ pub fn agent_dir() -> Option<PathBuf> {
 
 pub fn sync_agent(root: &Path, agent: &Path) -> Result<bool, String> {
     let grants = Grants::load(root)?;
-    sync_mcp_servers(agent, &scan(root).plugins, &grants)
+    sync_mcp_servers(root, agent, &scan(root).plugins, &grants)
 }
 
 pub(crate) fn absolute(path: &Path) -> PathBuf {
