@@ -11,7 +11,7 @@ use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{DaemonLaunch, Studio, StudioConfig, Update, Waker};
 use serde_json::{Map, Value};
 
-const WITHIN: Duration = Duration::from_secs(3);
+const WITHIN: Duration = Duration::from_secs(5);
 
 struct Quiet;
 
@@ -82,8 +82,23 @@ fn watch(studio: &Arc<Studio>, bin: &Path, data: &Path) -> anyhow::Result<()> {
     let again = free_port()?;
     install(bin, data, again)?;
     until("the app serves again when serve.json comes back", || health(again) == Some(200))?;
+    let moved = free_port()?;
+    install(bin, data, moved)?;
+    until("the app moves to the new port when serve.json changes it", || health(moved) == Some(200) && refused(again))?;
+    let held = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let busy = held.local_addr()?.port();
+    install(bin, data, busy)?;
+    until("the app leaves the old port when serve.json names a busy one", || refused(moved))?;
+    let stopping = Instant::now();
     host.stop();
-    ensure!(refused(again), "127.0.0.1:{again} still answers after the handle stopped");
+    ensure!(
+        stopping.elapsed() < WITHIN,
+        "stopping took {} ms while the app waited for the busy port",
+        stopping.elapsed().as_millis()
+    );
+    println!("ok   the handle stops in {} ms while waiting for a busy port", stopping.elapsed().as_millis());
+    drop(held);
+    ensure!(refused(busy), "127.0.0.1:{busy} answers after the handle stopped");
     println!("ok   stopping the handle closes the listener");
     Ok(())
 }

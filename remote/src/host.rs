@@ -83,14 +83,21 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
         "channel": CHANNEL,
         "urls": config.urls,
     });
-    let local = bind(config.port, BIND_WAIT).await?;
+    tokio::pin!(until);
+    let local = tokio::select! {
+        bound = bind(config.port, BIND_WAIT) => bound?,
+        stop = &mut until => return Ok(stop),
+    };
     let tunnel = match config.tunnel_port {
-        Some(port) => match bind(port, BIND_WAIT).await {
-            Ok(listener) => Some((listener, port)),
-            Err(error) => {
-                eprintln!("local-studio-serve: could not start the tunnel listener, serving without it: {error:#}");
-                None
-            }
+        Some(port) => tokio::select! {
+            bound = bind(port, BIND_WAIT) => match bound {
+                Ok(listener) => Some((listener, port)),
+                Err(error) => {
+                    eprintln!("local-studio-serve: could not start the tunnel listener, serving without it: {error:#}");
+                    None
+                }
+            },
+            stop = &mut until => return Ok(stop),
         },
         None => None,
     };
@@ -246,12 +253,12 @@ enum Session {
     Failed(String),
 }
 
-async fn settled(data_dir: &Path, present: bool, stop: &mut watch::Receiver<bool>) -> bool {
+async fn settled(stop: &mut watch::Receiver<bool>, mut done: impl FnMut() -> bool) -> bool {
     loop {
         if *stop.borrow() {
             return false;
         }
-        if settings::exists(data_dir) == present {
+        if done() {
             return true;
         }
         tokio::select! {
@@ -265,10 +272,16 @@ async fn settled(data_dir: &Path, present: bool, stop: &mut watch::Receiver<bool
     }
 }
 
+fn ports(config: &Effective) -> (u16, Option<u16>) {
+    (config.port, config.tunnel_port)
+}
+
 async fn session(studio: &Arc<Studio>, data_dir: &Path, stop: &mut watch::Receiver<bool>) -> Session {
-    if !settled(data_dir, true, stop).await {
+    if !settled(stop, || settings::exists(data_dir)).await {
         return Session::Stopped;
     }
+    let name = host_name();
+    let started = configured(data_dir, &Settings::default(), &name).ok().as_ref().map(ports);
     let (waker, notify) = hub::signal();
     let feed = Feed::Subscription(studio.subscribe(waker));
     let launch = Launch {
@@ -280,9 +293,24 @@ async fn session(studio: &Arc<Studio>, data_dir: &Path, stop: &mut watch::Receiv
         reload: None,
     };
     let served = run(launch, async {
-        if settled(data_dir, false, stop).await {
-            eprintln!("local-studio-serve: serve.json was removed: stopping the in-process server");
+        let mut gone = false;
+        let changed = settled(stop, || {
+            gone = !settings::exists(data_dir);
+            gone || configured(data_dir, &Settings::default(), &name)
+                .ok()
+                .as_ref()
+                .map(ports)
+                .is_some_and(|now| Some(now) != started)
+        })
+        .await;
+        if !changed {
+            return Stop::HandOver;
         }
+        if gone {
+            eprintln!("local-studio-serve: serve.json was removed: stopping the in-process server");
+            return Stop::Quit;
+        }
+        eprintln!("local-studio-serve: serve.json changed the port: restarting the in-process server");
         Stop::HandOver
     })
     .await;
