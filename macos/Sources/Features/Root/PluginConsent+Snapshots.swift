@@ -8,6 +8,7 @@ extension SnapshotCatalog {
             entry("plugin-consent", ConsentFixtures.install, height: 510),
             entry("plugin-consent-findings", ConsentFixtures.findings, height: 468, findingsOpen: true),
             entry("plugin-consent-update", ConsentFixtures.update, height: 318),
+            entry("plugin-consent-long", ConsentFixtures.long, height: 640, findingsOpen: true),
         ]
     }
 
@@ -63,12 +64,32 @@ enum ConsentFixtures {
         updateFrom: "1.4.0"
     )
 
+    static let long = request(
+        rows: rows + [
+            ConsentRow(
+                id: "native-host", need: .needed, sentence: "Talk to its browser extension",
+                scope: "Through a local helper that only its pinned extension can reach.", gates: nil
+            ),
+            ConsentRow(
+                id: "synthetic-input", need: .sensitive, sentence: "Click and type in those tabs",
+                scope: "Input goes only to what the plugin opened.", gates: nil
+            ),
+            ConsentRow(
+                id: "accessibility", need: .sensitive, sentence: "Read and control other apps",
+                scope: "Uses the system accessibility API; macOS asks you separately.", gates: nil
+            ),
+        ],
+        findings: (1...6).map { "executable not named in the manifest: bin/helper-\($0)" },
+        description: String(repeating: "Reads pages in its own tabs and keeps notes for a thread. ", count: 5)
+    )
+
     static func request(
-        rows: [ConsentRow], findings: [String], version: String = "1.4.0", updateFrom: String? = nil
+        rows: [ConsentRow], findings: [String], version: String = "1.4.0", updateFrom: String? = nil,
+        description: String = "Reads pages in its own tabs and keeps notes for a thread"
     ) -> ConsentRequest {
         ConsentRequest(
             request: "snapshot", plugin: "field-notes", name: "Field Notes", icon: nil,
-            description: "Reads pages in its own tabs and keeps notes for a thread", version: version,
+            description: description, version: version,
             install: true, updateFrom: updateFrom, source: "https://github.com/example/field-notes",
             pin: "3f9a2c1", files: 14, findings: findings, rows: rows
         )

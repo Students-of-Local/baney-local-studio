@@ -7,6 +7,7 @@ struct PluginConsentSheet: View {
     let answer: (ConsentAnswer) -> Void
     @State private var allowed: Set<String> = []
     @State private var findingsOpen: Bool
+    @State private var contentHeight: CGFloat = 0
     @FocusState private var focused: String?
 
     init(consent: ConsentRequest, findingsOpen: Bool = false, answer: @escaping (ConsentAnswer) -> Void) {
@@ -17,26 +18,33 @@ struct PluginConsentSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                scan
-            }
-            .padding(18)
-            Rectangle().fill(Theme.hairline).frame(height: 1)
-            VStack(alignment: .leading, spacing: 0) {
-                Text("It asks to")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.secondaryText)
-                    .padding(.bottom, 4)
-                ForEach(Array(consent.rows.enumerated()), id: \.element.id) { index, row in
-                    if index > 0 {
-                        Rectangle().fill(Theme.hairline).frame(height: 1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        header
+                        scan
                     }
-                    rowView(row)
+                    .padding(18)
+                    Rectangle().fill(Theme.hairline).frame(height: 1)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("It asks to")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.secondaryText)
+                            .padding(.bottom, 4)
+                        ForEach(Array(consent.rows.enumerated()), id: \.element.id) { index, row in
+                            if index > 0 {
+                                Rectangle().fill(Theme.hairline).frame(height: 1)
+                            }
+                            rowView(row)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(contentHeight, scrollLimit))
             Rectangle().fill(Theme.hairline).frame(height: 1)
             footer
                 .padding(18)
@@ -44,6 +52,10 @@ struct PluginConsentSheet: View {
         }
         .frame(width: 540)
         .background(Theme.card)
+    }
+
+    private var scrollLimit: CGFloat {
+        min(520, (NSScreen.main?.visibleFrame.height ?? 800) - 240)
     }
 
     private var header: some View {
