@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -25,7 +26,7 @@ const DRAIN_POLL: Duration = Duration::from_millis(20);
 const STOP_WITHIN: Duration = Duration::from_secs(2);
 const WAIT_EVERY: Duration = Duration::from_secs(1);
 const REQUEST_EVERY: Duration = Duration::from_millis(500);
-const ANSWER_WITHIN: Duration = Duration::from_secs(4);
+const ANSWER_WITHIN: Duration = Duration::from_secs(25);
 const GOING_AWAY: u16 = 1001;
 const RESTARTING: u16 = 1012;
 
@@ -284,43 +285,47 @@ impl Requests {
         self.projects.iter().find(|known| known.id == project || known.path == project)
     }
 
-    async fn until(&mut self, done: impl Fn(&Self) -> bool) -> Result<(), String> {
+    async fn until(&mut self, done: impl Fn(&Self) -> bool) -> Option<Result<(), String>> {
         let deadline = tokio::time::Instant::now() + ANSWER_WITHIN;
         loop {
             let notices = self.drain();
             if done(self) {
-                return Ok(());
+                return Some(Ok(()));
             }
             if let Some(notice) = notices.into_iter().next() {
-                return Err(notice);
+                return Some(Err(notice));
             }
             if tokio::time::timeout_at(deadline, self.notify.notified()).await.is_err() {
-                return Err(format!(
-                    "the core has not applied it within {} s; it is queued and may still land, so check project list",
-                    ANSWER_WITHIN.as_secs()
-                ));
+                return None;
             }
         }
     }
 
-    async fn answer(&mut self, request: Request) -> Value {
+    async fn answer(&mut self, request: Request, again: bool) -> Option<Value> {
         self.drain();
         let path = request.path.unwrap_or_default();
         let (ok, message) = match request.op.as_str() {
             "list_projects" => (true, format!("{} projects", self.projects.len())),
-            "add_project" if self.known(&path).is_some() => (true, format!("{path} is already a project")),
+            "add_project" if self.known(&path).is_some() => {
+                (true, if again { format!("added {path}") } else { format!("{path} is already a project") })
+            }
             "add_project" => {
-                self.studio.add_project(path.clone());
-                match self.until(|requests| requests.known(&path).is_some()).await {
+                if !again {
+                    self.studio.add_project(path.clone());
+                }
+                match self.until(|requests| requests.known(&path).is_some()).await? {
                     Ok(()) => (true, format!("added {path}")),
                     Err(message) => (false, message),
                 }
             }
+            "remove_project" if again && self.known(&path).is_none() => (true, format!("removed {path}")),
             "remove_project" => match self.known(&path).map(|known| known.id.clone()) {
                 None => (false, format!("{path} is not a project")),
                 Some(id) => {
-                    self.studio.remove_project(id.clone());
-                    match self.until(|requests| requests.known(&id).is_none()).await {
+                    if !again {
+                        self.studio.remove_project(id.clone());
+                    }
+                    match self.until(|requests| requests.known(&id).is_none()).await? {
                         Ok(()) => (true, format!("removed {path}")),
                         Err(message) => (false, message),
                     }
@@ -328,7 +333,7 @@ impl Requests {
             },
             other => (false, format!("unknown request {other:?}")),
         };
-        json!({ "ok": ok, "message": message, "projects": self.projects })
+        Some(json!({ "ok": ok, "message": message, "projects": self.projects }))
     }
 }
 
@@ -345,9 +350,11 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
     let folder = requests_dir(&data_dir);
     let (waker, notify) = hub::signal();
     let mut requests = Requests { subscription: studio.subscribe(waker), studio, notify, projects: Vec::new() };
+    let mut applied: HashSet<PathBuf> = HashSet::new();
     loop {
         tokio::time::sleep(REQUEST_EVERY).await;
         requests.drain();
+        applied.retain(|path| path.exists());
         let Ok(entries) = std::fs::read_dir(&folder) else { continue };
         let mut waiting: Vec<PathBuf> =
             entries.filter_map(Result::ok).map(|entry| entry.path()).filter(|path| pending(path)).collect();
@@ -357,11 +364,26 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
                 continue;
             }
             let answer = match read_request(&path) {
-                Ok(request) => requests.answer(request).await,
+                Ok(request) => {
+                    let again = applied.contains(&path);
+                    let Some(answer) = requests.answer(request, again).await else {
+                        if !again {
+                            eprintln!(
+                                "local-studio-serve: the core has not applied {} within {} s; waiting on it",
+                                path.display(),
+                                ANSWER_WITHIN.as_secs()
+                            );
+                        }
+                        applied.insert(path);
+                        continue;
+                    };
+                    answer
+                }
                 Err(error) => {
                     json!({ "ok": false, "message": format!("unreadable request: {error:#}"), "projects": [] })
                 }
             };
+            applied.remove(&path);
             if let Err(error) = write_private(&path.with_extension("done.json"), &answer) {
                 eprintln!("local-studio-serve: could not answer {}: {error:#}", path.display());
             }
