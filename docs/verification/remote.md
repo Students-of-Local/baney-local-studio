@@ -12,12 +12,12 @@ Every run isolates its state. `HOME`, `EUKHE_DAEMON_SOCKET`, `EUKHE_CODING_AGENT
 | Serve with a real model | Partly verified | remote_smoke model stage, abbey1, qwen3-vl:4b |
 | Desktop link client | Verified | link_smoke, Claude Code haiku |
 | iPhone client library against real serve | Verified | ServeInteropTests on the Mac host |
-| iPhone app against real serve | Not run | Needs a simulator run of `ios/tools/smoke.sh` |
+| iPhone app to Parish1 over the tailnet | Verified | `ios/tools/smoke.sh` in the simulator, Claude Code on Parish1 |
 | Machines UI (macOS, Linux) | Snapshots only | Settings › Connections, pairing sheet, sidebar rows |
 | Serve as a service on Linux | Deployed | Parish1, systemd user unit, `install --tailscale` |
 | Serve as a service on macOS, handoff with the app | Verified | The Mac, launchd agent, `install --tailscale` |
 | The app serving while it runs | Verified | The Mac, app launched after `serve.json` existed |
-| The app starting to serve when `serve.json` appears later | Not built | #53 |
+| The app starting to serve when `serve.json` appears later | Verified headless | `host_watch` (#56); not yet on the installed app |
 | Mac to Parish1 over the tailnet, core link client | Verified | link_probe, Claude Code haiku on Parish1 |
 | Mac to Parish1 over the tailnet, app screens | Not run | Polycarp computer use was down; steps below |
 | Mac to Parish1 over the shared tunnel | Not run yet | Waits for the tunnel |
@@ -61,6 +61,34 @@ cd ios/Packages/LocalStudioRemote && LOCAL_STUDIO_PAIR_LINK="$link" swift test -
 - Serve refuses the flood of mid-handshake sockets.
 
 This covers the phone's client library, not the app's screens.
+
+## iPhone app to Parish1: smoke.sh
+
+`ios/tools/smoke.sh` runs the app's UI test in the simulator. Given a pair link, it skips the fake studio and drives the real machine:
+
+```sh
+link=$(ssh <parish1> 'local-studio-serve pair --url wss://<parish1>.<tailnet>.ts.net/v1/ws --name iphone-smoke' | grep -o '[a-z-]*://pair?[^ ]*')
+LOCAL_STUDIO_PAIR_LINK="$link" ios/tools/smoke.sh
+ssh <parish1> 'local-studio-serve devices'
+ssh <parish1> 'local-studio-serve revoke <device id>'
+```
+
+Revoke by the device id that `devices` prints; the app pairs under its own device name, not the `--name` given to `pair`.
+
+2026-11-21, iPhone 17 Pro simulator (iOS 26.5), app built from main at d421e5628, against the Parish1 service over the tailnet. `testPairWatchSendApproveRelaunch` passed in 37.8 s:
+
+- The app paired from the link and showed `link live` and the live thread list.
+- It opened the first thread on Parish1, sent "Reply with the single word pong." and waited for an assistant reply and an idle thread (Claude Code, Supervised).
+- It saved the cache, relaunched with a 6 s connect delay, showed the cached list first, then went live again.
+
+| Timing | ms |
+| --- | --- |
+| Cold start to live list | 1526 |
+| Send to first transcript update | 72 |
+| Relaunch to cached list | 16 |
+| Relaunch to live list (6 s connect delay) | 7106 |
+
+`testIncompatibleMachine` skips without a fake studio. The device was revoked afterward, and Parish1 lists no paired devices.
 
 ## Serve on Parish1 and the Mac to Parish1 link
 
