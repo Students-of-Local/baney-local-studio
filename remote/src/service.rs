@@ -54,7 +54,7 @@ fn unit() -> anyhow::Result<Unit> {
     }
 }
 
-fn uid() -> anyhow::Result<String> {
+pub(crate) fn uid() -> anyhow::Result<String> {
     let output = Command::new("id").arg("-u").output().context("run id -u")?;
     ensure!(output.status.success(), "id -u failed");
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

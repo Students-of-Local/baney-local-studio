@@ -8,7 +8,7 @@ use local_studio_core::{DaemonLaunch, Studio, StudioConfig};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
-use crate::devices::{now_ms, Devices};
+use crate::devices::{hex, now_ms, random, Devices};
 use crate::host::{self, Launch, Stop};
 use crate::hub::{self, Feed};
 use crate::pairing::{self, host_name};
@@ -20,6 +20,8 @@ const HAND_OVER_WAIT: Duration = Duration::from_secs(20);
 const HAND_OVER_POLL: Duration = Duration::from_millis(200);
 const STOP_WITHIN: Duration = Duration::from_secs(2);
 const PICK_UP_WITHIN: Duration = Duration::from_secs(5);
+const ANSWER_WAIT: Duration = Duration::from_secs(5);
+const ANSWER_POLL: Duration = Duration::from_millis(100);
 
 const USAGE: &str = "usage:
   local-studio-serve serve [--port 18093] [--tunnel-port 18094] [--allow-host <name>]... [--allow-tunnel-host <name>]... [--url <wss url>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
@@ -31,14 +33,17 @@ const USAGE: &str = "usage:
   local-studio-serve install [--tailscale] [--https-port 443] [--bin <path>] [--eukhe <path>] [--no-load] [--json] [serve flags]
   local-studio-serve uninstall [--no-load] [--json] [--data-dir <dir>]
   local-studio-serve status [--no-load] [--json] [--data-dir <dir>]
+  local-studio-serve project (add <path> | remove <path or project id> | list) [--json] [--data-dir <dir>]
 
 --json prints one object with a \"state\" field, and nothing else on stdout. No command ever prompts.
-serve reads <data dir>/remote/serve.json and rereads it on SIGHUP and when it changes; flags add to its lists and replace its other fields for that run.";
+serve reads <data dir>/remote/serve.json and rereads it on SIGHUP and when it changes; flags add to its lists and replace its other fields for that run.
+project asks the process that owns the data dir (serve, or the app while it serves) to add or remove a project, and waits up to 5 s for its answer; list reads state.json when nothing owns it.";
 
 #[must_use]
 pub fn cli() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is::<Reported>() => ExitCode::FAILURE,
         Err(error) => {
             if std::env::args().skip(1).any(|arg| arg == "--json") {
                 println!("{}", json!({ "state": "error", "error": format!("{error:#}") }));
@@ -49,6 +54,17 @@ pub fn cli() -> ExitCode {
         }
     }
 }
+
+#[derive(Debug)]
+struct Reported;
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("reported")
+    }
+}
+
+impl std::error::Error for Reported {}
 
 pub(crate) struct Out {
     json: bool,
@@ -154,6 +170,7 @@ fn run() -> anyhow::Result<()> {
         "install" => service::install(args),
         "uninstall" => service::uninstall(args),
         "status" => service::status(args),
+        "project" => project(args),
         "help" => {
             println!("{USAGE}");
             Ok(())
@@ -590,4 +607,138 @@ fn revoke(mut args: Args) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+enum Asked {
+    Answer(Value),
+    NoOwner,
+    Silent(Option<u32>),
+}
+
+fn ask(data_dir: &Path, op: &str, path: Option<&str>) -> anyhow::Result<Asked> {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = host::requests_dir(data_dir);
+    std::fs::create_dir_all(&folder).with_context(|| format!("create {}", folder.display()))?;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("make {} private", folder.display()))?;
+    let id = hex(&random::<16>()?);
+    let request = folder.join(format!("{id}.json"));
+    let answer = folder.join(format!("{id}.done.json"));
+    host::write_private(&request, &json!({ "op": op, "path": path }))?;
+    let lock::Owner::Held(owner) = lock::holder(data_dir) else {
+        std::fs::remove_file(&request).ok();
+        return Ok(Asked::NoOwner);
+    };
+    let since = Instant::now();
+    while since.elapsed() < ANSWER_WAIT {
+        if let Ok(text) = std::fs::read_to_string(&answer) {
+            std::fs::remove_file(&answer).ok();
+            let value = serde_json::from_str(&text).with_context(|| format!("read {}", answer.display()))?;
+            return Ok(Asked::Answer(value));
+        }
+        std::thread::sleep(ANSWER_POLL);
+    }
+    std::fs::remove_file(&request).ok();
+    std::fs::remove_file(&answer).ok();
+    Ok(Asked::Silent(owner))
+}
+
+fn stored_projects(data_dir: &Path) -> anyhow::Result<Value> {
+    let path = data_dir.join("state.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(json!([])),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let state: Value = serde_json::from_str(&text).with_context(|| format!("read {}", path.display()))?;
+    let projects = state.get("projects").and_then(Value::as_array).cloned().unwrap_or_default();
+    Ok(Value::Array(
+        projects.iter().map(|project| json!({ "name": project.get("name"), "path": project.get("path") })).collect(),
+    ))
+}
+
+fn report(out: &Out, state: &str, message: &str, path: Option<&str>, projects: &Value) {
+    out.say(message);
+    if state == "listed" {
+        for project in projects.as_array().into_iter().flatten() {
+            let name = project.get("name").and_then(Value::as_str).unwrap_or_default();
+            let path = project.get("path").and_then(Value::as_str).unwrap_or_default();
+            out.say(format_args!("  {name}  {path}"));
+        }
+    }
+    out.object(&json!({ "state": state, "message": message, "path": path, "projects": projects }));
+}
+
+fn project(mut args: Args) -> anyhow::Result<()> {
+    let out = Out::new(&mut args);
+    let data_dir = args.data_dir()?;
+    let verb = if args.0.is_empty() { String::new() } else { args.0.remove(0) };
+    let (op, done) = match verb.as_str() {
+        "add" => ("add_project", "added"),
+        "remove" => ("remove_project", "removed"),
+        "list" => ("list_projects", "listed"),
+        _ => bail!("project needs add, remove or list\n{USAGE}"),
+    };
+    let target = if verb == "list" {
+        None
+    } else {
+        let Some(target) = args.0.first().cloned() else { bail!("project {verb} needs a path\n{USAGE}") };
+        args.0.remove(0);
+        Some(target)
+    };
+    args.done()?;
+    let path = match (verb.as_str(), target) {
+        ("add", Some(target)) => match std::fs::canonicalize(&target) {
+            Ok(path) if path.is_dir() => Some(path.to_string_lossy().into_owned()),
+            Ok(path) => {
+                report(&out, "failed", &format!("{} is not a folder", path.display()), Some(&target), &json!([]));
+                return Err(Reported.into());
+            }
+            Err(error) => {
+                report(&out, "failed", &format!("cannot add {target}: {error}"), Some(&target), &json!([]));
+                return Err(Reported.into());
+            }
+        },
+        (_, Some(target)) => {
+            Some(std::fs::canonicalize(&target).map_or(target, |path| path.to_string_lossy().into_owned()))
+        }
+        (_, None) => None,
+    };
+    match ask(&data_dir, op, path.as_deref())? {
+        Asked::Answer(answer) => {
+            let ok = answer.get("ok").and_then(Value::as_bool) == Some(true);
+            let message = answer.get("message").and_then(Value::as_str).unwrap_or_default();
+            let projects = answer.get("projects").cloned().unwrap_or_else(|| json!([]));
+            report(&out, if ok { done } else { "failed" }, message, path.as_deref(), &projects);
+            if ok {
+                Ok(())
+            } else {
+                Err(Reported.into())
+            }
+        }
+        Asked::NoOwner if verb == "list" => {
+            let projects = stored_projects(&data_dir)?;
+            let message = format!("nothing owns {}; these are the projects in its state.json", data_dir.display());
+            report(&out, done, &message, None, &projects);
+            Ok(())
+        }
+        Asked::NoOwner => {
+            let message = format!(
+                "nothing owns {}; start local-studio-serve serve (or the desktop app) and try again",
+                data_dir.display()
+            );
+            report(&out, "no_owner", &message, path.as_deref(), &json!([]));
+            Err(Reported.into())
+        }
+        Asked::Silent(owner) => {
+            let message = format!(
+                "{} owns {} but did not answer within {} s; it answers only while it serves, and the app serves only when serve.json exists",
+                lock::describe(owner),
+                data_dir.display(),
+                ANSWER_WAIT.as_secs()
+            );
+            report(&out, "failed", &message, path.as_deref(), &json!([]));
+            Err(Reported.into())
+        }
+    }
 }
