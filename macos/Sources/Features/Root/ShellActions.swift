@@ -194,6 +194,10 @@ extension StudioStore {
         case .archive(let ids): inbox.setArchived(ids, true)
         case .unpin(let ids): inbox.setPinned(ids, false)
         case .restartDaemon: core.run { $0.restartDaemon(force: true) }
+        case .localOnly(let thread, _, _, let local):
+            if local != nil {
+                core.run { $0.runLocal(thread: thread) }
+            }
         }
     }
 

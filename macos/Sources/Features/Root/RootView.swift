@@ -146,6 +146,7 @@ struct RootView: View {
         case .archive: return "Archive \(noun)?"
         case .unpin: return "Unpin \(noun)?"
         case .restartDaemon: return "Restart the Eukhe daemon?"
+        case .localOnly: return "Runs only on local models"
         }
     }
 
@@ -157,6 +158,7 @@ struct RootView: View {
         case .unpin: "The thread moves back to the Active list."
         case .restartDaemon(let busy):
             "\(busy) Eukhe sessions are running. Restarting stops their runs; their threads stay saved and reopen on the new daemon."
+        case .localOnly(_, _, let message, _): message
         }
     }
 
@@ -167,13 +169,14 @@ struct RootView: View {
         case .archive: "Archive"
         case .unpin: "Unpin"
         case .restartDaemon: "Restart"
+        case .localOnly(_, _, _, let local): local.map { "Switch to \($0.model) and Run" } ?? "OK"
         }
     }
 
     private func confirmationRole(_ confirmation: ShellConfirmation) -> ButtonRole? {
         switch confirmation {
         case .delete, .stopAndDelete, .restartDaemon: .destructive
-        case .archive, .unpin: nil
+        case .archive, .unpin, .localOnly: nil
         }
     }
 }

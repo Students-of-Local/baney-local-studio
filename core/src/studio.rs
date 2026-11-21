@@ -61,6 +61,7 @@ const KILL_TIMEOUT_MS: u64 = 15_000;
 const DELIVERY_SLACK_MS: i64 = 2_000;
 
 mod cli;
+mod local_only;
 mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +375,9 @@ enum Command {
         thread: String,
         provider: String,
         model: String,
+    },
+    RunLocal {
+        thread: String,
     },
     SetThinkingLevel {
         thread: String,
@@ -790,6 +794,10 @@ impl Studio {
         self.send_command(Command::SetModel { thread, provider, model });
     }
 
+    pub fn run_local(&self, thread: String) {
+        self.send_command(Command::RunLocal { thread });
+    }
+
     pub fn set_thinking_level(&self, thread: String, level: String) {
         self.send_command(Command::SetThinkingLevel { thread, level });
     }
@@ -1042,6 +1050,7 @@ struct Thread {
     allowed_effects: Vec<String>,
     resources: Option<Resources>,
     rlm_children: Vec<Subagent>,
+    refused: Option<PromptDraft>,
 }
 
 struct Actor {
@@ -1481,6 +1490,7 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
+            Command::RunLocal { thread } => self.run_local(&thread).await,
             Command::SetThinkingLevel { thread, level } => {
                 if let Err(error) = self.apply_model(&thread, None, None, Some(level)).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
@@ -2253,6 +2263,9 @@ impl Actor {
         } else {
             self.ensure_open(id).await?
         };
+        if !self.local_only_gate(id, &active, &message, &prompt, request.clone()).await? {
+            return Ok(());
+        }
         let message = if !cli && (message.starts_with('/') || message.contains('$')) {
             self.resources(id, &active).await.expand(&message)
         } else {
@@ -2699,6 +2712,7 @@ impl Actor {
             fork.activity_at = Some(now);
             fork.project = flags.project;
             fork.access = flags.access;
+            fork.local_only = flags.local_only;
         });
         self.save();
         self.threads.insert(fork_id.clone(), Thread { path, cwd, ..Thread::default() });
@@ -2715,6 +2729,9 @@ impl Actor {
         model: Option<String>,
         level: Option<String>,
     ) -> Result<(), String> {
+        if let Some(provider) = &provider {
+            self.keep_local(id, provider)?;
+        }
         if self.harness(id).is_some() {
             return self.cli_model(id, provider, model, level);
         }
@@ -3675,7 +3692,11 @@ impl Actor {
         }
         let project = self.thread_project(id);
         let settings = self.workspace.effective_settings(project.as_deref());
-        if let (Some(provider), Some(model)) = (settings.text_generation_provider, settings.text_generation_model) {
+        let generator = settings
+            .text_generation_provider
+            .zip(settings.text_generation_model)
+            .filter(|(provider, _)| self.store.flags(id).local_only.is_none() || Self::local_provider(provider));
+        if let Some((provider, model)) = generator {
             let excerpt: String = self
                 .saved
                 .get(id)
