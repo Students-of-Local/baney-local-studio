@@ -1,5 +1,6 @@
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use serde_json::{json, Value};
 const SLOW: Duration = Duration::from_millis(1500);
 const LAG: Duration = Duration::from_millis(1500);
 const STOP_WORDS: &str = "You've hit your usage limit.";
+const SKILL_READ: &str = "cat ~/.codex/skills/writing/SKILL.md";
 
 #[derive(Default)]
 struct Shared {
@@ -15,6 +17,7 @@ struct Shared {
     busy: Mutex<bool>,
     interrupted: AtomicBool,
     turns: AtomicU64,
+    answers: Mutex<Vec<(Value, Sender<String>)>>,
 }
 
 impl Shared {
@@ -35,6 +38,34 @@ impl Shared {
 
     fn notify(&self, method: &str, params: &Value) {
         self.write(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+    }
+
+    fn ask(&self, turn: &str, number: u64) -> Option<String> {
+        let id = json!(format!("approval-{number}"));
+        let (sender, answer) = channel();
+        self.answers.lock().unwrap_or_else(PoisonError::into_inner).push((id.clone(), sender));
+        self.write(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "item/commandExecution/requestApproval",
+            "params": { "turnId": turn, "itemId": format!("command-{number}"), "command": SKILL_READ },
+        }));
+        loop {
+            if let Ok(decision) = answer.recv_timeout(Duration::from_millis(20)) {
+                return Some(decision);
+            }
+            if self.interrupted.load(Ordering::Relaxed) {
+                return None;
+            }
+        }
+    }
+
+    fn answered(&self, id: &Value, result: &Value) {
+        let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = answers.iter().position(|(known, _)| known == id) {
+            let (_, sender) = answers.remove(index);
+            sender.send(result["decision"].as_str().unwrap_or_default().to_string()).ok();
+        }
     }
 
     fn idle(&self) {
@@ -92,12 +123,18 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         shared.completed(&turn, "failed", Some(STOP_WORDS));
         return;
     }
+    let mut reply = format!("reply to {text}");
+    if text.contains("skill") {
+        let Some(decision) = shared.ask(&turn, number) else {
+            shared.interrupted.store(false, Ordering::Relaxed);
+            shared.completed(&turn, "interrupted", None);
+            return;
+        };
+        reply = format!("{reply} after {decision}");
+    }
     let agent = format!("agent-{number}");
     shared.notify("item/started", &json!({ "item": { "id": agent, "type": "agentMessage" } }));
-    shared.notify(
-        "item/completed",
-        &json!({ "item": { "id": agent, "type": "agentMessage", "text": format!("reply to {text}") } }),
-    );
+    shared.notify("item/completed", &json!({ "item": { "id": agent, "type": "agentMessage", "text": reply } }));
     shared.completed(&turn, "completed", None);
 }
 
@@ -149,8 +186,10 @@ fn main() {
     let shared = Arc::new(Shared::default());
     for line in std::io::stdin().lock().lines().map_while(Result::ok) {
         let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
-        if let (Some(id), Some(method)) = (frame.get("id"), frame.get("method").and_then(Value::as_str)) {
-            request(&shared, id, method, frame.get("params").unwrap_or(&Value::Null));
+        match (frame.get("id"), frame.get("method").and_then(Value::as_str)) {
+            (Some(id), Some(method)) => request(&shared, id, method, frame.get("params").unwrap_or(&Value::Null)),
+            (Some(id), None) => shared.answered(id, frame.get("result").unwrap_or(&Value::Null)),
+            _ => {}
         }
     }
 }

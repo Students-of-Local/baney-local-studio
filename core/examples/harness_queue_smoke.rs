@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
@@ -13,32 +13,14 @@ use local_studio_core::{
 };
 use serde_json::Map;
 
+#[allow(dead_code)]
+#[path = "support/harness.rs"]
+mod harness;
+
+use harness::Signal;
+
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(12);
-
-#[derive(Default)]
-struct Signal {
-    pending: Mutex<bool>,
-    ready: Condvar,
-}
-
-impl Waker for Signal {
-    fn wake(&self) {
-        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        self.ready.notify_one();
-    }
-}
-
-impl Signal {
-    fn wait(&self, timeout: Duration) {
-        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let (mut pending, _) = self
-            .ready
-            .wait_timeout_while(pending, timeout, |pending| !*pending)
-            .unwrap_or_else(PoisonError::into_inner);
-        *pending = false;
-    }
-}
 
 #[derive(Default)]
 struct Watch {
@@ -177,7 +159,17 @@ impl Run {
         self.studio.send(format!("send-{}", self.sent), self.thread(), prompt(text), Delivery::Queue);
     }
 
-    fn start(&mut self, label: &str, provider: &str, model: &str, thinking: Option<&str>) -> anyhow::Result<()> {
+    fn start(&mut self, label: &str, (provider, model): (&str, &str), thinking: Option<&str>) -> anyhow::Result<()> {
+        self.start_with(label, (provider, model), thinking, AccessMode::FullAccess)
+    }
+
+    fn start_with(
+        &mut self,
+        label: &str,
+        (provider, model): (&str, &str),
+        thinking: Option<&str>,
+        access: AccessMode,
+    ) -> anyhow::Result<()> {
         self.watch.thread = None;
         self.watch.busy = false;
         self.watch.replies.clear();
@@ -186,7 +178,7 @@ impl Run {
             provider: Some(provider.to_string()),
             model: Some(model.to_string()),
             thinking_level: thinking.map(str::to_string),
-            access: AccessMode::FullAccess,
+            access,
             worktree: WorktreeChoice::Local,
         };
         let draft = format!("draft-{label}");
@@ -222,7 +214,7 @@ fn ran_at(run: &mut Run, text: &str, effort: &str) {
 }
 
 fn claude_restart_keeps_message(run: &mut Run) -> anyhow::Result<()> {
-    run.start("claude-restart", "claude-code", "haiku", Some("low"))?;
+    run.start("claude-restart", ("claude-code", "haiku"), Some("low"))?;
     run.slow("slow alpha")?;
     run.studio.set_thinking_level(run.thread(), "medium".to_string());
     run.send("queued bravo");
@@ -237,7 +229,7 @@ fn claude_restart_keeps_message(run: &mut Run) -> anyhow::Result<()> {
 }
 
 fn claude_stop_drops_held(run: &mut Run) -> anyhow::Result<()> {
-    run.start("claude-discard", "claude-code", "haiku", Some("low"))?;
+    run.start("claude-discard", ("claude-code", "haiku"), Some("low"))?;
     run.slow("slow discard tango")?;
     run.studio.set_thinking_level(run.thread(), "medium".to_string());
     run.send("uniform");
@@ -249,7 +241,7 @@ fn claude_stop_drops_held(run: &mut Run) -> anyhow::Result<()> {
 }
 
 fn claude_stop_after_effort_change(run: &mut Run) -> anyhow::Result<()> {
-    run.start("claude-stop", "claude-code", "haiku", Some("low"))?;
+    run.start("claude-stop", ("claude-code", "haiku"), Some("low"))?;
     let thread = run.thread();
     let errors = run.watch.errors.len();
     let failed = run.watch.failed.len();
@@ -265,7 +257,7 @@ fn claude_stop_after_effort_change(run: &mut Run) -> anyhow::Result<()> {
 }
 
 fn codex_start_race(run: &mut Run) -> anyhow::Result<()> {
-    run.start("codex-race", "codex", "fake-mini", None)?;
+    run.start("codex-race", ("codex", "fake-mini"), None)?;
     let refused = run.watch.refused.len();
     run.slow("slow echo")?;
     run.send("lag foxtrot");
@@ -294,7 +286,7 @@ fn codex_start_race(run: &mut Run) -> anyhow::Result<()> {
 }
 
 fn codex_failed_start(run: &mut Run) -> anyhow::Result<()> {
-    run.start("codex-reject", "codex", "fake-mini", None)?;
+    run.start("codex-reject", ("codex", "fake-mini"), None)?;
     run.slow("slow hotel")?;
     run.send("reject india");
     run.send("juliet");
@@ -305,10 +297,28 @@ fn codex_failed_start(run: &mut Run) -> anyhow::Result<()> {
 }
 
 fn codex_drop(run: &mut Run, label: &str, first: &str, held: &str) -> anyhow::Result<()> {
-    run.start(label, "codex", "fake-mini", None)?;
+    run.start(label, ("codex", "fake-mini"), None)?;
     run.slow(first)?;
     run.send(held);
     run.check(&format!("{label}: the dropped held message is shown in the transcript"), |watch| watch.noticed(held));
+    Ok(())
+}
+
+fn codex_unexpected_approval(run: &mut Run) -> anyhow::Result<()> {
+    run.start_with("codex-skill", ("codex", "fake-mini"), None, AccessMode::Supervised)?;
+    let thread = run.thread();
+    let mut watch = harness::Watch::default();
+    watch.thread = Some(thread.clone());
+    let step = "a Supervised turn that asks an approval no step expects";
+    let outcome = harness::turn(&run.studio, &run.signal, &mut watch, &thread, "skill quebec", step);
+    let denied: Vec<String> = watch.denied.iter().map(|(approval, _)| approval.command.clone()).collect();
+    match outcome {
+        Ok(reply) if reply.contains("after decline") && denied.iter().any(|command| command.contains("SKILL.md")) => {
+            println!("ok   the unexpected approval {denied:?} was denied and the turn went on: {reply}");
+        }
+        Ok(reply) => run.watch.miss(format!("the turn ended without a deny of its approval: {reply}")),
+        Err(error) => run.watch.miss(format!("{error:#}")),
+    }
     Ok(())
 }
 
@@ -321,7 +331,8 @@ fn scenarios(run: &mut Run) -> anyhow::Result<()> {
     codex_drop(run, "codex-exit", "slow exit kilo", "lima")?;
     codex_drop(run, "codex-start-exit", "slow romeo", "crash sierra")?;
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
-    codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")
+    codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
+    codex_unexpected_approval(run)
 }
 
 fn git(work: &Path, args: &[&str]) -> anyhow::Result<()> {

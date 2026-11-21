@@ -52,6 +52,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
    - abort a long turn and see the thread leave Working;
    - shut Studio down, start a new one on the same data dir, see the thread listed with its harness, open it, see the earlier turns, and get a second reply that proves the session resumed (ask for the word from turn 1);
    - print a usage line with real tokens.
+   - never wait on an approval no step expects. The CLIs keep the user's real config, so a model may load a user skill with a shell command in any turn (issue #62). Every step that does not test approvals denies such a card, logs it and keeps going; only the approval steps leave cards for the check to answer. A denied card still pending after 45 s, and every step timeout, fails with the pending card's text. Files the checks assert on (`denied.txt`, `approved.txt`, `touched.txt`, `proof.txt`, `stopped.txt`, `outside/outside.txt`) are removed at the start of each run, since the scratch dir is reused. `harness_queue_smoke` holds the deny path to a fake Codex turn that asks to read a skill file.
 3. Existing smokes still pass (`smoke`, `order_smoke`, `working_smoke`).
 4. A Linux `--snapshot` scene with a Claude Code thread row showing its harness.
 
