@@ -138,60 +138,79 @@ impl Resources {
         commands
     }
 
-    pub(crate) fn expand(&self, text: &str) -> String {
+    pub(crate) fn expand(&self, text: &str) -> Expansion {
         let skills = self.all_skills();
+        let plain = || Expansion { text: text.to_string(), plugins: Vec::new() };
         if let Some((name, args)) = parse_slash_command(text) {
             if let Some(skill_name) = name.strip_prefix("skill:") {
-                if let Some(block) = skills.iter().find(|skill| skill.name == skill_name).and_then(skill_block) {
-                    return with_args(block, &args);
-                }
-                return text.to_string();
+                return skills
+                    .iter()
+                    .find(|skill| skill.name == skill_name)
+                    .and_then(|skill| Some((skill_block(skill)?, skill)))
+                    .map_or_else(plain, |(block, skill)| Expansion::from(with_args(block, &args), [skill]));
             }
             if let Some(template) = self.all_templates().iter().find(|template| template.name == name) {
                 if let Ok(content) = std::fs::read_to_string(&template.file_path) {
-                    return substitute_args(&strip_frontmatter(&content), &words(&args));
+                    return Expansion::from(substitute_args(&strip_frontmatter(&content), &words(&args)), [template]);
                 }
             }
-            if let Some(expanded) = self.expand_plugin(&name, &args) {
-                return expanded;
-            }
-            return text.to_string();
+            return self.expand_plugin(&name, &args).unwrap_or_else(plain);
         }
+        let mut used: Vec<&Resource> = Vec::new();
         let mut blocks: Vec<String> = Vec::new();
-        let mut used: Vec<&str> = Vec::new();
-        for token in text.split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '(' | ')')) {
-            let Some(name) = token.strip_prefix('$') else { continue };
-            if used.contains(&name) {
+        for (index, _) in text.match_indices('$') {
+            let rest = &text[index + 1..];
+            let named = |skill: &&Resource| {
+                let after = rest.strip_prefix(skill.name.as_str());
+                after.is_some_and(|after| !after.starts_with(|c: char| c.is_alphanumeric() || matches!(c, '-' | '_')))
+            };
+            let longest = skills.iter().filter(named).map(|skill| skill.name.len()).max();
+            let Some(skill) = skills.iter().find(|skill| Some(skill.name.len()) == longest && named(skill)) else {
+                continue;
+            };
+            if used.iter().any(|seen| seen.name == skill.name) {
                 continue;
             }
-            if let Some(block) = skills.iter().find(|skill| skill.name == name).and_then(skill_block) {
-                used.push(name);
+            if let Some(block) = skill_block(skill) {
+                used.push(skill);
                 blocks.push(block);
             }
         }
         if blocks.is_empty() {
-            return text.to_string();
+            return plain();
         }
         blocks.push(text.to_string());
-        blocks.join("\n\n")
+        Expansion::from(blocks.join("\n\n"), used)
+    }
+}
+
+pub(crate) struct Expansion {
+    pub text: String,
+    pub plugins: Vec<String>,
+}
+
+impl Expansion {
+    fn from<'a>(text: String, resources: impl IntoIterator<Item = &'a Resource>) -> Self {
+        Self { text, plugins: resources.into_iter().filter_map(|resource| resource.plugin.clone()).collect() }
     }
 }
 
 impl Resources {
-    fn expand_plugin(&self, name: &str, args: &str) -> Option<String> {
+    fn expand_plugin(&self, name: &str, args: &str) -> Option<Expansion> {
         let (plugin, command) = self.plugins.iter().find_map(|plugin| {
             plugin.commands.iter().find(|command| command.name == name).map(|command| (plugin, command))
         })?;
-        match &command.target {
+        let text = match &command.target {
             CommandTarget::Prompt(path) => {
                 let content = std::fs::read_to_string(path).ok()?;
-                Some(substitute_args(&strip_frontmatter(&content), &words(args)))
+                substitute_args(&strip_frontmatter(&content), &words(args))
             }
             CommandTarget::Skill(skill) => {
                 let file = plugin.skill(skill)?;
-                skill_block(&Resource::from_plugin(plugin, file)).map(|block| with_args(block, args))
+                skill_block(&Resource::from_plugin(plugin, file)).map(|block| with_args(block, args))?
             }
-        }
+        };
+        Some(Expansion { text, plugins: vec![plugin.id.clone()] })
     }
 }
 

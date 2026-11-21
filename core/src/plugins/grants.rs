@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::install::live_hash;
+use super::install::{live_hash, Live};
 use super::{Capability, Plugin};
 
 pub const GRANTS: &str = "grants.json";
@@ -51,15 +51,20 @@ impl Grants {
         if plugin.capabilities.is_empty() {
             return Consent::Ready;
         }
-        let tree = match live_hash(&plugin.dir) {
-            Ok(tree) => tree,
+        let live = match Live::check(&plugin.dir) {
+            Ok(live) => live,
             Err(reason) => return Consent::Refused { reason },
         };
-        let granted = self
-            .plugins
-            .get(&plugin.id)
-            .filter(|grant| !grant.tree.is_empty() && grant.tree == tree)
-            .map(|grant| &grant.capabilities);
+        let record = self.plugins.get(&plugin.id).filter(|grant| {
+            !grant.tree.is_empty() && plugin.capabilities.iter().any(|asked| grant.capabilities.contains(asked.name()))
+        });
+        let granted = match record {
+            None => None,
+            Some(grant) => match live.hash() {
+                Ok(tree) => (tree == grant.tree).then_some(&grant.capabilities),
+                Err(reason) => return Consent::Refused { reason },
+            },
+        };
         let missing: Vec<Capability> = plugin
             .capabilities
             .iter()

@@ -299,6 +299,8 @@ final class StudioStore {
             machines.setPairing(request: request, link: link, url: url, serving: serving, expiresAt: expiresAt)
         case .pairedDevices(let devices):
             machines.setDevices(devices)
+        case .localOnly(let thread, let plugin, let message, let local):
+            shell.confirmation = .localOnly(thread: thread, plugin: plugin, message: message, local: local)
         }
     }
 }

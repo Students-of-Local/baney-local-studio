@@ -128,6 +128,9 @@ fn validate(dir: &Path) -> Result<(), String> {
 }
 
 fn asks(plugin: &Plugin) {
+    if plugin.local_only {
+        println!("  {}", plugins::LOCAL_ONLY_LABEL);
+    }
     if plugin.capabilities.is_empty() {
         println!("  asks for no capabilities");
     }
@@ -143,7 +146,11 @@ fn asks(plugin: &Plugin) {
 }
 
 fn consent_line(plugin: &Plugin, grants: &Grants) -> String {
-    match grants.consent(plugin) {
+    consent_text(plugin, &grants.consent(plugin))
+}
+
+fn consent_text(plugin: &Plugin, consent: &Consent) -> String {
+    match consent {
         Consent::Ready => "ready".to_string(),
         Consent::Refused { reason } => format!("refused, so it gets no capabilities: {reason}"),
         Consent::NeedsConsent { missing } => {
@@ -160,7 +167,11 @@ fn consent_line(plugin: &Plugin, grants: &Grants) -> String {
 
 fn sync(root: &Path) -> Result<(), String> {
     let Some(agent) = plugins::agent_dir() else { return Ok(()) };
-    if plugins::sync_agent(root, &agent)? {
+    synced(&agent, plugins::sync_agent(root, &agent))
+}
+
+fn synced(agent: &Path, changed: Result<bool, String>) -> Result<(), String> {
+    if changed? {
         println!("updated mcpServers in {}", agent.join("settings.json").display());
     }
     Ok(())
@@ -171,9 +182,13 @@ fn list() -> Result<(), String> {
     println!("plugins dir: {}", root.display());
     let scan = plugins::scan(&root);
     let grants = Grants::load(&root)?;
-    for plugin in &scan.plugins {
+    let ready = plugins::ready(&scan.plugins, &grants);
+    for (plugin, consent) in &ready {
         println!("{} {}: {}", plugin.id, plugin.version, plugin.description);
-        println!("  {}", consent_line(plugin, &grants));
+        if plugin.local_only {
+            println!("  {}", plugins::LOCAL_ONLY_LABEL);
+        }
+        println!("  {}", consent_text(plugin, consent));
         if let Some((version, source, granted)) =
             grants.granted(&plugin.id).filter(|(_, _, granted)| !granted.is_empty())
         {
@@ -199,10 +214,17 @@ fn list() -> Result<(), String> {
             println!("  error: {error}");
         }
     }
-    if scan.failures.is_empty() {
+    let mut errors: Vec<String> = plugins::agent_dir()
+        .and_then(|agent| synced(&agent, plugins::sync_mcp_servers(&root, &agent, &ready)).err())
+        .into_iter()
+        .collect();
+    if !scan.failures.is_empty() {
+        errors.push(format!("{} plugins failed to load", scan.failures.len()));
+    }
+    if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("{} plugins failed to load", scan.failures.len()))
+        Err(errors.join("\n"))
     }
 }
 
@@ -255,7 +277,7 @@ fn revoke(id: &str, names: &[&str]) -> Result<(), String> {
     let mut grants = Grants::load(&root)?;
     if !grants.revoke(id, &capabilities) {
         println!("{id}: nothing to revoke");
-        return Ok(());
+        return sync(&root);
     }
     grants.save(&root)?;
     match installed(&root, id) {
