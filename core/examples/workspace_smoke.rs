@@ -724,10 +724,12 @@ fn text_generation_and_cleanup(harness: &mut Harness, project: &str) -> anyhow::
     settings.writing_style = WritingStyle::Custom;
     settings.writing_instructions =
         format!("Begin the commit subject or pull request title with the word {GENERATED_MARK}.");
-    settings.worktree_cleanup_unchanged = true;
     harness.studio.update_settings(settings);
-    harness.pump_until("text model and cleanup rule saved", |view| {
-        view.settings.as_ref().is_some_and(|settings| settings.worktree_cleanup_unchanged)
+    harness.pump_until("text model saved", |view| {
+        view.settings.as_ref().is_some_and(|settings| {
+            settings.text_generation_model.as_deref() == Some(real_model::model())
+                && settings.writing_style == WritingStyle::Custom
+        })
     })?;
     std::fs::write(Path::new(&project).join("GENERATED.md"), "generated\n")?;
     let request = harness.request();
@@ -753,6 +755,12 @@ fn text_generation_and_cleanup(harness: &mut Harness, project: &str) -> anyhow::
     );
     println!("     generated PR text {:?}", created.lines().skip_while(|line| *line != "--title").nth(1));
 
+    let mut settings = harness.view.settings.clone().context("settings")?;
+    settings.worktree_cleanup_unchanged = true;
+    harness.studio.update_settings(settings);
+    harness.pump_until("cleanup rule saved", |view| {
+        view.settings.as_ref().is_some_and(|settings| settings.worktree_cleanup_unchanged)
+    })?;
     let request = harness.request();
     harness.studio.cleanup_worktrees(request.clone());
     harness.answer("worktree retention sweep", &request)?;
