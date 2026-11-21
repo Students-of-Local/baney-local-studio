@@ -21,6 +21,7 @@ const WORD: &str = "zeppelin";
 const QUEUED: &str = "marmalade";
 const PROOF: &str = "echo ls-proof-4711 > proof.txt";
 const STOPPED: &str = "echo ls-stop-4711 > stopped.txt";
+const TOUCH: &str = "touch touched.txt";
 const LONG: &str = "Write a 3000 word short story about a lighthouse keeper on a northern island, in plain prose.";
 
 pub struct Target {
@@ -336,6 +337,62 @@ fn card_shows_command(
     Ok(())
 }
 
+fn codex_supervised_holds(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    (target, thread): (&Target, &str),
+    work: &Path,
+) -> anyhow::Result<()> {
+    if target.harness != Harness::Codex {
+        return Ok(());
+    }
+    untrusted_command_asks(studio, signal, watch, thread, work)?;
+    outside_write_held(studio, signal, watch, thread, work)
+}
+
+fn untrusted_command_asks(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    thread: &str,
+    work: &Path,
+) -> anyhow::Result<()> {
+    let asked = approval_turn(studio, signal, watch, thread, ("touch", &shell_prompt(TOUCH)), ApprovalAnswer::Deny)?;
+    ensure!(!asked.is_empty(), "Supervised did not ask before running `{TOUCH}`");
+    ensure!(!work.join("touched.txt").exists(), "touched.txt was written after a deny");
+    println!("ok   `{TOUCH}` asked first and deny left no file ({} approvals denied)", asked.len());
+    Ok(())
+}
+
+fn outside_write_held(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    thread: &str,
+    work: &Path,
+) -> anyhow::Result<()> {
+    let outside = work.parent().context("scratch root")?.join("outside");
+    std::fs::create_dir_all(&outside)?;
+    let target = outside.join("outside.txt");
+    let text = format!(
+        "Create a file at the absolute path {} containing the single line hello. Use a file writing tool, and do not ask me first.",
+        target.display()
+    );
+    let asked = approval_turn(studio, signal, watch, thread, ("outside.txt", &text), ApprovalAnswer::Deny)?;
+    ensure!(
+        !target.exists(),
+        "a write outside the thread's cwd happened {}",
+        if asked.is_empty() { "silently, with no approval asked" } else { "after a deny" }
+    );
+    if asked.is_empty() {
+        println!("ok   a write outside the cwd was refused without asking: {}", watch.reply("outside.txt")?.trim());
+    } else {
+        println!("ok   a write outside the cwd asked first and deny left no file ({} approvals denied)", asked.len());
+    }
+    Ok(())
+}
+
 fn stop_settles_approval(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str) -> anyhow::Result<()> {
     let finished = watch.finished;
     studio.send("send-stop-approval".to_string(), thread.to_string(), prompt(&shell_prompt(STOPPED)), Delivery::Queue);
@@ -556,6 +613,7 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         ensure!(approved > 0, "Supervised did not ask before writing approved.txt");
         ensure!(work.join("approved.txt").is_file(), "approved.txt is missing after an approve");
         println!("ok   approve wrote approved.txt ({approved} approvals)");
+        codex_supervised_holds(&studio, &signal, watch, (target, &thread), work)?;
 
         card_shows_command(&studio, &signal, watch, &thread, work)?;
         stop_settles_approval(&studio, &signal, watch, &thread)?;

@@ -48,6 +48,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 2. New e2e examples `harness_claude_smoke` and `harness_codex_smoke`, real models (Claude: `haiku`; Codex: the smallest model app-server lists), isolated `LOCAL_STUDIO_DATA_DIR` and `EUKHE_DAEMON_SOCKET`, scratch git repo as cwd. The CLIs keep their real config dirs so the sign-in works; the only thing they write is the session for the scratch cwd. Each smoke must:
    - start a thread and get a reply containing a word the prompt asked for;
    - in Supervised, ask for a file write: deny leaves no file, approve writes it;
+   - Codex only, in Supervised: ask before `touch touched.txt` (deny leaves no file), and ask or refuse before a write outside the thread's cwd (no file after a deny);
    - abort a long turn and see the thread leave Working;
    - shut Studio down, start a new one on the same data dir, see the thread listed with its harness, open it, see the earlier turns, and get a second reply that proves the session resumed (ask for the word from turn 1);
    - print a usage line with real tokens.
@@ -110,14 +111,16 @@ History on reopen comes from `~/.claude/projects/<cwd with every non-alphanumeri
 
 Requests we send: `initialize` (then the `initialized` notification), `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`, `thread/name/set`, `thread/compact/start`, `model/list`.
 
-Access modes follow T3:
+Access modes follow T3, except Supervised:
 
 | Mode | approvalPolicy | sandbox | approvalsReviewer |
 | --- | --- | --- | --- |
-| Supervised | `untrusted` | `read-only` | `user` |
+| Supervised | `untrusted` | `workspace-write` | `user` |
 | AutoAcceptEdits | `on-request` | `workspace-write` | `user` |
 | Auto | `on-request` | `workspace-write` | `auto_review` |
 | FullAccess | `granular` (only MCP elicitations ask) | `danger-full-access` | `user` |
+
+T3 runs Supervised in a `read-only` sandbox. There, `gpt-6-luna` sometimes refuses to write instead of asking, so a Supervised user gets no approval to grant (issue #55). Supervised here keeps `untrusted`, so Codex still asks before every file change and before every command outside its trusted read-only list, and uses `workspace-write` so the model knows a write can happen once approved. `harness_codex_smoke` holds that change to three checks on the real CLI: a file edit asks first (deny leaves no file, approve writes it), `touch touched.txt` asks first and deny leaves no file, and a write to a path outside the thread's cwd asks or is refused and never lands after a deny. If any of these fails, Supervised goes back to `read-only`.
 
 Notifications we read: `turn/started`, `turn/completed`, `serverRequest/resolved`, `item/started`, `item/completed`, `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `thread/tokenUsage/updated`, `error` (skipped while `willRetry` is true).
 
