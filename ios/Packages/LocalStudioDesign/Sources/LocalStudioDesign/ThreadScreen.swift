@@ -448,7 +448,7 @@ public struct ThreadScreen: View {
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .background(Theme.canvas)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .safeAreaBar(edge: .bottom, spacing: 0) {
             VStack(spacing: 8) {
                 if !content.approvals.isEmpty || content.question != nil {
                     PinnedRequest(content: content, actions: actions)
