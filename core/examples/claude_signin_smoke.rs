@@ -229,6 +229,7 @@ fn run(
         data_dir: None,
         launch: Some(DaemonLaunch { program: daemon.to_string_lossy().into_owned() }),
         controller_main: None,
+        take_over_serve: false,
     };
     let signal = Arc::new(Signal::default());
     let outcome =
