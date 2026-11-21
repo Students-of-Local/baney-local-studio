@@ -703,6 +703,36 @@ if [ -x "$DRIVER" ]; then
     fail "second-G3 a sheet whose rows went stale is refused and installs nothing"
   fi
 
+  echo "== sol-F4 / first-F1: plugin revoke while a grant answer sits between its load and save"
+  fresh f4
+  for id in kept slow; do
+    manifest "$D/plugins/$id"
+    script "$D/plugins/$id/bin/server" "$id"
+  done
+  ls_ plugin grant kept mcp-server > /dev/null
+  mkdir -p "$S/gate"
+  touch "$S/gate/go"
+  (LOCAL_STUDIO_TEST_HASH_GATE=$S/gate CONSENT_DRIVER_HOOK="rm -f $S/gate/go $S/gate/walked && touch $S/gate/armed" \
+    drive scan consent:slow@1.0.0=install > "$S/out") &
+  pid=$!
+  n=0
+  while [ ! -e "$S/gate/walked" -o ! -e "$S/gate/armed" ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done
+  ls_ plugin revoke kept > "$S/revoke.out" 2>&1 &
+  rpid=$!
+  n=0
+  while kill -0 "$rpid" 2> /dev/null && [ $n -lt 30 ]; do sleep 0.1; n=$((n + 1)); done
+  if kill -0 "$rpid" 2> /dev/null; then held=yes; else held=no; fi
+  touch "$S/gate/go"
+  waited "$pid"
+  wait "$rpid"
+  grep -v '^ROW' "$S/out" | sed 's/^/  /'
+  echo "  revoke waited for the answer: $held; grants: kept '$(granted kept)', slow '$(granted slow)'"
+  if grep -q '^DONE consent:slow@1.0.0: ' "$S/out" && [ -z "$(granted kept)" ] && [ "$(granted slow)" = mcp-server ]; then
+    pass "sol-F4 a revoke from the CLI during a Studio answer survives the answer's save"
+  else
+    fail "sol-F4 a revoke from the CLI during a Studio answer survives the answer's save"
+  fi
+
   echo "== first-F1 / sol-F2: the grant sheets Studio offers when it scans the installed plugins"
   fresh scan
   mkdir -p "$S/src/granter/bin"

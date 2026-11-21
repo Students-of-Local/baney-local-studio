@@ -9,10 +9,8 @@ use super::{Capability, Plugin};
 
 pub const GRANTS: &str = "grants.json";
 
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
-    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+pub struct GrantsLock {
+    _file: std::fs::File,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +39,15 @@ pub enum Consent {
 }
 
 impl Grants {
+    pub fn lock(root: &Path) -> Result<GrantsLock, String> {
+        crate::workspace::providers::create_private_dir(root)?;
+        let path = root.join("grants.json.lock");
+        let failed = |error: std::io::Error| format!("cannot lock {}: {error}", path.display());
+        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&path).map_err(failed)?;
+        file.lock().map_err(failed)?;
+        Ok(GrantsLock { _file: file })
+    }
+
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = root.join(GRANTS);
         let object = crate::workspace::providers::read_object(&path)?;

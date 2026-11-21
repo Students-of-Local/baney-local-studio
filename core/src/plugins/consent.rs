@@ -137,7 +137,7 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
             Ok(installed.note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")))
         }
         Kind::Grant { plugin, tree } => {
-            let _grants = super::grants::lock();
+            let _lock = Grants::lock(root)?;
             let mut grants = Grants::load(root)?;
             grants.grant(&plugin, &chosen, Some(&tree))?;
             grants.save(root)?;
