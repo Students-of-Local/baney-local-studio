@@ -352,6 +352,15 @@ fn settings(access: AccessMode) -> ThreadSettings {
     real_model::thread_settings(access, WorktreeChoice::Local)
 }
 
+fn image_settings() -> ThreadSettings {
+    let separate = real_model::image_model() != real_model::model();
+    ThreadSettings {
+        model: Some(real_model::image_model().to_string()),
+        thinking_level: separate.then(|| "off".to_string()),
+        ..settings(AccessMode::Supervised)
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let usage = "usage: smoke <eukhe> <scratch dir> | smoke --stop <socket>";
     let mut args = std::env::args_os().skip(1);
@@ -786,38 +795,33 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
             && !reply_to(view.items(&first), "Template says hello").trim().is_empty()
             && idle(view, &first)
     })?;
-    let switched = real_model::image_model() != real_model::model();
-    if switched {
-        studio.set_model(first.clone(), real_model::provider().to_string(), real_model::image_model().to_string());
-        studio.set_thinking_level(first.clone(), "off".to_string());
-    }
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(640, 320, image::Rgba([40, 90, 200, 255]))
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
-    studio.send(
-        "send-image".to_string(),
-        first.clone(),
+    studio.start_thread(
+        "draft-image".to_string(),
+        Some(ids.project.clone()),
         PromptDraft {
             text: IMAGE.to_string(),
             images: vec![ImageAttachment { mime_type: "image/png".to_string(), data: png.clone() }],
             files: Vec::new(),
         },
-        Delivery::Queue,
+        image_settings(),
     );
     harness.pump_until("user image carried as a downscaled thumbnail and answered", |view| {
-        view.items(&first).iter().any(|item| matches!(&item.kind, ItemKind::User { thumbnails, entry: Some(_), .. } if thumbnails.len() == 1 && thumbnails[0].width == 512 && thumbnails[0].height == 256))
-            && !reply_to(view.items(&first), IMAGE).trim().is_empty()
-            && idle(view, &first)
+        view.thread("draft-image").is_some_and(|pictured| {
+            view.items(&pictured).iter().any(|item| matches!(&item.kind, ItemKind::User { thumbnails, entry: Some(_), .. } if thumbnails.len() == 1 && thumbnails[0].width == 512 && thumbnails[0].height == 256))
+                && !reply_to(view.items(&pictured), IMAGE).trim().is_empty()
+                && idle(view, &pictured)
+        })
     })?;
-    let seen = reply_to(harness.view.items(&first), IMAGE);
+    let pictured = harness.view.thread("draft-image").context("no image thread")?;
+    let seen = reply_to(harness.view.items(&pictured), IMAGE);
     ensure!(seen.to_lowercase().contains("blue"), "the model did not see the blue image: {seen:?}");
     println!("ok   {} saw the attached image ({})", real_model::image_model(), seen.trim());
-    if switched {
-        studio.set_model(first.clone(), real_model::provider().to_string(), real_model::model().to_string());
-    }
     let entry = harness
         .view
-        .items(&first)
+        .items(&pictured)
         .iter()
         .rev()
         .find_map(|item| match &item.kind {
@@ -830,7 +834,7 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
             | ItemKind::Compaction { .. } => None,
         })
         .context("the image message has no entry")?;
-    studio.load_message_image("image-1".to_string(), first.clone(), entry, 0);
+    studio.load_message_image("image-1".to_string(), pictured.clone(), entry, 0);
     harness.pump_until("full image loaded on demand", |view| view.image.as_ref() == Some(&png))?;
     Ok(())
 }
