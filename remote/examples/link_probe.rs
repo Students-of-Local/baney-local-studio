@@ -45,6 +45,7 @@ struct View {
     started: HashMap<String, String>,
     items: HashMap<String, Vec<Item>>,
     failed: HashMap<String, String>,
+    partials: HashMap<String, usize>,
     daemon: Option<u32>,
 }
 
@@ -58,6 +59,11 @@ impl View {
                 self.started.insert(draft, thread);
             }
             Update::Transcript { thread, op } => {
+                if matches!(&op, TranscriptOp::Insert { item, .. } | TranscriptOp::Update { item, .. }
+                    if matches!(item.kind, ItemKind::Assistant { streaming: true, .. }))
+                {
+                    *self.partials.entry(thread.clone()).or_default() += 1;
+                }
                 let items = self.items.entry(thread).or_default();
                 match op {
                     TranscriptOp::Reset { items: all } => *items = all,
@@ -98,8 +104,22 @@ impl View {
         self.items(thread).iter().filter_map(reply).collect()
     }
 
-    fn streaming(&self, thread: &str) -> bool {
-        self.items(thread).iter().any(|item| matches!(item.kind, ItemKind::Assistant { streaming: true, .. }))
+    fn partials(&self, thread: &str) -> usize {
+        self.partials.get(thread).copied().unwrap_or_default()
+    }
+
+    fn errors(&self, thread: &str) -> Vec<String> {
+        self.items(thread)
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Assistant { error: Some(error), .. } => Some(format!("{error:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn settled(&self, thread: &str, replies: usize, errors: usize) -> bool {
+        self.idle(thread) && (self.replies(thread).len() > replies || self.errors(thread).len() > errors)
     }
 }
 
@@ -147,19 +167,33 @@ impl Desk {
     }
 }
 
+fn settle(desk: &mut Desk, thread: &str, request: &str, before: (usize, usize, usize)) -> anyhow::Result<String> {
+    let (replies, errors, partials) = before;
+    desk.until("the reply comes back and the thread settles", MODEL_STEP, |view| {
+        view.settled(thread, replies, errors) || view.failed.contains_key(request)
+    })?;
+    ensure!(!desk.view.failed.contains_key(request), "{request} failed");
+    let failed = desk.view.errors(thread);
+    ensure!(failed.len() == errors, "the far turn ended in an error: {}", failed.last().cloned().unwrap_or_default());
+    let last = desk.view.replies(thread).last().cloned().unwrap_or_default();
+    println!(
+        "     {} partial transcript updates arrived before the reply settled",
+        desk.view.partials(thread) - partials
+    );
+    Ok(last)
+}
+
+fn marks(view: &View, thread: &str) -> (usize, usize, usize) {
+    (view.replies(thread).len(), view.errors(thread).len(), view.partials(thread))
+}
+
 fn turn(desk: &mut Desk, thread: &str, request: &str, text: &str, expect: &str) -> anyhow::Result<()> {
-    let before = desk.view.replies(thread).len();
+    let before = marks(&desk.view, thread);
     let sent = Instant::now();
     desk.studio.send(request.to_string(), thread.to_string(), draft(text), Delivery::Default);
-    let mut streamed = false;
-    desk.until("the reply streams back and the thread settles", MODEL_STEP, |view| {
-        streamed |= view.streaming(thread);
-        view.replies(thread).len() > before && view.idle(thread) || view.failed.contains_key(request)
-    })?;
-    ensure!(!desk.view.failed.contains_key(request), "send {request} failed");
-    let last = desk.view.replies(thread).last().cloned().unwrap_or_default();
+    let last = settle(desk, thread, request, before)?;
     ensure!(last.to_ascii_lowercase().contains(expect), "the reply is {last:?}");
-    println!("ok   reply {last:?} in {} ms, streamed partial text first: {streamed}", sent.elapsed().as_millis());
+    println!("ok   reply {last:?} in {} ms", sent.elapsed().as_millis());
     Ok(())
 }
 
@@ -212,17 +246,9 @@ fn probe(desk: &mut Desk, link: &str) -> anyhow::Result<()> {
     let thread = desk.view.started.get("probe-1").cloned().context("start_thread failed")?;
     ensure!(thread.starts_with(&format!("@{id}/")), "the thread id {thread} is not on the far machine");
     desk.studio.select_thread(Some(thread.clone()));
-    let mut streamed = false;
-    desk.until("the first reply streams back and the thread settles", MODEL_STEP, |view| {
-        streamed |= view.streaming(&thread);
-        !view.replies(&thread).is_empty() && view.idle(&thread)
-    })?;
-    let first = desk.view.replies(&thread).last().cloned().unwrap_or_default();
+    let first = settle(desk, &thread, "probe-1", (0, 0, 0))?;
     ensure!(first.to_ascii_lowercase().contains("far pong"), "the first reply is {first:?}");
-    println!(
-        "ok   {thread}: reply {first:?} in {} ms from start, streamed partial text first: {streamed}",
-        started.elapsed().as_millis()
-    );
+    println!("ok   {thread}: reply {first:?} in {} ms from start", started.elapsed().as_millis());
     turn(desk, &thread, "probe-2", SECOND, "second")?;
     desk.studio.forget_machine(id.clone());
     desk.until("forget_machine removes the far machine", QUICK, |view| {
@@ -286,9 +312,14 @@ fn main() -> anyhow::Result<()> {
     let result = probe(&mut desk, &link);
     desk.studio.shutdown();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    if let Err(error) = runtime.block_on(stop_daemon(&socket, desk.view.daemon)) {
-        println!("FAIL {error:#}");
-    }
+    let stopped = runtime.block_on(stop_daemon(&socket, desk.view.daemon));
+    let result = match (result, stopped) {
+        (Err(error), Err(stop)) => {
+            println!("FAIL {stop:#}");
+            Err(error)
+        }
+        (result, stopped) => result.and(stopped),
+    };
     match &result {
         Ok(()) => println!("PASS link probe"),
         Err(error) => println!("FAIL {error:#}"),

@@ -70,10 +70,10 @@ local-studio-serve install --tailscale --name parish1 \
   --bin ~/.local/opt/local-studio/local-studio-serve --eukhe ~/.local/opt/local-studio/eukhe --json
 local-studio-serve status --json
 tailscale serve status
-curl https://parish1.tail2b1ef8.ts.net/v1/health
+curl https://<parish1>.<tailnet>.ts.net/v1/health
 ```
 
-- `install` wrote the `local-studio-serve.service` user unit, and `status --json` reported `serving` with the service as owner and `wss://parish1.tail2b1ef8.ts.net/v1/ws` as the effective URL.
+- `install` wrote the `local-studio-serve.service` user unit, and `status --json` reported `serving` with the service as owner and `wss://<parish1>.<tailnet>.ts.net/v1/ws` as the effective URL.
 - `tailscale serve` mounts only `/v1/health` and `/v1/ws` on 443. From the Mac, health over the tailnet answered `{"ok":true,"protocol":2,"min_protocol":2}`, and `/` returned 404.
 
 A machine that only runs serve has no projects, and nothing can add one (#49). For this check, `state.json` was seeded by hand with one project, `~/local-studio-probe`, while the service was stopped.
@@ -81,16 +81,22 @@ A machine that only runs serve has no projects, and nothing can add one (#49). F
 `remote/examples/link_probe.rs` drives the core link client that the desktop apps use, with no UI, against a real far machine:
 
 ```sh
+scratch=$(mktemp -d)
 LOCAL_STUDIO_PAIR_LINK="$(ssh parish1 'local-studio-serve pair' | grep '://pair?')" \
-  target/debug/examples/link_probe <local eukhe> "$(mktemp -d)"
+  target/debug/examples/link_probe <local eukhe> "$scratch"
+ssh parish1 'local-studio-serve devices'
+ssh parish1 'local-studio-serve revoke <the id of this Mac in that list>'
+rm -rf "$scratch"
 ```
 
-Run from the Mac over the tailnet, PASS:
+The probe forgets the far machine on success but can't revoke itself on the far side, and the scratch folder holds this side's pairing keys, so the last three steps run every time, pass or fail.
 
-- `pair_machine` reached Connected in 4.0 s. The far machine reported linux, `0.1.0-dev.0+local.6ef29c0`, at `wss://parish1.tail2b1ef8.ts.net/v1/ws`; latency was 8 ms once the first ping came back (20 s).
-- Parish1's project arrived as `@<machine>//home/baney75/local-studio-probe`.
-- `start_thread` with Claude Code haiku answered in 67 ms with an `@<machine>/` thread id. The reply "far pong" streamed back, partial text first, and the thread settled 1.4 s after the start.
-- A second send got "second" back in 1.3 s. Parish1's serve log shows the send accepted and its first update out 0 ms later, and Parish1's `state.json` holds the thread with its working folder.
+Run from the Mac over the tailnet, twice, both PASS. Numbers are from the second run, after the round 1 review fixes:
+
+- `pair_machine` reached Connected in 1.5 s (4.0 s in the first run). The far machine reported linux, `0.1.0-dev.0+local.6ef29c0`, at `wss://<parish1>.<tailnet>.ts.net/v1/ws`; latency was 13 ms once the first ping came back (20 s).
+- Parish1's project arrived as `@<machine>/<home>/local-studio-probe`.
+- `start_thread` with Claude Code haiku answered in 52 ms with an `@<machine>/` thread id. A streaming transcript update arrived before the reply settled, and "far pong" settled 1.7 s after the start.
+- A second send got "second" back in 1.0 s, again with a streaming update first. Parish1's serve log shows each send accepted and its first update out 0 ms later, and Parish1's `state.json` holds the threads with their working folder.
 - `forget_machine` removed the machine locally. It does not revoke the desktop on the far side, so `local-studio-serve devices` still listed the Mac until `revoke` ran there.
 
 The iPhone client library also paired with Parish1 over the tailnet, reconnected with KK, and had a replayed handshake refused (serve log). Its flood stage hung: it relies on the loopback-only slot and on fake `Tailscale-User-Login` headers, and over the tailnet every socket carries the real login and none is loopback. The stage works on loopback only.
