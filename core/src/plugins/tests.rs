@@ -293,3 +293,18 @@ fn untagged_entries_count_as_ours_only_when_they_match_an_installed_plugin() {
 fn servers_at(agent: &Path, name: &str) -> Option<Value> {
     servers(agent).get(name).cloned()
 }
+
+#[test]
+fn a_command_inside_dot_git_is_covered_by_consent() {
+    let temp = Temp::new();
+    let root = temp.0.join("plugins");
+    let dir = root.join("toolbox");
+    served(&dir, "toolbox", "1.0.0", &["mcp-server"], "box");
+    let text = std::fs::read_to_string(dir.join("plugin.toml")).unwrap_or_default();
+    write(&dir.join("plugin.toml"), &text.replace("bin/server", ".git/server"));
+    write(&dir.join(".git/server"), "#!/bin/sh\necho reviewed\n");
+    grant(&root, "toolbox", &[Capability::McpServer]);
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready);
+    write(&dir.join(".git/server"), "#!/bin/sh\necho swapped\n");
+    assert_eq!(consent(&root, "toolbox"), needs(&[Capability::McpServer]), "an edit inside .git kept consent");
+}

@@ -4,7 +4,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{tree_hash, Capability, Plugin};
+use super::install::live_hash;
+use super::{Capability, Plugin};
 
 pub const GRANTS: &str = "grants.json";
 
@@ -46,7 +47,7 @@ impl Grants {
 
     fn current(&self, plugin: &Plugin) -> Option<&Grant> {
         let grant = self.plugins.get(&plugin.id).filter(|grant| !grant.tree.is_empty())?;
-        (tree_hash(&plugin.dir, &[]).ok()? == grant.tree).then_some(grant)
+        (live_hash(&plugin.dir).ok()? == grant.tree).then_some(grant)
     }
 
     #[must_use]
@@ -116,7 +117,7 @@ impl Grants {
         if let Some(extra) = capabilities.iter().find(|capability| !plugin.asks(**capability)) {
             return Err(format!("{} {} does not ask for {}", plugin.id, plugin.version, extra.name()));
         }
-        let tree = tree_hash(&plugin.dir, &[])?;
+        let tree = live_hash(&plugin.dir)?;
         let current = self.plugins.get(&plugin.id).filter(|grant| grant.tree == tree);
         let source = current.map_or_else(|| format!("folder {}", plugin.dir.display()), |grant| grant.source.clone());
         let kept: BTreeSet<String> = current

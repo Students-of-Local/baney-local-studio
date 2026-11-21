@@ -169,7 +169,7 @@ fn place(
     flattened: &[PathBuf],
     origin: &str,
 ) -> Result<Installed, Vec<String>> {
-    let entries = walk(source, exclude).map_err(|error| vec![error])?;
+    let entries = walk(source, exclude, false).map_err(|error| vec![error])?;
     let unlinked: Vec<String> = entries
         .iter()
         .filter(|entry| matches!(entry.kind, Kind::File { .. }) && flattened.contains(&source.join(&entry.path)))
@@ -301,7 +301,7 @@ struct Entry {
     kind: Kind,
 }
 
-fn walk(root: &Path, exclude: &[String]) -> Result<Vec<Entry>, String> {
+fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, String> {
     let excluded: Vec<PathBuf> = exclude
         .iter()
         .map(|relative| inside(Path::new(""), relative).map(|path| path.components().collect()))
@@ -315,7 +315,7 @@ fn walk(root: &Path, exclude: &[String]) -> Result<Vec<Entry>, String> {
             let item = item.map_err(|error| error.to_string())?;
             let name = item.file_name();
             let path = relative.join(&name);
-            if (relative.as_os_str().is_empty() && name == ".git") || excluded.contains(&path) {
+            if (!keep_git && relative.as_os_str().is_empty() && name == ".git") || excluded.contains(&path) {
                 continue;
             }
             let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
@@ -410,7 +410,12 @@ fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
 }
 
 pub fn tree_hash(root: &Path, exclude: &[String]) -> Result<String, String> {
-    hash_entries(root, &walk(root, exclude)?)
+    hash_entries(root, &walk(root, exclude, false)?)
+}
+
+/// The hash consent checks: the whole folder as it is now, `.git` included, so code there is covered too.
+pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
+    hash_entries(root, &walk(root, &[], true)?)
 }
 
 fn hex(bytes: &[u8]) -> String {
