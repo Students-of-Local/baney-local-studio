@@ -22,7 +22,7 @@ remote_ip=${E2E_REMOTE_IP:-}
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
 examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke stuck_smoke providers_smoke local_smoke plugin_smoke harness_queue_smoke tunnel_setup_smoke harness_claude_smoke harness_codex_smoke)
-helpers=(provider_stub fake_claude fake_codex)
+helpers=(provider_stub fake_claude fake_codex consent_driver)
 post=
 [ "${1:-}" = --post ] && post=1 && shift
 commit=${1:-$(git rev-parse HEAD)}
