@@ -2049,7 +2049,7 @@ fn ask_fixture(data: &Path) -> anyhow::Result<()> {
     std::fs::set_permissions(dir.join("server.py"), std::fs::Permissions::from_mode(0o755))?;
     let plugin = plugins::load(&dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
     let mut grants = Grants::load(&plugins_dir).map_err(anyhow::Error::msg)?;
-    grants.grant(&plugin, &[Capability::McpServer, Capability::AskUser]).map_err(anyhow::Error::msg)?;
+    grants.grant(&plugin, &[Capability::McpServer, Capability::AskUser], None).map_err(anyhow::Error::msg)?;
     grants.save(&plugins_dir).map_err(anyhow::Error::msg)
 }
 
