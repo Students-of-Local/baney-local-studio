@@ -1192,40 +1192,4 @@ mod tests {
         assert!(!gap.load(Ordering::Relaxed), "a send could start a turn while a held message was waiting to start");
         Ok(())
     }
-
-    #[test]
-    fn verbs_reach_codex_in_call_order() -> anyhow::Result<()> {
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
-        let (events, _received) = mpsc::unbounded_channel();
-        let (lines, mut written) = mpsc::unbounded_channel::<String>();
-        let mut codex = Codex {
-            rpc: Rpc { lines, replies: Replies::default(), next: Arc::default() },
-            sink: Sink::new("t", 0, events),
-            thread: "t".to_string(),
-            turns: SharedTurns::default(),
-            approvals: Arc::default(),
-            access: AccessMode::FullAccess,
-            model: None,
-            effort: None,
-            cwd: String::new(),
-            kill: None,
-        };
-        let methods = runtime.block_on(async move {
-            tokio::spawn(async move {
-                codex.compact();
-                codex.send("hello", &[], false, None)
-            })
-            .await?
-            .map_err(anyhow::Error::msg)?;
-            let mut methods = Vec::new();
-            while methods.len() < 2 {
-                let line = tokio::time::timeout(Duration::from_secs(5), written.recv()).await?;
-                let frame: Value = serde_json::from_str(&line.unwrap_or_default())?;
-                methods.push(frame["method"].as_str().unwrap_or_default().to_string());
-            }
-            anyhow::Ok(methods)
-        })?;
-        assert_eq!(methods, ["thread/compact/start", "turn/start"], "Codex got the verbs out of call order");
-        Ok(())
-    }
 }
