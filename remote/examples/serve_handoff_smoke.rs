@@ -649,6 +649,11 @@ async fn takeover(run: &mut Run, phone: &Phone, mut link: Link) -> anyhow::Resul
     let tunnel = health(run.tunnel, TUNNEL).await;
     ensure!(tunnel == Some(200), "the in-process server's tunnel listener answered {tunnel:?}");
     println!("ok   the app's in-process server holds the lock, serves the tunnel host and the phone");
+    ensure!(
+        local_studio_core::link::pairing::serving(&run.data),
+        "pairing::serving is false while the app serves in process, so the pairing sheet warns it is not serving"
+    );
+    println!("ok   pairing::serving is true under the app's in-process server: no not-serving warning");
     let status = tokio::task::block_in_place(|| run.json(&["status", "--no-load"]))?;
     expect(&status, "/owner/pid", &json!(app), "status --json under the app")?;
     expect(&status, "/state", &json!("serving"), "status --json under the app")?;
