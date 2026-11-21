@@ -371,11 +371,11 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(agent_dir.join("prompts"))?;
     std::fs::write(
         agent_dir.join("skills").join("smoke-skill").join("SKILL.md"),
-        "---\nname: smoke-skill\ndescription: Answers the smoke check\n---\nSay smoke-skill-body.",
+        "---\nname: smoke-skill\ndescription: Answers the smoke check\n---\nReply with only the words smoke-skill-body. Do not call any tools.",
     )?;
     std::fs::write(
         agent_dir.join("prompts").join("smoke-template.md"),
-        "---\ndescription: A smoke template\n---\nTemplate says $1",
+        "---\ndescription: A smoke template\n---\nReply with only the words Template says $1. Do not call any tools.",
     )?;
     git(&work, &["init", "-q", "-b", "main"])?;
     git(
@@ -488,6 +488,7 @@ struct Ids {
 
 const REWIND: &str = "Reply with only the word rewound.";
 const IMAGE: &str = "What color fills this image? Reply with one word.";
+const TEMPLATE_HELLO: &str = "Reply with only the words Template says hello. Do not call any tools.";
 const FAN: &str = "Reply with only the word fan.";
 
 fn drive(config: &StudioConfig, work: &Path) -> anyhow::Result<()> {
@@ -782,8 +783,8 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
     })?;
     studio.send("send-template".to_string(), first.clone(), prompt("/smoke-template hello"), Delivery::Queue);
     harness.pump_until("prompt template expanded with its argument and answered", |view| {
-        user_texts(view, &first).iter().any(|text| text == "Template says hello")
-            && !reply_to(view.items(&first), "Template says hello").trim().is_empty()
+        user_texts(view, &first).iter().any(|text| text == TEMPLATE_HELLO)
+            && !reply_to(view.items(&first), TEMPLATE_HELLO).trim().is_empty()
             && idle(view, &first)
     })?;
     let mut png = Vec::new();
