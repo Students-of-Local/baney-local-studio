@@ -14,6 +14,9 @@ for wf in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
   if awk '/^on:/{on=1;next} on&&/^[^ #]/{on=0} on&&/^  push:/{p=1;next} on&&/^  [a-z_]+:/{p=0} on&&p&&/^    tags:/{f=1} END{exit !f}' "$wf"; then
     err "$name starts on a pushed tag; stable builds start only from promote.yml"
   fi
+  if grep -qE ':(refs/heads/)?stable(["'"'"' ]|$)' "$wf"; then
+    err "$name pushes to the stable branch; only scripts/release-stable.sh moves it"
+  fi
   if awk '/^ +environment: *["'"'"']?stable["'"'"']? *$/{f=1} /^ +environment: *$/{e=1;next} e&&/^ +name: *["'"'"']?stable["'"'"']? *$/{f=1} {e=0} END{exit !f}' "$wf"; then
     for t in $(triggers "$wf"); do
       case $t in workflow_call|workflow_dispatch) ;; *) err "$name uses the stable environment but also runs on $t" ;; esac

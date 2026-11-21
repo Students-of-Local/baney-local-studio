@@ -191,7 +191,7 @@ swap_rolling() {
 }
 
 publish() {
-  local channel=$1 id=$2 version=$3 commit=$4 dir="$RUNNER_TEMP/assets" text base
+  local channel=$1 id=$2 version=$3 commit=$4 dir="$RUNNER_TEMP/assets" text base stale
   check_newer "$channel" "$version"
   fetch_assets "$id" "$dir"
   text=$(notes "$channel" "$version" "$commit")
@@ -202,6 +202,9 @@ publish() {
   esac
   feed_json "$channel" "$version" "$commit" "$dir" "$base" "$text" > "$RUNNER_TEMP/latest.json"
   cat "$RUNNER_TEMP/latest.json"
+  for stale in $(gh api "repos/$REPO/releases/$id/assets" --paginate -q '.[] | select(.name == "latest.json") | .id'); do
+    gh api -X DELETE "repos/$REPO/releases/assets/$stale"
+  done
   upload "$id" "$RUNNER_TEMP/latest.json"
   check_newer "$channel" "$version"
   if [ "$channel" = stable ]; then
