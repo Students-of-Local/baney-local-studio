@@ -358,6 +358,10 @@ enum Command {
     StopCheck {
         thread: String,
     },
+    CliSettle {
+        thread: String,
+        epoch: u64,
+    },
     RestartDaemon {
         force: bool,
     },
@@ -1370,6 +1374,7 @@ impl Actor {
             }
             Command::Verify { thread, attempt, relink } => self.verify(&thread, attempt, relink).await,
             Command::StopCheck { thread } => self.stop_check(&thread).await,
+            Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
             Command::HarnessModels { models } => {
                 self.codex_models = models;

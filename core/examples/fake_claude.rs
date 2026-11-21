@@ -35,6 +35,9 @@ fn run(turn: u32, frame: &Value, effort: &str, inbox: &Receiver<Value>, waiting:
             match inbox.recv_timeout(left) {
                 Ok(next) if interrupt(&next) => {
                     answer_control(&next);
+                    if text.contains("discard") {
+                        waiting.clear();
+                    }
                     aborted = true;
                     break;
                 }

@@ -117,6 +117,9 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
         "thread/resume" => shared.respond(id, &json!({ "thread": { "id": params["threadId"], "turns": [] } })),
         "turn/start" => {
             let text = input_text(params);
+            if text.contains("crash") {
+                std::process::exit(1);
+            }
             if text.contains("reject") {
                 shared.refuse(id, "fake codex rejected this turn");
                 return;

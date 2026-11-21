@@ -208,6 +208,19 @@ fn prompt(text: &str) -> PromptDraft {
     PromptDraft { text: text.to_string(), images: Vec::new(), files: Vec::new() }
 }
 
+fn ran_at(run: &mut Run, text: &str, effort: &str) {
+    run.send(text);
+    let reply = format!("reply to {text}");
+    if run.check(&format!("{text:?} is answered"), |watch| watch.replied(&reply).is_some()) {
+        let reply = run.watch.replied(&reply).cloned().unwrap_or_default();
+        if reply.contains(&format!("at effort {effort}")) {
+            println!("ok   {text:?} ran on the new effort: {reply}");
+        } else {
+            run.watch.miss(format!("{text:?} did not run on the new effort: {reply}"));
+        }
+    }
+}
+
 fn claude_restart_keeps_message(run: &mut Run) -> anyhow::Result<()> {
     run.start("claude-restart", "claude-code", "haiku", Some("low"))?;
     run.slow("slow alpha")?;
@@ -219,15 +232,19 @@ fn claude_restart_keeps_message(run: &mut Run) -> anyhow::Result<()> {
         return Ok(());
     }
     run.setup("the thread is idle after the held message", |watch| !watch.busy)?;
-    run.send("charlie");
-    if run.check("the next send is answered", |watch| watch.replied("reply to charlie").is_some()) {
-        let reply = run.watch.replied("reply to charlie").cloned().unwrap_or_default();
-        if reply.contains("at effort medium") {
-            println!("ok   the next send ran on the new effort: {reply}");
-        } else {
-            run.watch.miss(format!("the next send did not run on the new effort: {reply}"));
-        }
-    }
+    ran_at(run, "charlie", "medium");
+    Ok(())
+}
+
+fn claude_stop_drops_held(run: &mut Run) -> anyhow::Result<()> {
+    run.start("claude-discard", "claude-code", "haiku", Some("low"))?;
+    run.slow("slow discard tango")?;
+    run.studio.set_thinking_level(run.thread(), "medium".to_string());
+    run.send("uniform");
+    run.studio.abort(run.thread());
+    run.setup("the stopped turn ended", |watch| !watch.busy)?;
+    run.until(Duration::from_secs(5), |_| false);
+    ran_at(run, "victor", "medium");
     Ok(())
 }
 
@@ -298,9 +315,11 @@ fn codex_drop(run: &mut Run, label: &str, first: &str, held: &str) -> anyhow::Re
 fn scenarios(run: &mut Run) -> anyhow::Result<()> {
     claude_restart_keeps_message(run)?;
     claude_stop_after_effort_change(run)?;
+    claude_stop_drops_held(run)?;
     codex_start_race(run)?;
     codex_failed_start(run)?;
     codex_drop(run, "codex-exit", "slow exit kilo", "lima")?;
+    codex_drop(run, "codex-start-exit", "slow romeo", "crash sierra")?;
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")
 }

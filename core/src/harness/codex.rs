@@ -78,6 +78,7 @@ struct PendingApproval {
 struct Turns {
     running: Option<String>,
     starting: bool,
+    launching: Option<Value>,
     finished: VecDeque<String>,
     held: VecDeque<Value>,
 }
@@ -91,6 +92,7 @@ impl Turns {
         if !self.finished.iter().any(|done| done == id) {
             self.running = Some(id.to_string());
             self.starting = false;
+            self.launching = None;
         }
     }
 
@@ -110,15 +112,19 @@ impl Turns {
     }
 
     fn next(&mut self) -> Option<Value> {
-        let next = self.held.pop_front();
-        self.starting = next.is_some();
-        next
+        self.launching = self.held.pop_front();
+        self.starting = self.launching.is_some();
+        self.launching.clone()
     }
 
     fn forget(&mut self) -> VecDeque<Value> {
         self.running = None;
         self.starting = false;
-        std::mem::take(&mut self.held)
+        let mut dropped = std::mem::take(&mut self.held);
+        if let Some(launching) = self.launching.take() {
+            dropped.push_front(launching);
+        }
+        dropped
     }
 }
 
@@ -142,11 +148,18 @@ fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
                     return;
                 }
                 Err(error) => {
+                    let next = {
+                        let mut turns = turns.lock().unwrap_or_else(PoisonError::into_inner);
+                        if turns.launching.take().is_none() {
+                            return;
+                        }
+                        turns.next()
+                    };
                     let text = format!("Codex did not start this queued message ({error}): {}", held_text(&params));
                     if let Some(message) = notice(&text, now_ms()) {
                         emit_message(&sink, message);
                     }
-                    let Some(next) = turns.lock().unwrap_or_else(PoisonError::into_inner).next() else {
+                    let Some(next) = next else {
                         sink.send(Event::Idle);
                         return;
                     };
@@ -663,7 +676,6 @@ impl Translator {
             "turn/completed" => {
                 let turn = params.get("turn");
                 let id = turn.and_then(|turn| turn.get("id")).and_then(Value::as_str);
-                let current = self.turns.lock().unwrap_or_else(PoisonError::into_inner).completed(id);
                 let status = text(turn, "status");
                 let error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null()).map(|error| {
                     error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string)
@@ -680,8 +692,11 @@ impl Translator {
                 } else {
                     None
                 };
+                let next = {
+                    let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+                    turns.completed(id).then(|| turns.next()).flatten()
+                };
                 self.end(failure);
-                let next = current.then(|| self.turns.lock().unwrap_or_else(PoisonError::into_inner).next()).flatten();
                 if let Some(params) = next {
                     start_turn(self.rpc.clone(), self.sink.clone(), Arc::clone(&self.turns), params);
                 }
@@ -1057,4 +1072,43 @@ fn history(thread: &Value) -> Vec<AgentMessage> {
         }
     }
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    #[test]
+    fn a_held_message_never_looks_idle_when_its_turn_completes() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let _guard = runtime.enter();
+        let (events, _received) = mpsc::unbounded_channel();
+        let (lines, _written) = mpsc::unbounded_channel();
+        let rpc = Rpc { lines, replies: Replies::default(), next: Arc::default() };
+        let turns = SharedTurns::default();
+        let mut translator = Translator::new(Sink::new("t", 0, events), rpc, Arc::default(), Arc::clone(&turns));
+        let gap = Arc::new(AtomicBool::new(false));
+        for round in 0..2000 {
+            let id = format!("turn-{round}");
+            *turns.lock().unwrap_or_else(PoisonError::into_inner) =
+                Turns { running: Some(id.clone()), held: [json!({ "input": [] })].into(), ..Turns::default() };
+            translator.begin();
+            let (shared, seen) = (Arc::clone(&turns), Arc::clone(&gap));
+            let watcher = std::thread::spawn(move || loop {
+                let turns = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                if turns.held.is_empty() {
+                    break;
+                }
+                if !turns.busy() {
+                    seen.store(true, Ordering::Relaxed);
+                }
+            });
+            translator.notification("turn/completed", &json!({ "turn": { "id": id, "status": "completed" } }));
+            watcher.join().map_err(|_| anyhow::anyhow!("the watcher panicked"))?;
+        }
+        assert!(!gap.load(Ordering::Relaxed), "a send could start a turn while a held message was waiting to start");
+        Ok(())
+    }
 }

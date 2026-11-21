@@ -14,6 +14,8 @@ use crate::session::LiveState;
 use crate::transcript::Transcript;
 
 const IDLE_KILL: Duration = Duration::from_secs(600);
+/// How long a CLI may sit idle with sends unanswered before Local Studio counts them as dropped.
+const SETTLE: Duration = Duration::from_secs(3);
 
 pub(super) struct Cli {
     driver: Driver,
@@ -21,6 +23,7 @@ pub(super) struct Cli {
     used: Instant,
     restart: bool,
     unanswered: usize,
+    epoch: u64,
 }
 
 pub(super) fn name(harness: Harness) -> &'static str {
@@ -196,7 +199,7 @@ impl Actor {
         let active = thread.live.as_ref().map(|live| live.active.clone()).unwrap_or_default();
         self.drivers.insert(
             id.to_string(),
-            Cli { driver: opened.driver, generation, used: Instant::now(), restart: false, unanswered: 0 },
+            Cli { driver: opened.driver, generation, used: Instant::now(), restart: false, unanswered: 0, epoch: 0 },
         );
         self.note_user_at(id, last_user_at);
         if self.focused.as_deref() == Some(id) {
@@ -216,6 +219,7 @@ impl Actor {
         let cli = self.drivers.get_mut(id).ok_or_else(|| "The thread is not open.".to_string())?;
         cli.used = Instant::now();
         cli.unanswered += 1;
+        cli.epoch += 1;
         let sent = cli.driver.send(text, images, steer).await;
         if sent.is_err() {
             self.answered(id);
@@ -321,6 +325,7 @@ impl Actor {
             Ok(_) => match self.drivers.get_mut(id) {
                 Some(cli) => {
                     cli.unanswered += 1;
+                    cli.epoch += 1;
                     let sent = cli.driver.compact().await;
                     if sent.is_err() {
                         self.answered(id);
@@ -467,16 +472,7 @@ impl Actor {
             return;
         }
         match event {
-            Event::Session(event) => {
-                self.apply_event(&id, &event, 0).await;
-                if matches!(*event, SessionEvent::AgentEnd { .. }) {
-                    if let Some(thread) = self.threads.get_mut(&id) {
-                        thread.stopping = None;
-                    }
-                    self.answered(&id);
-                    self.cli_restart_due(&id);
-                }
-            }
+            Event::Session(event) => self.cli_session(&id, &event).await,
             Event::Idle => {
                 self.answered(&id);
                 let busy =
@@ -544,6 +540,34 @@ impl Actor {
                 }
             }
         }
+    }
+
+    async fn cli_session(&mut self, id: &str, event: &SessionEvent) {
+        self.apply_event(id, event, 0).await;
+        let ended = matches!(event, SessionEvent::AgentEnd { .. });
+        if let Some(cli) = self.drivers.get_mut(id).filter(|_| ended || matches!(event, SessionEvent::AgentStart)) {
+            cli.epoch += 1;
+        }
+        if !ended {
+            return;
+        }
+        if let Some(thread) = self.threads.get_mut(id) {
+            thread.stopping = None;
+        }
+        self.answered(id);
+        self.cli_restart_due(id);
+        if let Some(cli) = self.drivers.get(id).filter(|cli| cli.restart && cli.unanswered > 0) {
+            self.later(SETTLE, Command::CliSettle { thread: id.to_string(), epoch: cli.epoch });
+        }
+    }
+
+    /// A CLI can drop or merge input it held (on Stop, for one), so it answers fewer sends than it got. When
+    /// nothing was sent, started or ended for `SETTLE` after a turn ended, count the thread as settled.
+    pub(super) fn cli_settle(&mut self, id: &str, epoch: u64) {
+        let running = self.running(id);
+        let Some(cli) = self.drivers.get_mut(id).filter(|cli| cli.epoch == epoch && !running) else { return };
+        cli.unanswered = 0;
+        self.cli_restart_due(id);
     }
 
     fn cli_restart_due(&mut self, id: &str) {
