@@ -2,7 +2,7 @@
 
 export def source-hash [package: path]: nothing -> string {
     let icon = ($package | path join "AppIcon.icon")
-    glob ($icon | path join "**" "*") --no-dir | sort | each {|f| $"($f | path relative-to $icon) (open --raw $f | hash sha256)" } | str join "\n" | hash sha256
+    ^git -C $icon ls-files -z --cached . | split row (char nul) | compact --empty | sort | each {|f| $"($f) (open --raw ($icon | path join $f) | hash sha256)" } | str join "\n" | hash sha256
 }
 
 def main [] {
