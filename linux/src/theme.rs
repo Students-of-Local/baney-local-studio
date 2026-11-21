@@ -141,6 +141,7 @@ popover.ls-palette > contents { padding: 0; }
 .ls-machine-dot.idle { background: alpha(var(--window-fg-color), 0.4); }
 .ls-machine-dot.offline { box-shadow: inset 0 0 0 1.5px alpha(var(--window-fg-color), 0.62); }
 .ls-machine-dot.unreachable { box-shadow: inset 0 0 0 1.5px var(--warning-color); }
+.ls-machine-dot.failed { background: var(--error-color); }
 .ls-dash-label { font-size: 13px; }
 .ls-dash-small { font-size: 11.5px; }
 .ls-dash-num { font-feature-settings: 'tnum'; }

@@ -1,8 +1,11 @@
 use std::sync::{Mutex, PoisonError};
 
 use serde::Deserialize;
+use serde_json::json;
 use snow::{HandshakeState, TransportState};
 
+pub const PROTOCOL: u64 = 2;
+pub const MIN_PROTOCOL: u64 = 2;
 pub const XX: &str = "Noise_XXpsk3_25519_ChaChaPoly_SHA256";
 pub const KK: &str = "Noise_KK_25519_ChaChaPoly_SHA256";
 pub const PROLOGUE: &[u8] = b"local-studio-remote/1\n";
@@ -17,6 +20,12 @@ pub const BLOB: u8 = 0x03;
 pub const BLOB_ID: usize = 16;
 const BLOB_HEAD: usize = 1 + BLOB_ID + 1;
 const FINAL: u8 = 0x01;
+pub const UNPAIRED: u16 = 4401;
+pub const REPLACED: u16 = 4409;
+pub const BANNED: u16 = 4429;
+pub const RESTART: u16 = 1012;
+pub const BUSY: u16 = 1013;
+pub const BROKEN: u16 = 1002;
 
 #[derive(Debug, Deserialize)]
 pub struct Header {
@@ -30,6 +39,13 @@ pub struct Header {
     pub min_protocol: u64,
 }
 
+#[must_use]
+pub fn header(pattern: &str, id: &str) -> String {
+    let key = if pattern == "KK" { "device" } else { "pair" };
+    json!({ "v": 1, "pattern": pattern, key: id, "protocol": PROTOCOL, "min_protocol": MIN_PROTOCOL }).to_string()
+}
+
+#[must_use]
 pub fn prologue(header: &str) -> Vec<u8> {
     let mut prologue = PROLOGUE.to_vec();
     prologue.extend_from_slice(header.as_bytes());
@@ -70,6 +86,7 @@ pub fn write(state: &mut HandshakeState, payload: &[u8]) -> Result<Vec<u8>, snow
 pub struct Channel(Mutex<TransportState>);
 
 impl Channel {
+    #[must_use]
     pub fn new(state: TransportState) -> Self {
         Self(Mutex::new(state))
     }
@@ -89,6 +106,7 @@ impl Channel {
     }
 }
 
+#[must_use]
 pub fn json_records(text: &str) -> Vec<Vec<u8>> {
     let bytes = text.as_bytes();
     let chunks: Vec<&[u8]> = if bytes.is_empty() { vec![bytes] } else { bytes.chunks(PLAIN - 1).collect() };
@@ -105,6 +123,7 @@ pub fn json_records(text: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
+#[must_use]
 pub fn blob_records(id: &[u8; BLOB_ID], data: &[u8]) -> Vec<Vec<u8>> {
     let chunks: Vec<&[u8]> = if data.is_empty() { vec![data] } else { data.chunks(PLAIN - BLOB_HEAD).collect() };
     let last = chunks.len() - 1;

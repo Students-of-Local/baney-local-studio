@@ -460,7 +460,20 @@ fn delete(app: &Rc<App>, id: String) {
     });
 }
 
-fn confirm_action(
+pub fn local_only(app: &Rc<App>, thread: String, message: &str, local: Option<&local_studio_core::ModelKey>) {
+    let Some(local) = local else {
+        app.show_notice(message);
+        return;
+    };
+    let verb = format!("Switch to {} and Run", local.model);
+    let local = local.clone();
+    confirm_action(app, "Runs only on local models", message, &verb, false, move |app| {
+        let (thread, local) = (thread.clone(), local.clone());
+        app.core.run(|studio| studio.run_local(thread, local));
+    });
+}
+
+pub fn confirm_action(
     app: &Rc<App>,
     heading: &str,
     body: &str,

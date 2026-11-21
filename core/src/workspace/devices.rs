@@ -28,11 +28,15 @@ fn android_tool(name: &str, subdir: &str) -> Option<PathBuf> {
         .iter()
         .filter_map(|key| std::env::var_os(key).filter(|value| !value.is_empty()).map(PathBuf::from))
         .collect();
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = crate::platform::home() {
         roots.push(Path::new(&home).join("Library/Android/sdk"));
         roots.push(Path::new(&home).join("Android/Sdk"));
     }
-    roots.into_iter().map(|root| root.join(subdir).join(name)).find(|path| path.is_file())
+    #[cfg(windows)]
+    if let Some(local) = crate::platform::local_app_data() {
+        roots.push(local.join("Android").join("Sdk"));
+    }
+    roots.into_iter().find_map(|root| crate::platform::executable(root.join(subdir).join(name)))
 }
 
 fn runtime_name(key: &str) -> String {

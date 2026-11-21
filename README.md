@@ -1,61 +1,134 @@
 # Local Studio
 
-Native Mac and Linux app for running many coding-agent threads at once on local and cloud models, built on [Eukhe](https://github.com/gildrb/eukhe).
+**The native studio for coding agents and local AI.** Run every agent thread you have, across every project, on your own GPUs or any cloud model, in one fast Mac and Linux app that never stops working when you close the window.
+
+![Local Studio on macOS: the inbox of agent threads across projects on the left, and a thread on the right splitting an audit across three subagents with live token counts](docs/images/studio.png)
+
+*Rendered from the app's own fixture scenes (`LocalStudio +snapshot`).*
+
+## Why Local Studio
+
+- **Native, not a web page in a frame.** AppKit and SwiftUI on macOS, GTK4 and libadwaita on Linux, over one Rust core. Terminals run on [libghostty-vt](https://lib.ghostty.org) emulation and grammar-based highlighting in the core, drawn natively by each app. On macOS every action works from the keyboard.
+- **Threads that outlive the window.** Sessions run in the [Eukhe](https://github.com/gildrb/eukhe) daemon. Quit the app or crash it mid-turn: the turn keeps going, and the transcript is there when you come back.
+- **Your own hardware, first class.** The Local page is a live dashboard for every machine in your fleet: decode speed, first-token time, KV cache, GPUs, memory, power, and a year of daily tokens. Switch or stop the model from the same page. The controller finds vLLM, SGLang, llama.cpp, ExLlama, Ollama and LM Studio engines for you.
+- **Every model in one picker.** Built-in providers, any OpenAI-compatible, OpenAI Responses or Anthropic endpoint, and the engines on your own machines, side by side. Paste API keys or add an endpoint in Settings → Providers; Claude Code and Codex threads run through their official CLIs.
+- **One inbox for all of it.** Every thread in every project, with live status: working, needs approval, failed, done. Snooze, pin, and see the branch, the diff size and the pull request on each row.
+- **Plugins that do real work.** A plugin is a folder, usually a git tree, with a `plugin.toml`: skills, slash commands and its own tool server, each capability granted by you. See [Plugins](#plugins).
+
+![The Local page: one machine serving qwen3-coder at 391 tokens a second, with first-token time, requests in flight, KV cache, four GPUs, memory, power and a year of daily token use](docs/images/local.png)
 
 ## Install
 
+Local Studio ships on three channels. Stable opens with the first public release, and the first nightly ships once the nightly gate passes; today the only prebuilt build is dev.
+
+| Channel | For | Updates |
+| --- | --- | --- |
+| Stable | Everyone | When a nightly has run clean for 72 hours and passed its live checks |
+| Nightly | People who want new work first | Once a day, only from a commit that passed CI and the real-model checks |
+| Dev | Developers and agents testing a change | Every merge to `main` |
+
+Stable and nightly install side by side and share your threads. Dev keeps its own data. The full scheme is in [docs/channels.md](docs/channels.md).
+
+**Linux (dev channel):** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/baney75/local-studio/releases/tag/dev). Dev keeps its own data, so threads made there do not carry over to nightly or stable.
+
+**From source, macOS:**
+
 ```sh
 nu macos/build.nu --configuration Release
+open macos/build/Release/LocalStudio.app
 ```
 
-Needs Xcode 26+, Rust 1.98, and Nushell; the build fetches the pinned Eukhe release (v0.10.73). Linux: see [linux/AGENTS.md](linux/AGENTS.md).
+Needs macOS 26 on Apple Silicon, Xcode 26+, Rust 1.98 and Nushell. The build fetches the pinned Eukhe release and checks it against its `SHA256SUMS`.
+
+**From source, Linux:** `cd linux && cargo build`, then `nu bundle.nu`. Details in [linux/AGENTS.md](linux/AGENTS.md).
 
 ## Use
 
-- Open `macos/build/Release/LocalStudio.app`, add a project folder, start a thread.
-- ⌘N new thread, ⌘T new thread in the current project, ⌘W close the thread, ⌃Tab recent threads, ⌘K command palette, ⌘J terminal, ⌥⌘B right panel, ⌘, settings.
-- On macOS everything works from the keyboard: F6 or ⌘⌥←/→ move between sidebar, timeline, composer, right panel and terminal; arrows, Return, Space and Delete work in the lists; ⌘L focuses the composer. Settings → General → Keyboard turns on vim keys (j/k, gg/G, h/l, / and a modal composer).
+Add a project folder and start a thread.
 
-## Many threads, one inbox
+| Keys | Does |
+| --- | --- |
+| ⌘N / ⌘T | New thread / new thread in this project |
+| ⌘W | Close the thread |
+| ⌘K | Command palette |
+| ⌘J | Terminal |
+| ⌥⌘B | Right panel |
+| ⌃Tab | Recent threads |
+| F6 or ⌘⌥←/→ | Move between sidebar, timeline, composer, panel and terminal |
+| ⌘L | Focus the composer |
+| ⌘, | Settings |
 
-- Every thread across every project in one sidebar, with live status (working, needs approval, done).
-- Threads keep running in the Eukhe daemon when the window closes; the Eukhe TUI sees the same sessions.
-- Working follows the daemon: a thread whose session worker stopped, passivated or crashed leaves Working, Stop escalates to stopping the worker when a run does not end within seconds, and a running thread offers Stop and Delete. When the daemon on the socket runs another Eukhe version than the app bundles, a banner offers Restart Daemon.
+Settings → General → Keyboard turns on vim keys (j/k, gg/G, h/l, / and a modal composer).
 
-## Providers
+## Plugins
 
-- Settings → Providers: paste API keys for built-in providers, add any OpenAI-compatible, OpenAI Responses or Anthropic endpoint (Test Connection lists its models), and use engines running on the Local fleet with one click.
-- Keys go to Eukhe's `auth.json` (mode 0600) and endpoints to its `models.json`; new models show up in the model picker right away.
+A Local Studio plugin is a folder, usually a git tree, with a `plugin.toml` at its root:
 
-## Local models
+```toml
+id = "smoothstone"
+version = "0.1.0"
+description = "Make 3D printable parts with the stone CLI and its tested parametric recipes"
+capabilities = []
 
-- Settings → Local manages machines, loaded models and the Local AI Registry through the controller. The Local page is a per-machine dashboard: decode speed, first-token time, requests in flight, KV cache, GPUs, memory and power, a 24-hour decode chart and a year of daily tokens, with Switch model… and Stop model….
+[[commands]]
+name = "stone"
+description = "Make a printable part with smoothstone"
+skill = "smoothstone"
+```
 
-## Native
+What a plugin can do today:
 
-- AppKit/SwiftUI on macOS, GTK4 + libadwaita on Linux, one Rust core.
-- Terminals and syntax highlighting live in the core: [libghostty-vt](https://lib.ghostty.org) emulation and grammar-based highlighting, drawn natively by each app.
+- Ship skills and slash commands that appear in the composer.
+- Run its own MCP tool server for your sessions (`mcp-server`).
+- Declare each power it needs: `ask-user`, `native-host`, `site-secrets`, `accessibility`, `synthetic-input`, `screen-capture`. A plugin's tool server does not start until you have granted every one it asks for. The in-app consent sheet is being designed; today grants are made from the command line.
+- Install from a pinned catalog entry: a git URL, a full commit and a `sha256` of the tree, so what runs is exactly what was reviewed. Installs from a path or an unpinned git source are not pinned, and grants are not yet bound to the installed tree (#38).
 
-## Components
+The plugin family, in progress:
 
-- `core/`: shared Rust logic both apps link.
-- `kit/`: the core as a static library with Swift bindings.
-- `macos/`: macOS app.
-- `linux/`: Linux app.
-- `controller/`: local-LLM controller: discovers inference engines, links machines into a fleet, launches registry recipes. See [docs/controller.md](docs/controller.md).
+| Plugin | What it is | State |
+| --- | --- | --- |
+| [Tychicus](https://github.com/baney75/tychicus) | Browser use and computer use for your agents | Ships Local Studio manifests today; becoming the default plugin |
+| [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | Ships a Local Studio manifest with six commands; joining the catalog |
+| [Gantrel](https://github.com/baney75/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
+| [UntoCaesar](https://github.com/baney75/UntoCaesar) | Local-AI tax filing that never leaves your machine | Engine and manifest on a branch |
+| [Corunis](https://github.com/baney75/Corunis) | A private organizational brain for universities | MCP server and manifest on a branch |
+| [Fonsviva](https://github.com/baney75/Fonsviva) | Local compute and model serving the plugins run on | In progress |
 
-## Limitations
+From the command line:
 
-- macOS 26+ (Apple Silicon) and Linux only.
-- Not sandboxed: agents run code with your user permissions.
+```sh
+local-studio plugin validate <dir>
+local-studio plugin install <catalog id, path or git source>
+local-studio plugin grant <id> <capability>...
+local-studio plugin list
+```
+
+Write your own: start from [examples/plugins/smoothstone](examples/plugins/smoothstone).
+
+## How it is built
+
+- `core/`: the shared Rust core both apps link: inbox, transcripts, git, files, terminals, usage, plugins, settings.
+- `kit/`: the core as a static library with Swift bindings (UniFFI).
+- `macos/`: the macOS app. `linux/`: the Linux app. `ios/`: the iPhone app, in progress.
+- `controller/`: the local-LLM controller. Discovers inference engines, links machines into a fleet, launches registry recipes. See [docs/controller.md](docs/controller.md).
+- Eukhe is the agent engine, the way libghostty is Ghostty's terminal: sessions, storage, tools and inference live there, out of process.
+
+Every check drives the real binaries against a real model. See [AGENTS.md](AGENTS.md).
+
+## Limits
+
+- macOS 26+ on Apple Silicon and Linux. Windows builds the core only, for now.
+- Not sandboxed: agents run code with your user's permissions. Use Supervised mode to approve each step.
 - Subscription sign-in for ChatGPT and GitHub Copilot happens in Eukhe (`eukhe`, then `/login`). Claude runs only through Claude Code and your `claude` sign-in ([docs/harness.md](docs/harness.md)); Local Studio hides Eukhe's Claude sign-in because it identifies as Claude Code and can get the account restricted. Anthropic API keys still work in Eukhe.
 
 ## Credits
 
-- [Eukhe](https://github.com/gildrb/eukhe), the agent core, and this native rework: Gil Rodrigues ([gildrb.com](https://gildrb.com)).
-- Local Studio: Sherif Cherfa ([0xSero](https://github.com/0xSero)) and [contributors](https://github.com/sybil-solutions/local-studio/graphs/contributors).
-- [T3 Code](https://github.com/pingdotgg/t3code) by T3 Tools: the original app and layout Local Studio grew from.
+Local Studio stands on the work of others, and gladly says so.
+
+- [Eukhe](https://github.com/gildrb/eukhe), the agent core, and the native rework this repository grew from: Gil Rodrigues ([gildrb.com](https://gildrb.com)).
+- The original Local Studio: Sherif Cherfa ([0xSero](https://github.com/0xSero)) and [contributors](https://github.com/sybil-solutions/local-studio/graphs/contributors).
+- [T3 Code](https://github.com/pingdotgg/t3code) by T3 Tools: the original app and layout Local Studio began from.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Report security issues as described in [SECURITY.md](SECURITY.md).

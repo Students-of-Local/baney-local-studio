@@ -11,12 +11,12 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use local_studio_core::link::snow::{self, TransportState};
 use local_studio_core::{
-    AccessMode, Approval, Connection, DaemonLaunch, Item, ItemKind, Studio, StudioConfig, ThreadRow, ThreadSettings,
-    ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    AccessMode, Approval, Connection, DaemonLaunch, Delivery, Item, ItemKind, PromptDraft, Studio, StudioConfig,
+    ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
-use snow::TransportState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
@@ -40,6 +40,9 @@ const TUNNEL: &str = "tunnel.smoke.test";
 static TUNNEL_PORT: OnceLock<u16> = OnceLock::new();
 const ONCE_TEXT: &str = "Reply with only the word once.";
 const SLEEP_COMMAND: &str = "sleep 60 && echo slept";
+const QUEUE_SLEEP: &str = "sleep 15 && echo slept";
+const FOLLOW_TEXT: &str = "Reply with only the word followed.";
+const MAX_JSON: usize = 8 << 20;
 const UPDATE_TYPES: [&str; 28] = [
     "connection",
     "projects",
@@ -192,6 +195,10 @@ struct View {
     notifications: u32,
     needs_approval: HashMap<String, u32>,
     blobs: HashMap<String, Received>,
+    failed: HashMap<String, Value>,
+    cuts: HashMap<String, u64>,
+    setups: HashMap<String, Value>,
+    queues: HashMap<String, Vec<String>>,
 }
 
 impl View {
@@ -297,6 +304,17 @@ impl View {
         if let Some(request) = raw.get("request").and_then(Value::as_str) {
             self.answers.insert(request.to_string(), kind.clone());
             *self.answer_counts.entry(request.to_string()).or_default() += 1;
+            if kind == "request_failed" {
+                self.failed.insert(request.to_string(), raw.clone());
+            }
+            if let Some(cut) = raw.get("cut").and_then(Value::as_u64) {
+                self.cuts.insert(request.to_string(), cut);
+            }
+        }
+        if kind == "worktree_setup" {
+            if let Some(thread) = raw.get("thread").and_then(Value::as_str) {
+                self.setups.insert(thread.to_string(), raw.clone());
+            }
         }
         let update: Update = serde_json::from_value(raw.clone()).with_context(|| format!("decode update {raw}"))?;
         match update {
@@ -316,6 +334,9 @@ impl View {
             }
             Update::Approvals { thread, approvals } => {
                 self.approvals.insert(thread, approvals);
+            }
+            Update::Queue { thread, queued } => {
+                self.queues.insert(thread, queued.into_iter().map(|message| message.text).collect());
             }
             Update::Models { .. } => self.models += 1,
             Update::GitStatus { .. } => self.git_status += 1,
@@ -376,6 +397,8 @@ struct Route {
     from: Option<String>,
     forwarded_host: Option<String>,
     login: Option<String>,
+    xff: Option<String>,
+    ts_name: Option<String>,
 }
 
 impl Route {
@@ -385,6 +408,10 @@ impl Route {
 
     fn login(login: &str) -> Self {
         Self { login: Some(login.to_string()), ..Self::default() }
+    }
+
+    fn forwarded(login: Option<&str>, xff: &str) -> Self {
+        Self { login: login.map(str::to_string), xff: Some(xff.to_string()), ..Self::default() }
     }
 }
 
@@ -401,6 +428,8 @@ async fn connect(port: u16, route: &Route) -> anyhow::Result<Result<Socket, u16>
         ("cf-connecting-ip", &route.from),
         ("x-forwarded-host", &route.forwarded_host),
         ("tailscale-user-login", &route.login),
+        ("x-forwarded-for", &route.xff),
+        ("tailscale-user-name", &route.ts_name),
     ] {
         if let Some(value) = value {
             request.headers_mut().insert(name, HeaderValue::from_str(value)?);
@@ -575,6 +604,11 @@ async fn reader(
                     break;
                 };
                 record.truncate(length);
+                let joining = matches!(record.first(), Some(1 | 2));
+                if joining && joined.len() + record.len() - 1 > MAX_JSON {
+                    view_now.broken.get_or_insert_with(|| format!("a JSON frame over {MAX_JSON} bytes"));
+                    break;
+                }
                 let outcome = match record.first() {
                     Some(1) => {
                         joined.extend_from_slice(&record[1..]);
@@ -798,6 +832,7 @@ struct Serve {
     root: PathBuf,
     data: PathBuf,
     port: u16,
+    kept: Option<u64>,
     child: Option<Child>,
 }
 
@@ -822,8 +857,11 @@ impl Serve {
 
     fn start(&mut self, eukhe: &Path, hook: &str) -> anyhow::Result<()> {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(self.root.join("serve.log"))?;
-        let child = self
-            .command()
+        let mut command = self.command();
+        if let Some(kept) = self.kept {
+            command.env("LOCAL_STUDIO_SERVE_KEPT_SECS", kept.to_string());
+        }
+        let child = command
             .args(["serve", "--port", &self.port.to_string(), "--name", "smoke-box"])
             .args(["--tunnel-port", &tunnel_port().to_string(), "--allow-tunnel-host", TUNNEL])
             .arg("--eukhe")
@@ -855,6 +893,12 @@ impl Serve {
             Some(child) => child.try_wait()?.is_some(),
             None => true,
         })
+    }
+
+    fn refused(&self, args: &[&str]) -> anyhow::Result<String> {
+        let output = self.command().args(args).arg("--data-dir").arg(&self.data).output()?;
+        ensure!(!output.status.success(), "{args:?} succeeded: {}", String::from_utf8_lossy(&output.stdout));
+        Ok(String::from_utf8_lossy(&output.stderr).into_owned())
     }
 
     fn run(&self, args: &[&str]) -> anyhow::Result<String> {
@@ -988,6 +1032,7 @@ fn desktop_run(
         data_dir: Some(data.to_string_lossy().into_owned()),
         launch: Some(DaemonLaunch { program: eukhe.to_string_lossy().into_owned() }),
         controller_main: None,
+        take_over_serve: false,
     };
     let studio =
         Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -1081,8 +1126,23 @@ fn refuse_links(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
+struct Linked(PathBuf);
+
+impl Drop for Linked {
+    fn drop(&mut self) {
+        let linked = std::fs::symlink_metadata(&self.0).is_ok_and(|meta| meta.file_type().is_symlink());
+        if linked && std::fs::remove_file(&self.0).is_ok() {
+            println!("ok   credential link removed ({})", self.0.display());
+        }
+    }
+}
+
+fn agent_dir(root: &Path) -> anyhow::Result<(Option<Target>, Option<Linked>)> {
     let agent = root.join("agent");
+    let auth = agent.join("auth.json");
+    if std::fs::symlink_metadata(&auth).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(&auth)?;
+    }
     if std::fs::symlink_metadata(&agent).is_ok() {
         refuse_links(&agent)?;
         for name in ["auth.json", "models.json", "settings.json"] {
@@ -1104,18 +1164,28 @@ fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
             .write_all(data)?;
         Ok(())
     };
-    write("auth.json", b"{}")?;
-    local_studio_core::check_scratch_agent(&agent).map_err(|error| anyhow::anyhow!(error))?;
+    let source = std::env::var_os("LOCAL_STUDIO_SMOKE_AGENT").map(PathBuf::from);
+    let real = source.as_ref().map(|source| source.join("auth.json")).filter(|auth| auth.is_file());
+    let linked = if let Some(real) = real {
+        let real = std::fs::canonicalize(&real).with_context(|| format!("resolve {}", real.display()))?;
+        std::os::unix::fs::symlink(&real, &auth)
+            .with_context(|| format!("link {} to {}", auth.display(), real.display()))?;
+        Some(Linked(auth.clone()))
+    } else {
+        write("auth.json", b"{}")?;
+        local_studio_core::check_scratch_agent(&agent).map_err(|error| anyhow::anyhow!(error))?;
+        None
+    };
     let absent = json!({
         "baseUrl": format!("http://127.0.0.1:{}/v1", free_port()?),
         "api": "openai-completions",
         "apiKey": "absent",
         "models": [{ "id": "absent", "input": ["text", "image"], "contextWindow": 8192 }]
     });
-    let Some(source) = std::env::var_os("LOCAL_STUDIO_SMOKE_AGENT").map(PathBuf::from) else {
+    let Some(source) = source else {
         write("models.json", &serde_json::to_vec(&json!({ "providers": { "remote-smoke-absent": absent } }))?)?;
         write("settings.json", br#"{"onboardingShown":true}"#)?;
-        return Ok(None);
+        return Ok((None, linked));
     };
     let models = std::fs::read(source.join("models.json"))
         .with_context(|| format!("read {}", source.join("models.json").display()))?;
@@ -1153,10 +1223,17 @@ fn agent_dir(root: &Path) -> anyhow::Result<Option<Target>> {
         .and_then(|entry| entry["input"].as_array())
         .is_some_and(|input| input.iter().any(|kind| kind == "image"));
     println!(
-        "     model {provider}/{model} at {base}, thinking {thinking}, {}; auth.json is a scratch {{}} (no sign-in)",
-        if images { "takes images" } else { "text only" }
+        "     model {provider}/{model} at {base}, thinking {thinking}, {}; auth.json {}",
+        if images { "takes images" } else { "text only" },
+        match &linked {
+            Some(Linked(auth)) => format!(
+                "linked to {} (refreshes write back there)",
+                std::fs::read_link(auth).unwrap_or_default().display()
+            ),
+            None => "is a scratch {} (no sign-in)".to_string(),
+        }
     );
-    Ok(Some(Target { provider, model, thinking, images }))
+    Ok((Some(Target { provider, model, thinking, images }), linked))
 }
 
 struct Run {
@@ -1239,28 +1316,28 @@ async fn transport_checks(run: &mut Run, eukhe: &Path) -> anyhow::Result<()> {
     println!("ok   a socket with a mismatched Origin gets 403");
 
     let rival_port = free_port()?;
-    let mut rival = run.serve.command();
-    let mut rival = rival
+    let rival_log = run.serve.root.join("rival.log");
+    let mut rival = run
+        .serve
+        .command()
         .args(["serve", "--port", &rival_port.to_string(), "--eukhe"])
         .arg(eukhe)
         .arg("--data-dir")
         .arg(&run.serve.data)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(std::fs::File::create(&rival_log)?)
         .spawn()?;
-    let deadline = Instant::now() + QUICK;
-    while rival.try_wait()?.is_none() {
-        if Instant::now() >= deadline {
-            Command::new("kill").args(["-KILL", &rival.id().to_string()]).status()?;
-            rival.wait()?;
-            bail!("a second serve on the same data dir kept running");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let output = rival.wait_with_output()?;
-    let said = String::from_utf8_lossy(&output.stderr);
-    ensure!(!output.status.success() && said.contains("already owns"), "a second serve said: {said}");
-    println!("ok   a second serve on the data dir is refused: {}", said.trim());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let running = rival.try_wait()?.is_none();
+    Command::new("kill").args(["-KILL", &rival.id().to_string()]).status()?;
+    rival.wait()?;
+    let said = std::fs::read_to_string(&rival_log).unwrap_or_default();
+    ensure!(running, "a second serve on the same data dir exited instead of waiting: {said}");
+    ensure!(
+        said.matches("serve waits and tries again").count() == 1,
+        "a second serve did not log the wait exactly once: {said}"
+    );
+    println!("ok   a second serve on the data dir waits for the lock and logs it once: {}", said.trim());
 
     for (protocol, min_protocol) in [(3, 3), (1, 1)] {
         let mut socket =
@@ -1642,6 +1719,54 @@ async fn limit_checks(run: &Run, a: Client, a_phone: &Phone) -> anyhow::Result<C
     let code = first_close(port, &Route::login("mallory@example.com")).await?;
     ensure!(code == Some(4429), "5 failures from one Tailscale login closed with {code:?}");
     println!("ok   5 bad headers from one Tailscale-User-Login refuse that login with 4429");
+    let opened = kk_handshake(
+        port,
+        &Route::forwarded(Some("mallory@example.com"), "203.0.113.9"),
+        &a_phone.id,
+        &a_phone.private,
+        &run.server_key,
+    )
+    .await?;
+    let Opened::Ready(socket, transport, _) = opened else {
+        bail!("the ban on one Tailscale login at one hop refused the same login at another hop")
+    };
+    let other = Client::spawn(&a_phone.name, socket, transport);
+    other.hello(json!({ "watch": [] })).await?;
+    drop(other);
+    println!("ok   a Tailscale login ban is keyed on login plus the rightmost X-Forwarded-For hop: another hop still connects");
+    bad_headers(port, &Route::forwarded(Some("mallory@example.com"), "fd7a:115c:a1e0::1"), 5).await?;
+    let opened = kk_handshake(
+        port,
+        &Route::forwarded(Some("mallory@example.com"), "fd7a:115c:a1e0::2"),
+        &a_phone.id,
+        &a_phone.private,
+        &run.server_key,
+    )
+    .await?;
+    let Opened::Ready(socket, transport, _) = opened else {
+        bail!("a ban on one tailnet IPv6 node refused the same login on another node in the same /64")
+    };
+    let other = Client::spawn(&a_phone.name, socket, transport);
+    other.hello(json!({ "watch": [] })).await?;
+    drop(other);
+    println!("ok   tailnet IPv6 hops are keyed on the whole address: a ban on one node leaves another node of the login connected");
+    for at in 1..=5 {
+        bad_headers(port, &Route::forwarded(None, &format!("10.9.{at}.1, 203.0.113.20")), 1).await?;
+    }
+    let code = first_close(port, &Route::forwarded(None, "10.9.99.1, 203.0.113.20")).await?;
+    ensure!(
+        code == Some(4429),
+        "5 failures with rotating left X-Forwarded-For hops and one right hop closed with {code:?}"
+    );
+    println!("ok   rotating the left X-Forwarded-For hops does not dodge a ban: the rightmost hop is the key");
+    let named = Route { ts_name: Some("Mallory".to_string()), ..Route::default() };
+    bad_headers(port, &named, 5).await?;
+    let code = first_close(port, &named).await?;
+    ensure!(
+        code == Some(4429),
+        "5 failures from a loopback request with a Tailscale-User-Name header closed with {code:?}"
+    );
+    println!("ok   a loopback request with any Tailscale-* header is not the exempt loopback client: 5 failures refuse it with 4429");
     bad_headers(port, &Route::default(), 6).await?;
     let mut last = None;
     for (route, who) in
@@ -1791,6 +1916,32 @@ async fn revoke_one(run: &mut Run) -> anyhow::Result<()> {
     std::fs::write(&ledger, text.replacen(&key, &flipped, 1))?;
     std::fs::File::options().write(true).open(&ledger)?.set_modified(stamp)?;
     s.closed_with("a device whose key changes under an unchanged ledger stamp closes with 4401", 4401).await?;
+    let twin_1 = Phone::new("phone-t1", "Smoke Twin")?;
+    let twin_2 = Phone::new("phone-t2", "Smoke Twin")?;
+    let t1 = pair(run, &twin_1).await?;
+    let t2 = pair(run, &twin_2).await?;
+    let parsed: Value = serde_json::from_str(&std::fs::read_to_string(&ledger)?)?;
+    let twin = |id: &str| parsed["devices"].as_array().into_iter().flatten().find(|device| device["id"] == id).cloned();
+    let (first, second) = (
+        twin("phone-t1").context("phone-t1 is not in the ledger")?,
+        twin("phone-t2").context("phone-t2 is not in the ledger")?,
+    );
+    let shared = first["name"].as_str().context("phone-t1 has no name")?.to_string();
+    ensure!(second["name"] == shared, "the twins do not share a name: {first} {second}");
+    let said = run.serve.refused(&["revoke", &shared])?;
+    ensure!(
+        said.contains("phone-t1") && said.contains("phone-t2") && said.contains("key "),
+        "revoke by a shared name did not list both matches with id and key: {said}"
+    );
+    println!("ok   revoke by a name two devices share is refused, listing both: {}", said.trim());
+    let twin_key = first["key"].as_str().context("phone-t1 has no key in the ledger")?.to_string();
+    run.serve.run(&["revoke", &twin_key[..12]])?;
+    t1.closed_with("revoke by a 12 hex key prefix closes that device with 4401", 4401).await?;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    ensure!(!t2.view().closed, "revoking phone-t1 by key prefix closed phone-t2 too");
+    run.serve.run(&["revoke", "phone-t2"])?;
+    t2.closed_with("revoke by id closes the other twin", 4401).await?;
+    println!("ok   revoke by a key fingerprint prefix removes only that device; the twin with the same name stays until revoked by id");
     let b_phone = Phone::new("phone-b", "Smoke Phone B")?;
     let b = pair(run, &b_phone).await?;
     let started = Instant::now();
@@ -2050,6 +2201,161 @@ async fn prompt_backlog(run: &Run, eukhe: &Path, a: &mut Client) -> anyhow::Resu
     Ok(())
 }
 
+fn text_backlog(run: &Run) -> anyhow::Result<()> {
+    let root = run.serve.root.join("text-backlog");
+    std::fs::create_dir_all(&root)?;
+    let socket = root.join("held.sock");
+    std::fs::remove_file(&socket).ok();
+    let held = tokio::net::UnixListener::bind(&socket)?;
+    let config = StudioConfig {
+        socket_path: Some(socket.to_string_lossy().into_owned()),
+        session_dir: None,
+        data_dir: Some(root.join("data").to_string_lossy().into_owned()),
+        launch: None,
+        controller_main: None,
+        take_over_serve: false,
+    };
+    let counted = tokio::task::block_in_place(|| -> anyhow::Result<(usize, usize)> {
+        let studio = Studio::new(config, Arc::new(Signal::default()) as Arc<dyn Waker>)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let text = "t".repeat(7 << 20);
+        for at in 1..=3 {
+            let draft = PromptDraft { text: text.clone(), images: Vec::new(), files: Vec::new() };
+            studio.send(format!("r-text-{at}"), "no-such-thread-text".into(), draft, Delivery::Queue);
+        }
+        let counted = studio.backlog();
+        studio.shutdown();
+        drop(studio);
+        Ok(counted)
+    })?;
+    drop(held);
+    let (prompts, bytes) = counted;
+    ensure!(
+        prompts == 3 && bytes >= 3 * (7 << 20),
+        "three held 7 MiB text prompts count {prompts} prompts and {bytes} bytes toward the core backlog"
+    );
+    println!("ok   held prompt text counts toward the core backlog: three 7 MiB text prompts held {prompts} prompts and {bytes} bytes");
+    Ok(())
+}
+
+async fn reap_ledger(run: &mut Run, eukhe: &Path) -> anyhow::Result<()> {
+    let later = run.serve.root.join("eukhe-later");
+    run.serve.stop()?;
+    run.serve.kept = Some(3);
+    run.serve.start(&later, &run.hook.clone())?;
+    let d_phone = Phone::new("phone-d", "Smoke Phone D")?;
+    let deadline = Instant::now() + SETUP;
+    let mut d = loop {
+        match pair(run, &d_phone).await {
+            Ok(client) => break client,
+            Err(error) => ensure!(
+                !run.serve.exited()? && Instant::now() < deadline,
+                "serve did not come back: {error:#}\n{}",
+                run.serve.log_tail()
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let mut attempt = 0;
+    let (hold, request, args) = loop {
+        attempt += 1;
+        let hold = hold_core(run).await?;
+        let request = format!("r-late-{attempt}");
+        let args = json!({ "request": request, "thread": "no-such-thread-late", "prompt": prompt("late outcome"), "delivery": "queue" });
+        d.call("send", args.clone()).await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if !d.view().answers.contains_key(&request) {
+            break (hold, request, args);
+        }
+        ensure!(attempt < 3, "the core answered {request} at once on {attempt} holds in a row; the hold never took");
+        release_core(run, eukhe, hold).await?;
+        println!("     the core answered {request} before the hold took; holding it again");
+    };
+    drop(d);
+    let released = Instant::now();
+    while !run.serve.log().contains("released device phone-d's session") {
+        ensure!(
+            released.elapsed() < Duration::from_secs(10),
+            "serve did not release phone D's session 10 s after it left"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (mut d, _) = reconnect(run, &d_phone, json!({ "watch": [] })).await?;
+    let again = d.reply("send", args).await?;
+    ensure!(
+        again.get("ok") == Some(&json!(true)) && again.get("duplicate") == Some(&json!(true)),
+        "a send retried after its session was released answered {again}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ensure!(
+        !d.view().answers.contains_key(&request),
+        "{request} was answered while the core was held, so its outcome did not arrive after the release"
+    );
+    let held_for = release_core(run, eukhe, hold).await?;
+    d.until("the outcome of a send whose session was released", SETUP, |view| {
+        view.answers.get(&request).is_some_and(|kind| kind == "request_failed")
+    })
+    .await?;
+    println!(
+        "ok   a send's outcome outlives its released session: retried while the core was held, it is a duplicate, and the request_failed that comes after the release reaches the phone (core held {} ms)",
+        held_for.as_millis()
+    );
+    drop(d);
+    run.serve.run(&["revoke", "phone-d"])?;
+    run.serve.stop()?;
+    run.serve.kept = None;
+    run.serve.start(&later, &run.hook.clone())?;
+    Ok(())
+}
+
+async fn download_budget(run: &Run, c_phone: &Phone) -> anyhow::Result<Client> {
+    let wide = (0..26_000).fold(String::new(), |mut wide, line| {
+        writeln!(wide, "line {line:05} of a file read again and again by a phone that does not read").ok();
+        wide
+    });
+    std::fs::write(run.work.join("reread.txt"), &wide)?;
+    let Opened::Ready(mut socket, transport, _) =
+        kk_handshake(run.serve.port, &Route::default(), &c_phone.id, &c_phone.private, &run.server_key).await?
+    else {
+        bail!("phone C's KK was refused:\n{}", run.serve.log_tail())
+    };
+    let transport = Mutex::new(transport);
+    let reads = 50;
+    let mut frames = vec![
+        json!({ "op": "hello", "device": { "name": "Smoke Phone C", "app": "0.4.1", "channel": CHANNEL }, "resume": { "watch": [] } }),
+    ];
+    frames.extend((1..=reads).map(|at| json!({ "id": at, "op": "read_file", "args": { "request": format!("q-dl-{at}"), "project": run.project, "relative": "reread.txt" } })));
+    for frame in frames {
+        for record in records(1, frame.to_string().as_bytes(), 65_000) {
+            let message = seal(&transport, &record).context("seal")?;
+            socket.send(Message::binary(message)).await?;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let c = Client::spawn(&c_phone.name, socket, transport.into_inner().unwrap_or_else(PoisonError::into_inner));
+    let done = |view: &View, at: usize| {
+        let request = format!("q-dl-{at}");
+        view.failed.contains_key(&request) || view.blobs.values().any(|blob| blob.request == request && blob.done)
+    };
+    c.until("every read answered with a blob or request_failed", SETUP, |view| (1..=reads).all(|at| done(view, at)))
+        .await?;
+    let view = c.view();
+    let pending = view.failed.values().filter(|failed| failed["code"] == json!("downloads_pending")).count();
+    let delivered = view.blobs.values().filter(|blob| blob.request.starts_with("q-dl-") && blob.done).count();
+    ensure!(
+        pending > 0 && delivered > 0 && pending + delivered == reads,
+        "{reads} reads of {} bytes left unread: {delivered} blobs, {pending} downloads_pending, failures {:?}",
+        wide.len(),
+        view.failed.values().collect::<Vec<_>>()
+    );
+    println!(
+        "ok   download budget: of {reads} reads of a {} byte file left unread, {delivered} arrived and {pending} were answered request_failed downloads_pending",
+        wide.len()
+    );
+    drop(view);
+    Ok(c)
+}
+
 async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
     let flood = 3000;
     let long = "r".repeat(65);
@@ -2109,6 +2415,20 @@ async fn tag_isolation(run: &Run, eukhe: &Path, a: &mut Client, c: &mut Client) 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn serve_fd(pid: u32, serve_port: u16, socket: &Socket) -> anyhow::Result<(String, impl Fn() -> anyhow::Result<bool>)> {
+    let MaybeTlsStream::Plain(tcp) = socket.get_ref() else { bail!("the phone's socket is not plain TCP") };
+    let link = format!("127.0.0.1:{serve_port}->127.0.0.1:{}", tcp.local_addr()?.port());
+    let target = link.clone();
+    let held = move || -> anyhow::Result<bool> {
+        let listed = Command::new("lsof").args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-Fn"]).output()?;
+        Ok(String::from_utf8_lossy(&listed.stdout).lines().any(|line| line.strip_prefix('n') == Some(target.as_str())))
+    };
+    ensure!(held()?, "lsof lists no {link} for serve {pid}");
+    Ok((link, held))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn serve_fd(pid: u32, serve_port: u16, socket: &Socket) -> anyhow::Result<(String, impl Fn() -> anyhow::Result<bool>)> {
     let MaybeTlsStream::Plain(tcp) = socket.get_ref() else { bail!("the phone's socket is not plain TCP") };
     let local = tcp.local_addr()?.port();
@@ -2427,6 +2747,53 @@ async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) 
     a.until("the thread is idle before the abort check", MODEL_STEP, |view| view.idle(&thread)).await?;
     let tools = a.view().tools(&thread);
 
+    a.call("send", json!({ "request": "r-queue-sleep", "thread": thread, "prompt": prompt(&bash_prompt(QUEUE_SLEEP)), "delivery": "queue" })).await?;
+    a.until("the queue sleep turn is running its bash call", MODEL_STEP, |view| {
+        view.working(&thread) && view.tools(&thread) > tools
+    })
+    .await?;
+    a.call(
+        "send",
+        json!({ "request": "r-follow", "thread": thread, "prompt": prompt(FOLLOW_TEXT), "delivery": "queue" }),
+    )
+    .await?;
+    a.until("the follow-up waits in the thread's queue while the sleep runs", MODEL_STEP, |view| {
+        view.queues.get(&thread).is_some_and(|queued| queued.iter().any(|text| text.contains(FOLLOW_TEXT)))
+            && view.working(&thread)
+    })
+    .await?;
+    ensure!(
+        a.view().users_saying(&thread, FOLLOW_TEXT) == 0,
+        "the queued follow-up reached the transcript while the sleep turn ran"
+    );
+    a.until("the queued follow-up runs after the sleep turn and finishes", MODEL_STEP, |view| {
+        let items = view.items(&thread);
+        let followed = items
+            .iter()
+            .position(|item| matches!(&item.kind, ItemKind::User { text, .. } if text.contains(FOLLOW_TEXT)));
+        followed.is_some_and(|at| {
+            items[at..]
+                .iter()
+                .any(|item| matches!(&item.kind, ItemKind::Assistant { streaming: false, error: None, .. }))
+        }) && view.users_saying(&thread, FOLLOW_TEXT) == 1
+            && view.idle(&thread)
+            && view.queues.get(&thread).is_none_or(Vec::is_empty)
+    })
+    .await?;
+    {
+        let view = a.view();
+        let items = view.items(&thread);
+        let slept = items.iter().rposition(|item| matches!(&item.kind, ItemKind::Tool { .. }));
+        let followed = items
+            .iter()
+            .position(|item| matches!(&item.kind, ItemKind::User { text, .. } if text.contains(FOLLOW_TEXT)));
+        ensure!(
+            matches!((slept, followed), (Some(slept), Some(followed)) if followed > slept),
+            "the queued follow-up (item {followed:?}) is not after the sleep tool call (item {slept:?})"
+        );
+    }
+    println!("ok   a follow-up sent with delivery queue while a real sleep ran waited in the queue and ran after it");
+    let tools = a.view().tools(&thread);
     a.call("send", json!({ "request": "r-sleep", "thread": thread, "prompt": prompt(&bash_prompt(SLEEP_COMMAND)), "delivery": "queue" })).await?;
     a.until("the sleep turn is running its bash call", MODEL_STEP, |view| {
         view.working(&thread) && view.tools(&thread) > tools
@@ -2502,6 +2869,110 @@ async fn duplicate_replay(a: &mut Client) -> anyhow::Result<()> {
     .await?;
     ensure!(a.view().answers["d-dup"] == "request_failed", "the replayed outcome is {}", a.view().answers["d-dup"]);
     println!("ok   a duplicate of a failed start_thread is answered {again} and its request_failed is sent again");
+    let first = a.reply("start_thread", json!({ "request": "st-req", "draft": "d-req-1", "project": "/no-such-project-req", "prompt": prompt("request start"), "settings": settings })).await?;
+    ensure!(
+        first.get("ok") == Some(&json!(true)) && first.get("duplicate").is_none(),
+        "a start_thread with request st-req answered {first}"
+    );
+    a.until("request_failed for d-req-1", SETUP, |view| view.answer_counts.get("d-req-1") == Some(&1)).await?;
+    let again = a.reply("start_thread", json!({ "request": "st-req", "draft": "d-req-2", "project": "/no-such-project-req", "prompt": prompt("request start"), "settings": settings })).await?;
+    ensure!(
+        again.get("ok") == Some(&json!(true)) && again.get("duplicate") == Some(&json!(true)),
+        "a retried start_thread with request st-req and a new draft answered {again}"
+    );
+    a.until("the first start's outcome is sent again for the retry", QUICK, |view| {
+        view.answer_counts.get("d-req-1") == Some(&2)
+    })
+    .await?;
+    ensure!(!a.view().answers.contains_key("d-req-2"), "the retry with a new draft started a second thread");
+    println!("ok   start_thread deduplicates on its optional request: a retry with a new draft is a duplicate and gets the first outcome");
+    Ok(())
+}
+
+async fn partial_upload(run: &Run, c_phone: &Phone, mut c: Client) -> anyhow::Result<Client> {
+    let id = rand_bytes::<16>()?;
+    let data = vec![7u8; 1000];
+    let put = json!({ "blob": hex(&id), "size": data.len(), "mime": "image/png" });
+    c.next += 1;
+    let ask = c.next;
+    c.frame(&json!({ "id": ask, "op": "blob_put", "args": put }));
+    let mut record = vec![3u8];
+    record.extend_from_slice(&id);
+    record.push(0);
+    record.extend_from_slice(&data[..10]);
+    c.out.send(record).ok();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    ensure!(!c.view().replies.contains_key(&ask), "a partial upload was answered before its last chunk");
+    drop(c);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (mut c, _) = reconnect(run, c_phone, json!({ "watch": [] })).await?;
+    c.next += 1;
+    let ask = c.next;
+    c.frame(&json!({ "id": ask, "op": "blob_put", "args": put }));
+    c.blob(&id, &data);
+    let reply = c.reply_to(ask, "blob_put").await?;
+    ensure!(
+        reply.get("ok") == Some(&json!(true)),
+        "after the socket closed mid-upload, blob_put of the same id answered {reply}"
+    );
+    println!(
+        "ok   a socket that closes mid-upload drops its partial upload: the same blob id uploads again after reconnect"
+    );
+    Ok(c)
+}
+
+async fn worktree_route(run: &Run, a: &mut Client) -> anyhow::Result<()> {
+    let settings = json!({ "provider": "remote-smoke-absent", "model": "absent", "thinkingLevel": "off", "access": "supervised", "worktree": { "type": "new_worktree", "branch": "local-studio/smoke-tree", "base": null } });
+    a.call(
+        "start_thread",
+        json!({ "draft": "d-tree", "project": run.project, "prompt": prompt("worktree setup"), "settings": settings }),
+    )
+    .await?;
+    a.until("worktree_setup for the phone's own draft", SETUP, |view| {
+        view.setups.get("d-tree").is_some_and(|setup| setup["done"] == json!(true))
+    })
+    .await?;
+    a.until("thread_started for the worktree thread", SETUP, |view| view.started.contains_key("d-tree")).await?;
+    let setup = a.view().setups["d-tree"].clone();
+    ensure!(
+        setup["stages"].as_array().is_some_and(|stages| !stages.is_empty()) && setup["error"].is_null(),
+        "the worktree setup for d-tree is {setup}"
+    );
+    ensure!(
+        a.view().setups.keys().all(|thread| !thread.starts_with('m')),
+        "a worktree_setup carried a server tag: {:?}",
+        a.view().setups.keys().collect::<Vec<_>>()
+    );
+    println!(
+        "ok   worktree_setup for a new worktree reaches the phone under its own draft d-tree before thread_started"
+    );
+    Ok(())
+}
+
+async fn cut_checks(run: &Run, a: &mut Client) -> anyhow::Result<()> {
+    std::fs::write(run.work.join("wide.txt"), "wide\n")?;
+    git(&run.work, &["add", "wide.txt"])?;
+    git(&run.work, &["commit", "-q", "-m", "wide"])?;
+    let wide = (0..1_200).fold(String::new(), |mut wide, line| {
+        writeln!(wide, "line {line:04} {}", "w".repeat(8_000)).ok();
+        wide
+    });
+    std::fs::write(run.work.join("wide.txt"), &wide)?;
+    let kind = a
+        .answered(
+            "load_diff",
+            json!({ "request": "q-cut", "project": run.project, "scope": { "type": "working_tree" } }),
+            "q-cut",
+        )
+        .await?;
+    git(&run.work, &["checkout", "--", "wide.txt"])?;
+    ensure!(kind == "diff", "load_diff of a {} byte change answered {kind}", wide.len());
+    let cut = a.view().cuts.get("q-cut").copied().context("the oversized diff carries no cut field")?;
+    ensure!(cut > 0, "the oversized diff says it cut {cut} bytes");
+    println!(
+        "ok   a diff over one 8 MiB frame ({} bytes of changed lines) arrives cut to fit with cut: {cut}",
+        wide.len()
+    );
     Ok(())
 }
 
@@ -2511,6 +2982,7 @@ fn pending(view: &View, thread: &str) -> bool {
 
 async fn approve_and_finish(a: &mut Client, thread: &str, proof: &Path, step: &str) -> anyhow::Result<()> {
     let request = a.view().approvals[thread][0].request_id.clone();
+    ensure!(!proof.exists(), "{step}: {} exists before the phone approved the command", proof.display());
     let replies = a.view().replies_done(thread);
     a.call("answer_approval", json!({ "thread": thread, "request": request, "answer": "approve" })).await?;
     a.until(&format!("{step}: the approved turn finishes"), MODEL_STEP, |view| {
@@ -2783,36 +3255,65 @@ fn usage_check(eukhe: &Path, data: &Path, model: &Target) -> anyhow::Result<()> 
 #[allow(clippy::too_many_lines)]
 async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::Result<()> {
     run.serve.start(eukhe, &run.hook.clone())?;
-    transport_checks(run, eukhe).await?;
+    Box::pin(transport_checks(run, eukhe)).await?;
     let a_phone = Phone::new("phone-a", "Smoke Phone A")?;
     let mut a = pairing_checks(run, &a_phone).await?;
     op_checks(run, &mut a).await?;
+    cut_checks(run, &mut a).await?;
     let c_phone = Phone::new("phone-c", "Smoke Phone C")?;
-    let mut c = pair(run, &c_phone).await?;
+    let c = pair(run, &c_phone).await?;
+    let mut c = partial_upload(run, &c_phone, c).await?;
     let a = resume_checks(run, a, &a_phone, &mut c).await?;
-    let a = limit_checks(run, a, &a_phone).await?;
-    let mut a = listener_checks(run, a, &a_phone).await?;
+    let a = Box::pin(limit_checks(run, a, &a_phone)).await?;
+    let mut a = Box::pin(listener_checks(run, a, &a_phone)).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
     duplicate_replay(&mut a).await?;
+    worktree_route(run, &mut a).await?;
     let (mut a, mut c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
     let steps = std::env::var("REMOTE_SMOKE_STEPS").unwrap_or_default();
     let step = |name: &str| steps.is_empty() || steps.split(',').any(|chosen| chosen == name);
+    if step("reap") {
+        drop(a);
+        drop(c);
+        reap_ledger(run, eukhe).await?;
+        let deadline = Instant::now() + SETUP;
+        a = loop {
+            match reconnect(run, &a_phone, json!({ "watch": [] })).await {
+                Ok((client, _)) => break client,
+                Err(error) => ensure!(
+                    !run.serve.exited()? && Instant::now() < deadline,
+                    "serve did not come back: {error:#}\n{}",
+                    run.serve.log_tail()
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        run.epoch = a.view().hello.as_ref().and_then(|hello| hello["epoch"].as_str()).unwrap_or_default().to_string();
+        c = reconnect(run, &c_phone, json!({ "watch": [] })).await?.0;
+    }
     if step("caps") {
         upload_caps(&mut c).await?;
     }
     if step("backlog") {
         prompt_backlog(run, eukhe, &mut a).await?;
+        text_backlog(run)?;
         watch_churn(run, eukhe).await?;
     }
     if step("tags") {
         tag_isolation(run, eukhe, &mut a, &mut c).await?;
     }
-    let mut c = if step("writer") {
+    let c = if step("writer") {
         drop(c);
-        let c = writer_abort(run, &c_phone).await?;
+        let c = Box::pin(writer_abort(run, &c_phone)).await?;
         revoke_blocked(run).await?;
         c
+    } else {
+        c
+    };
+    let mut c = if step("downloads") {
+        drop(c);
+        download_budget(run, &c_phone).await?
     } else {
         c
     };
@@ -2867,7 +3368,7 @@ async fn main() -> anyhow::Result<()> {
     std::env::set_var("EUKHE_DAEMON_SOCKET", root.join("d.sock"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", root.join("agent"));
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
-    let model = agent_dir(&root)?;
+    let (model, _linked) = agent_dir(&root)?;
     let big = seed_work(&work)?;
     let project_path = work.to_string_lossy().into_owned();
     let daemon = desktop(
@@ -2890,7 +3391,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     TUNNEL_PORT.set(tunnel).ok();
-    let serve = Serve { bin, root: root.clone(), data, port, child: None };
+    let serve = Serve { bin, root: root.clone(), data, port, kept: None, child: None };
     let mut run = Run {
         serve,
         work,
@@ -2902,7 +3403,7 @@ async fn main() -> anyhow::Result<()> {
         epoch: String::new(),
         report: Vec::new(),
     };
-    let outcome = drive(&mut run, &eukhe, model.as_ref()).await;
+    let outcome = Box::pin(drive(&mut run, &eukhe, model.as_ref())).await;
     if outcome.is_err() {
         println!("     serve log tail:\n{}", run.serve.log_tail());
     }

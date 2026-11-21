@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eukhe_client::daemon_client::{DaemonClient, DaemonClientEvent};
@@ -30,7 +30,7 @@ use crate::model::{
 use crate::oneshot::TextGen;
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
-use crate::skills::Resources;
+use crate::skills::{Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
@@ -39,6 +39,10 @@ use crate::workspace::{PreparedWorktree, Workspace};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const TAKEOVER_WAIT: Duration = Duration::from_secs(15);
+const TAKEOVER_POLL: Duration = Duration::from_millis(100);
+const PROBED_WITHIN: Duration = Duration::from_secs(1);
+const PROBED_POLL: Duration = Duration::from_millis(20);
 const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
 const NEW_THREAD_TITLE: &str = "New thread";
@@ -57,6 +61,8 @@ const KILL_TIMEOUT_MS: u64 = 15_000;
 const DELIVERY_SLACK_MS: i64 = 2_000;
 
 mod cli;
+mod local_only;
+mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -72,6 +78,8 @@ pub struct StudioConfig {
     pub data_dir: Option<String>,
     pub launch: Option<DaemonLaunch>,
     pub controller_main: Option<String>,
+    #[cfg_attr(feature = "ffi", uniffi(default = false))]
+    pub take_over_serve: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,52 +105,43 @@ pub trait Waker: Send + Sync {
     fn wake(&self);
 }
 
-pub(crate) struct Mailbox {
+#[derive(Clone, Copy)]
+enum How {
+    Plain,
+    Threads,
+    Frame,
+}
+
+struct Queue {
     updates: Mutex<Vec<Update>>,
     waker: Arc<dyn Waker>,
 }
 
-impl Mailbox {
-    pub(crate) fn push(&self, update: Update) {
+impl Queue {
+    fn new(waker: Arc<dyn Waker>) -> Self {
+        Self { updates: Mutex::new(Vec::new()), waker }
+    }
+
+    fn put(&self, update: Update, how: How) {
         let was_empty = {
             let mut updates = self.updates.lock().unwrap_or_else(PoisonError::into_inner);
             let was_empty = updates.is_empty();
-            updates.push(update);
-            was_empty
-        };
-        if was_empty {
-            self.waker.wake();
-        }
-    }
-
-    pub(crate) fn notice(&self, level: NoticeLevel, text: impl Into<String>) {
-        self.push(Update::Notice { level, text: text.into() });
-    }
-
-    fn push_threads(&self, threads: Vec<ThreadRow>) {
-        let was_empty = {
-            let mut updates = self.updates.lock().unwrap_or_else(PoisonError::into_inner);
-            updates.retain(|update| !matches!(update, Update::Threads { .. }));
-            let was_empty = updates.is_empty();
-            updates.push(Update::Threads { threads });
-            was_empty
-        };
-        if was_empty {
-            self.waker.wake();
-        }
-    }
-
-    pub(crate) fn push_frame(&self, terminal: &str, frame: TerminalFrame) {
-        let was_empty = {
-            let mut updates = self.updates.lock().unwrap_or_else(PoisonError::into_inner);
-            let was_empty = updates.is_empty();
-            let pending = updates.iter_mut().rev().find_map(|update| match update {
-                Update::TerminalFrame { terminal: id, frame } if id == terminal => Some(frame),
-                _ => None,
-            });
-            match pending {
-                Some(pending) => merge_frame(pending, frame),
-                None => updates.push(Update::TerminalFrame { terminal: terminal.to_owned(), frame }),
+            match (how, update) {
+                (How::Threads, update) => {
+                    updates.retain(|update| !matches!(update, Update::Threads { .. }));
+                    updates.push(update);
+                }
+                (How::Frame, Update::TerminalFrame { terminal, frame }) => {
+                    let pending = updates.iter_mut().rev().find_map(|update| match update {
+                        Update::TerminalFrame { terminal: id, frame } if *id == terminal => Some(frame),
+                        _ => None,
+                    });
+                    match pending {
+                        Some(pending) => merge_frame(pending, frame),
+                        None => updates.push(Update::TerminalFrame { terminal, frame }),
+                    }
+                }
+                (_, update) => updates.push(update),
             }
             was_empty
         };
@@ -153,6 +152,101 @@ impl Mailbox {
 
     fn drain(&self) -> Vec<Update> {
         std::mem::take(&mut *self.updates.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+#[derive(Default)]
+struct Taps {
+    latest: Vec<Update>,
+    feeds: Vec<Weak<Queue>>,
+}
+
+fn remembered(update: &Update) -> bool {
+    matches!(
+        update,
+        Update::Connection { .. }
+            | Update::Projects { .. }
+            | Update::Threads { .. }
+            | Update::Models { .. }
+            | Update::DaemonDefault { .. }
+    )
+}
+
+pub(crate) struct Mailbox {
+    main: Queue,
+    taps: Mutex<Taps>,
+    rows: Mutex<remote::Rows>,
+}
+
+pub struct Subscription(Arc<Queue>);
+
+impl Subscription {
+    #[must_use]
+    pub fn tick(&self) -> Vec<Update> {
+        self.0.drain()
+    }
+}
+
+impl Mailbox {
+    fn new(waker: Arc<dyn Waker>) -> Self {
+        Self { main: Queue::new(waker), taps: Mutex::new(Taps::default()), rows: Mutex::default() }
+    }
+
+    fn deliver(&self, update: Update, how: How) {
+        {
+            let mut taps = self.taps.lock().unwrap_or_else(PoisonError::into_inner);
+            if remembered(&update) {
+                let kind = std::mem::discriminant(&update);
+                taps.latest.retain(|known| std::mem::discriminant(known) != kind);
+                taps.latest.push(update.clone());
+            }
+            taps.feeds.retain(|feed| feed.strong_count() > 0);
+            for feed in taps.feeds.iter().filter_map(Weak::upgrade) {
+                feed.put(update.clone(), how);
+            }
+        }
+        self.main.put(update, how);
+    }
+
+    pub(crate) fn push(&self, update: Update) {
+        match update {
+            Update::Projects { projects } => self.local_projects(projects),
+            update => self.enqueue(update),
+        }
+    }
+
+    fn enqueue(&self, update: Update) {
+        self.deliver(update, How::Plain);
+    }
+
+    pub(crate) fn notice(&self, level: NoticeLevel, text: impl Into<String>) {
+        self.push(Update::Notice { level, text: text.into() });
+    }
+
+    fn push_threads(&self, threads: Vec<ThreadRow>) {
+        self.local_threads(threads);
+    }
+
+    fn queue_threads(&self, threads: Vec<ThreadRow>) {
+        self.deliver(Update::Threads { threads }, How::Threads);
+    }
+
+    pub(crate) fn push_frame(&self, terminal: &str, frame: TerminalFrame) {
+        self.deliver(Update::TerminalFrame { terminal: terminal.to_owned(), frame }, How::Frame);
+    }
+
+    fn drain(&self) -> Vec<Update> {
+        self.main.drain()
+    }
+
+    fn subscribe(&self, waker: Arc<dyn Waker>) -> Subscription {
+        let queue = Arc::new(Queue::new(waker));
+        let mut taps = self.taps.lock().unwrap_or_else(PoisonError::into_inner);
+        for update in &taps.latest {
+            queue.put(update.clone(), How::Plain);
+        }
+        taps.feeds.push(Arc::downgrade(&queue));
+        Subscription(queue)
     }
 }
 
@@ -282,6 +376,13 @@ enum Command {
         provider: String,
         model: String,
     },
+    RunLocal {
+        thread: String,
+        local: ModelKey,
+    },
+    SendHeld {
+        thread: String,
+    },
     SetThinkingLevel {
         thread: String,
         level: String,
@@ -358,6 +459,10 @@ enum Command {
     StopCheck {
         thread: String,
     },
+    CliSettle {
+        thread: String,
+        epoch: u64,
+    },
     RestartDaemon {
         force: bool,
     },
@@ -374,7 +479,11 @@ impl Command {
         match self {
             Command::Send { prompt, .. }
             | Command::StartThread { prompt, .. }
-            | Command::StartThreads { prompt, .. } => Some(prompt.images.iter().map(|image| image.data.len()).sum()),
+            | Command::StartThreads { prompt, .. } => Some(
+                prompt.text.len()
+                    + prompt.files.iter().map(String::len).sum::<usize>()
+                    + prompt.images.iter().map(|image| image.data.len()).sum::<usize>(),
+            ),
             _ => None,
         }
     }
@@ -426,6 +535,10 @@ pub struct Studio {
     backlog: Arc<Backlog>,
     mailbox: Arc<Mailbox>,
     pub(crate) workspace: Workspace,
+    #[cfg(feature = "link")]
+    links: crate::link::client::Links,
+    #[cfg(feature = "link")]
+    data_dir: PathBuf,
     lock: Mutex<Option<std::fs::File>>,
     _runtime: tokio::runtime::Runtime,
 }
@@ -433,6 +546,7 @@ pub struct Studio {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Studio {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
+    #[allow(clippy::too_many_lines)]
     pub fn new(config: StudioConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, StudioError> {
         let socket = daemon::socket_path(config.socket_path.as_deref());
         let plugins_dir = plugins::plugins_dir(config.data_dir.as_deref());
@@ -440,9 +554,10 @@ impl Studio {
             store::data_dir(config.data_dir.as_deref()).map_err(|message| StudioError::Config { message })?;
         std::fs::create_dir_all(&data_dir)
             .map_err(|error| StudioError::Config { message: format!("create {}: {error}", data_dir.display()) })?;
-        let lock = lock_data_dir(&data_dir)?;
+        let lock = lock_data_dir(&data_dir, config.take_over_serve)?;
         let store = Store::open(&data_dir).map_err(|error| StudioError::Config { message: format!("{error:#}") })?;
-        let home = store::home_dir().ok_or_else(|| StudioError::Config { message: "HOME is not set".to_string() })?;
+        let home = store::home_dir()
+            .ok_or_else(|| StudioError::Config { message: format!("{} is not set", crate::platform::HOME_VAR) })?;
         let session_dir = config.session_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -450,7 +565,7 @@ impl Studio {
             .enable_all()
             .build()
             .map_err(|error| StudioError::Runtime { message: error.to_string() })?;
-        let mailbox = Arc::new(Mailbox { updates: Mutex::new(Vec::new()), waker });
+        let mailbox = Arc::new(Mailbox::new(waker));
         let (client_slot, client_watch) = watch::channel(None);
         let query = DaemonQuery::new(client_watch.clone(), session_dir.clone());
         let home = home.to_string_lossy().into_owned();
@@ -480,6 +595,10 @@ impl Studio {
         workspace.set_models_reloader(Arc::new(move |answer| {
             reloader.send(Command::LoadModels { answer });
         }));
+        #[cfg(feature = "link")]
+        let links = crate::link::client::Links::new(runtime.handle().clone(), Arc::clone(&mailbox), &data_dir);
+        #[cfg(feature = "link")]
+        let link_dir = data_dir.clone();
         let actor = Actor {
             socket,
             session_dir,
@@ -520,12 +639,25 @@ impl Studio {
             data_dir,
             cli,
             drivers: HashMap::new(),
+            opening: HashMap::new(),
+            loading: HashMap::new(),
             generation: 0,
             codex_models: Vec::new(),
             plugin_consent: Vec::new(),
         };
         runtime.spawn(actor.run(receiver, cli_events));
-        Ok(Arc::new(Self { commands, backlog, mailbox, workspace, lock: Mutex::new(Some(lock)), _runtime: runtime }))
+        Ok(Arc::new(Self {
+            commands,
+            backlog,
+            mailbox,
+            workspace,
+            #[cfg(feature = "link")]
+            links,
+            #[cfg(feature = "link")]
+            data_dir: link_dir,
+            lock: Mutex::new(Some(lock)),
+            _runtime: runtime,
+        }))
     }
 
     pub fn tick(&self) -> Vec<Update> {
@@ -533,6 +665,8 @@ impl Studio {
     }
 
     pub fn shutdown(&self) {
+        #[cfg(feature = "link")]
+        self.links.shutdown();
         self.workspace.shutdown();
         let (done, finished) = std::sync::mpsc::channel();
         if self.commands.send(Command::Shutdown { done }).is_ok() {
@@ -664,6 +798,10 @@ impl Studio {
         self.send_command(Command::SetModel { thread, provider, model });
     }
 
+    pub fn run_local(&self, thread: String, local: ModelKey) {
+        self.send_command(Command::RunLocal { thread, local });
+    }
+
     pub fn set_thinking_level(&self, thread: String, level: String) {
         self.send_command(Command::SetThinkingLevel { thread, level });
     }
@@ -729,27 +867,52 @@ impl Studio {
     }
 }
 
-fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, StudioError> {
-    use std::io::{Read, Seek, Write};
+fn lock_data_dir(data_dir: &Path, take_over_serve: bool) -> Result<std::fs::File, StudioError> {
+    use std::io::{Seek, Write};
     let path = data_dir.join("studio.lock");
     let failed = |error: std::io::Error| StudioError::Config { message: format!("lock {}: {error}", path.display()) };
     let mut file =
         std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(failed)?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            let mut holder = String::new();
-            file.read_to_string(&mut holder).ok();
-            let holder = holder.trim();
-            let by = if holder.is_empty() { String::new() } else { format!(" (process {holder})") };
-            return Err(StudioError::Config {
-                message: format!(
-                    "another Local Studio{by} already owns {}: quit it, or give this one its own data dir",
-                    data_dir.display()
-                ),
-            });
+    let mut asked: Option<std::time::Instant> = None;
+    let since = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let holder = std::fs::read_to_string(&path).unwrap_or_default().trim().to_string();
+                let gone = holder.parse::<u32>().map_or(true, |pid| serve::executable(pid).is_none());
+                if asked.is_none() && gone && since.elapsed() < PROBED_WITHIN {
+                    std::thread::sleep(PROBED_POLL);
+                    continue;
+                }
+                if let Some(asked) = asked {
+                    if asked.elapsed() < TAKEOVER_WAIT {
+                        std::thread::sleep(TAKEOVER_POLL);
+                        continue;
+                    }
+                } else if take_over_serve {
+                    if let Some(pid) = holder.parse::<u32>().ok().filter(|pid| serve::runs_serve(*pid)) {
+                        if serve::hand_over(pid) {
+                            asked = Some(std::time::Instant::now());
+                            continue;
+                        }
+                    }
+                }
+                let by = if holder.is_empty() { String::new() } else { format!(" (process {holder})") };
+                let waited = if asked.is_some() {
+                    format!(" and did not hand it over within {} s", TAKEOVER_WAIT.as_secs())
+                } else {
+                    String::new()
+                };
+                return Err(StudioError::Config {
+                    message: format!(
+                        "another Local Studio{by} already owns {}{waited}: quit it, or give this one its own data dir",
+                        data_dir.display()
+                    ),
+                });
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(failed(error)),
         }
-        Err(std::fs::TryLockError::Error(error)) => return Err(failed(error)),
     }
     file.set_len(0)
         .and_then(|()| file.rewind())
@@ -758,7 +921,78 @@ fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, StudioError> {
     Ok(file)
 }
 
+#[cfg(unix)]
+mod serve {
+    use std::process::{Command, Stdio};
+
+    pub const NAME: &str = "local-studio-serve";
+
+    fn name_of(path: &str) -> String {
+        path.trim().trim_end_matches(" (deleted)").rsplit('/').next().unwrap_or_default().to_string()
+    }
+
+    pub fn executable(pid: u32) -> Option<String> {
+        if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+            return Some(name_of(&path.to_string_lossy()));
+        }
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        Some(name_of(&String::from_utf8_lossy(&output.stdout))).filter(|name| !name.is_empty())
+    }
+
+    pub fn runs_serve(pid: u32) -> bool {
+        pid != std::process::id() && executable(pid).as_deref() == Some(NAME)
+    }
+
+    pub fn hand_over(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-USR1", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
+#[cfg(not(unix))]
+mod serve {
+    pub fn executable(_: u32) -> Option<String> {
+        None
+    }
+
+    pub fn runs_serve(_: u32) -> bool {
+        false
+    }
+
+    pub fn hand_over(_: u32) -> bool {
+        false
+    }
+}
+
+#[must_use]
+pub fn process_name(pid: u32) -> Option<String> {
+    serve::executable(pid)
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn serve_holds_lock(data_dir: Option<String>) -> bool {
+    store::data_dir(data_dir.as_deref())
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join("studio.lock")).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .is_some_and(serve::runs_serve)
+}
+
 impl Studio {
+    pub fn subscribe(&self, waker: Arc<dyn Waker>) -> Subscription {
+        self.mailbox.subscribe(waker)
+    }
+
     pub fn backlog(&self) -> (usize, usize) {
         (self.backlog.prompts.load(Ordering::SeqCst), self.backlog.bytes.load(Ordering::SeqCst))
     }
@@ -768,6 +1002,10 @@ impl Studio {
     }
 
     fn send_command(&self, command: Command) {
+        #[cfg(feature = "link")]
+        let Some(command) = self.route(command) else {
+            return;
+        };
         self.backlog.change(&command, true);
         if let Err(mpsc::error::SendError(command)) = self.commands.send(command) {
             self.backlog.change(&command, false);
@@ -810,11 +1048,15 @@ struct Thread {
     pending_run: bool,
     pending_at: Option<i64>,
     stopping: Option<Instant>,
+    retired: Option<u64>,
     reopen: bool,
     ended_by_events: bool,
     allowed_effects: Vec<String>,
     resources: Option<Resources>,
     rlm_children: Vec<Subagent>,
+    refused: Option<PromptDraft>,
+    held: Vec<(PromptDraft, Delivery, Option<String>)>,
+    served: Option<String>,
 }
 
 struct Actor {
@@ -857,6 +1099,8 @@ struct Actor {
     data_dir: PathBuf,
     cli: mpsc::UnboundedSender<Envelope>,
     drivers: HashMap<String, cli::Cli>,
+    opening: HashMap<String, cli::Opening>,
+    loading: HashMap<String, u64>,
     generation: u64,
     codex_models: Vec<ModelOption>,
     plugin_consent: Vec<String>,
@@ -1193,7 +1437,7 @@ impl Actor {
                 self.start_threads(&draft, project, prompt, settings, models).await;
             }
             Command::Send { request, thread, prompt, delivery } => {
-                if let Err(message) = self.send_prompt(&thread, prompt, delivery).await {
+                if let Err(message) = self.send_prompt(&thread, prompt, delivery, Some(request.clone())).await {
                     self.mailbox.push(Update::RequestFailed { request, message });
                 }
             }
@@ -1234,7 +1478,7 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
-            Command::Compact { thread } if self.harness(&thread).is_some() => self.cli_compact(&thread).await,
+            Command::Compact { thread } if self.harness(&thread).is_some() => self.cli_compact(&thread),
             Command::Compact { thread } => match self.ensure_open(&thread).await.and_then(|active| {
                 self.thread_refuses(&thread)?;
                 Ok(active)
@@ -1255,6 +1499,8 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
+            Command::RunLocal { thread, local } => self.run_local(&thread, local).await,
+            Command::SendHeld { thread } => self.send_held(&thread).await,
             Command::SetThinkingLevel { thread, level } => {
                 if let Err(error) = self.apply_model(&thread, None, None, Some(level)).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
@@ -1371,6 +1617,7 @@ impl Actor {
             }
             Command::Verify { thread, attempt, relink } => self.verify(&thread, attempt, relink).await,
             Command::StopCheck { thread } => self.stop_check(&thread).await,
+            Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
             Command::HarnessModels { models } => {
                 self.codex_models = models;
@@ -1665,7 +1912,7 @@ impl Actor {
 
     async fn ensure_open(&mut self, id: &str) -> Result<String, String> {
         if self.harness(id).is_some() {
-            return self.cli_open(id).await;
+            return Ok(self.cli_view(id));
         }
         if let Some(active) = self.live_active(id) {
             return Ok(active);
@@ -1866,7 +2113,7 @@ impl Actor {
     ) {
         match self.create_thread(draft, project, settings, fan_out, &prompt.text).await {
             Ok(id) => {
-                if let Err(error) = self.send_prompt(&id, prompt, Delivery::Queue).await {
+                if let Err(error) = self.send_prompt(&id, prompt, Delivery::Queue, None).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
@@ -1930,9 +2177,17 @@ impl Actor {
         if harness != Harness::Eukhe {
             let model = if settings.provider.is_some() { settings.model } else { effective.default_model };
             let thinking = settings.thinking_level.or(effective.default_thinking_level);
-            return self
-                .cli_create(draft, harness, cwd, project_path, settings.access, model, thinking, fan_out, prompt)
-                .await;
+            return self.cli_create(
+                draft,
+                harness,
+                cwd,
+                project_path,
+                settings.access,
+                model,
+                thinking,
+                fan_out,
+                prompt,
+            );
         }
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let created = saved_sessions::create_resident(&client, None, self.create_config(&cwd))
@@ -2006,7 +2261,13 @@ impl Actor {
         }
     }
 
-    async fn send_prompt(&mut self, id: &str, prompt: PromptDraft, delivery: Delivery) -> Result<(), String> {
+    async fn send_prompt(
+        &mut self,
+        id: &str,
+        prompt: PromptDraft,
+        delivery: Delivery,
+        request: Option<String>,
+    ) -> Result<(), String> {
         if !self.known(id) {
             return Err(format!("Unknown thread {id}."));
         }
@@ -2014,16 +2275,30 @@ impl Actor {
         if message.trim().is_empty() && prompt.images.is_empty() {
             return Err("Write a message first.".to_string());
         }
-        let active = self.ensure_open(id).await?;
         let cli = self.harness(id).is_some();
-        if !cli {
-            self.thread_refuses(id)?;
-        }
-        let message = if !cli && (message.starts_with('/') || message.contains('$')) {
-            self.resources(id, &active).await.expand(&message)
+        let active = if cli {
+            self.threads.entry(id.to_string()).or_default();
+            String::new()
         } else {
-            message
+            let active = self.ensure_open(id).await?;
+            self.thread_refuses(id)?;
+            active
         };
+        if self.running(id) && self.threads.get(id).is_some_and(|thread| !thread.held.is_empty()) {
+            self.hold(id, &prompt, delivery, request);
+            return Ok(());
+        }
+        let expansion = if !(message.starts_with('/') || message.contains('$')) {
+            Expansion { text: message.clone(), plugins: Vec::new() }
+        } else if cli {
+            Resources::default().with_plugins(self.plugins()).expand(&message)
+        } else {
+            self.resources(id, &active).await.expand(&message)
+        };
+        if !self.local_only_gate(id, &active, &expansion.plugins, &prompt, delivery, request.clone()).await? {
+            return Ok(());
+        }
+        let message = if cli { message } else { expansion.text };
         let images = (!prompt.images.is_empty()).then(|| {
             Value::Array(
                 prompt
@@ -2066,7 +2341,7 @@ impl Actor {
         self.dirty = true;
         let result = if cli {
             let steer = matches!(delivery, Delivery::Steer);
-            self.cli_send(id, &message, Self::cli_images(&prompt), steer).await
+            self.cli_send(id, &message, Self::cli_images(&prompt), steer, request)
         } else {
             let command = DaemonCommand::Prompt {
                 id: None,
@@ -2127,14 +2402,25 @@ impl Actor {
             notes.push(error);
             plugins::Grants::default()
         });
-        for plugin in &scan.plugins {
-            if let plugins::Consent::NeedsConsent { missing } = grants.consent(plugin) {
-                let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
-                notes.push(format!("{} needs consent for {}, so its MCP server is off", plugin.id, names.join(", ")));
+        let ready = plugins::ready(&scan.plugins, &grants);
+        for (plugin, consent) in &ready {
+            match consent {
+                plugins::Consent::Ready => {}
+                plugins::Consent::NeedsConsent { missing } => {
+                    let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+                    notes.push(format!(
+                        "{} needs consent for {}, so its MCP server is off",
+                        plugin.id,
+                        names.join(", ")
+                    ));
+                }
+                plugins::Consent::Refused { reason } => {
+                    notes.push(format!("{} cannot be granted, so its MCP server is off: {reason}", plugin.id));
+                }
             }
         }
         if let Some(agent) = crate::daemon::agent_dir() {
-            if let Err(error) = plugins::sync_mcp_servers(&agent, &scan.plugins, &grants) {
+            if let Err(error) = plugins::sync_mcp_servers(dir, &agent, &ready) {
                 notes.push(error);
             }
         }
@@ -2314,7 +2600,7 @@ impl Actor {
             return;
         }
         if self.harness(id).is_some() {
-            self.cli_rename(id, &title).await;
+            self.cli_rename(id, &title);
             return;
         }
         let command = if let Some(active) = self.live_active(id) {
@@ -2481,6 +2767,7 @@ impl Actor {
             fork.activity_at = Some(now);
             fork.project = flags.project;
             fork.access = flags.access;
+            fork.local_only = flags.local_only;
         });
         self.save();
         self.threads.insert(fork_id.clone(), Thread { path, cwd, ..Thread::default() });
@@ -2497,6 +2784,9 @@ impl Actor {
         model: Option<String>,
         level: Option<String>,
     ) -> Result<(), String> {
+        if let Some(provider) = &provider {
+            self.keep_local(id, provider)?;
+        }
         if self.harness(id).is_some() {
             return self.cli_model(id, provider, model, level);
         }
@@ -3338,6 +3628,7 @@ impl Actor {
                 if let Some(thread) = self.threads.get_mut(&id) {
                     thread.run_started_at = None;
                 }
+                self.itself.send(Command::SendHeld { thread: id.clone() });
             }
             if flipped {
                 self.emit_info(&id);
@@ -3457,7 +3748,11 @@ impl Actor {
         }
         let project = self.thread_project(id);
         let settings = self.workspace.effective_settings(project.as_deref());
-        if let (Some(provider), Some(model)) = (settings.text_generation_provider, settings.text_generation_model) {
+        let generator = settings
+            .text_generation_provider
+            .zip(settings.text_generation_model)
+            .filter(|(provider, _)| self.store.flags(id).local_only.is_none() || Self::local_provider(provider));
+        if let Some((provider, model)) = generator {
             let excerpt: String = self
                 .saved
                 .get(id)
@@ -3644,6 +3939,7 @@ impl Actor {
             self.refresh_saved().await;
         }
         self.emit_info(id);
+        self.send_held(id).await;
         self.release(id).await;
     }
 

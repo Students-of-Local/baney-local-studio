@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{ErrorKind, Write as _};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,6 +14,7 @@ use super::model::{
 };
 use super::{ModelsReloader, Workspace};
 use crate::model::{ModelOption, Update};
+use crate::platform::Mode;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,6 +70,63 @@ pub fn endpoint_presets() -> Vec<EndpointPreset> {
         needs_key: false,
     })
     .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provider {
+    pub id: String,
+    pub base_url: Option<String>,
+}
+
+impl Provider {
+    #[must_use]
+    pub fn configured(agent: &Path, id: &str) -> Self {
+        Self::from_models(&configured_providers(agent), id)
+    }
+
+    #[must_use]
+    pub fn from_models(providers: &Map<String, Value>, id: &str) -> Self {
+        let base_url =
+            providers.get(id).filter(|_| !is_built_in(id)).and_then(|entry| text(entry, "baseUrl")).map(str::to_string);
+        Self { id: id.to_string(), base_url }
+    }
+
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        crate::harness::harness_of(&self.id) == crate::model::Harness::Eukhe
+            && self.base_url.as_deref().is_some_and(local_url)
+    }
+}
+
+#[must_use]
+pub fn configured_providers(agent: &Path) -> Map<String, Value> {
+    match read_object(&agent.join("models.json")).ok().and_then(|mut root| root.remove("providers")) {
+        Some(Value::Object(providers)) => providers,
+        _ => Map::new(),
+    }
+}
+
+fn local_url(url: &str) -> bool {
+    let Ok(url) = Url::parse(url) else { return false };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else { return false };
+    if host == "localhost" {
+        return true;
+    }
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => local_v4(ip),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(local_v4) || ip.segments()[0] & 0xfe00 == 0xfc00
+        }
+        Err(_) => false,
+    }
+}
+
+fn local_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    ip.is_loopback() || ip.is_private() || (first == 100 && (64..128).contains(&second))
 }
 
 #[derive(Default)]
@@ -382,7 +439,8 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
         .recursive(true)
         .mode(0o700)
         .create(dir)
-        .map_err(|error| format!("Could not create {}: {error}", dir.display()))
+        .map_err(|error| format!("Could not create {}: {error}", dir.display()))?;
+    crate::platform::set_mode(dir, 0o700).map_err(|error| format!("Could not make {} private: {error}", dir.display()))
 }
 
 fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -390,6 +448,7 @@ fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Resul
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(temporary, target)?;
+    #[cfg(unix)]
     if let Some(parent) = target.parent() {
         fs::File::open(parent)?.sync_all()?;
     }

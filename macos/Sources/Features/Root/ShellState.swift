@@ -1,4 +1,5 @@
 import Foundation
+import LocalStudioKit
 import Observation
 
 enum PalettePage: Equatable {
@@ -15,11 +16,12 @@ enum ShellConfirmation: Equatable {
     case archive([String])
     case unpin([String])
     case restartDaemon(UInt32)
+    case localOnly(thread: String, plugin: String, message: String, local: ModelKey?)
 
     var threads: [String] {
         switch self {
         case .delete(let ids), .stopAndDelete(let ids), .archive(let ids), .unpin(let ids): ids
-        case .restartDaemon: []
+        case .restartDaemon, .localOnly: []
         }
     }
 }

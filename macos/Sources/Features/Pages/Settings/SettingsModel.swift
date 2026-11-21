@@ -76,7 +76,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .sourceControl: "Background Git sync and how commits and pull requests are written."
         case .storage: "Worktree cleanup and the data Local Studio keeps."
         case .local: "The Local controller on this Mac and the machines in your fleet."
-        case .connections: "The Eukhe agent daemon that runs every thread."
+        case .connections: "The Eukhe agent daemon, devices paired with this Mac and your other machines."
         case .archive: "Archived threads, grouped by project."
         }
     }
@@ -111,7 +111,8 @@ enum SettingsGroup: Hashable {
     case controller
     case fleet
     case daemon
-    case unsupported
+    case pairedDevices
+    case otherMachines
     case archived
 
     var title: String {
@@ -144,7 +145,8 @@ enum SettingsGroup: Hashable {
         case .controller: "Controller"
         case .fleet: "Fleet"
         case .daemon: "Agent Daemon"
-        case .unsupported: "Remote Environments"
+        case .pairedDevices: "Paired Devices"
+        case .otherMachines: "Other Machines"
         case .archived: "Archived Threads"
         }
     }
@@ -159,7 +161,7 @@ enum SettingsGroup: Hashable {
         case .git, .writing: .sourceControl
         case .worktrees, .data: .storage
         case .controller, .fleet: .local
-        case .daemon, .unsupported: .connections
+        case .daemon, .pairedDevices, .otherMachines: .connections
         case .archived: .archive
         }
     }
@@ -190,7 +192,7 @@ enum SettingKey: CaseIterable {
     case dataLocation
     case controllerURL, fleetKey, startController
     case machines, registry, localUsage
-    case daemonStatus, remoteEnvironments
+    case daemonStatus, pairDevice, pairedDevices, otherMachines, addMachine
     case archivedThreads
     case snapshotEnabled, snapshotShortcut, snapshotIncludeText, snapshotPermission
     case snapshotSound, snapshotFlash, snapshotAnimations
@@ -223,7 +225,8 @@ enum SettingKey: CaseIterable {
         case .controllerURL, .fleetKey, .startController: .controller
         case .machines, .registry, .localUsage: .fleet
         case .daemonStatus: .daemon
-        case .remoteEnvironments: .unsupported
+        case .pairDevice, .pairedDevices: .pairedDevices
+        case .otherMachines, .addMachine: .otherMachines
         case .archivedThreads: .archived
         case .snapshotEnabled, .snapshotShortcut, .snapshotIncludeText, .snapshotPermission: .snapshotCapture
         case .snapshotSound, .snapshotFlash, .snapshotAnimations: .snapshotFeedback
@@ -307,7 +310,10 @@ enum SettingKey: CaseIterable {
         case .registry: "Registry"
         case .localUsage: "Local usage"
         case .daemonStatus: "Eukhe daemon"
-        case .remoteEnvironments: "Remote environments"
+        case .pairDevice: "Pair a device"
+        case .pairedDevices: "Paired devices"
+        case .otherMachines: "Other machines"
+        case .addMachine: "Add a machine"
         case .archivedThreads: "Archived threads"
         case .snapshotEnabled: "Enable SnapShots"
         case .snapshotShortcut: "Capture shortcut"
@@ -383,7 +389,10 @@ enum SettingKey: CaseIterable {
         case .registry: "models recipes download"
         case .localUsage: "tokens requests"
         case .daemonStatus: "socket connection"
-        case .remoteEnvironments: "ssh pairing connections"
+        case .pairDevice: "iphone phone qr code link remote connect"
+        case .pairedDevices: "revoke iphone phone remote"
+        case .otherMachines: "remote linux mac forget linked"
+        case .addMachine: "pairing link connect remote"
         case .archivedThreads: "unarchive restore"
         case .snapshotEnabled, .snapshotShortcut, .snapshotPermission: "screenshot capture window screen recording"
         case .snapshotIncludeText: "accessibility text context"

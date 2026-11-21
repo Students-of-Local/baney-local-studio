@@ -18,7 +18,7 @@ def plist-string [text: string, key: string, value: string]: nothing -> string {
     replace-once $text ('(<key>' + $key + '</key>\s*<string>)[^<]*(</string>)') ('${1}' + $value + '${2}') $"($key) in the Info.plist"
 }
 
-def stamp [root: path, identity: record, short: string, bundle: string] {
+def stamp [root: path, identity: record, short: string, bundle: string, version: string, channel: string] {
     let plist_path = ($root | path join "macos" "LocalStudio-Info.plist")
     mut plist = (open --raw $plist_path)
     for entry in [
@@ -28,6 +28,8 @@ def stamp [root: path, identity: record, short: string, bundle: string] {
         [CFBundleURLName $identity.bundle_id]
         [CFBundleShortVersionString $short]
         [CFBundleVersion $bundle]
+        [LocalStudioVersion $version]
+        [LocalStudioChannel $channel]
     ] {
         $plist = (plist-string $plist $entry.0 $entry.1)
     }
@@ -43,6 +45,7 @@ def main [
     channel: string
     --stamp
     --json
+    --build-env
     --at: string
     --commit: string
     --root: path
@@ -72,11 +75,14 @@ def main [
     }
     let identity = ($identities | get (if $channel == "local" { "dev" } else { $channel }))
     let bundle = $"($at | str substring 0..7).($at | str substring 8..13)"
+    let build_channel = if $channel == "local" { "dev" } else { $channel }
     if $stamp {
-        stamp $root $identity $base $bundle
+        stamp $root $identity $base $bundle $version $build_channel
     }
     if $json {
-        { channel: $channel, version: $version, base: $base, commit: $commit, bundle_version: $bundle } | merge $identity | to json
+        { channel: $channel, build_channel: $build_channel, version: $version, base: $base, commit: $commit, bundle_version: $bundle } | merge $identity | to json
+    } else if $build_env {
+        $"LOCAL_STUDIO_VERSION=($version)\nLOCAL_STUDIO_CHANNEL=($build_channel)"
     } else {
         $version
     }

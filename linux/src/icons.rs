@@ -68,6 +68,7 @@ pub const SWITCH: &str = "network-transmit-receive-symbolic";
 pub const COMPACTED: &str = "view-restore-symbolic";
 pub const ALL: &str = "view-grid-symbolic";
 pub const COMPUTER: &str = "computer-symbolic";
+pub const CONNECTIONS: &str = "network-workgroup-symbolic";
 
 pub const STACKED: &str = "ls-icon-stacked";
 

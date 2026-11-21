@@ -2,6 +2,7 @@
 
 use zig.nu toolchain
 use ../eukhe.nu
+use icon.nu
 
 def developer-dir []: nothing -> string {
     if ($env.DEVELOPER_DIR? | is-not-empty) {
@@ -21,9 +22,18 @@ def compile-icon [package: path, resources: path] {
     let partial = (mktemp -t "local-studio-icon.XXXXXX")
     let result = (do { ^xcrun actool ($package | path join "AppIcon.icon") --compile $resources --platform macosx --minimum-deployment-target 26.0 --app-icon AppIcon --output-partial-info-plist $partial --output-format human-readable-text } | complete)
     rm -f $partial
-    if $result.exit_code != 0 or not ($resources | path join "Assets.car" | path exists) {
+    if $result.exit_code == 0 and ($resources | path join "Assets.car" | path exists) {
+        return
+    }
+    let prebuilt = ($package | path join "AppIcon.prebuilt")
+    if not ($prebuilt | path join "source.sha256" | path exists) {
         error make { msg: $"actool could not compile AppIcon.icon \(needs Xcode 26+; run `sudo xcodebuild -runFirstLaunch` once\):\n($result.stdout)($result.stderr)" }
     }
+    if (open --raw ($prebuilt | path join "source.sha256") | str trim) != (icon source-hash $package) {
+        error make { msg: $"actool could not compile AppIcon.icon, and macos/AppIcon.prebuilt is from an older icon; run `nu macos/icon.nu` with an Xcode whose actool compiles it:\n($result.stdout)($result.stderr)" }
+    }
+    print -e $"warning: actool could not compile AppIcon.icon \(Xcode 26.6 crashes on it, #27\); using macos/AppIcon.prebuilt"
+    cp ($prebuilt | path join "Assets.car") ($prebuilt | path join "AppIcon.icns") $resources
 }
 
 def build-kit [repo: path, package: path, profile: string] {
@@ -36,10 +46,14 @@ def build-kit [repo: path, package: path, profile: string] {
     let bindings = (mktemp -d)
     ^cargo run --quiet --manifest-path ($repo | path join "Cargo.toml") -p local-studio-kit --bin uniffi-bindgen ...$cargo_profile -- generate --library ($target | path join "liblocal_studio_kit.dylib") --language swift --out-dir $bindings
     rm -r -f $generated
-    mkdir ($generated | path join "lib") ($generated | path join "LocalStudioKit") ($generated | path join "local_studio_coreFFI")
-    mv ($bindings | path join "local_studio_core.swift") ($generated | path join "LocalStudioKit")
-    mv ($bindings | path join "local_studio_coreFFI.h") ($generated | path join "local_studio_coreFFI")
-    mv ($bindings | path join "local_studio_coreFFI.modulemap") ($generated | path join "local_studio_coreFFI" "module.modulemap")
+    mkdir ($generated | path join "lib") ($generated | path join "LocalStudioKit")
+    for module in ["local_studio_core" "local_studio_kit"] {
+        let ffi = ($generated | path join $"($module)FFI")
+        mkdir $ffi
+        mv ($bindings | path join $"($module).swift") ($generated | path join "LocalStudioKit")
+        mv ($bindings | path join $"($module)FFI.h") $ffi
+        mv ($bindings | path join $"($module)FFI.modulemap") ($ffi | path join "module.modulemap")
+    }
     cp ($target | path join "liblocal_studio_kit.a") ($generated | path join "lib")
     rm -r -f $bindings
 }

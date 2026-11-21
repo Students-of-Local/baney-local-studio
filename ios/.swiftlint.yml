@@ -5,7 +5,7 @@ check_for_updates: false
 excluded:
   - build
   - .build
-  - Packages/LocalStudioRemote/.build
+  - Packages/*/.build
   - LocalStudio.xcodeproj
 
 disabled_rules:
