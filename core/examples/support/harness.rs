@@ -331,7 +331,7 @@ pub fn turn(
 
 fn write_prompt(file: &str) -> String {
     format!(
-        "Create a file named {file} in the current directory containing the single line hello. Use a file writing tool, not a shell command, and do not ask me first."
+        "Create a file named {file} in the current directory containing the single line hello. Use your built-in file editing tool (Write for Claude Code, apply_patch for Codex), not a shell command or an MCP tool, and do not ask me first."
     )
 }
 
@@ -441,7 +441,7 @@ fn outside_write_held(
     std::fs::create_dir_all(&outside)?;
     let target = outside.join("outside.txt");
     let text = format!(
-        "Create a file at the absolute path {} containing the single line hello. Use a file writing tool, and do not ask me first.",
+        "Create a file at the absolute path {} containing the single line hello. Use your built-in file editing tool (Write for Claude Code, apply_patch for Codex), not a shell command or an MCP tool, and do not ask me first.",
         target.display()
     );
     let asked = approval_turn(studio, signal, watch, thread, ("outside.txt", &text), ApprovalAnswer::Deny)?;
