@@ -372,6 +372,14 @@ fn written_by_us(root: &Path, name: &str, entry: &Value) -> bool {
     }
 }
 
+#[must_use]
+pub fn foreign_servers(root: &Path, agent: &Path) -> Vec<String> {
+    let root = absolute(root);
+    let settings = crate::workspace::providers::read_object(&agent.join("settings.json")).unwrap_or_default();
+    let servers = settings.get("mcpServers").and_then(Value::as_object).cloned().unwrap_or_default();
+    servers.into_iter().filter(|(name, entry)| !written_by_us(&root, name, entry)).map(|(name, _)| name).collect()
+}
+
 pub fn sync_mcp_servers(root: &Path, agent: &Path, plugins: &[Plugin], grants: &Grants) -> Result<bool, String> {
     let path = agent.join("settings.json");
     let mut settings = crate::workspace::providers::read_object(&path)?;

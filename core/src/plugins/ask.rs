@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
@@ -12,6 +12,8 @@ use super::{Capability, Consent, Grants, Plugin};
 pub const SOCKET_ENV: &str = "LOCAL_STUDIO_ASK";
 pub const TOKEN_ENV: &str = "LOCAL_STUDIO_ASK_TOKEN";
 pub const THREAD_ENV: &str = "LOCAL_STUDIO_THREAD";
+pub const PID_ENV: &str = "LOCAL_STUDIO_ASK_PID";
+pub const TOKENS_FILE: &str = "ask-tokens.json";
 pub const NOTE_TYPE: &str = "local-studio-ask";
 pub const MAX_LINE: usize = 16 * 1024;
 pub const MAX_TEXT: usize = 2000;
@@ -48,6 +50,7 @@ pub struct Ask {
 pub enum Event {
     Ask(Ask),
     Gone { thread: String, request: String },
+    Replaced(Option<String>),
 }
 
 #[derive(Clone, Default)]
@@ -57,11 +60,48 @@ pub struct Tokens {
 
 #[derive(Default)]
 struct TokenTable {
+    file: Option<PathBuf>,
     issued: HashMap<(String, String), String>,
     holders: HashMap<String, (String, String)>,
 }
 
+#[derive(Deserialize)]
+struct Saved {
+    plugin: String,
+    thread: String,
+    token: String,
+}
+
+impl TokenTable {
+    fn insert(&mut self, key: (String, String), token: String) {
+        self.holders.insert(digest(&token), key.clone());
+        self.issued.insert(key, token);
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let Some(file) = &self.file else { return Ok(()) };
+        let saved: Vec<Value> = self
+            .issued
+            .iter()
+            .map(|((plugin, thread), token)| json!({ "plugin": plugin, "thread": thread, "token": token }))
+            .collect();
+        crate::workspace::providers::write_private(file, &Value::Array(saved))
+    }
+}
+
 impl Tokens {
+    #[must_use]
+    pub fn load(data_dir: &Path) -> Self {
+        let file = data_dir.join(TOKENS_FILE);
+        let saved: Vec<Saved> =
+            std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+        let mut table = TokenTable { file: Some(file), ..TokenTable::default() };
+        for Saved { plugin, thread, token } in saved {
+            table.insert((plugin, thread), token);
+        }
+        Self { inner: Arc::new(Mutex::new(table)) }
+    }
+
     pub fn issue(&self, plugin: &str, thread: &str) -> Result<String, String> {
         let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let key = (plugin.to_string(), thread.to_string());
@@ -71,8 +111,12 @@ impl Tokens {
         let mut bytes = [0_u8; 32];
         getrandom::getrandom(&mut bytes).map_err(|error| format!("no random token: {error}"))?;
         let token = super::install::hex(&bytes);
-        table.holders.insert(digest(&token), key.clone());
-        table.issued.insert(key, token.clone());
+        table.insert(key.clone(), token.clone());
+        if let Err(error) = table.save() {
+            table.issued.remove(&key);
+            table.holders.remove(&digest(&token));
+            return Err(error);
+        }
         Ok(token)
     }
 
@@ -82,10 +126,14 @@ impl Tokens {
         table.holders.get(&digest(token)).cloned()
     }
 
-    pub fn forget_thread(&self, thread: &str) {
+    pub fn retain(&self, keep: impl Fn(&str, &str) -> bool) {
         let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        table.issued.retain(|(_, owner), _| owner != thread);
-        table.holders.retain(|_, (_, owner)| owner != thread);
+        let before = table.issued.len();
+        table.issued.retain(|(plugin, thread), _| keep(plugin, thread));
+        table.holders.retain(|_, (plugin, thread)| keep(plugin, thread));
+        if table.issued.len() != before {
+            let _ = table.save();
+        }
     }
 }
 
@@ -146,31 +194,27 @@ pub fn asks(plugin: &Plugin, grants: &Grants) -> bool {
     plugin.asks(Capability::AskUser) && plugin.asks(Capability::McpServer) && grants.consent(plugin) == Consent::Ready
 }
 
+#[must_use]
 pub fn acp_servers(
     plugins: &[Plugin],
     grants: &Grants,
     socket: &Path,
     thread: &str,
     tokens: &Tokens,
+    foreign: &[String],
 ) -> (Vec<Value>, Vec<String>) {
     let asking: Vec<Plugin> = plugins.iter().filter(|plugin| asks(plugin, grants)).cloned().collect();
     let mut servers = Vec::new();
     let mut errors = Vec::new();
     for (name, entry) in super::mcp_servers(&asking, grants) {
         let Some(plugin) = asking.iter().find(|plugin| plugin.mcp_name() == name) else { continue };
-        let mut env = Map::new();
-        let mut missing = Vec::new();
-        for (key, reference) in entry.get("env").and_then(Value::as_object).into_iter().flatten() {
-            let host = reference.get("env").and_then(Value::as_str).unwrap_or_default();
-            match std::env::var(host) {
-                Ok(value) => {
-                    env.insert(key.clone(), Value::String(value));
-                }
-                Err(_) => missing.push(host.to_string()),
-            }
+        if foreign.contains(&name) {
+            continue;
         }
-        if !missing.is_empty() {
-            errors.push(format!("{name} is off in this thread: {} is not set", missing.join(", ")));
+        if plugin.mcp.as_ref().is_some_and(|mcp| !mcp.env.is_empty()) {
+            errors.push(format!(
+                "{name} cannot ask you questions: its [mcp] env names host variables, and Eukhe resolves those only in settings.json entries"
+            ));
             continue;
         }
         let token = match tokens.issue(&plugin.id, thread) {
@@ -180,9 +224,13 @@ pub fn acp_servers(
                 continue;
             }
         };
-        env.insert(SOCKET_ENV.to_string(), Value::String(socket.to_string_lossy().into_owned()));
-        env.insert(TOKEN_ENV.to_string(), Value::String(token));
-        env.insert(THREAD_ENV.to_string(), Value::String(thread.to_string()));
+        let env = json!({
+            super::NO_BYTECODE.0: "1",
+            SOCKET_ENV: socket.to_string_lossy(),
+            TOKEN_ENV: token,
+            THREAD_ENV: thread,
+            PID_ENV: std::process::id().to_string(),
+        });
         servers.push(json!({
             "type": "stdio",
             "name": name,
@@ -200,7 +248,9 @@ pub use server::serve;
 
 #[cfg(unix)]
 mod server {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -208,30 +258,89 @@ mod server {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::{oneshot, Semaphore};
 
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::{parse, Ask, Event, Outcome, Tokens, MAX_LINE};
 
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
+    const CHECK_EVERY: Duration = Duration::from_secs(1);
+    const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
     const MAX_CONNECTIONS: usize = 64;
+    const HALF_CLOSED: &str =
+        "the plugin closed its sending side, so the question was withdrawn; keep the connection open until the reply";
     static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    type Mark = (u64, u64, i64, i64);
+
+    fn mark(path: &Path) -> Option<Mark> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        Some((meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()))
+    }
+
+    fn bind(path: &Path, replaced: bool) -> std::io::Result<(UnixListener, Mark, u32)> {
+        if std::fs::symlink_metadata(path)
+            .is_ok_and(|meta| meta.file_type().is_socket() || (replaced && !meta.is_dir()))
+        {
+            match std::fs::remove_file(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+        let listener = UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        let meta = std::fs::symlink_metadata(path)?;
+        let held = (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec());
+        let probe = std::os::unix::net::UnixStream::connect(path)?;
+        probe.set_nonblocking(true)?;
+        let peer = UnixStream::from_std(probe)?.peer_cred()?.pid();
+        if peer != i32::try_from(std::process::id()).ok() || mark(path) != Some(held) {
+            return Err(std::io::Error::other("another process took the path while Local Studio made it"));
+        }
+        Ok((listener, held, meta.uid()))
+    }
 
     pub fn serve(
         path: &Path,
         tokens: Tokens,
         events: Arc<dyn Fn(Event) + Send + Sync>,
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
-            std::fs::remove_file(path)?;
-        }
-        let listener = UnixListener::bind(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        let own = std::fs::metadata(path)?.uid();
+        let (mut listener, mut held, own) = bind(path, false)?;
+        let path = path.to_path_buf();
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         Ok(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(CHECK_EVERY);
+            let (mut warned, mut failing, mut calm) = (false, false, 0_u32);
             loop {
-                let Ok((stream, _)) = listener.accept().await else { continue };
+                let (accepted, ticked) = tokio::select! {
+                    accepted = listener.accept() => if let Ok((stream, _)) = accepted {
+                        (Some(stream), false)
+                    } else {
+                        tokio::time::sleep(ACCEPT_BACKOFF).await;
+                        (None, false)
+                    },
+                    _ = tick.tick() => (None, true),
+                };
+                if mark(&path) == Some(held) {
+                    calm = calm.saturating_add(u32::from(ticked));
+                    if calm >= 2 {
+                        (warned, failing) = (false, false);
+                    }
+                } else {
+                    calm = 0;
+                    match bind(&path, true) {
+                        Ok((fresh, fresh_mark, _)) => {
+                            (listener, held) = (fresh, fresh_mark);
+                            if !warned {
+                                warned = true;
+                                events(Event::Replaced(None));
+                            }
+                        }
+                        Err(error) if !failing => {
+                            failing = true;
+                            events(Event::Replaced(Some(error.to_string())));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                let Some(stream) = accepted else { continue };
                 let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else { continue };
                 let (tokens, events) = (tokens.clone(), Arc::clone(&events));
                 tokio::spawn(async move {
@@ -269,9 +378,16 @@ mod server {
                     loop {
                         tokio::select! {
                             outcome = &mut answer => break outcome.unwrap_or(Outcome::Cancelled),
-                            read = rest.read(&mut sink) => if matches!(read, Ok(0) | Err(_)) {
-                                events(Event::Gone { thread, request });
-                                return;
+                            read = rest.read(&mut sink) => match read {
+                                Ok(0) => {
+                                    events(Event::Gone { thread, request });
+                                    break Outcome::Refused(HALF_CLOSED.to_string());
+                                }
+                                Err(_) => {
+                                    events(Event::Gone { thread, request });
+                                    return;
+                                }
+                                Ok(_) => {}
                             },
                         }
                     }

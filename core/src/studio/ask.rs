@@ -56,8 +56,13 @@ impl Actor {
             refuse(reply, "the thread is gone");
             return;
         }
+        if self.store.flags(&thread).archived {
+            refuse(reply, "the thread is archived");
+            return;
+        }
         let (asking, _) = self.granted_askers();
         if !asking.iter().any(|known| known.id == plugin) {
+            self.ask_tokens.retain(|holder, _| holder != plugin);
             refuse(reply, "the plugin no longer holds the ask-user grant");
             return;
         }
@@ -104,7 +109,7 @@ impl Actor {
             return;
         };
         let Some(pending) = self.take_question(id, request) else { return };
-        let note = note(&pending.plugin, &pending.text, &answer);
+        let note = note(&pending.plugin, &pending.text, &format!("You answered: {answer}"));
         let _ = pending.reply.send(Outcome::Answered(answer));
         self.ask_notes.entry(id.to_string()).or_default().push(note);
         if !self.running(id) {
@@ -121,7 +126,7 @@ impl Actor {
         for pending in list {
             self.mailbox.push(Update::QuestionsSettled { thread: id.to_string(), request: pending.request.clone() });
             if noted {
-                let note = note(&pending.plugin, &pending.text, "cancelled");
+                let note = note(&pending.plugin, &pending.text, "You stopped the question (not confirmed).");
                 self.ask_notes.entry(id.to_string()).or_default().push(note);
             }
             let _ = pending.reply.send(Outcome::Cancelled);
@@ -155,8 +160,15 @@ impl Actor {
 
     pub(super) async fn sync_ask_servers(&mut self, id: &str, active: &str) {
         let Some(socket) = self.ask_socket.clone() else { return };
+        if self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy) {
+            return;
+        }
         let (asking, grants) = self.granted_askers();
-        let (servers, errors) = ask::acp_servers(&asking, &grants, &socket, id, &self.ask_tokens);
+        self.ask_tokens.retain(|plugin, _| asking.iter().any(|known| known.id == plugin));
+        let foreign = crate::daemon::agent_dir()
+            .and_then(|agent| Some(plugins::foreign_servers(self.plugins_dir.as_deref()?, &agent)))
+            .unwrap_or_default();
+        let (servers, errors) = ask::acp_servers(&asking, &grants, &socket, id, &self.ask_tokens, &foreign);
         if !errors.is_empty() {
             self.mailbox.notice(NoticeLevel::Warning, format!("Plugins: {}", errors.join("; ")));
         }
@@ -185,11 +197,41 @@ impl Actor {
     pub(super) fn forget_ask_thread(&mut self, id: &str) {
         self.cancel_questions(id, false);
         self.ask_notes.remove(id);
-        self.ask_tokens.forget_thread(id);
+        self.ask_tokens.retain(|_, thread| thread != id);
+    }
+
+    pub(super) async fn ask_socket_replaced(&mut self, error: Option<String>) {
+        let path = self.ask_socket.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+        let warning = match error {
+            None => format!(
+                "Another process replaced the plugin question socket {path}, so Local Studio made it again. A plugin answer from the replaced socket did not come from you."
+            ),
+            Some(error) => format!(
+                "Another process replaced the plugin question socket {path}, and Local Studio could not make it again ({error}). Plugins cannot ask you questions until it can."
+            ),
+        };
+        self.mailbox.notice(NoticeLevel::Warning, warning.clone());
+        let asking: Vec<String> = self
+            .threads
+            .keys()
+            .filter(|id| {
+                self.live_active(id)
+                    .and_then(|active| self.ask_sent.get(&active))
+                    .and_then(Value::as_array)
+                    .is_some_and(|servers| !servers.is_empty())
+            })
+            .cloned()
+            .collect();
+        for id in asking {
+            self.ask_notes.entry(id.clone()).or_default().push(warning.clone());
+            if !self.running(&id) {
+                self.flush_ask_notes(&id).await;
+            }
+        }
     }
 }
 
-fn note(plugin: &str, text: &str, answer: &str) -> String {
+fn note(plugin: &str, text: &str, outcome: &str) -> String {
     let stop = if text.ends_with(['.', '?', '!']) { "" } else { "." };
-    format!("{plugin} asked: {text}{stop} You answered: {answer}")
+    format!("{plugin} asked: {text}{stop} {outcome}")
 }

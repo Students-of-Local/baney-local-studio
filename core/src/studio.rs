@@ -349,6 +349,9 @@ enum Command {
     FlushAskNotes {
         thread: String,
     },
+    AskSocketReplaced {
+        error: Option<String>,
+    },
     RenameThread {
         thread: String,
         title: String,
@@ -607,8 +610,8 @@ impl Studio {
         let links = crate::link::client::Links::new(runtime.handle().clone(), Arc::clone(&mailbox), &data_dir);
         #[cfg(feature = "link")]
         let link_dir = data_dir.clone();
-        let ask_tokens = plugins::ask::Tokens::default();
-        let ask_socket = start_ask_server(&runtime, &data_dir, &ask_tokens, &inbox, &mailbox);
+        let ask_tokens = plugins::ask::Tokens::load(&data_dir);
+        let (ask_socket, ask_task) = start_ask_server(&runtime, &data_dir, &ask_tokens, &inbox, &mailbox).unzip();
         let actor = Actor {
             socket,
             session_dir,
@@ -655,6 +658,7 @@ impl Studio {
             codex_models: Vec::new(),
             plugin_consent: Vec::new(),
             ask_socket,
+            ask_task,
             ask_tokens,
             questions: HashMap::new(),
             ask_notes: HashMap::new(),
@@ -1117,6 +1121,7 @@ struct Actor {
     codex_models: Vec<ModelOption>,
     plugin_consent: Vec<String>,
     ask_socket: Option<PathBuf>,
+    ask_task: Option<tokio::task::JoinHandle<()>>,
     ask_tokens: plugins::ask::Tokens,
     questions: HashMap<String, Vec<ask::Pending>>,
     ask_notes: HashMap<String, Vec<String>>,
@@ -1130,16 +1135,17 @@ fn start_ask_server(
     tokens: &plugins::ask::Tokens,
     inbox: &Inbox,
     mailbox: &Mailbox,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, tokio::task::JoinHandle<()>)> {
     let path = plugins::ask::socket_path(data_dir);
     let asker = inbox.clone();
     let events: Arc<dyn Fn(plugins::ask::Event) + Send + Sync> = Arc::new(move |event| match event {
         plugins::ask::Event::Ask(ask) => asker.send(Command::PluginAsk { ask }),
         plugins::ask::Event::Gone { thread, request } => asker.send(Command::PluginAskGone { thread, request }),
+        plugins::ask::Event::Replaced(error) => asker.send(Command::AskSocketReplaced { error }),
     });
     let _entered = runtime.enter();
     match plugins::ask::serve(&path, tokens.clone(), events) {
-        Ok(_) => Some(path),
+        Ok(task) => Some((path, task)),
         Err(error) => {
             mailbox.notice(
                 NoticeLevel::Warning,
@@ -1157,7 +1163,7 @@ fn start_ask_server(
     _tokens: &plugins::ask::Tokens,
     _inbox: &Inbox,
     _mailbox: &Mailbox,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, tokio::task::JoinHandle<()>)> {
     None
 }
 
@@ -1381,6 +1387,9 @@ impl Actor {
         for id in self.questions.keys().cloned().collect::<Vec<_>>() {
             self.cancel_questions(&id, false);
         }
+        if let Some(task) = self.ask_task.take() {
+            task.abort();
+        }
         if let Some(socket) = self.ask_socket.take() {
             let _ = std::fs::remove_file(socket);
         }
@@ -1519,6 +1528,7 @@ impl Actor {
                     self.flush_ask_notes(&thread).await;
                 }
             }
+            Command::AskSocketReplaced { error } => self.ask_socket_replaced(error).await,
             Command::RenameThread { thread, title } => self.rename(&thread, &title).await,
             Command::DeleteThread { thread } => self.delete(&thread).await,
             Command::SetArchived { thread, archived } => {
@@ -2013,6 +2023,7 @@ impl Actor {
         entry.path = Some(created.session_file);
         entry.cwd = Some(cwd);
         self.attach(id, &created.active_session_id).await?;
+        self.sync_ask_servers(id, &created.active_session_id).await;
         Ok(created.active_session_id)
     }
 
@@ -2280,6 +2291,7 @@ impl Actor {
         });
         self.save();
         self.attach(&id, &created.active_session_id).await?;
+        self.sync_ask_servers(&id, &created.active_session_id).await;
         let provider = settings.provider.or(effective.default_provider);
         let model = settings.model.or(effective.default_model);
         let thinking = settings.thinking_level.or(effective.default_thinking_level);
