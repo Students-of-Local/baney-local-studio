@@ -14,4 +14,4 @@ Problems in Eukhe, the agent engine, belong to [gildrb/eukhe](https://github.com
 
 ## What Local Studio does not protect against
 
-Agents run code with your user's permissions; the app is not a sandbox. A plugin you grant `accessibility`, `synthetic-input` or `screen-capture` can operate your computer. Grant only what you would give a person sitting at your keyboard.
+Agents run code with your user's permissions; the app is not a sandbox. Every capability widens what a plugin can do. A plugin you grant `accessibility`, `synthetic-input` or `screen-capture` can operate your computer; `site-secrets` lets it fill your saved secrets into sites; `native-host` lets it register a helper a browser extension can talk to. Grant only what you would give a person sitting at your keyboard.

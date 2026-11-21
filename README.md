@@ -8,18 +8,18 @@
 
 ## Why Local Studio
 
-- **Native, not a web page in a frame.** AppKit and SwiftUI on macOS, GTK4 and libadwaita on Linux, over one Rust core. Terminals are drawn natively on [libghostty-vt](https://lib.ghostty.org). Every action works from the keyboard.
+- **Native, not a web page in a frame.** AppKit and SwiftUI on macOS, GTK4 and libadwaita on Linux, over one Rust core. Terminals run on [libghostty-vt](https://lib.ghostty.org) emulation and grammar-based highlighting in the core, drawn natively by each app. On macOS every action works from the keyboard.
 - **Threads that outlive the window.** Sessions run in the [Eukhe](https://github.com/gildrb/eukhe) daemon. Quit the app or crash it mid-turn: the turn keeps going, and the transcript is there when you come back.
 - **Your own hardware, first class.** The Local page is a live dashboard for every machine in your fleet: decode speed, first-token time, KV cache, GPUs, memory, power, and a year of daily tokens. Switch or stop the model from the same page. The controller finds vLLM, SGLang, llama.cpp, ExLlama, Ollama and LM Studio engines for you.
-- **Every model in one picker.** Built-in providers, any OpenAI-compatible, OpenAI Responses or Anthropic endpoint, and the engines on your own machines, side by side. Claude Code and Codex run through their official CLIs.
+- **Every model in one picker.** Built-in providers, any OpenAI-compatible, OpenAI Responses or Anthropic endpoint, and the engines on your own machines, side by side. Paste API keys or add an endpoint in Settings → Providers; Claude Code and Codex threads run through their official CLIs.
 - **One inbox for all of it.** Every thread in every project, with live status: working, needs approval, failed, done. Snooze, pin, and see the branch, the diff size and the pull request on each row.
-- **Plugins that do real work.** A plugin is a folder with a `plugin.toml`: skills, slash commands and its own tool server, each capability granted by you and pinned to an exact source tree. See [Plugins](#plugins).
+- **Plugins that do real work.** A plugin is a folder, usually a git tree, with a `plugin.toml`: skills, slash commands and its own tool server, each capability granted by you. See [Plugins](#plugins).
 
 ![The Local page: one machine serving qwen3-coder at 391 tokens a second, with first-token time, requests in flight, KV cache, four GPUs, memory, power and a year of daily token use](docs/images/local.png)
 
 ## Install
 
-Local Studio ships on three channels. Stable opens with the first public release; until then, nightly is the daily driver.
+Local Studio ships on three channels. Stable opens with the first public release, and the first nightly ships once the nightly gate passes; today the only prebuilt build is dev.
 
 | Channel | For | Updates |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Local Studio ships on three channels. Stable opens with the first public release
 
 Stable and nightly install side by side and share your threads. Dev keeps its own data. The full scheme is in [docs/channels.md](docs/channels.md).
 
-**Linux (dev channel):** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/baney75/local-studio/releases/tag/dev).
+**Linux (dev channel):** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/baney75/local-studio/releases/tag/dev). Dev keeps its own data, so threads made there do not carry over to nightly or stable.
 
 **From source, macOS:**
 
@@ -49,18 +49,20 @@ Add a project folder and start a thread.
 | Keys | Does |
 | --- | --- |
 | ⌘N / ⌘T | New thread / new thread in this project |
+| ⌘W | Close the thread |
 | ⌘K | Command palette |
 | ⌘J | Terminal |
 | ⌥⌘B | Right panel |
 | ⌃Tab | Recent threads |
 | F6 or ⌘⌥←/→ | Move between sidebar, timeline, composer, panel and terminal |
 | ⌘L | Focus the composer |
+| ⌘, | Settings |
 
 Settings → General → Keyboard turns on vim keys (j/k, gg/G, h/l, / and a modal composer).
 
 ## Plugins
 
-A Local Studio plugin is a git tree with a `plugin.toml` at its root:
+A Local Studio plugin is a folder, usually a git tree, with a `plugin.toml` at its root:
 
 ```toml
 id = "smoothstone"
@@ -79,7 +81,7 @@ What a plugin can do today:
 - Ship skills and slash commands that appear in the composer.
 - Run its own MCP tool server for your sessions (`mcp-server`).
 - Declare each power it needs: `ask-user`, `native-host`, `site-secrets`, `accessibility`, `synthetic-input`, `screen-capture`. A plugin's tool server does not start until you have granted every one it asks for. The in-app consent sheet is being designed; today grants are made from the command line.
-- Install from a pinned catalog entry: a git URL, a full commit and a `sha256` of the tree, so what runs is exactly what was reviewed.
+- Install from a pinned catalog entry: a git URL, a full commit and a `sha256` of the tree, so what runs is exactly what was reviewed. Installs from a path or an unpinned git source are not pinned, and grants are not yet bound to the installed tree (#38).
 
 The plugin family, in progress:
 
@@ -116,6 +118,7 @@ Every check drives the real binaries against a real model. See [AGENTS.md](AGENT
 
 - macOS 26+ on Apple Silicon and Linux. Windows builds the core only, for now.
 - Not sandboxed: agents run code with your user's permissions. Use Supervised mode to approve each step.
+- Subscription sign-in (ChatGPT, Claude, GitHub Copilot) happens in Eukhe: run `eukhe`, then `/login`.
 
 ## Credits
 
