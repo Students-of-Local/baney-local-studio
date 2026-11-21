@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::install::live_hash;
 use super::{Capability, Plugin};
 
 pub const GRANTS: &str = "grants.json";
@@ -20,6 +21,10 @@ pub struct Grants {
 struct Grant {
     version: String,
     capabilities: BTreeSet<String>,
+    #[serde(default)]
+    tree: String,
+    #[serde(default)]
+    source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +45,17 @@ impl Grants {
         crate::workspace::providers::write_private(&root.join(GRANTS), &value)
     }
 
+    fn current(&self, plugin: &Plugin) -> Option<&Grant> {
+        let grant = self.plugins.get(&plugin.id).filter(|grant| !grant.tree.is_empty())?;
+        (live_hash(&plugin.dir).ok()? == grant.tree).then_some(grant)
+    }
+
     #[must_use]
     pub fn consent(&self, plugin: &Plugin) -> Consent {
-        let granted = self.plugins.get(&plugin.id).map(|grant| &grant.capabilities);
+        if plugin.capabilities.is_empty() {
+            return Consent::Ready;
+        }
+        let granted = self.current(plugin).map(|grant| &grant.capabilities);
         let missing: Vec<Capability> = plugin
             .capabilities
             .iter()
@@ -57,40 +70,82 @@ impl Grants {
     }
 
     #[must_use]
-    pub fn granted(&self, id: &str) -> Option<(&str, Vec<&str>)> {
-        self.plugins
-            .get(id)
-            .map(|grant| (grant.version.as_str(), grant.capabilities.iter().map(String::as_str).collect()))
+    pub fn granted(&self, id: &str) -> Option<(&str, &str, Vec<&str>)> {
+        self.plugins.get(id).map(|grant| {
+            (grant.version.as_str(), grant.source.as_str(), grant.capabilities.iter().map(String::as_str).collect())
+        })
+    }
+
+    pub fn installed(&mut self, plugin: &Plugin, tree: &str, source: &str) -> Option<String> {
+        let asked = |name: &String| Capability::parse(name).is_some_and(|capability| plugin.asks(capability));
+        // A tree with no source is a slice 2 grant renewed after the upgrade: its origin is unknown, so only a catalog update keeps it.
+        let unknown = |grant: &Grant| grant.source.is_empty() && !grant.tree.is_empty();
+        let catalog = source == format!("catalog {}", plugin.id);
+        let (capabilities, kept_source, note) = match self.plugins.get(&plugin.id) {
+            Some(grant) if grant.tree == tree => (grant.capabilities.clone(), grant.source.clone(), None),
+            Some(grant) if grant.source == source || (catalog && unknown(grant)) => {
+                let kept: BTreeSet<String> = grant.capabilities.iter().filter(|name| asked(name)).cloned().collect();
+                let dropped: Vec<&str> =
+                    grant.capabilities.iter().filter(|name| !asked(name)).map(String::as_str).collect();
+                let note = (!dropped.is_empty()).then(|| {
+                    format!(
+                        "{} {} no longer asks for {}, so that grant is gone",
+                        plugin.id,
+                        plugin.version,
+                        dropped.join(", ")
+                    )
+                });
+                (kept, source.to_string(), note)
+            }
+            Some(grant) if !grant.capabilities.is_empty() => {
+                let names: Vec<&str> = grant.capabilities.iter().map(String::as_str).collect();
+                let note = format!(
+                    "dropped the grants for {} ({}): they were given to code from {}, and this copy came from {source}",
+                    plugin.id,
+                    names.join(", "),
+                    if grant.source.is_empty() { "an earlier Local Studio" } else { grant.source.as_str() }
+                );
+                (BTreeSet::new(), source.to_string(), Some(note))
+            }
+            _ => (BTreeSet::new(), source.to_string(), None),
+        };
+        self.plugins.insert(
+            plugin.id.clone(),
+            Grant { version: plugin.version.clone(), capabilities, tree: tree.to_string(), source: kept_source },
+        );
+        note
     }
 
     pub fn grant(&mut self, plugin: &Plugin, capabilities: &[Capability]) -> Result<(), String> {
         if let Some(extra) = capabilities.iter().find(|capability| !plugin.asks(**capability)) {
             return Err(format!("{} {} does not ask for {}", plugin.id, plugin.version, extra.name()));
         }
-        let kept: BTreeSet<String> = self
-            .plugins
-            .get(&plugin.id)
+        let tree = live_hash(&plugin.dir)?;
+        let record = self.plugins.get(&plugin.id);
+        let current = record.filter(|grant| grant.tree == tree);
+        // A slice 2 record has no tree: keep its source (empty, unknown origin) rather than invent one.
+        let source = match record.filter(|grant| grant.tree == tree || grant.tree.is_empty()) {
+            Some(grant) => grant.source.clone(),
+            None => format!("folder {}", plugin.dir.display()),
+        };
+        let kept: BTreeSet<String> = current
             .map(|grant| grant.capabilities.clone())
             .unwrap_or_default()
             .into_iter()
             .filter(|name| Capability::parse(name).is_some_and(|capability| plugin.asks(capability)))
             .chain(capabilities.iter().map(|capability| capability.name().to_string()))
             .collect();
-        self.plugins.insert(plugin.id.clone(), Grant { version: plugin.version.clone(), capabilities: kept });
+        self.plugins
+            .insert(plugin.id.clone(), Grant { version: plugin.version.clone(), capabilities: kept, tree, source });
         Ok(())
     }
 
     pub fn revoke(&mut self, id: &str, capabilities: &[Capability]) -> bool {
-        if capabilities.is_empty() {
-            return self.plugins.remove(id).is_some();
-        }
         let Some(grant) = self.plugins.get_mut(id) else { return false };
         let before = grant.capabilities.len();
-        grant.capabilities.retain(|name| !capabilities.iter().any(|capability| capability.name() == name));
-        let changed = grant.capabilities.len() != before;
-        if grant.capabilities.is_empty() {
-            self.plugins.remove(id);
-        }
-        changed
+        grant.capabilities.retain(|name| {
+            !capabilities.is_empty() && !capabilities.iter().any(|capability| capability.name() == name)
+        });
+        grant.capabilities.len() != before
     }
 }

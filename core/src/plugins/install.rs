@@ -45,6 +45,8 @@ pub struct Installed {
     pub consent: Consent,
     pub files: usize,
     pub tree: String,
+    pub source: String,
+    pub note: Option<String>,
 }
 
 impl Source {
@@ -69,6 +71,15 @@ impl Source {
                 ))
             }
             _ => Err(format!("not a plugin folder, a catalog id or a git source <url>@<sha>: {arg}")),
+        }
+    }
+
+    #[must_use]
+    pub fn origin(&self) -> String {
+        match self {
+            Source::Dir(dir) => format!("folder {}", super::absolute(dir).display()),
+            Source::Git { url, .. } => format!("git {url}"),
+            Source::Catalog(id) => format!("catalog {id}"),
         }
     }
 }
@@ -127,12 +138,13 @@ impl Drop for Scratch {
 
 pub fn install(root: &Path, source: &Source, catalog: &Catalog) -> Result<Installed, Vec<String>> {
     std::fs::create_dir_all(root).map_err(|error| vec![format!("cannot create {}: {error}", root.display())])?;
+    let origin = source.origin();
     match source {
-        Source::Dir(dir) => place(root, dir, &[], None, &[]),
+        Source::Dir(dir) => place(root, dir, &[], None, &[], &origin),
         Source::Git { url, rev } => {
             let fetched = Scratch::new(root, "fetch")?;
             let flattened = fetch(url, rev, &fetched.0)?;
-            place(root, &fetched.0, &[], None, &flattened)
+            place(root, &fetched.0, &[], None, &flattened, &origin)
         }
         Source::Catalog(id) => {
             let entry = catalog
@@ -144,7 +156,7 @@ pub fn install(root: &Path, source: &Source, catalog: &Catalog) -> Result<Instal
                 Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
                 None => fetched.0.clone(),
             };
-            place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened)
+            place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, &origin)
         }
     }
 }
@@ -155,8 +167,9 @@ fn place(
     exclude: &[String],
     expected: Option<&str>,
     flattened: &[PathBuf],
+    origin: &str,
 ) -> Result<Installed, Vec<String>> {
-    let entries = walk(source, exclude).map_err(|error| vec![error])?;
+    let entries = walk(source, exclude, false).map_err(|error| vec![error])?;
     let unlinked: Vec<String> = entries
         .iter()
         .filter(|entry| matches!(entry.kind, Kind::File { .. }) && flattened.contains(&source.join(&entry.path)))
@@ -198,7 +211,9 @@ fn place(
         return Err(vec![format!("cannot install {}: {error}", target.display())]);
     }
     let plugin = load(&target)?;
-    let grants = Grants::load(root).map_err(|error| vec![error])?;
+    let mut grants = Grants::load(root).map_err(|error| vec![error])?;
+    let note = grants.installed(&plugin, &tree, origin);
+    grants.save(root).map_err(|error| vec![error])?;
     let consent = grants.consent(&plugin);
     Ok(Installed {
         plugin,
@@ -206,6 +221,8 @@ fn place(
         consent,
         files: entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count(),
         tree,
+        source: origin.to_string(),
+        note,
     })
 }
 
@@ -284,7 +301,10 @@ struct Entry {
     kind: Kind,
 }
 
-fn walk(root: &Path, exclude: &[String]) -> Result<Vec<Entry>, String> {
+/// Finder writes `.DS_Store` into any folder it shows; no runtime loads one, so no hash covers it.
+pub const UNHASHED: &str = ".DS_Store";
+
+fn walk(root: &Path, exclude: &[String], keep_git: bool) -> Result<Vec<Entry>, String> {
     let excluded: Vec<PathBuf> = exclude
         .iter()
         .map(|relative| inside(Path::new(""), relative).map(|path| path.components().collect()))
@@ -298,10 +318,13 @@ fn walk(root: &Path, exclude: &[String]) -> Result<Vec<Entry>, String> {
             let item = item.map_err(|error| error.to_string())?;
             let name = item.file_name();
             let path = relative.join(&name);
-            if (relative.as_os_str().is_empty() && name == ".git") || excluded.contains(&path) {
+            if (!keep_git && relative.as_os_str().is_empty() && name == ".git") || excluded.contains(&path) {
                 continue;
             }
             let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
+            if name == UNHASHED && meta.is_file() {
+                continue;
+            }
             let text = path
                 .components()
                 .map(|part| part.as_os_str().to_str())
@@ -393,7 +416,12 @@ fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
 }
 
 pub fn tree_hash(root: &Path, exclude: &[String]) -> Result<String, String> {
-    hash_entries(root, &walk(root, exclude)?)
+    hash_entries(root, &walk(root, exclude, false)?)
+}
+
+/// The hash consent checks: the whole folder as it is now, `.git` included, so code there is covered too.
+pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
+    hash_entries(root, &walk(root, &[], true)?)
 }
 
 fn hex(bytes: &[u8]) -> String {
