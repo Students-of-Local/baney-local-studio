@@ -50,6 +50,21 @@ pub(crate) enum Event {
     Idle,
     Stopped(String),
     Exited(Option<String>),
+    Failed(Failure, String),
+    Opened(Box<OpenReport>),
+    Loaded(Result<Vec<AgentMessage>, String>),
+}
+
+pub(crate) enum Failure {
+    Send(Option<String>),
+    Interrupt,
+    Rename,
+    Compact,
+}
+
+pub(crate) struct OpenReport {
+    pub(crate) result: Result<Opened, String>,
+    pub(crate) lost: Option<String>,
 }
 
 pub(crate) struct Envelope {
@@ -121,7 +136,12 @@ impl Driver {
         match launch.harness {
             Harness::ClaudeCode => {
                 let native = launch.native.clone();
-                let history = if launch.resume { claude::history(&launch.cwd, &native) } else { Vec::new() };
+                let history = if launch.resume {
+                    let (cwd, session) = (launch.cwd.clone(), native.clone());
+                    tokio::task::spawn_blocking(move || claude::history(&cwd, &session)).await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let driver = claude::Claude::spawn(&launch, sink)?;
                 Ok(Opened { driver: Self::Claude(driver), native, history })
             }
@@ -133,17 +153,23 @@ impl Driver {
         }
     }
 
-    pub(crate) async fn send(&mut self, text: &str, images: Vec<Image>, steer: bool) -> Result<(), String> {
+    pub(crate) fn send(
+        &mut self,
+        text: &str,
+        images: &[Image],
+        steer: bool,
+        request: Option<String>,
+    ) -> Result<(), String> {
         match self {
-            Self::Claude(driver) => driver.send(text, &images),
-            Self::Codex(driver) => driver.send(text, &images, steer).await,
+            Self::Claude(driver) => driver.send(text, images),
+            Self::Codex(driver) => driver.send(text, images, steer, request),
         }
     }
 
-    pub(crate) async fn interrupt(&mut self) -> Result<(), String> {
+    pub(crate) fn interrupt(&mut self) -> Result<(), String> {
         match self {
             Self::Claude(driver) => driver.interrupt(),
-            Self::Codex(driver) => driver.interrupt().await,
+            Self::Codex(driver) => driver.interrupt(),
         }
     }
 
@@ -184,17 +210,19 @@ impl Driver {
         }
     }
 
-    pub(crate) async fn rename(&mut self, title: &str) -> Result<(), String> {
-        match self {
-            Self::Claude(_) => Ok(()),
-            Self::Codex(driver) => driver.rename(title).await,
+    pub(crate) fn rename(&mut self, title: &str) {
+        if let Self::Codex(driver) = self {
+            driver.rename(title);
         }
     }
 
-    pub(crate) async fn compact(&mut self) -> Result<(), String> {
+    pub(crate) fn compact(&mut self) -> Result<(), String> {
         match self {
             Self::Claude(driver) => driver.send("/compact", &[]),
-            Self::Codex(driver) => driver.compact().await,
+            Self::Codex(driver) => {
+                driver.compact();
+                Ok(())
+            }
         }
     }
 
@@ -215,6 +243,23 @@ pub(crate) fn models(harness: Harness) -> Vec<ModelOption> {
 
 pub(crate) async fn codex_models() -> Result<Vec<ModelOption>, String> {
     codex::models().await
+}
+
+pub(crate) async fn history(harness: Harness, cwd: String, native: String) -> Result<Vec<AgentMessage>, String> {
+    match harness {
+        Harness::ClaudeCode => tokio::task::spawn_blocking(move || {
+            if claude::session_exists(&cwd, &native) {
+                claude::history(&cwd, &native)
+            } else {
+                Vec::new()
+            }
+        })
+        .await
+        .map_err(|error| error.to_string()),
+        Harness::Codex if native.is_empty() => Ok(Vec::new()),
+        Harness::Codex => codex::read(&cwd, &native).await,
+        Harness::Eukhe => Ok(Vec::new()),
+    }
 }
 
 pub(crate) fn usage_ledger(data_dir: &Path) -> PathBuf {
@@ -438,7 +483,7 @@ fn tool_result(
     serde_json::from_value(message).ok()
 }
 
-fn notice(text: &str, timestamp: u64) -> Option<AgentMessage> {
+pub(crate) fn notice(text: &str, timestamp: u64) -> Option<AgentMessage> {
     serde_json::from_value(json!({
         "role": "custom",
         "customType": "harness",
