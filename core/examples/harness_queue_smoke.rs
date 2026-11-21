@@ -23,12 +23,14 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(12);
 const PROMPT: Duration = Duration::from_secs(2);
 const RESUME_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_RESUME_MS";
+const START_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_START_MS";
 const OPEN_LATER: [&str; 2] = ["draft-stall-codex", "draft-codex-failed-stop"];
 
 #[derive(Default)]
 struct Watch {
     connection: Option<Connection>,
     projects: Vec<String>,
+    rows: Vec<String>,
     started: BTreeMap<String, String>,
     thread: Option<String>,
     busy: bool,
@@ -106,6 +108,7 @@ fn apply(watch: &mut Watch, update: Update) {
         }
         Update::Connection { state } => watch.connection = Some(state),
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
+        Update::Threads { threads } => watch.rows = threads.into_iter().map(|row| row.id).collect(),
         Update::ThreadStarted { draft, thread } => {
             watch.started.insert(draft, thread);
         }
@@ -118,9 +121,9 @@ fn apply(watch: &mut Watch, update: Update) {
             }
         }
         Update::Notification { thread, kind: NotificationKind::Failed, body, .. } => watch.failed.push((thread, body)),
-        Update::RequestFailed { message, .. } => {
+        Update::RequestFailed { request, message } => {
             println!("     request failed: {message}");
-            watch.refused.push(message);
+            watch.refused.push(format!("{request}: {message}"));
         }
         _ => {}
     }
@@ -207,13 +210,7 @@ impl Run {
         self.start_with(label, (provider, model), thinking, AccessMode::FullAccess)
     }
 
-    fn start_with(
-        &mut self,
-        label: &str,
-        (provider, model): (&str, &str),
-        thinking: Option<&str>,
-        access: AccessMode,
-    ) -> anyhow::Result<()> {
+    fn begin(&mut self, label: &str, (provider, model): (&str, &str), thinking: Option<&str>, access: AccessMode) {
         self.watch.thread = None;
         self.watch.busy = false;
         self.watch.replies.clear();
@@ -226,7 +223,18 @@ impl Run {
             worktree: WorktreeChoice::Local,
         };
         let draft = format!("draft-{label}");
-        self.studio.start_thread(draft.clone(), self.watch.projects.first().cloned(), prompt("hello"), settings);
+        self.studio.start_thread(draft, self.watch.projects.first().cloned(), prompt("hello"), settings);
+    }
+
+    fn start_with(
+        &mut self,
+        label: &str,
+        (provider, model): (&str, &str),
+        thinking: Option<&str>,
+        access: AccessMode,
+    ) -> anyhow::Result<()> {
+        self.begin(label, (provider, model), thinking, access);
+        let draft = format!("draft-{label}");
         self.setup(&format!("{label}: thread started"), |watch| watch.started.contains_key(&draft))?;
         let thread = self.watch.started.get(&draft).cloned().context("thread id")?;
         self.watch.thread = Some(thread.clone());
@@ -278,6 +286,20 @@ fn claude_effort_during_open(run: &mut Run) -> anyhow::Result<()> {
     run.studio.set_thinking_level(run.thread(), "high".to_string());
     run.until(Duration::from_secs(1), |_| false);
     ran_at(run, "xray", "high");
+    Ok(())
+}
+
+fn delete_during_start(run: &mut Run) -> anyhow::Result<()> {
+    std::env::set_var(START_DELAY, "3000");
+    let known = run.watch.rows.clone();
+    run.begin("codex-delete", ("codex", "fake-mini"), None, AccessMode::FullAccess);
+    let fresh = |watch: &Watch| watch.rows.iter().find(|row| !known.contains(row)).cloned();
+    run.setup("codex-delete: the new thread is listed", |watch| fresh(watch).is_some())?;
+    run.studio.delete_thread(fresh(&run.watch).context("new thread")?);
+    run.check("deleting a thread before it started fails its draft", |watch| {
+        watch.refused.iter().any(|refused| refused.starts_with("draft-codex-delete: "))
+    });
+    std::env::remove_var(START_DELAY);
     Ok(())
 }
 
@@ -414,6 +436,7 @@ fn scenarios(run: &mut Run) -> anyhow::Result<()> {
     codex_stall_keeps_others(run)?;
     claude_restart_keeps_message(run)?;
     claude_effort_during_open(run)?;
+    delete_during_start(run)?;
     claude_stop_after_effort_change(run)?;
     claude_stop_drops_held(run)?;
     codex_start_race(run)?;

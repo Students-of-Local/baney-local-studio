@@ -11,6 +11,7 @@ const SLOW: Duration = Duration::from_millis(1500);
 const LAG: Duration = Duration::from_millis(1500);
 const STALL: Duration = Duration::from_secs(5);
 const RESUME_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_RESUME_MS";
+const START_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_START_MS";
 const STOP_WORDS: &str = "You've hit your usage limit.";
 const SKILL_READ: &str = "cat ~/.codex/skills/writing/SKILL.md";
 
@@ -177,6 +178,11 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
     shared.completed(&turn, "completed", None);
 }
 
+fn pause(variable: &str) {
+    let delay = std::env::var(variable).ok().and_then(|ms| ms.parse().ok()).unwrap_or(0);
+    std::thread::sleep(Duration::from_millis(delay));
+}
+
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
     match method {
         "model/list" => shared.respond(
@@ -188,12 +194,12 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
             }] }),
         ),
         "thread/start" => {
+            pause(START_DELAY);
             let thread = format!("fake-thread-{}", std::process::id());
             shared.respond(id, &shared.thread(&json!(thread)));
         }
         "thread/resume" => {
-            let delay = std::env::var(RESUME_DELAY).ok().and_then(|ms| ms.parse().ok()).unwrap_or(0);
-            std::thread::sleep(Duration::from_millis(delay));
+            pause(RESUME_DELAY);
             shared.respond(id, &shared.thread(&params["threadId"]));
         }
         "thread/read" => shared.respond(id, &shared.thread(&params["threadId"])),

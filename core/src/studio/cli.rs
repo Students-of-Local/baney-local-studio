@@ -530,6 +530,10 @@ impl Actor {
         }
         if let Some(opening) = self.opening.remove(id) {
             opening.cancel();
+            if let Some(request) = opening.draft {
+                let message = "The thread was deleted before it started.".to_string();
+                self.mailbox.push(Update::RequestFailed { request, message });
+            }
         }
         self.loading.remove(id);
         let cwd = self.threads.get(id).and_then(|thread| thread.cwd.clone()).or_else(|| self.store.flags(id).cwd);
