@@ -19,6 +19,9 @@ pub const MCP_PREFIX: &str = "plugin-";
 pub const MCP_TAG: &str = "localStudioPlugin";
 /// Eukhe's settings take env values only as host variable names; Python needs any non-empty value, and every kernel has PATH.
 pub const NO_BYTECODE: (&str, &str) = ("PYTHONDONTWRITEBYTECODE", "PATH");
+pub const LOCAL_ONLY_ENV: &str = "LOCAL_STUDIO_LOCAL_ONLY";
+pub const LOCAL_ONLY_LABEL: &str = "Runs only on local models";
+pub const SESSION_OWNER: &str = "local-studio";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -92,6 +95,7 @@ pub struct Plugin {
     pub commands: Vec<PluginCommand>,
     pub capabilities: Vec<Capability>,
     pub mcp: Option<McpServer>,
+    pub local_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +165,8 @@ struct Manifest {
     #[serde(default)]
     capabilities: Vec<String>,
     mcp: Option<ManifestMcp>,
+    #[serde(default)]
+    local_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,6 +291,7 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         commands,
         capabilities,
         mcp,
+        local_only: manifest.local_only,
     })
 }
 
@@ -356,7 +363,9 @@ pub fn ready<'a>(plugins: &'a [Plugin], grants: &Grants) -> Vec<(&'a Plugin, Con
 fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
     ready
         .iter()
-        .filter(|(plugin, consent)| *consent == Consent::Ready && plugin.asks(Capability::McpServer))
+        .filter(|(plugin, consent)| {
+            !plugin.local_only && *consent == Consent::Ready && plugin.asks(Capability::McpServer)
+        })
         .map(|(plugin, _)| *plugin)
         .filter_map(|plugin| {
             let mcp = plugin.mcp.as_ref()?;
@@ -373,6 +382,33 @@ fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
             });
             entry["env"] = Value::Object(env);
             Some((plugin.mcp_name(), entry))
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
+    plugins
+        .iter()
+        .filter(|plugin| plugin.local_only)
+        .filter(|plugin| grants.consent(plugin) == Consent::Ready && plugin.asks(Capability::McpServer))
+        .filter_map(|plugin| {
+            let mcp = plugin.mcp.as_ref()?;
+            let mut env: Map<String, Value> = mcp
+                .env
+                .iter()
+                .filter_map(|(name, host)| Some((name.clone(), Value::String(std::env::var(host).ok()?))))
+                .collect();
+            env.insert(NO_BYTECODE.0.to_string(), json!("1"));
+            env.insert(LOCAL_ONLY_ENV.to_string(), json!("1"));
+            Some(json!({
+                "type": "stdio",
+                "name": plugin.mcp_name(),
+                "command": absolute(&mcp.command).to_string_lossy(),
+                "args": mcp.args,
+                "cwd": absolute(&plugin.dir).to_string_lossy(),
+                "env": env,
+            }))
         })
         .collect()
 }
@@ -499,7 +535,11 @@ pub fn commands(plugins: &[Plugin]) -> Vec<SlashCommand> {
         .flat_map(|plugin| {
             plugin.commands.iter().map(|command| SlashCommand {
                 name: command.name.clone(),
-                description: command.description.clone(),
+                description: if plugin.local_only {
+                    format!("{} ({LOCAL_ONLY_LABEL})", command.description)
+                } else {
+                    command.description.clone()
+                },
                 source: plugin.source(),
                 kind: CommandKind::Plugin,
             })

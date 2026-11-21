@@ -128,6 +128,9 @@ fn validate(dir: &Path) -> Result<(), String> {
 }
 
 fn asks(plugin: &Plugin) {
+    if plugin.local_only {
+        println!("  {}", plugins::LOCAL_ONLY_LABEL);
+    }
     if plugin.capabilities.is_empty() {
         println!("  asks for no capabilities");
     }
@@ -182,6 +185,9 @@ fn list() -> Result<(), String> {
     let ready = plugins::ready(&scan.plugins, &grants);
     for (plugin, consent) in &ready {
         println!("{} {}: {}", plugin.id, plugin.version, plugin.description);
+        if plugin.local_only {
+            println!("  {}", plugins::LOCAL_ONLY_LABEL);
+        }
         println!("  {}", consent_text(plugin, consent));
         if let Some((version, source, granted)) =
             grants.granted(&plugin.id).filter(|(_, _, granted)| !granted.is_empty())

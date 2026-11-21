@@ -42,6 +42,22 @@ Local Studio writes each ready plugin's server into `<agent dir>/settings.json` 
 
 Every other entry stays, whatever its name, including `plugin-manager`, an untagged `plugin-<name>` that runs code from outside the plugins folder even with its `cwd` inside it, and a tagged entry copied to a name without the `plugin-` prefix. If a ready plugin's name is already taken by an entry Local Studio did not write, the user's entry stays, that plugin's server is off, and sync reports the name as an error (a notice in the app, an `error:` line in the CLI).
 
+## Local-only plugins
+
+A plugin whose `plugin.toml` sets `local_only = true` runs only on local models. `plugin validate`, `plugin list` and the composer's command list show "Runs only on local models" for it.
+
+Local Studio counts a provider as local only when its `models.json` entry has a `baseUrl` whose host is `localhost` or an IP address on loopback, a private range (10/8, 172.16/12, 192.168/16, IPv6 fc00::/7) or 100.64/10 (Tailscale). That covers the local fleet, Ollama, LM Studio and Fonsviva. Every other provider counts as cloud: built-in provider ids, the Claude Code and Codex harnesses, any entry without a `baseUrl`, and any host name other than `localhost`, even one that resolves to a private address.
+
+When a message would expand one of the plugin's commands or prompts (`/name`) or skills (`/skill:name` or `$name`) in a thread on a cloud provider, Local Studio does not send it. The app says why and offers to switch the thread to a local model and run it; the message goes back into the composer. Once a local-only command runs in a thread, the thread stays local: every later message is checked the same way, a switch to a cloud model is refused, and a fork keeps the rule. A thread that ran on a cloud model before the command still holds that history.
+
+In that thread Local Studio also:
+
+- refuses to run while the session lists any MCP server from `settings.json` (connected or not), or any other connected MCP server, other than local-only plugins' servers, and names them. Eukhe exposes web fetch and search only through MCP servers, and it fixes `mcpServers` from `settings.json` when a session opens, so remove them there and start a new thread.
+- sets the session's side models (tiny, judge, translate, auxiliary, subagents, workers, RLM queries, images, the backup model) to the thread's local model, clears their fallback chains, and turns off failover, chat memory and automatic titles. Regenerating a title uses the text generation model only when it is local; otherwise it asks the thread's own model.
+- starts the plugin's MCP server for that session only, with `LOCAL_STUDIO_LOCAL_ONLY=1` in its environment. A local-only plugin's server is never written to `settings.json`, so other sessions do not get it.
+
+This keeps the plugin's prompts and the thread off cloud models. It does not stop the model's tools from reaching the network: bash, the kernel and the plugin's own server can still open connections. Blocking that is upstream Eukhe work (#33). Another Eukhe client attached to the same session can still change its model.
+
 ## Downgrades
 
 Builds from before grants were bound to code reject a `grants.json` that has `tree` and `source` fields. Running one of them on the same data dir fails every `plugin` command, and its Studio treats every plugin as ungranted and removes their MCP entries. Go back to a build with this rule to recover; the file itself is fine.

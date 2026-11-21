@@ -153,6 +153,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Transcript { .. }
         | Update::Queue { .. }
         | Update::ComposerText { .. }
+        | Update::LocalOnly { .. }
         | Update::Models { .. }
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }
