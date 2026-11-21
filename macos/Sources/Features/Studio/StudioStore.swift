@@ -26,6 +26,7 @@ final class StudioStore {
     @ObservationIgnored private let launch: DaemonLaunch?
     @ObservationIgnored private let controllerMain: String?
     @ObservationIgnored private var pump: UpdatePump?
+    @ObservationIgnored private var remoteHost: RemoteHost?
 
     init(launch: DaemonLaunch?, controllerMain: String? = nil) {
         self.launch = launch
@@ -48,20 +49,66 @@ final class StudioStore {
     }
 
     func start() throws {
-        let config = StudioConfig(socketPath: nil, sessionDir: nil, dataDir: nil, launch: launch, controllerMain: controllerMain)
-        let pump = UpdatePump { [weak self] studio, updates in
+        let pump = makePump()
+        attach(try Studio(config: makeConfig(), waker: pump), pump: pump)
+    }
+
+    func start(then done: @escaping @MainActor @Sendable (Error?) -> Void) {
+        guard serveHoldsLock(dataDir: nil) else {
+            do {
+                try start()
+                done(nil)
+            } catch {
+                done(error)
+            }
+            return
+        }
+        let config = makeConfig()
+        let pump = makePump()
+        Task.detached {
+            let opened: Result<Studio, StudioError>
+            do {
+                opened = .success(try Studio(config: config, waker: pump))
+            } catch let error as StudioError {
+                opened = .failure(error)
+            } catch {
+                opened = .failure(.Config(message: String(describing: error)))
+            }
+            await MainActor.run { [weak self] in
+                switch opened {
+                case .success(let studio):
+                    self?.attach(studio, pump: pump)
+                    done(nil)
+                case .failure(let error):
+                    done(error)
+                }
+            }
+        }
+    }
+
+    private func makeConfig() -> StudioConfig {
+        StudioConfig(socketPath: nil, sessionDir: nil, dataDir: nil, launch: launch, controllerMain: controllerMain, takeOverServe: true)
+    }
+
+    private func makePump() -> UpdatePump {
+        UpdatePump { [weak self] studio, updates in
             guard let self, self.core.studio === studio else { return }
             self.receive(updates)
         }
-        let studio = try Studio(config: config, waker: pump)
+    }
+
+    private func attach(_ studio: Studio, pump: UpdatePump) {
         core.studio = studio
         pump.attach(studio)
         self.pump = pump
+        remoteHost = startRemoteHost(studio: studio, dataDir: nil)
     }
 
     func stop() {
         pump?.attach(nil)
         pump = nil
+        remoteHost?.stop()
+        remoteHost = nil
         core.studio?.shutdown()
         core.studio = nil
         requests.reset()
