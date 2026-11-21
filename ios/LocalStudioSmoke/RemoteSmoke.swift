@@ -14,7 +14,8 @@ final class RemoteSmoke: XCTestCase {
         let link = try configuredLink()
 
         let app = XCUIApplication()
-        app.launchArguments = ["-LSReset", "YES", "-LSSmoke", "YES", "-LSPairLink", link]
+        let channel = fake ? ["-LSPassThrough", "YES"] : []
+        app.launchArguments = ["-LSReset", "YES", "-LSSmoke", "YES", "-LSPairLink", link] + channel
         app.launch()
         expectLabel(app, "link-state", "link live", timeout: 30)
         expectLabel(app, "list-source", "list live")
@@ -33,7 +34,7 @@ final class RemoteSmoke: XCTestCase {
         let fresh = timings(app)
         app.terminate()
 
-        app.launchArguments = ["-LSSmoke", "YES", "-LSConnectDelay", "6"]
+        app.launchArguments = ["-LSSmoke", "YES", "-LSConnectDelay", "6"] + channel
         app.launch()
         let cachedRow = fake ? element(app, "thread-t1") : app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'thread-'")).firstMatch
         XCTAssertTrue(cachedRow.waitForExistence(timeout: 3), "no cached thread list after relaunch")
@@ -52,7 +53,7 @@ final class RemoteSmoke: XCTestCase {
             throw XCTSkip("set LOCAL_STUDIO_INCOMPATIBLE_URL to a fake-studio started with --protocol 4 --min-protocol 3")
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-LSReset", "YES", "-LSSmoke", "YES", "-LSPairLink", try pairLink(socket, id: "0000000000000000", secret: String(repeating: "A", count: 43))]
+        app.launchArguments = ["-LSReset", "YES", "-LSSmoke", "YES", "-LSPairLink", try pairLink(socket, id: "0000000000000000", secret: String(repeating: "A", count: 43)), "-LSPassThrough", "YES"]
         app.launch()
         expectLabel(app, "link-state", "link incompatible", timeout: 30)
         expectLabel(app, "link-detail", "the machine speaks protocol 3 to 4 and this app 2: update this app")

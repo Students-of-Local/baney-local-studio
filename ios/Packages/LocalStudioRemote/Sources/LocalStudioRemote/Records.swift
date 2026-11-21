@@ -28,6 +28,9 @@ public struct RecordReader: Sendable {
             defer { pending = Data() }
             return .frame(pending)
         case 0x03:
+            guard pending.isEmpty else {
+                throw RemoteError.unexpected("a blob record inside a JSON frame")
+            }
             guard body.count >= 17 else {
                 throw RemoteError.unexpected("a short blob record")
             }

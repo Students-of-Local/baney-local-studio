@@ -16,7 +16,8 @@ struct LocalStudioApp: App {
             directory: URL.applicationSupportDirectory.appendingPathComponent("LocalStudioRemote", isDirectory: true),
             keychainService: (Bundle.main.bundleIdentifier ?? "org.local.studio.ios") + ".remote",
             device: DeviceProfile(name: UIDevice.current.name, app: Channel.version, channel: Channel.current),
-            connectDelay: .milliseconds(Int(launch.connectDelay * 1000))
+            connectDelay: .milliseconds(Int(launch.connectDelay * 1000)),
+            passThrough: launch.passThrough
         )
         if launch.reset {
             environment.wipe()
@@ -57,12 +58,14 @@ struct LaunchOptions {
     let smoke: Bool
     let pairLink: String?
     let connectDelay: Double
+    let passThrough: Bool
 
     init(defaults: UserDefaults = .standard) {
         reset = defaults.bool(forKey: "LSReset")
         smoke = defaults.bool(forKey: "LSSmoke")
         pairLink = defaults.string(forKey: "LSPairLink")
         connectDelay = defaults.double(forKey: "LSConnectDelay")
+        passThrough = defaults.bool(forKey: "LSPassThrough")
     }
 }
 
