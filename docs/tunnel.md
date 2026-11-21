@@ -38,8 +38,19 @@ local-studio tunnel setup --cloudflare <name>   the person's own Cloudflare acco
 local-studio tunnel setup --tailnet             tailnet only, no Funnel
 local-studio tunnel request                     the hosted route (waitlist)
 local-studio tunnel adopt                       take over a Tychicus tunnel already on this machine
+local-studio tunnel status                      the route, its health and the next step
 local-studio tunnel off                         stop and remove the route; the Cloudflare tunnel and DNS stay
 ```
+
+### Dev channel only, for now
+
+Donovan, 2026-11-21: tunnel setup ships on the dev channel only (docs/channels.md). On stable and nightly, `setup`, `adopt` and `request` don't run and the settings screen shows a waitlist signup instead. The gate reads the build channel (`LOCAL_STUDIO_BUILD_CHANNEL`); `status` and `off` work on every channel, so a machine that moves off dev can still see and remove its route.
+
+### Agents can run it
+
+An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL), `needs_dns`, `waitlist` (stable or nightly; carries the signup URL), or `error` with a code. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
+
+### Going live
 
 Before a route carries a path, Local Studio checks auth there (baney75/local-studio-tunnels docs/DESIGN.md, Going live): `/mcp` answers 401 with `WWW-Authenticate` naming the resource metadata, and `/v1/health` answers 200 for the route's hostname and 403 for any other Host. It registers the hostname with `local-studio-serve allow-tunnel-host <name>`. The Cloudflare route uses the pinned, verified cloudflared, the same release and digests as Tychicus's download, and reuses Tychicus's copy when its digest matches.
 
