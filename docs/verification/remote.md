@@ -15,6 +15,8 @@ Every run isolates its state. `HOME`, `EUKHE_DAEMON_SOCKET`, `EUKHE_CODING_AGENT
 | iPhone app against real serve | Not run | Needs a simulator run of `ios/tools/smoke.sh` |
 | Machines UI (macOS, Linux) | Snapshots only | Settings › Connections, pairing sheet, sidebar rows |
 | Serve as a service on Linux | Deployed | Parish1, systemd user unit, `install --tailscale` |
+| Serve as a service on macOS, handoff with the app | Verified | The Mac, launchd agent, `install --tailscale` |
+| The app serving while it runs | Not built | #53 |
 | Mac to Parish1 over the tailnet, core link client | Verified | link_probe, Claude Code haiku on Parish1 |
 | Mac to Parish1 over the tailnet, app screens | Not run | Polycarp computer use was down; steps below |
 | Mac to Parish1 over the shared tunnel | Not run yet | Waits for the tunnel |
@@ -100,6 +102,20 @@ Run from the Mac over the tailnet, twice, both PASS. Numbers are from the second
 - `forget_machine` removed the machine locally. It does not revoke the desktop on the far side, so `local-studio-serve devices` still listed the Mac until `revoke` ran there.
 
 The iPhone client library also paired with Parish1 over the tailnet, reconnected with KK, and had a replayed handshake refused (serve log). Its flood stage hung: it relies on the loopback-only slot and on fake `Tailscale-User-Login` headers, and over the tailnet every socket carries the real login and none is loopback. The stage works on loopback only.
+
+## Serve and the desktop app on the Mac
+
+2026-11-21, the Mac. The app is a Release build of #41's head, and serve is built from it, installed with:
+
+```sh
+local-studio-serve install --tailscale --name <mac> --bin ~/.local/opt/local-studio/local-studio-serve \
+  --eukhe /Applications/LocalStudio.app/Contents/MacOS/eukhe --json
+```
+
+- With the app running, `install` wrote `org.local.studio.serve.plist` and loaded it, and mounted `/v1/health` and `/v1/ws` on 443. Serve logged that the app owns the data dir and waited. `status --json` reported `owned` by the app.
+- App quit: serve took the lock about 1 s after the app exited (`status --json`: `serving`, owner `serve`). Health over the tailnet answered from the Mac and from Parish1.
+- App launched: it sent `SIGUSR1`. Serve closed every remote socket with 1012, released the lock, and logged that the app took it over. The app owned the data dir about 40 s after launch, with the Mac's load average around 300, and serve went back to waiting.
+- Not built: while the app owns the lock, nothing serves remote clients, so the Mac is unreachable whenever the app is open (#53).
 
 ## Machines UI
 
