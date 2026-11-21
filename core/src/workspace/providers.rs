@@ -25,6 +25,8 @@ pub(super) const NO_KEY: &str = "none";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ENDPOINT_HEADER: &str = "x-local-studio-endpoint";
 const EXCERPT: usize = 200;
+const ANTHROPIC: &str = "anthropic";
+const CLAUDE_SIGN_IN: &str = "Eukhe's Claude models are hidden: its Claude subscription sign-in identifies as Claude Code and can get the Anthropic account restricted. Use Claude Code (your claude CLI sign-in) for Claude, or save an Anthropic API key.";
 
 struct BuiltIn {
     id: &'static str,
@@ -204,11 +206,12 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
             } else {
                 ProviderCredential::Missing
             });
+            let refused = built_in.id == ANTHROPIC && credential == ProviderCredential::SignedIn;
             ProviderStatus {
                 id: built_in.id.to_string(),
                 name: built_in.name.to_string(),
                 kind: ProviderKind::BuiltIn,
-                configured: configured || credential != ProviderCredential::Missing,
+                configured: !refused && (configured || credential != ProviderCredential::Missing),
                 credential,
                 model_count,
                 env_var: Some(built_in.env.to_string()),
@@ -671,13 +674,33 @@ impl Workspace {
             .ok_or_else(|| "Eukhe's agent folder is unknown because HOME is not set.".to_string())
     }
 
-    pub(crate) fn models_loaded(&self, models: &[ModelOption], errors: Vec<String>) {
+    fn claude_signed_in(&self) -> bool {
+        self.inner
+            .agent_dir
+            .as_deref()
+            .and_then(|agent| read_object(&agent.join("auth.json")).ok())
+            .is_some_and(|auth| stored(&auth, ANTHROPIC) == Some(ProviderCredential::SignedIn))
+    }
+
+    pub(crate) fn eukhe_refuses(&self, provider: Option<&str>) -> Result<(), String> {
+        if provider == Some(ANTHROPIC) && self.claude_signed_in() {
+            return Err(CLAUDE_SIGN_IN.to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn models_loaded(&self, mut models: Vec<ModelOption>, mut errors: Vec<String>) -> Vec<ModelOption> {
+        if self.claude_signed_in() {
+            models.retain(|model| model.provider != ANTHROPIC);
+            errors.push(CLAUDE_SIGN_IN.to_string());
+        }
         {
             let mut state = self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
-            state.catalog = Some(models.to_vec());
+            state.catalog = Some(models.clone());
             state.errors = errors;
         }
         self.publish_providers();
+        models
     }
 
     pub(crate) fn fleet_seen(&self, fleet: Vec<LocalController>) {

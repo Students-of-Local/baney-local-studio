@@ -1922,6 +1922,8 @@ impl Actor {
                 .cli_create(draft, harness, cwd, project_path, settings.access, model, thinking, fan_out, prompt)
                 .await;
         }
+        let provider = settings.provider.or(effective.default_provider);
+        self.workspace.eukhe_refuses(provider.as_deref())?;
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let created = saved_sessions::create_resident(&client, None, self.create_config(&cwd))
             .await
@@ -1945,7 +1947,6 @@ impl Actor {
         });
         self.save();
         self.attach(&id, &created.active_session_id).await?;
-        let provider = settings.provider.or(effective.default_provider);
         let model = settings.model.or(effective.default_model);
         let thinking = settings.thinking_level.or(effective.default_thinking_level);
         if (provider.is_some() && model.is_some()) || thinking.is_some() {
@@ -2469,6 +2470,7 @@ impl Actor {
         if self.harness(id).is_some() {
             return self.cli_model(id, provider, model, level);
         }
+        self.workspace.eukhe_refuses(provider.as_deref())?;
         let mut active = self.ensure_open(id).await?;
         if let (Some(provider), Some(model)) = (provider, model) {
             let command = |active: String| DaemonCommand::SetModel {
@@ -2650,8 +2652,7 @@ impl Actor {
         match catalog {
             Ok(data) => match session::model_options(&data) {
                 Ok((models, errors)) => {
-                    self.models = models;
-                    self.workspace.models_loaded(&self.models, errors);
+                    self.models = self.workspace.models_loaded(models, errors);
                     self.push_models();
                 }
                 Err(error) => self.mailbox.notice(NoticeLevel::Error, format!("Unreadable model catalog: {error:#}")),
