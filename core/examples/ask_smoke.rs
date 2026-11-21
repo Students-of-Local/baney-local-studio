@@ -544,7 +544,7 @@ fn fixture(plugins_dir: &Path, id: &str, capabilities: &[&str], log: &Path) -> a
     let plugin = plugins::load(&dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
     let mut grants = Grants::load(plugins_dir).map_err(anyhow::Error::msg)?;
     let granted: Vec<Capability> = capabilities.iter().filter_map(|name| Capability::parse(name)).collect();
-    grants.grant(&plugin, &granted).map_err(anyhow::Error::msg)?;
+    grants.grant(&plugin, &granted, None).map_err(anyhow::Error::msg)?;
     grants.save(plugins_dir).map_err(anyhow::Error::msg)?;
     Ok(())
 }
