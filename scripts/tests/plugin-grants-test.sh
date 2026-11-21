@@ -606,16 +606,17 @@ else
   out=$(drive "$S/src/sheet" install:screen-capture)
   echo "$out" | grep -v '^ROW' | sed 's/^/  /'
   echo "  after Install with screen-capture on: grants $(granted sheet); plugin list: $(status sheet)"
-  if echo "$out" | grep -q '^DONE ' && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ] \
+  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 3 new permissions, but it is off: its tools stay off until every permission it asks for is on (local-studio plugin grant sheet site-secrets)$' \
+    && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ] \
     && [ "$(status sheet)" = "needs consent for site-secrets (local-studio plugin grant sheet site-secrets)" ]; then
-    pass "#14 Install grants exactly the needed capabilities plus the one switched on"
+    pass "#14 / second-G1 Install grants the needed capabilities plus the one switched on and says the plugin is installed but off"
   else
-    fail "#14 Install grants exactly the needed capabilities plus the one switched on"
+    fail "#14 / second-G1 Install grants the needed capabilities plus the one switched on and says the plugin is installed but off"
   fi
   sheeted 2.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets", "synthetic-input"'
   out=$(drive "$S/src/sheet" install:site-secrets)
   version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
-  echo "  Install with site-secrets on a sheet that lists only synthetic-input: $(echo "$out" | tail -1); installed $version"
+  echo "  Install with site-secrets on a sheet that lists only synthetic-input: $(echo "$out" | grep "^FAILED"); installed $version"
   if echo "$out" | grep -q '^FAILED .*not a sensitive permission this sheet asked for' && [ "$version" = 1.0.0 ] \
     && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ]; then
     pass "#14 a sensitive id the sheet did not list is refused and installs nothing"
@@ -639,6 +640,145 @@ else
   else
     fail "#14 an update that removes a capability installs without asking"
   fi
+fi
+
+if [ -x "$DRIVER" ]; then
+  echo "== first-F2: install_plugin with a request id whose sheet is already open"
+  fresh f2
+  sheeted 1.0.0 '"mcp-server", "screen-capture"'
+  out=$(CONSENT_DRIVER_AGAIN=1 drive "$S/src/sheet" cancel)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  if echo "$out" | grep -q '^AGAIN refused: A permission sheet with that request is already open$' \
+    && echo "$out" | grep -q '^DONE Nothing installed or granted for Sheet$'; then
+    pass "first-F2 a repeated request id fails at once and the open sheet still answers"
+  else
+    fail "first-F2 a repeated request id fails at once and the open sheet still answers"
+  fi
+  echo "== first-F3: after an answer, Studio's own scan syncs mcpServers and offers what changed"
+  fresh f3
+  sheeted 1.0.0 '"mcp-server", "screen-capture"'
+  Q=$D/plugins/dropped
+  out=$(CONSENT_DRIVER_HOOK="mkdir -p $Q/bin && printf 'id = \"dropped\"\nversion = \"1.0.0\"\ndescription = \"Dropped in\"\ncapabilities = [\"mcp-server\"]\n[mcp]\ncommand = \"bin/server\"\n' > $Q/plugin.toml && printf '#!/bin/sh\n' > $Q/bin/server && chmod 755 $Q/bin/server" \
+    drive "$S/src/sheet" install:screen-capture)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  plugin-sheet in mcpServers: $(entry "$A" plugin-sheet)"
+  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 2 new permissions$' && echo "$out" | grep -q '^OPEN-AFTER consent:dropped@1.0.0$' \
+    && [ "$(entry "$A" plugin-sheet)" = yes ]; then
+    pass "first-F3 the answer's sync runs in Studio's scan: mcpServers has the plugin and the scan offers the dropped-in plugin"
+  else
+    fail "first-F3 the answer's sync runs in Studio's scan: mcpServers has the plugin and the scan offers the dropped-in plugin"
+  fi
+  echo "== second-G2: two grant sheets answered at once"
+  fresh g2
+  for id in biga bigb; do
+    manifest "$D/plugins/$id"
+    script "$D/plugins/$id/bin/server" "$id"
+    head -c 9000000 /dev/zero > "$D/plugins/$id/data.bin"
+  done
+  out=$(drive scan consent:biga@1.0.0=install consent:bigb@1.0.0=install)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  grants: biga '$(granted biga)', bigb '$(granted bigb)'"
+  if echo "$out" | grep -q '^DONE consent:biga@1.0.0: ' && echo "$out" | grep -q '^DONE consent:bigb@1.0.0: ' \
+    && [ "$(granted biga)" = mcp-server ] && [ "$(granted bigb)" = mcp-server ]; then
+    pass "second-G2 two answers at once both keep their grant"
+  else
+    fail "second-G2 two answers at once both keep their grant"
+  fi
+
+  echo "== second-G3: the grant an update would carry is revoked while its sheet is open"
+  fresh g3
+  sheeted 1.0.0 '"mcp-server", "screen-capture"'
+  drive "$S/src/sheet" install:screen-capture > /dev/null
+  echo "  1.0.0 installed, grants $(granted sheet)"
+  sheeted 2.0.0 '"mcp-server", "screen-capture", "synthetic-input"'
+  out=$(CONSENT_DRIVER_HOOK="HOME=$S/h LOCAL_STUDIO_DATA_DIR=$D EUKHE_CODING_AGENT_DIR=$A $BIN plugin revoke sheet" drive "$S/src/sheet" install:synthetic-input)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
+  echo "  installed $version, grants '$(granted sheet)'"
+  if echo "$out" | grep -q '^SHEET Sheet 2.0.0 from=1.0.0 .* rows=synthetic-input:sensitive$' \
+    && echo "$out" | grep -q '^FAILED the permissions sheet needs changed after they were checked' \
+    && [ "$version" = 1.0.0 ] && [ -z "$(granted sheet)" ]; then
+    pass "second-G3 a sheet whose rows went stale is refused and installs nothing"
+  else
+    fail "second-G3 a sheet whose rows went stale is refused and installs nothing"
+  fi
+
+  echo "== first-F1 / sol-F2: the grant sheets Studio offers when it scans the installed plugins"
+  fresh scan
+  mkdir -p "$S/src/granter/bin"
+  printf 'id = "granter"\nname = "Granter"\nversion = "1.0.0"\ndescription = "Installed and never granted"\ncapabilities = ["mcp-server", "ask-user", "screen-capture"]\n[mcp]\ncommand = "bin/server"\n' > "$S/src/granter/plugin.toml"
+  script "$S/src/granter/bin/server" granter
+  ls_ plugin install "$S/src/granter" > /dev/null
+  H=$D/plugins/handmade
+  manifest "$H"
+  script "$H/bin/server" handmade
+  mkdir -p "$H/.git/hooks"
+  script "$H/.git/hooks/post-checkout" hook
+  E=$D/plugins/edited
+  manifest "$E"
+  script "$E/bin/server" reviewed
+  Q=$D/plugins/dropped
+  folder() { (cd "$1" && find . -print0 | sort -z | xargs -0 ls -ld | awk '{ print $1, $NF }'; find . -type f -print0 | sort -z | xargs -0 shasum) | shasum | cut -c1-16; }
+  kept=$(folder "$H")
+  hook="printf '#!/bin/sh\necho swapped\n' > $E/bin/server && mkdir -p $Q/bin && printf 'id = \"dropped\"\nversion = \"1.0.0\"\ndescription = \"Dropped in\"\ncapabilities = [\"mcp-server\"]\n[mcp]\ncommand = \"bin/server\"\n' > $Q/plugin.toml && printf '#!/bin/sh\n' > $Q/bin/server && chmod 755 $Q/bin/server"
+  out=$(CONSENT_DRIVER_HOOK=$hook drive scan consent:granter@1.0.0=install consent:handmade@1.0.0=cancel consent:edited@1.0.0=install)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  grants: granter '$(granted granter)', handmade '$(granted handmade)', edited '$(granted edited)'; handmade folder $kept before, $(folder "$H") after"
+  if [ "$(echo "$out" | grep -A1 '^OPEN consent:granter@1.0.0$' | sed -n 's/^SHEET .* rows=//p')" = "mcp-server:needed,ask-user:needed,screen-capture:sensitive" ]; then
+    pass "first-F1 a plugin installed with plugin install gets a consent:<id>@<version> sheet at startup"
+  else
+    fail "first-F1 a plugin installed with plugin install gets a consent:<id>@<version> sheet at startup"
+  fi
+  if echo "$out" | grep -q '^DONE consent:granter@1.0.0: Granter 1.0.0 has 2 new permissions, but it is off: .*(local-studio plugin grant granter screen-capture)$' \
+    && [ "$(granted granter)" = "ask-user,mcp-server" ]; then
+    pass "first-F1 Install on the scan sheet grants the needed rows and says the plugin stays off"
+  else
+    fail "first-F1 Install on the scan sheet grants the needed rows and says the plugin stays off"
+  fi
+  if echo "$out" | grep -q '^FAILED consent:edited@1.0.0: edited changed after the sheet opened, so nothing was granted$' \
+    && [ "$(granted edited)" = none ]; then
+    pass "first-F1 a file edited between the offer and the answer is refused"
+  else
+    fail "first-F1 a file edited between the offer and the answer is refused"
+  fi
+  if echo "$out" | grep -q '^DONE consent:handmade@1.0.0: Nothing installed or granted for handmade$' \
+    && [ "$(granted handmade)" = none ] && [ "$(folder "$H")" = "$kept" ]; then
+    pass "first-F1 Cancel on the scan sheet leaves the plugin untouched"
+  else
+    fail "first-F1 Cancel on the scan sheet leaves the plugin untouched"
+  fi
+  if echo "$out" | grep -q '^OPEN-AFTER consent:dropped@1.0.0$'; then
+    pass "first-F1 the scan after the answers offers only the new plugin, no answered sheet again"
+  else
+    fail "first-F1 the scan after the answers offers only the new plugin, no answered sheet again"
+  fi
+  if echo "$out" | grep -A2 '^OPEN consent:handmade@1.0.0$' | grep -q '^SHEET .* findings=1 ' \
+    && echo "$out" | grep -q '^FINDING executable not named in the manifest: .git/hooks/post-checkout$'; then
+    pass "sol-F2 the scan sheet lists an executable under .git"
+  else
+    fail "sol-F2 the scan sheet lists an executable under .git"
+  fi
+  echo "== sol-F1: the staged copy changes while the install sheet is open"
+  for change in edit add; do
+    fresh "f1$change"
+    mkdir -p "$S/src/staged/bin"
+    printf 'id = "staged"\nversion = "1.0.0"\ndescription = "Staged"\ncapabilities = ["mcp-server"]\n[mcp]\ncommand = "bin/server"\n' > "$S/src/staged/plugin.toml"
+    script "$S/src/staged/bin/server" reviewed
+    if [ "$change" = edit ]; then
+      hook="for f in $D/plugins/.install-*/staged/bin/server; do printf '#!/bin/sh\necho swapped\n' > \"\$f\"; done"
+    else
+      hook="for d in $D/plugins/.install-*/staged/bin; do printf '#!/bin/sh\necho added\n' > \"\$d/extra\"; chmod 755 \"\$d/extra\"; done"
+    fi
+    out=$(CONSENT_DRIVER_HOOK=$hook drive "$S/src/staged" install)
+    echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+    echo "  installed: $(ls "$D/plugins/staged/bin" 2> /dev/null | tr '\n' ' ')server says '$(tail -1 "$D/plugins/staged/bin/server" 2> /dev/null)'; grants $(granted staged)"
+    if echo "$out" | grep -q '^HOOK exit status: 0$' && echo "$out" | grep -q '^FAILED .*changed after' \
+      && [ ! -e "$D/plugins/staged" ] && [ "$(granted staged)" = none ]; then
+      pass "sol-F1 a staged copy that gets an $change while the sheet is open is refused, nothing installed or granted"
+    else
+      fail "sol-F1 a staged copy that gets an $change while the sheet is open is refused, nothing installed or granted"
+    fi
+  done
 fi
 
 echo "failures: $failures"
