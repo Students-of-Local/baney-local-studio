@@ -1,55 +1,55 @@
 # One tunnel per machine
 
-Decision, 2026-11-21 (Claude, tunnels lead). Donovan, 2026-11-21: "1 tunnel for cua and bua, and also this tunnel is the same localstudio will use for syncing across devices."
+Decision, 2026-11-21 (Claude, tunnels lead, with Donovan's answers). Donovan, 2026-11-21: "1 tunnel for cua and bua, and also this tunnel is the same localstudio will use for syncing across devices." Then: the tunnel is Local Studio's, and Polycarp's name leaves it.
 
-A machine has at most one public route: one cloudflared process with one ingress, or one `tailscale serve` config on port 443. That route carries both products:
+A machine has at most one public route: one cloudflared process with one ingress, or one `tailscale serve` config on port 443. Local Studio owns it on every route. It carries both products:
 
 | Paths | Goes to |
 | --- | --- |
-| `/v1/health`, `/v1/ws` | local-studio-serve: the tunnel listener (18094) on a Cloudflare route, the local listener (18093) on the tailnet route (docs/remote.md) |
+| `/v1/health`, `/v1/ws` | local-studio-serve: the tunnel listener (18094) on a Cloudflare route, the local listener (18093) on the tailnet route (docs/remote.md, Tunnel listener contract) |
 | `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-authorization-server/mcp`, `/authorize`, `/token`, `/register`, `/revoke` | Tychicus serve (8787): browser use and computer use |
 | anything else | 404 |
 
-These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md, on every route.
+These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. One hostname serves both products, split by these exact paths: the tailnet route has one name per machine, and on the hosted route a second name would halve the zone's tunnel cap.
 
 ## The route record
 
-`<data dir>/tunnel/route.json`, where the data dir is `$LOCAL_STUDIO_DATA_DIR` or `~/.local-studio`. Mode 0600 in a 0700 folder.
+`<data dir>/tunnel/route.json`, where the data dir is `$LOCAL_STUDIO_DATA_DIR` or `~/.local-studio`. Mode 0600 in a 0700 folder. Local Studio writes it; Tychicus reads it.
 
 ```json
 {
   "v": 1,
-  "owner": "tychicus",
+  "owner": "local-studio",
   "route": "cloudflare",
-  "hostname": "tychicus.example.com",
+  "hostname": "studio.example.com",
+  "aliases": [],
   "ports": { "mcp": 8787, "serve": 18094 }
 }
 ```
 
-- `owner` is `tychicus` or `local-studio`: the product that runs the tunnel process.
-- `route` is `hosted` (Local Studio's waitlist service), `cloudflare` (the person's own account), or `tailnet` (`tailscale serve`, no Funnel).
-- `ports.mcp` is Tychicus serve. `ports.serve` is where `/v1` goes; absent means Local Studio hasn't joined, and the owner routes no `/v1` paths.
+- `route` is `hosted` (Local Studio's waitlist service), `cloudflare` (the person's own account and domain), or `tailnet` (`tailscale serve`, no Funnel).
+- `aliases` are extra hostnames on the same tunnel with the same routes, kept only while a connector moves to `hostname`.
 - Ports are loopback, 1024 to 65535, different from each other, and never 18091 (the controller).
 
-The owner writes the record when it sets the route up and removes it when it tears the route down. The owner renders its ingress from the record every time its tunnel starts, so a change to the record takes effect on the next start.
+## Local Studio sets it up
 
-## Who owns which route
+```
+local-studio tunnel setup --cloudflare <name>   the person's own Cloudflare account
+local-studio tunnel setup --tailnet             tailnet only, no Funnel
+local-studio tunnel request                     the hosted route (waitlist)
+local-studio tunnel adopt                       take over a Tychicus tunnel already on this machine
+local-studio tunnel off                         stop and remove the route; the Cloudflare tunnel and DNS stay
+```
 
-Whichever product sets up first owns the route it set up:
+Before a route carries a path, Local Studio checks auth there (baney75/local-studio-tunnels docs/DESIGN.md, Going live): `/mcp` answers 401 with `WWW-Authenticate` naming the resource metadata, and `/v1/health` answers 200 for the route's hostname and 403 for any other Host. It registers the hostname with `local-studio-serve allow-tunnel-host <name>`. The Cloudflare route uses the pinned, verified cloudflared, the same release and digests as Tychicus's download, and reuses Tychicus's copy when its digest matches.
 
-- **hosted**: Local Studio core (`core/src/tunnel.rs`). The service sets the ingress from the record's two ports; `PUT /v1/tunnel/ports` changes them.
-- **cloudflare** and **tailnet**: Tychicus `remote setup --cloudflare <name>` or `--tailnet`. Tychicus already has the pinned and verified cloudflared, the Cloudflare sign-in, DNS and the service units. `local-studio tunnel byo` runs it.
-- Tychicus's Funnel route (`--tailscale`, port 8443) opens the whole port, so it can't keep to exact paths. Local Studio doesn't join it; docs/remote.md keeps Funnel off the local listener.
+## Tychicus joins
 
-## The second product joins
+`tychicus remote join` reads the record, stops any tunnel of its own without deleting it, and serves on `ports.mcp` with `https://<hostname>` as its public address, answering OAuth on each alias too. On a machine with Local Studio, `tychicus remote setup` runs `local-studio tunnel setup` and then joins. On a machine without Local Studio, Tychicus keeps its own `remote setup` with the same exact paths.
 
-- Local Studio finds a Tychicus record: `local-studio tunnel attach` sets `ports.serve` and runs `tychicus remote reload`, which re-renders the ingress and restarts the tunnel. On failure the record goes back as it was. `local-studio-serve` then runs with `--allow-tunnel-host <hostname>` (Cloudflare) or `--allow-host <hostname>` (tailnet).
-- Tychicus finds a Local Studio hosted record: `remote setup` starts no tunnel. It saves the `custom` route with `https://<hostname>` and serves on `ports.mcp`.
-- Neither starts a second tunnel: `local-studio tunnel request` refuses while a Tychicus route exists, and Tychicus refuses `--cloudflare` or `--tailnet` while a hosted route exists.
-
-Both products check auth before a route carries their paths (baney75/local-studio-tunnels docs/DESIGN.md, Going live): `/mcp` answers 401 with `WWW-Authenticate` naming the resource metadata, and `/v1/health` answers for the route's hostname and 403 for any other Host.
+`local-studio tunnel adopt` moves a Tychicus tunnel to Local Studio without a gap: it keeps the tunnel and its credentials, adds the new hostname, keeps the old one as an alias, starts Local Studio's service, then runs `tychicus remote join`. Any failure puts Tychicus's service back.
 
 ## Not yet
 
-- Local Studio without Tychicus can't make a bring-your-own route: `tunnel byo` needs the Tychicus plugin.
 - The hosted route waits on Donovan's choice of a Cloudflare account and domain (`STABLE_SERVICE`).
+- Tychicus's Funnel route (port 8443) opens the whole port, so it can't keep to exact paths; Local Studio doesn't use Funnel.
