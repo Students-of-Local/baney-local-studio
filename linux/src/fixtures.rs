@@ -314,6 +314,7 @@ fn projects() -> Vec<Project> {
             path: project_id(name),
             icon: None,
             is_git: true,
+            machine: None,
         })
         .collect()
 }
@@ -344,6 +345,7 @@ fn row(id: &str, project: &str, title: &str, shelf: Shelf, status: ThreadStatus,
         fan_out: None,
         pull_request: None,
         harness: Harness::Eukhe,
+        machine: None,
     }
 }
 

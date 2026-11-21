@@ -244,6 +244,8 @@ final class StudioStore {
             }
         case .notice(let level, let text):
             post(level, text)
+        case .machines, .pairing:
+            break
         }
     }
 }

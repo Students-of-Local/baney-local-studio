@@ -102,6 +102,8 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ComposerText { .. }
         | Update::Models { .. }
         | Update::DaemonDefault { .. }
+        | Update::Machines { .. }
+        | Update::Pairing { .. }
         | Update::Commands { .. }
         | Update::Skills { .. }
         | Update::Subagents { .. }

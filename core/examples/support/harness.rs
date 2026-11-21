@@ -190,6 +190,8 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Queue { .. }
         | Update::ComposerText { .. }
         | Update::DaemonDefault { .. }
+        | Update::Machines { .. }
+        | Update::Pairing { .. }
         | Update::Subagents { .. }
         | Update::MessageImage { .. }
         | Update::Notification { .. }

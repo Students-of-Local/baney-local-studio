@@ -57,6 +57,7 @@ const KILL_TIMEOUT_MS: u64 = 15_000;
 const DELIVERY_SLACK_MS: i64 = 2_000;
 
 mod cli;
+mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -99,11 +100,19 @@ pub trait Waker: Send + Sync {
 
 pub(crate) struct Mailbox {
     updates: Mutex<Vec<Update>>,
+    rows: Mutex<remote::Rows>,
     waker: Arc<dyn Waker>,
 }
 
 impl Mailbox {
     pub(crate) fn push(&self, update: Update) {
+        match update {
+            Update::Projects { projects } => self.local_projects(projects),
+            update => self.enqueue(update),
+        }
+    }
+
+    fn enqueue(&self, update: Update) {
         let was_empty = {
             let mut updates = self.updates.lock().unwrap_or_else(PoisonError::into_inner);
             let was_empty = updates.is_empty();
@@ -120,6 +129,10 @@ impl Mailbox {
     }
 
     fn push_threads(&self, threads: Vec<ThreadRow>) {
+        self.local_threads(threads);
+    }
+
+    fn queue_threads(&self, threads: Vec<ThreadRow>) {
         let was_empty = {
             let mut updates = self.updates.lock().unwrap_or_else(PoisonError::into_inner);
             updates.retain(|update| !matches!(update, Update::Threads { .. }));
@@ -434,6 +447,10 @@ pub struct Studio {
     backlog: Arc<Backlog>,
     mailbox: Arc<Mailbox>,
     pub(crate) workspace: Workspace,
+    #[cfg(feature = "link")]
+    links: crate::link::client::Links,
+    #[cfg(feature = "link")]
+    data_dir: PathBuf,
     lock: Mutex<Option<std::fs::File>>,
     _runtime: tokio::runtime::Runtime,
 }
@@ -441,6 +458,7 @@ pub struct Studio {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Studio {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
+    #[allow(clippy::too_many_lines)]
     pub fn new(config: StudioConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, StudioError> {
         let socket = daemon::socket_path(config.socket_path.as_deref());
         let plugins_dir = plugins::plugins_dir(config.data_dir.as_deref());
@@ -459,7 +477,7 @@ impl Studio {
             .enable_all()
             .build()
             .map_err(|error| StudioError::Runtime { message: error.to_string() })?;
-        let mailbox = Arc::new(Mailbox { updates: Mutex::new(Vec::new()), waker });
+        let mailbox = Arc::new(Mailbox { updates: Mutex::new(Vec::new()), rows: Mutex::default(), waker });
         let (client_slot, client_watch) = watch::channel(None);
         let query = DaemonQuery::new(client_watch.clone(), session_dir.clone());
         let home = home.to_string_lossy().into_owned();
@@ -489,6 +507,10 @@ impl Studio {
         workspace.set_models_reloader(Arc::new(move |answer| {
             reloader.send(Command::LoadModels { answer });
         }));
+        #[cfg(feature = "link")]
+        let links = crate::link::client::Links::new(runtime.handle().clone(), Arc::clone(&mailbox), &data_dir);
+        #[cfg(feature = "link")]
+        let link_dir = data_dir.clone();
         let actor = Actor {
             socket,
             session_dir,
@@ -534,7 +556,18 @@ impl Studio {
             plugin_consent: Vec::new(),
         };
         runtime.spawn(actor.run(receiver, cli_events));
-        Ok(Arc::new(Self { commands, backlog, mailbox, workspace, lock: Mutex::new(Some(lock)), _runtime: runtime }))
+        Ok(Arc::new(Self {
+            commands,
+            backlog,
+            mailbox,
+            workspace,
+            #[cfg(feature = "link")]
+            links,
+            #[cfg(feature = "link")]
+            data_dir: link_dir,
+            lock: Mutex::new(Some(lock)),
+            _runtime: runtime,
+        }))
     }
 
     pub fn tick(&self) -> Vec<Update> {
@@ -542,6 +575,8 @@ impl Studio {
     }
 
     pub fn shutdown(&self) {
+        #[cfg(feature = "link")]
+        self.links.shutdown();
         self.workspace.shutdown();
         let (done, finished) = std::sync::mpsc::channel();
         if self.commands.send(Command::Shutdown { done }).is_ok() {
@@ -777,6 +812,10 @@ impl Studio {
     }
 
     fn send_command(&self, command: Command) {
+        #[cfg(feature = "link")]
+        let Some(command) = self.route(command) else {
+            return;
+        };
         self.backlog.change(&command, true);
         if let Err(mpsc::error::SendError(command)) = self.commands.send(command) {
             self.backlog.change(&command, false);

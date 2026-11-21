@@ -8,11 +8,11 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
 use crate::devices::{hex, now_ms, random, unhex};
-use crate::noise::BLOB_ID;
+use crate::noise::{BLOB_ID, REPLACED};
 use crate::ops::{self, OpError};
 
-pub const PROTOCOL: u64 = 2;
-pub const MIN_PROTOCOL: u64 = 2;
+pub use crate::noise::{MIN_PROTOCOL, PROTOCOL};
+
 const WINDOW: usize = 200;
 const PAGE_LIMIT: usize = 500;
 const REMEMBERED: usize = 1024;
@@ -39,7 +39,6 @@ const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_QUEUED_ITEMS: usize = 2 * BUFFERED;
 const MAX_QUEUED_BYTES: usize = 256 << 20;
 const FRAME_BUDGET: usize = crate::noise::MAX_JSON - 4096;
-const REPLACED: u16 = 4409;
 const SNAPSHOT: [&str; 5] = ["connection", "projects", "threads", "models", "daemon_default"];
 
 fn kept() -> Duration {
@@ -698,6 +697,15 @@ impl Hub {
 
     #[allow(clippy::too_many_lines)]
     fn on_update(&self, update: Update) {
+        let update = match update {
+            Update::Threads { threads } => {
+                Update::Threads { threads: threads.into_iter().filter(|row| row.machine.is_none()).collect() }
+            }
+            Update::Projects { projects } => Update::Projects {
+                projects: projects.into_iter().filter(|project| project.machine.is_none()).collect(),
+            },
+            update => update,
+        };
         let value = match serde_json::to_value(&update) {
             Ok(value) => value,
             Err(error) => {
@@ -705,6 +713,9 @@ impl Hub {
                 return;
             }
         };
+        if value.get("thread").and_then(Value::as_str).is_some_and(linked) {
+            return;
+        }
         let kind = value.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
         let mut state = self.state();
         match update {
@@ -1012,6 +1023,9 @@ impl Hub {
     }
 
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
+        if linked(thread) {
+            return Err(OpError::new("not_remote", "this machine does not serve threads it reaches over a link"));
+        }
         let mut state = self.state();
         let session = state.live(device, conn)?;
         if session.watching.contains(thread) {
@@ -1067,7 +1081,11 @@ impl Hub {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<bool, OpError> {
+        if ["thread", "project"].iter().any(|key| args.get(key).and_then(Value::as_str).is_some_and(linked)) {
+            return Err(OpError::new("not_remote", "this machine does not serve threads it reaches over a link"));
+        }
         let mut state = self.state();
         state.live(device, conn)?;
         if args.get("thread").and_then(Value::as_str).is_some_and(|thread| thread.len() > MAX_ID) {
@@ -1272,6 +1290,10 @@ impl Hub {
         upload.at = Instant::now();
         Ok(Some(json!({ "re": ack, "ok": true })))
     }
+}
+
+fn linked(id: &str) -> bool {
+    id.starts_with('@')
 }
 
 fn kind_of_file(value: &Value) -> &str {

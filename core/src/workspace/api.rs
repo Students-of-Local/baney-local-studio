@@ -15,46 +15,98 @@ pub fn terminal_preview(cols: u16, rows: u16, data: Vec<u8>) -> Option<TerminalF
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Studio {
     pub fn git_status(&self, project: String) {
+        #[cfg(feature = "link")]
+        if self.forward("git_status", &project, serde_json::json!({}), None) {
+            return;
+        }
         self.workspace.git_status(project);
     }
 
     pub fn list_branches(&self, request: String, project: String, query: String, limit: u32) {
+        if self.on_machine(&project, "Branches", Some(request.clone())) {
+            return;
+        }
         self.workspace.list_branches(request, project, query, limit);
     }
 
     pub fn create_worktree(&self, request: String, project: String, branch: String, base: Option<String>) {
+        if self.on_machine(&project, "Creating a worktree", Some(request.clone())) {
+            return;
+        }
         self.workspace.create_worktree(request, project, branch, base);
     }
 
     pub fn load_diff(&self, request: String, project: String, scope: DiffScope) {
+        #[cfg(feature = "link")]
+        if self.forward(
+            "load_diff",
+            &project,
+            serde_json::json!({ "request": request, "scope": scope }),
+            Some(request.clone()),
+        ) {
+            return;
+        }
         self.workspace.load_diff(request, project, scope);
     }
 
     pub fn commit(&self, request: String, project: String, message: Option<String>) {
+        if self.on_machine(&project, "Committing", Some(request.clone())) {
+            return;
+        }
         self.workspace.commit(request, project, message);
     }
 
     pub fn push(&self, request: String, project: String) {
+        if self.on_machine(&project, "Pushing", Some(request.clone())) {
+            return;
+        }
         self.workspace.push_branch(request, project);
     }
 
     pub fn create_pull_request(&self, request: String, project: String, title: String, body: String, draft: bool) {
+        if self.on_machine(&project, "Opening a pull request", Some(request.clone())) {
+            return;
+        }
         self.workspace.create_pull_request(request, project, title, body, draft);
     }
 
     pub fn list_pull_requests(&self, request: String, project: String) {
+        #[cfg(feature = "link")]
+        if self.forward(
+            "list_pull_requests",
+            &project,
+            serde_json::json!({ "request": request }),
+            Some(request.clone()),
+        ) {
+            return;
+        }
         self.workspace.list_pull_requests(request, project);
     }
 
     pub fn load_pull_request(&self, request: String, project: String, number: u64) {
+        #[cfg(feature = "link")]
+        if self.forward(
+            "load_pull_request",
+            &project,
+            serde_json::json!({ "request": request, "number": number }),
+            Some(request.clone()),
+        ) {
+            return;
+        }
         self.workspace.load_pull_request(request, project, number);
     }
 
     pub fn pull(&self, request: String, project: String) {
+        if self.on_machine(&project, "Pulling", Some(request.clone())) {
+            return;
+        }
         self.workspace.pull(request, project);
     }
 
     pub fn publish_repository(&self, request: String, project: String, name: String, private: bool) {
+        if self.on_machine(&project, "Publishing a repository", Some(request.clone())) {
+            return;
+        }
         self.workspace.publish_repository(request, project, name, private);
     }
 
@@ -71,22 +123,37 @@ impl Studio {
     }
 
     pub fn list_directory(&self, request: String, project: String, relative: String) {
+        if self.on_machine(&project, "Browsing files", Some(request.clone())) {
+            return;
+        }
         self.workspace.list_directory(request, project, relative);
     }
 
     pub fn read_file(&self, request: String, project: String, relative: String) {
+        if self.on_machine(&project, "Reading files", Some(request.clone())) {
+            return;
+        }
         self.workspace.read_file(request, project, relative);
     }
 
     pub fn search_files(&self, request: String, project: String, query: String, limit: u32) {
+        if self.on_machine(&project, "Searching files", Some(request.clone())) {
+            return;
+        }
         self.workspace.search_files(request, project, query, limit);
     }
 
     pub fn search_text(&self, request: String, project: String, query: String, limit: u32) {
+        if self.on_machine(&project, "Searching text", Some(request.clone())) {
+            return;
+        }
         self.workspace.search_text(request, project, query, limit);
     }
 
     pub fn open_terminal(&self, request: String, project: String, cols: u16, rows: u16) {
+        if self.on_machine(&project, "Terminals", Some(request.clone())) {
+            return;
+        }
         self.workspace.open_terminal(request, project, cols, rows);
     }
 
@@ -201,34 +268,58 @@ impl Studio {
     }
 
     pub fn load_project_settings(&self, project: String) {
+        if self.on_machine(&project, "Project settings", None) {
+            return;
+        }
         self.workspace.load_project_settings(project);
     }
 
     pub fn set_project_scripts(&self, project: String, scripts: Vec<ProjectScript>) {
+        if self.on_machine(&project, "Project scripts", None) {
+            return;
+        }
         self.workspace.set_project_scripts(project, scripts);
     }
 
     pub fn import_project_scripts(&self, request: String, project: String) {
+        if self.on_machine(&project, "Project scripts", Some(request.clone())) {
+            return;
+        }
         self.workspace.import_project_scripts(request, project);
     }
 
     pub fn run_project_script(&self, request: String, project: String, script: String) {
+        if self.on_machine(&project, "Project scripts", Some(request.clone())) {
+            return;
+        }
         self.workspace.run_project_script(request, project, script);
     }
 
     pub fn update_project_settings(&self, project: String, settings: ProjectSettings) {
+        if self.on_machine(&project, "Project settings", None) {
+            return;
+        }
         self.workspace.update_project_settings(project, settings);
     }
 
     pub fn cancel_worktree_setup(&self, thread: String) {
+        if self.on_machine(&thread, "Worktree setup", None) {
+            return;
+        }
         self.workspace.cancel_worktree_setup(thread);
     }
 
     pub fn skip_worktree_setup(&self, thread: String) {
+        if self.on_machine(&thread, "Worktree setup", None) {
+            return;
+        }
         self.workspace.skip_worktree_setup(thread);
     }
 
     pub fn checkout_pull_request(&self, request: String, project: String, number: u64) {
+        if self.on_machine(&project, "Checking out a pull request", Some(request.clone())) {
+            return;
+        }
         self.workspace.checkout_pull_request(request, project, number);
     }
 
@@ -237,6 +328,9 @@ impl Studio {
     }
 
     pub fn merge_pull_request(&self, request: String, project: String, number: u64, method: Option<MergeMethod>) {
+        if self.on_machine(&project, "Merging a pull request", Some(request.clone())) {
+            return;
+        }
         self.workspace.merge_pull_request(request, project, number, method);
     }
 

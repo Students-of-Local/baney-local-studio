@@ -1,11 +1,12 @@
 use std::fmt;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+
+use crate::platform::Mode;
 
 pub const PAIRING_TTL_MS: i64 = 10 * 60 * 1000;
 pub const KEY_BYTES: usize = 32;
@@ -32,10 +33,11 @@ impl fmt::Debug for StaticKey {
 
 pub fn random<const N: usize>() -> anyhow::Result<[u8; N]> {
     let mut bytes = [0u8; N];
-    getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("get random bytes: {error}"))?;
+    getrandom::getrandom(&mut bytes).map_err(|error| anyhow::anyhow!("get random bytes: {error}"))?;
     Ok(bytes)
 }
 
+#[must_use]
 pub fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -46,6 +48,7 @@ pub fn hex(bytes: &[u8]) -> String {
     text
 }
 
+#[must_use]
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -53,6 +56,7 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
     (0..text.len()).step_by(2).map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok()).collect()
 }
 
+#[must_use]
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -115,6 +119,7 @@ impl Drop for Held {
 }
 
 impl Devices {
+    #[must_use]
     pub fn new(data_dir: &Path) -> Self {
         let folder = data_dir.join("remote");
         Self {
@@ -128,7 +133,7 @@ impl Devices {
 
     fn hold(&self) -> anyhow::Result<Held> {
         std::fs::create_dir_all(&self.folder).with_context(|| format!("create {}", self.folder.display()))?;
-        std::fs::set_permissions(&self.folder, std::fs::Permissions::from_mode(0o700))
+        crate::platform::set_mode(&self.folder, 0o700)
             .with_context(|| format!("restrict {}", self.folder.display()))?;
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -175,7 +180,7 @@ impl Devices {
         let _held = self.hold()?;
         match std::fs::read(&self.key) {
             Ok(bytes) => {
-                let mode = std::fs::metadata(&self.key)?.permissions().mode() & 0o777;
+                let mode = crate::platform::mode(&std::fs::metadata(&self.key)?);
                 if mode & 0o077 != 0 {
                     bail!("{} is readable by others (mode {mode:o}); it must be 0600", self.key.display());
                 }
@@ -186,7 +191,7 @@ impl Devices {
                 Ok(StaticKey { private: private.to_vec(), public: public.to_vec() })
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let params = crate::noise::KK.parse()?;
+                let params = super::noise::KK.parse()?;
                 let pair = snow::Builder::new(params).generate_keypair()?;
                 let mut bytes = pair.private.clone();
                 bytes.extend_from_slice(&pair.public);
@@ -326,7 +331,7 @@ pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
         .mode(0o600)
         .open(&staging)
         .and_then(|mut file| {
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            crate::platform::set_mode(&staging, 0o600)?;
             file.write_all(contents)?;
             file.sync_all()
         })
