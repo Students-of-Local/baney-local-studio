@@ -2,6 +2,7 @@
 
 use zig.nu toolchain
 use ../eukhe.nu
+use icon.nu
 
 def developer-dir []: nothing -> string {
     if ($env.DEVELOPER_DIR? | is-not-empty) {
@@ -21,9 +22,18 @@ def compile-icon [package: path, resources: path] {
     let partial = (mktemp -t "local-studio-icon.XXXXXX")
     let result = (do { ^xcrun actool ($package | path join "AppIcon.icon") --compile $resources --platform macosx --minimum-deployment-target 26.0 --app-icon AppIcon --output-partial-info-plist $partial --output-format human-readable-text } | complete)
     rm -f $partial
-    if $result.exit_code != 0 or not ($resources | path join "Assets.car" | path exists) {
+    if $result.exit_code == 0 and ($resources | path join "Assets.car" | path exists) {
+        return
+    }
+    let prebuilt = ($package | path join "AppIcon.prebuilt")
+    if not ($prebuilt | path join "source.sha256" | path exists) {
         error make { msg: $"actool could not compile AppIcon.icon \(needs Xcode 26+; run `sudo xcodebuild -runFirstLaunch` once\):\n($result.stdout)($result.stderr)" }
     }
+    if (open --raw ($prebuilt | path join "source.sha256") | str trim) != (icon source-hash $package) {
+        error make { msg: $"actool could not compile AppIcon.icon, and macos/AppIcon.prebuilt is from an older icon; run `nu macos/icon.nu` with an Xcode whose actool compiles it:\n($result.stdout)($result.stderr)" }
+    }
+    print -e $"warning: actool could not compile AppIcon.icon \(Xcode 26.6 crashes on it, #27\); using macos/AppIcon.prebuilt"
+    cp ($prebuilt | path join "Assets.car") ($prebuilt | path join "AppIcon.icns") $resources
 }
 
 def build-kit [repo: path, package: path, profile: string] {

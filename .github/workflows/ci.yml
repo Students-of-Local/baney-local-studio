@@ -82,7 +82,7 @@ jobs:
         run: PATH="$(nu macos/zig.nu):$PATH" cargo build -p local-studio-core -p local-studio-kit
 
   macos-app:
-    name: macOS app (not blocking)
+    name: macOS app
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,8 +102,6 @@ jobs:
           echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
           xcodebuild -version
       - name: App (Debug)
-        # actool in Xcode 26.6, the newest on macos-26, crashes on macos/AppIcon.icon (#27); this records it without blocking.
-        continue-on-error: true
         run: nu macos/build.nu
 
   ios-app:
