@@ -14,10 +14,12 @@ Every run isolates its state. `HOME`, `EUKHE_DAEMON_SOCKET`, `EUKHE_CODING_AGENT
 | iPhone client library against real serve | Verified | ServeInteropTests on the Mac host |
 | iPhone app to Parish1 over the tailnet | Verified | `ios/tools/smoke.sh` in the simulator, Claude Code on Parish1 |
 | Machines UI (macOS, Linux) | Snapshots only | Settings › Connections, pairing sheet, sidebar rows |
-| Serve as a service on Linux | Deployed | Parish1, systemd user unit, `install --tailscale` |
+| Serve as a service on Linux | Deployed | Parish1, systemd user unit, `install --tailscale`, serve at a5f3c5b79 |
 | Serve as a service on macOS, handoff with the app | Verified | The Mac, launchd agent, `install --tailscale` |
 | The app serving while it runs | Verified | The Mac, app launched after `serve.json` existed |
-| The app starting to serve when `serve.json` appears later | Verified headless | `host_watch` (#56); not yet on the installed app |
+| The app starting to serve when `serve.json` appears later | Verified | The Mac, installed app at a5f3c5b79 (#56) |
+| Projects on a headless machine | Deployed | Parish1, `local-studio-serve project add` (#59) |
+| Project requests answered by the app | Verified | The Mac, installed app at a5f3c5b79 |
 | Mac to Parish1 over the tailnet, core link client | Verified | link_probe, Claude Code haiku on Parish1 |
 | Mac to Parish1 over the tailnet, app screens | Not run | Polycarp computer use was down; steps below |
 | Mac to Parish1 over the shared tunnel | Not run yet | Waits for the tunnel |
@@ -146,6 +148,24 @@ local-studio-serve install --tailscale --name <mac> --bin ~/.local/opt/local-stu
 - App launched: it sent `SIGUSR1`. Serve closed every remote socket with 1012, released the lock, and logged that the app took it over. The app owned the data dir about 40 s after launch, with the Mac's load average around 300, and serve went back to waiting.
 - The relaunched app served in process: it listened on 18093, `status --json` reported `serving` with the app as owner, and health over the tailnet answered from the Mac and from Parish1.
 - Gap (#53): the first app instance was already running when `install` wrote `serve.json`. It owned the lock but served nothing, because the app checks for `serve.json` only at launch. The Mac was unreachable until that app quit.
+
+### Redeploy at a5f3c5b79 (#56 and #59)
+
+2026-11-21. Serve and the app were rebuilt from main at a5f3c5b79.
+
+- Parish1: the new serve binary was copied into place and the user unit restarted. `status --json` reported `serving`, and health answered over the tailnet. The hand-seeded project was replaced through the running service: `project remove ~/local-studio-probe` printed `removed`, `project add ~/local-studio-probe` printed `added`, and `project list` showed it, each exiting 0.
+- The Mac, serve: the launchd agent was restarted on the new binary with the old app still open. It waited, and `status --json` reported `owned` by the app. `project list` printed `queued` and exited 2, since that app predates #59 and never answers (#62).
+- The Mac, app: swapped while idle. While it was closed, serve owned the data dir and served. The new app took the data dir back and served on 18093.
+- `project list` through the new app printed `listed` and exited 0. The Mac has no `state.json`, so 0 projects is the right answer.
+- #53 on the installed app: with the app running, moving `serve.json` away made 18093 refuse within 1 s; restoring the same file made it serve again within 1.5 s. The launchd agent kept waiting throughout, and health over the tailnet answered afterward.
+
+### Redeploy at 40ecae022 (#69)
+
+2026-11-21. Serve was rebuilt from main at 40ecae022. The app was not rebuilt, since #69 changes only the CLI.
+
+- Parish1: the new serve binary was copied into place and the user unit restarted. `status --json` reported `serving`, and `project list` printed `listed` with the probe project, exiting 0.
+- The Mac: the launchd agent was restarted on the new binary with the app open. It waited while the app served, `status --json` named the app as the owner, `project list` printed `listed` and exited 0, and health on 18093 answered.
+- The case #62 reported, an owner that holds the lock but never answers a list, was checked live before merge with a frozen serve (`kill -STOP`): `list` exited 0 with the projects from `state.json` and removed its own request (#69).
 
 ## Machines UI
 

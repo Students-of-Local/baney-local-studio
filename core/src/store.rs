@@ -59,6 +59,8 @@ pub(crate) struct ThreadFlags {
     pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) local_only: Option<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

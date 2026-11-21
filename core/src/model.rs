@@ -776,6 +776,12 @@ pub enum Update {
     Kernel {
         state: KernelState,
     },
+    LocalOnly {
+        thread: String,
+        plugin: String,
+        message: String,
+        local: Option<ModelKey>,
+    },
     RequestDone {
         request: String,
         message: String,

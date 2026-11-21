@@ -39,7 +39,7 @@ pub use studio::{
     process_name, serve_holds_lock, DaemonLaunch, Studio, StudioConfig, StudioError, Subscription, Waker,
 };
 pub use workspace::model::*;
-pub use workspace::{endpoint_presets, terminal_preview};
+pub use workspace::{configured_providers, endpoint_presets, terminal_preview, Provider};
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 #[must_use]
