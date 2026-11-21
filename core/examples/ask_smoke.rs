@@ -670,8 +670,19 @@ fn saved_token(paths: &Paths, thread: &str) -> anyhow::Result<String> {
 fn drive(harness: &mut Harness, model: &Model, paths: &Paths) -> anyhow::Result<String> {
     let thread = first_turn(harness, model, paths)?;
     squat_turn(harness, model, paths, &thread)?;
-    harness.studio.shutdown();
-    harness.studio = open_studio(paths, &harness.signal)?;
+    let deadline = Instant::now() + STEP;
+    harness.studio = loop {
+        harness.studio.shutdown();
+        harness.drain()?;
+        match open_studio(paths, &harness.signal) {
+            Ok(studio) => break studio,
+            Err(error) if Instant::now() < deadline => {
+                println!("     the old core still holds the data dir: {error}");
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(error) => return Err(error),
+        }
+    };
     harness.view.connection = None;
     harness.pump_until("a new Studio on the same data dir connected", STEP, |view| {
         matches!(view.connection, Some(Connection::Ready))
