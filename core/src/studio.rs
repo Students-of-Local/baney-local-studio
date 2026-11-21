@@ -168,6 +168,7 @@ fn remembered(update: &Update) -> bool {
             | Update::Threads { .. }
             | Update::Models { .. }
             | Update::DaemonDefault { .. }
+            | Update::Consents { .. }
     )
 }
 

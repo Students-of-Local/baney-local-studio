@@ -90,6 +90,13 @@ fn main() -> anyhow::Result<()> {
             for row in &sheet.rows {
                 println!("ROW {} | {} | {} | {}", row.id, row.sentence, row.scope, row.gates.as_deref().unwrap_or("-"));
             }
+            // A subscriber that joins after the sheet was raised, like the Remote hub after serve.json
+            // appears, must get it in its first batch.
+            let late = studio.subscribe(Arc::new(Signal::default()) as Arc<dyn Waker>);
+            let replayed = late.tick().into_iter().any(|update| {
+                matches!(update, Update::Consents { consents } if consents.iter().any(|sheet| sheet.request == request))
+            });
+            println!("LATE {}", if replayed { "sees the sheet" } else { "misses the sheet" });
             let answer = match answer.split_once(':') {
                 _ if answer == "cancel" => ConsentAnswer::Cancel,
                 Some(("install", on)) => {

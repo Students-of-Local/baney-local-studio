@@ -591,6 +591,11 @@ else
   else
     fail "#14 a new install lists every capability, needed and sensitive, with the scan finding"
   fi
+  if echo "$out" | grep -q '^LATE sees the sheet$'; then
+    pass "#14 a subscriber that joins after the sheet was raised (the Remote hub) gets it"
+  else
+    fail "#14 a subscriber that joins after the sheet was raised (the Remote hub) gets it"
+  fi
   leftovers=$(find "$D/plugins" -mindepth 1 -maxdepth 1 ! -name grants.json | wc -l | tr -d ' ')
   echo "  after Cancel: grants $(granted sheet), entries in the plugins folder besides grants.json: $leftovers"
   if echo "$out" | grep -q '^DONE ' && [ "$(granted sheet)" = none ] && [ "$leftovers" = 0 ]; then
