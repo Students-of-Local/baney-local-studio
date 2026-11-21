@@ -11,12 +11,12 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use local_studio_core::link::snow::{self, TransportState};
 use local_studio_core::{
     AccessMode, Approval, Connection, DaemonLaunch, Delivery, Item, ItemKind, PromptDraft, Studio, StudioConfig,
     ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
-use snow::TransportState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
@@ -3253,7 +3253,7 @@ fn usage_check(eukhe: &Path, data: &Path, model: &Target) -> anyhow::Result<()> 
 #[allow(clippy::too_many_lines)]
 async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::Result<()> {
     run.serve.start(eukhe, &run.hook.clone())?;
-    transport_checks(run, eukhe).await?;
+    Box::pin(transport_checks(run, eukhe)).await?;
     let a_phone = Phone::new("phone-a", "Smoke Phone A")?;
     let mut a = pairing_checks(run, &a_phone).await?;
     op_checks(run, &mut a).await?;
@@ -3262,8 +3262,8 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let c = pair(run, &c_phone).await?;
     let mut c = partial_upload(run, &c_phone, c).await?;
     let a = resume_checks(run, a, &a_phone, &mut c).await?;
-    let a = limit_checks(run, a, &a_phone).await?;
-    let mut a = listener_checks(run, a, &a_phone).await?;
+    let a = Box::pin(limit_checks(run, a, &a_phone)).await?;
+    let mut a = Box::pin(listener_checks(run, a, &a_phone)).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
     duplicate_replay(&mut a).await?;
@@ -3303,7 +3303,7 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     }
     let c = if step("writer") {
         drop(c);
-        let c = writer_abort(run, &c_phone).await?;
+        let c = Box::pin(writer_abort(run, &c_phone)).await?;
         revoke_blocked(run).await?;
         c
     } else {
@@ -3401,7 +3401,7 @@ async fn main() -> anyhow::Result<()> {
         epoch: String::new(),
         report: Vec::new(),
     };
-    let outcome = drive(&mut run, &eukhe, model.as_ref()).await;
+    let outcome = Box::pin(drive(&mut run, &eukhe, model.as_ref())).await;
     if outcome.is_err() {
         println!("     serve log tail:\n{}", run.serve.log_tail());
     }

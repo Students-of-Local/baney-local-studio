@@ -15,7 +15,7 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
-local-studio-core = { workspace = true, features = ["ffi"] }
+local-studio-core = { workspace = true, features = ["ffi", "link"] }
 uniffi = { workspace = true, features = ["cli"] }
 
 [lints]

@@ -211,6 +211,8 @@ impl Harness {
             | Update::TerminalExited { .. }
             | Update::Local { .. }
             | Update::DaemonDefault { .. }
+            | Update::Machines { .. }
+            | Update::Pairing { .. }
             | Update::LocalDashboard { .. }
             | Update::Providers { .. }
             | Update::ProviderModels { .. }

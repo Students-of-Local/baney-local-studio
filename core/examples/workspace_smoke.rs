@@ -290,6 +290,8 @@ impl Harness {
             | Update::ComposerText { .. }
             | Update::Models { .. }
             | Update::DaemonDefault { .. }
+            | Update::Machines { .. }
+            | Update::Pairing { .. }
             | Update::Commands { .. }
             | Update::Notification { .. }
             | Update::ArchivedThreads { .. }

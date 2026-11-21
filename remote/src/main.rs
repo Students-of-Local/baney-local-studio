@@ -1,21 +1,18 @@
 mod access;
-mod devices;
 mod hub;
 mod limits;
-mod noise;
 mod ops;
 mod server;
 
-use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
-use base64::Engine;
+use local_studio_core::link::{devices, noise, pairing};
 use local_studio_core::{DaemonLaunch, Studio, StudioConfig};
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::net::TcpListener;
 
 use crate::devices::{now_ms, Devices};
@@ -23,7 +20,6 @@ use crate::hub::Hub;
 use crate::limits::Gate;
 use crate::server::Server;
 
-const DEFAULT_PORT: u16 = 18093;
 const VERSION: &str = env!("LOCAL_STUDIO_BUILD_VERSION");
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 
@@ -65,7 +61,8 @@ impl Args {
     }
 
     fn port(&mut self) -> anyhow::Result<u16> {
-        self.take("--port")?.map_or(Ok(DEFAULT_PORT), |port| port.parse().with_context(|| format!("--port {port}")))
+        self.take("--port")?
+            .map_or(Ok(pairing::DEFAULT_PORT), |port| port.parse().with_context(|| format!("--port {port}")))
     }
 
     fn data_dir(&mut self) -> anyhow::Result<PathBuf> {
@@ -96,18 +93,6 @@ fn run() -> anyhow::Result<()> {
         }
         other => bail!("unknown command {other}\n{USAGE}"),
     }
-}
-
-fn host_name() -> String {
-    std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "local-studio".to_string())
 }
 
 async fn stopped() {
@@ -142,7 +127,7 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
         .take("--eukhe")?
         .or_else(|| std::env::var("EUKHE_BIN").ok().filter(|value| !value.is_empty()))
         .map(|program| DaemonLaunch { program });
-    let name = args.take("--name")?.unwrap_or_else(host_name);
+    let name = args.take("--name")?.unwrap_or_else(pairing::host_name);
     let data_dir = args.data_dir()?;
     args.done()?;
     if urls.is_empty() {
@@ -199,46 +184,14 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
     served
 }
 
-fn tailscale_url() -> Option<String> {
-    let output = std::process::Command::new("tailscale").args(["status", "--json"]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let status: Value = serde_json::from_slice(&output.stdout).ok()?;
-    let name = status.pointer("/Self/DNSName")?.as_str()?.trim_end_matches('.');
-    (!name.is_empty()).then(|| format!("wss://{name}/v1/ws"))
-}
-
-fn encode(text: &str) -> String {
-    let mut encoded = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            write!(encoded, "%{byte:02X}").ok();
-        }
-    }
-    encoded
-}
-
-fn scheme(channel: &str) -> String {
-    match channel {
-        "stable" | "" => "localstudio".to_string(),
-        other => format!("localstudio-{other}"),
-    }
-}
-
 fn pair(mut args: Args) -> anyhow::Result<()> {
     let port = args.port()?;
     let url = args.take("--url")?;
-    let name = args.take("--name")?.unwrap_or_else(host_name);
+    let name = args.take("--name")?.unwrap_or_else(pairing::host_name);
     let data_dir = args.data_dir()?;
     args.done()?;
-    let url = url.or_else(tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{port}/v1/ws"));
-    let devices = Devices::new(&data_dir);
-    let (id, secret, _) = devices.open_pairing()?;
-    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.0);
-    let link = format!("{}://pair?url={}&name={}&id={id}#{secret}", scheme(CHANNEL), encode(&url), encode(&name));
+    let url = url.or_else(pairing::tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{port}/v1/ws"));
+    let pairing::Minted { link, url, .. } = pairing::mint(&data_dir, CHANNEL, Some(url), Some(name))?;
     let code = qrcode::QrCode::new(link.as_bytes())?;
     let picture = code
         .render::<qrcode::render::unicode::Dense1x2>()

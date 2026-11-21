@@ -34,6 +34,17 @@ impl Mode for DirBuilder {
     }
 }
 
+#[cfg(all(unix, feature = "link"))]
+pub(crate) fn mode(metadata: &Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(all(windows, feature = "link"))]
+pub(crate) fn mode(_metadata: &Metadata) -> u32 {
+    0o600
+}
+
 #[cfg(unix)]
 pub(crate) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;

@@ -280,6 +280,8 @@ impl Harness {
             | Update::ProjectSettings { .. }
             | Update::WorktreeSetup { .. }
             | Update::DaemonDefault { .. }
+            | Update::Machines { .. }
+            | Update::Pairing { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
             | Update::LocalDashboard { .. } => {}

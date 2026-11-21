@@ -274,6 +274,7 @@ pub(crate) fn project_record(project: &StoredProject) -> Project {
         path: project.path.clone(),
         icon: project.icon.clone(),
         is_git: git_dir(Path::new(&project.path)).is_some(),
+        machine: None,
     }
 }
 
@@ -378,6 +379,7 @@ pub(crate) fn row(
             fan_out: flags.fan_out.clone(),
             pull_request: facts.pull_request,
             harness: facts.harness,
+            machine: None,
         },
         key,
     )
