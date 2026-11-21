@@ -8,7 +8,7 @@ use crate::model::{CommandKind, SlashCommand};
 
 mod grants;
 mod install;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 pub use grants::{Consent, Grants, GRANTS};
