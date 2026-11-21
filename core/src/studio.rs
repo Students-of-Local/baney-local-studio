@@ -408,6 +408,10 @@ enum Command {
         request: String,
         answer: ConsentAnswer,
     },
+    PluginsDone {
+        request: String,
+        outcome: Result<String, String>,
+    },
     ListArchived {
         request: String,
     },
@@ -1543,6 +1547,13 @@ impl Actor {
             }
             Command::InstallPlugin { request, source } => self.install_plugin(request, source),
             Command::AnswerConsent { request, answer } => self.answer_consent(request, answer),
+            Command::PluginsDone { request, outcome } => {
+                self.plugins();
+                self.mailbox.push(match outcome {
+                    Ok(message) => Update::RequestDone { request, message },
+                    Err(message) => Update::RequestFailed { request, message },
+                });
+            }
             Command::ListSkills { request, project } => {
                 let update = match self.project_resources(project).await {
                     Ok(resources) => Update::Skills { request, skills: resources.skills() },
@@ -2423,9 +2434,11 @@ impl Actor {
             self.mailbox.push(Update::RequestFailed { request, message: "No plugins folder: HOME is not set".into() });
             return;
         };
-        let (consents, mailbox) = (Arc::clone(&self.consents), Arc::clone(&self.mailbox));
+        let (consents, mailbox, itself) = (Arc::clone(&self.consents), Arc::clone(&self.mailbox), self.itself.clone());
         tokio::task::spawn_blocking(move || match plugins::offer_install(&root, &source, request.clone()) {
-            Ok(plugins::Offer::Installed(message)) => Self::plugins_done(&root, &mailbox, request, Ok(message)),
+            Ok(plugins::Offer::Installed(message)) => {
+                itself.send(Command::PluginsDone { request, outcome: Ok(message) });
+            }
             Ok(plugins::Offer::Ask(pending)) => {
                 let mut pendings = consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if pendings.push(*pending) {
@@ -2448,31 +2461,19 @@ impl Actor {
             self.mailbox.notice(NoticeLevel::Info, "That permission sheet is no longer open.");
             return;
         };
-        let mailbox = Arc::clone(&self.mailbox);
         match answer {
             ConsentAnswer::Cancel => {
                 let message = format!("Nothing installed or granted for {}", pending.request().name);
                 drop(pending);
-                mailbox.push(Update::RequestDone { request, message });
+                self.mailbox.push(Update::RequestDone { request, message });
             }
             ConsentAnswer::Install { sensitive } => {
+                let itself = self.itself.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = plugins::answer(&root, pending, &sensitive);
-                    Self::plugins_done(&root, &mailbox, request, outcome);
+                    itself.send(Command::PluginsDone { request, outcome });
                 });
             }
-        }
-    }
-
-    fn plugins_done(root: &std::path::Path, mailbox: &Mailbox, request: String, outcome: Result<String, String>) {
-        match outcome {
-            Ok(message) => {
-                if let Some(Err(error)) = crate::daemon::agent_dir().map(|agent| plugins::sync_agent(root, &agent)) {
-                    mailbox.notice(NoticeLevel::Warning, format!("Plugins: {error}"));
-                }
-                mailbox.push(Update::RequestDone { request, message });
-            }
-            Err(message) => mailbox.push(Update::RequestFailed { request, message }),
         }
     }
 

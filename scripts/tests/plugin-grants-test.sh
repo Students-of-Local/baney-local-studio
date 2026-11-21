@@ -616,7 +616,7 @@ else
   sheeted 2.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets", "synthetic-input"'
   out=$(drive "$S/src/sheet" install:site-secrets)
   version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
-  echo "  Install with site-secrets on a sheet that lists only synthetic-input: $(echo "$out" | tail -1); installed $version"
+  echo "  Install with site-secrets on a sheet that lists only synthetic-input: $(echo "$out" | grep "^FAILED"); installed $version"
   if echo "$out" | grep -q '^FAILED .*not a sensitive permission this sheet asked for' && [ "$version" = 1.0.0 ] \
     && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ]; then
     pass "#14 a sensitive id the sheet did not list is refused and installs nothing"
@@ -653,6 +653,20 @@ if [ -x "$DRIVER" ]; then
     pass "first-F2 a repeated request id fails at once and the open sheet still answers"
   else
     fail "first-F2 a repeated request id fails at once and the open sheet still answers"
+  fi
+  echo "== first-F3: after an answer, Studio's own scan syncs mcpServers and offers what changed"
+  fresh f3
+  sheeted 1.0.0 '"mcp-server", "screen-capture"'
+  Q=$D/plugins/dropped
+  out=$(CONSENT_DRIVER_HOOK="mkdir -p $Q/bin && printf 'id = \"dropped\"\nversion = \"1.0.0\"\ndescription = \"Dropped in\"\ncapabilities = [\"mcp-server\"]\n[mcp]\ncommand = \"bin/server\"\n' > $Q/plugin.toml && printf '#!/bin/sh\n' > $Q/bin/server && chmod 755 $Q/bin/server" \
+    drive "$S/src/sheet" install:screen-capture)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  plugin-sheet in mcpServers: $(entry "$A" plugin-sheet)"
+  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 2 new permissions$' && echo "$out" | grep -q '^OPEN-AFTER consent:dropped@1.0.0$' \
+    && [ "$(entry "$A" plugin-sheet)" = yes ]; then
+    pass "first-F3 the answer's sync runs in Studio's scan: mcpServers has the plugin and the scan offers the dropped-in plugin"
+  else
+    fail "first-F3 the answer's sync runs in Studio's scan: mcpServers has the plugin and the scan offers the dropped-in plugin"
   fi
   echo "== sol-F1: the staged copy changes while the install sheet is open"
   for change in edit add; do
