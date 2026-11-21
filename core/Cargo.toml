@@ -9,6 +9,8 @@ description = "Shared Local Studio logic: the Eukhe daemon client, session model
 [features]
 ffi = ["dep:uniffi"]
 wire = []
+# Pause points for scripts/tests/plugin-grants-test.sh. Never on in a shipped build.
+test-hooks = []
 link = ["wire", "dep:snow", "dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]

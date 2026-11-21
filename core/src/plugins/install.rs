@@ -196,6 +196,10 @@ fn place(
     let staging = Scratch::new(root, "install")?;
     let staged = staging.0.join(&id);
     copy(source, &staged, &entries).map_err(|error| vec![error])?;
+    let copied = hash_entries(&staged, &entries).map_err(|error| vec![error])?;
+    if copied != tree {
+        return Err(vec![format!("the plugin changed while it was installed: hashed {tree}, copied {copied}")]);
+    }
     load(&staged)?;
     let target = root.join(&id);
     let replaced = load(&target).ok().map(|old| old.version);
@@ -438,8 +442,15 @@ fn refusals(root: &Path, entries: &[Entry], mode: Walk) -> Vec<String> {
     refusals
 }
 
+/// Reads a file only if it is still a regular file, without following a link or waiting on a FIFO.
+/// `None` means the path is now something else (a FIFO, a folder or a link).
 fn read_regular(path: &Path) -> std::io::Result<Option<(Vec<u8>, bool)>> {
-    let file = crate::platform::open_without_waiting(path)?;
+    let file = match crate::platform::open_without_waiting(path) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Ok(None);
@@ -449,19 +460,21 @@ fn read_regular(path: &Path) -> std::io::Result<Option<(Vec<u8>, bool)>> {
     Ok(Some((bytes, crate::platform::is_executable(&meta))))
 }
 
-#[cfg(debug_assertions)]
-fn test_gate() {
+/// Test hook for scripts/tests/plugin-grants-test.sh, built only with the `test-hooks` feature: touch
+/// `<gate>/<reached>` and wait for `<gate>/<resume>`, so the script can swap a file at that exact point.
+#[cfg(feature = "test-hooks")]
+fn test_gate(reached: &str, resume: &str) {
     let Some(gate) = std::env::var_os("LOCAL_STUDIO_TEST_HASH_GATE").map(PathBuf::from) else { return };
-    let _ = std::fs::write(gate.join("walked"), b"");
+    let _ = std::fs::write(gate.join(reached), b"");
     let started = std::time::Instant::now();
-    while !gate.join("go").exists() && started.elapsed() < std::time::Duration::from_secs(30) {
+    while !gate.join(resume).exists() && started.elapsed() < std::time::Duration::from_secs(30) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
 fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
-    #[cfg(debug_assertions)]
-    test_gate();
+    #[cfg(feature = "test-hooks")]
+    test_gate("walked", "go");
     let mut listing = String::new();
     for entry in entries {
         match &entry.kind {
@@ -535,18 +548,41 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Copies through the same open as the hash, so a file swapped for a FIFO or a link after the hash
+/// is refused instead of blocking or being followed. `place` then hashes the copy again.
 fn copy(source: &Path, target: &Path, entries: &[Entry]) -> Result<(), String> {
+    #[cfg(feature = "test-hooks")]
+    test_gate("copying", "copy-go");
     std::fs::create_dir_all(target).map_err(|error| format!("cannot create {}: {error}", target.display()))?;
     for entry in entries {
         let from = source.join(&entry.path);
         let to = target.join(&entry.path);
         let result = match &entry.kind {
             Kind::Dir => std::fs::create_dir_all(&to),
-            Kind::File { .. } => std::fs::copy(&from, &to).map(|_| ()),
+            Kind::File { .. } => match read_regular(&from) {
+                Ok(Some((bytes, executable))) => write_file(&to, &bytes, executable),
+                Ok(None) => {
+                    return Err(format!("{} changed while it was read: it is no longer a regular file", entry.path))
+                }
+                Err(error) if gone(&error) => Ok(()),
+                Err(error) => Err(error),
+            },
             Kind::Link(link) => crate::platform::symlink(link, &to, from.is_dir()),
             Kind::Other => Ok(()),
         };
         result.map_err(|error| format!("cannot copy {}: {error}", entry.path))?;
     }
+    Ok(())
+}
+
+fn write_file(to: &Path, bytes: &[u8], executable: bool) -> std::io::Result<()> {
+    std::fs::write(to, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
     Ok(())
 }

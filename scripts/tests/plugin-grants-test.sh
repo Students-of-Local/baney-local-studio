@@ -365,7 +365,7 @@ gated() {
   if [ ! -e "$S/gate/walked" ]; then
     kill -9 "$pid" 2> /dev/null
     wait "$pid" 2> /dev/null
-    echo "gate did not fire: this needs a debug build of a branch with LOCAL_STUDIO_TEST_HASH_GATE"
+    echo "gate did not fire: build with --features test-hooks"
     return
   fi
   mkfifo "$S/swap.fifo"
@@ -379,7 +379,7 @@ gated() {
 }
 
 echo "== second-S3: a FIFO renamed over a regular file between the walk and the read"
-echo "  LOCAL_STUDIO_TEST_HASH_GATE (debug builds only) makes the binary touch <gate>/walked after the walk"
+echo "  LOCAL_STUDIO_TEST_HASH_GATE (builds with --features test-hooks) makes the binary touch <gate>/walked after the walk"
 echo "  and wait for <gate>/go before it opens any file, so the swap below always lands between stat and open"
 fresh s3race
 P=$D/plugins/fifobox
@@ -405,6 +405,57 @@ echo data > "$GATED"
 hashed=$(gated plugin hash "$S/src/fifosrc")
 echo "  plugin hash: $hashed"
 case $hashed in "finished: error: "*"data.txt"*"no longer a regular file"*) pass "second-S3 plugin hash does not block on a FIFO";; *) fail "second-S3 plugin hash does not block on a FIFO";; esac
+
+# Lets the hash pass untouched, then swaps $GATED for $1 (fifo, or a link to $2) after the hash and
+# before the copy, at the `copying` pause point.
+gated_copy() {
+  local swap=$1 outside=$2
+  shift 2
+  mkdir -p "$S/gate"
+  rm -f "$S/gate/walked" "$S/gate/go" "$S/gate/copying" "$S/gate/copy-go"
+  (
+    export HOME=$S/h LOCAL_STUDIO_DATA_DIR=$D EUKHE_CODING_AGENT_DIR=$A LOCAL_STUDIO_TEST_HASH_GATE=$S/gate
+    exec "$BIN" "$@"
+  ) > "$S/out" 2>&1 &
+  local pid=$! n=0
+  while [ ! -e "$S/gate/walked" ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+  touch "$S/gate/go"
+  n=0
+  while [ ! -e "$S/gate/copying" ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+  if [ ! -e "$S/gate/copying" ]; then
+    kill -9 "$pid" 2> /dev/null
+    wait "$pid" 2> /dev/null
+    echo "copy gate did not fire: build with --features test-hooks"
+    return
+  fi
+  rm -f "$GATED"
+  if [ "$swap" = fifo ]; then mkfifo "$GATED"; else ln -s "$outside" "$GATED"; fi
+  touch "$S/gate/copy-go"
+  if waited "$pid"; then
+    echo "finished: $(tr '\n' ' ' < "$S/out")"
+  else
+    echo "hung on the FIFO, killed after 10 s"
+  fi
+}
+
+echo "== r1 second-S1: a FIFO or a link swapped in after the hash and before the install copies"
+fresh s3copy
+mkdir -p "$S/src/copysrc/bin"
+manifest "$S/src/copysrc"
+script "$S/src/copysrc/bin/server" box
+echo data > "$S/src/copysrc/data.txt"
+GATED=$S/src/copysrc/data.txt
+copied=$(gated_copy fifo "" plugin install "$S/src/copysrc")
+echo "  plugin install, FIFO at copy: $copied"
+case $copied in "finished: error: "*"data.txt"*"no longer a regular file"*) pass "install copy does not block on a FIFO";; *) fail "install copy does not block on a FIFO";; esac
+echo "outside-secret-$$" > "$S/outside.txt"
+rm -f "$GATED"
+echo data > "$GATED"
+copied=$(gated_copy link "$S/outside.txt" plugin install "$S/src/copysrc")
+echo "  plugin install, link at copy: $copied"
+leaked=$(grep -rl "outside-secret-$$" "$D/plugins" 2> /dev/null | head -1)
+echo "  outside file copied into the plugins folder: ${leaked:-no}"
+case $copied in "finished: error: "*"data.txt"*"no longer a regular file"*) [ -z "$leaked" ] && pass "install copy does not follow a link" || fail "install copy does not follow a link";; *) fail "install copy does not follow a link";; esac
 
 echo "== second-S1: plugin list applies an edit by itself"
 fresh s1list
