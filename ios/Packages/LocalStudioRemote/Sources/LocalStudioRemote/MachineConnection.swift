@@ -137,7 +137,7 @@ public actor MachineConnection {
     private var incompatible: ProtocolWindow?
     private var stopped = false
 
-    public init(config: ConnectionConfig, credentials: CredentialStore, outbox: Outbox, channel: any SecureChannel = PassThroughChannel(), pairing: PairingLink? = nil) {
+    public init(config: ConnectionConfig, credentials: CredentialStore, outbox: Outbox, channel: any SecureChannel = NoiseChannel(), pairing: PairingLink? = nil) {
         let (stream, sink) = AsyncStream<ConnectionEvent>.makeStream(bufferingPolicy: .unbounded)
         events = stream
         self.sink = sink

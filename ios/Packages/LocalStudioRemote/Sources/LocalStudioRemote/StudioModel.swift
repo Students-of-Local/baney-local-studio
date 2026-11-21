@@ -7,8 +7,10 @@ public struct StudioEnvironment: Sendable {
     public var keychainService: String
     public var device: DeviceProfile
     public var connectDelay: Duration
+    public var passThrough: Bool
 
-    public init(directory: URL, keychainService: String, device: DeviceProfile, connectDelay: Duration = .zero) {
+    public init(directory: URL, keychainService: String, device: DeviceProfile, connectDelay: Duration = .zero, passThrough: Bool = false) {
+        self.passThrough = passThrough
         self.directory = directory
         self.keychainService = keychainService
         self.device = device
@@ -156,6 +158,7 @@ public final class MachineModel: Identifiable {
             config: config,
             credentials: studio.credentials,
             outbox: Outbox(file: CacheStore.outboxFile(in: environment.directory, machine: record.id)),
+            channel: environment.passThrough ? PassThroughChannel() : NoiseChannel(),
             pairing: pairing
         )
         if let cached {
