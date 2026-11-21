@@ -394,23 +394,6 @@ pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
         .collect()
 }
 
-#[must_use]
-pub fn local_only_invoked<'a>(plugins: &'a [Plugin], text: &str) -> Option<&'a Plugin> {
-    let private = || plugins.iter().filter(|plugin| plugin.local_only);
-    let by_skill = |name: &str| private().find(|plugin| plugin.skill(name).is_some());
-    if let Some((name, _)) = eukhe_types::slash_commands::parse_slash_command(text) {
-        if let Some(skill) = name.strip_prefix("skill:") {
-            return by_skill(skill);
-        }
-        if let Some(plugin) = private().find(|plugin| plugin.commands.iter().any(|command| command.name == name)) {
-            return Some(plugin);
-        }
-    }
-    text.split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '(' | ')'))
-        .filter_map(|token| token.strip_prefix('$'))
-        .find_map(by_skill)
-}
-
 fn written_by_us(root: &Path, name: &str, entry: &Value) -> bool {
     match entry.get(MCP_TAG) {
         Some(tag) => tag == &Value::Bool(true),

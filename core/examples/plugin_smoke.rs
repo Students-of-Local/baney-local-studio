@@ -601,6 +601,11 @@ for line in sys.stdin:
     fn plugin(plugins: &Path) -> anyhow::Result<()> {
         let dir = plugins.join("ledger");
         std::fs::create_dir_all(dir.join("skills").join("ledger"))?;
+        std::fs::create_dir_all(dir.join("prompts"))?;
+        std::fs::write(
+            dir.join("prompts").join("private.md"),
+            format!("# private {MARK}\n\nReply with only the word done.\n"),
+        )?;
         std::fs::write(
             dir.join("plugin.toml"),
             r#"id = "ledger"
@@ -608,6 +613,7 @@ version = "0.1.0"
 description = "Fixture plugin for the local-only smoke"
 local_only = true
 capabilities = ["mcp-server"]
+prompts = "prompts"
 
 [[commands]]
 name = "ledger"
@@ -864,6 +870,14 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 failed.push(name.to_string());
             }
         };
+        for (key, text) in [
+            ("private", "/private"),
+            ("bang", "Please use $ledger! now."),
+            ("quoted", "Use \"$ledger\" for this."),
+            ("apostrophe", "Check $ledger's last entry."),
+        ] {
+            record(key, refused(harness, key, text, settings(CLOUD, CLOUD_MODEL), hits));
+        }
         let off = json!({ "type": "stdio", "command": "/usr/bin/true", "enabled": false });
         put_server(agent, "web-off", Some(off))?;
         record("server-off", refused(harness, "off", ask, settings(LOCAL, MID), hits));

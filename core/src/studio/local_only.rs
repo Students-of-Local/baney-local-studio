@@ -82,17 +82,14 @@ impl Actor {
         &mut self,
         id: &str,
         active: &str,
-        message: &str,
+        invoked: &[String],
         prompt: &PromptDraft,
         request: Option<String>,
     ) -> Result<bool, String> {
         let plugins = self.plugins();
-        let plugin = match plugins::local_only_invoked(&plugins, message) {
-            Some(plugin) => plugin.id.clone(),
-            None => match self.store.flags(id).local_only {
-                Some(plugin) => plugin,
-                None => return Ok(true),
-            },
+        let named = invoked.iter().find(|owner| plugins.iter().any(|plugin| plugin.local_only && plugin.id == **owner));
+        let Some(plugin) = named.cloned().or_else(|| self.store.flags(id).local_only) else {
+            return Ok(true);
         };
         let current = self.thread_model(id);
         let Some((provider, model)) = current.clone().filter(|(provider, _)| Self::local_provider(provider)) else {

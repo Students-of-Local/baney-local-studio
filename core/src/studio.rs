@@ -30,7 +30,7 @@ use crate::model::{
 use crate::oneshot::TextGen;
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
-use crate::skills::Resources;
+use crate::skills::{Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
@@ -2263,14 +2263,17 @@ impl Actor {
         } else {
             self.ensure_open(id).await?
         };
-        if !self.local_only_gate(id, &active, &message, &prompt, request.clone()).await? {
+        let expansion = if !(message.starts_with('/') || message.contains('$')) {
+            Expansion { text: message.clone(), plugins: Vec::new() }
+        } else if cli {
+            Resources::default().with_plugins(self.plugins()).expand(&message)
+        } else {
+            self.resources(id, &active).await.expand(&message)
+        };
+        if !self.local_only_gate(id, &active, &expansion.plugins, &prompt, request.clone()).await? {
             return Ok(());
         }
-        let message = if !cli && (message.starts_with('/') || message.contains('$')) {
-            self.resources(id, &active).await.expand(&message)
-        } else {
-            message
-        };
+        let message = if cli { message } else { expansion.text };
         let images = (!prompt.images.is_empty()).then(|| {
             Value::Array(
                 prompt
