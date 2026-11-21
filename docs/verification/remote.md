@@ -107,7 +107,7 @@ curl https://<parish1>.<tailnet>.ts.net/v1/health
 - `install` wrote the `local-studio-serve.service` user unit, and `status --json` reported `serving` with the service as owner and `wss://<parish1>.<tailnet>.ts.net/v1/ws` as the effective URL.
 - `tailscale serve` mounts only `/v1/health` and `/v1/ws` on 443. From the Mac, health over the tailnet answered `{"ok":true,"protocol":2,"min_protocol":2}`, and `/` returned 404.
 
-A machine that only runs serve has no projects, and nothing can add one (#49). For this check, `state.json` was seeded by hand with one project, `~/local-studio-probe`, while the service was stopped.
+A machine that only runs serve has no projects, and nothing can add one (#49). For this check, `state.json` was seeded by hand with one project, `~/local-studio-probe`, while the service was stopped. #49 replaced that step: run `local-studio-serve project add ~/local-studio-probe` while the service runs.
 
 `remote/examples/link_probe.rs` drives the core link client that the desktop apps use, with no UI, against a real far machine:
 

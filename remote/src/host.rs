@@ -1,11 +1,13 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
-use local_studio_core::Studio;
-use serde_json::json;
+use local_studio_core::{NoticeLevel, Project, Studio, Subscription, Update};
+use serde::Deserialize;
+use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 
@@ -15,7 +17,7 @@ use crate::limits::Gate;
 use crate::pairing::host_name;
 use crate::server::{self, Hosts, Route, Server};
 use crate::settings::{self, Effective, Settings};
-use crate::{CHANNEL, VERSION};
+use crate::{service, CHANNEL, VERSION};
 
 const BIND_WAIT: Duration = Duration::from_secs(10);
 const BIND_RETRY: Duration = Duration::from_millis(200);
@@ -23,6 +25,10 @@ const RELOAD_EVERY: Duration = Duration::from_secs(2);
 const DRAIN_POLL: Duration = Duration::from_millis(20);
 const STOP_WITHIN: Duration = Duration::from_secs(2);
 const WAIT_EVERY: Duration = Duration::from_secs(1);
+const REQUEST_EVERY: Duration = Duration::from_millis(500);
+const ANSWER_WITHIN: Duration = Duration::from_secs(25);
+const ANSWERS_KEPT: Duration = Duration::from_secs(600);
+const FAILURES_KEPT: usize = 64;
 const GOING_AWAY: u16 = 1001;
 const RESTARTING: u16 = 1012;
 
@@ -128,10 +134,12 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
     if let Some((listener, _)) = tunnel {
         tokio::spawn(server::listen(listener, Route::Tunnel, Arc::clone(&server), stopped.clone()));
     }
+    let answering = tokio::spawn(answer_requests(Arc::clone(&studio), data_dir.clone()));
     let watcher = Watcher { data_dir, flags, default_name, server: Arc::clone(&server), stopped, tunnel: tunnel_port };
     let watching = tokio::spawn(watcher.run(config, reload));
     let stop = until.await;
     watching.abort();
+    answering.abort();
     stopping.send_replace(true);
     let (code, reason) = match stop {
         Stop::Quit => (GOING_AWAY, "serve stopped"),
@@ -217,6 +225,231 @@ impl Watcher {
                 tokio::spawn(server::listen(listener, Route::Tunnel, Arc::clone(&self.server), self.stopped.clone()));
             }
             Err(error) => eprintln!("local-studio-serve: could not start the tunnel listener: {error:#}"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Request {
+    op: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    applied: bool,
+}
+
+pub(crate) fn requests_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("remote").join("requests")
+}
+
+pub(crate) fn write_private(path: &Path, value: &Value) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let partial = path.with_extension("tmp");
+    std::fs::remove_file(&partial).ok();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&partial)
+        .with_context(|| format!("create {}", partial.display()))?;
+    file.write_all(value.to_string().as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&partial, path).with_context(|| format!("move {} into place", partial.display()))
+}
+
+fn pending(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false };
+    name.strip_suffix(".json").is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn modified(path: &Path) -> SystemTime {
+    std::fs::metadata(path).and_then(|metadata| metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+fn private_to(path: &Path, me: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.uid() == me && metadata.permissions().mode() & 0o777 == 0o600
+    })
+}
+
+struct Requests {
+    studio: Arc<Studio>,
+    subscription: Subscription,
+    notify: Arc<Notify>,
+    projects: Vec<Project>,
+    failures: VecDeque<String>,
+}
+
+impl Requests {
+    fn drain(&mut self) {
+        for update in self.subscription.tick() {
+            match update {
+                Update::Projects { projects } => {
+                    self.projects = projects.into_iter().filter(|project| project.machine.is_none()).collect();
+                }
+                Update::Notice { level: NoticeLevel::Error, text } => {
+                    if self.failures.len() == FAILURES_KEPT {
+                        self.failures.pop_front();
+                    }
+                    self.failures.push_back(text);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn failure(&mut self, fails: &impl Fn(&str) -> bool) -> Option<String> {
+        let index = self.failures.iter().position(|text| fails(text))?;
+        self.failures.remove(index)
+    }
+
+    fn forget(&mut self, fails: &impl Fn(&str) -> bool) {
+        self.failures.retain(|text| !fails(text));
+    }
+
+    fn known(&self, project: &str) -> Option<&Project> {
+        self.projects.iter().find(|known| known.id == project || known.path == project).or_else(|| {
+            let wanted = std::fs::canonicalize(project).ok()?;
+            self.projects.iter().find(|known| std::fs::canonicalize(&known.path).is_ok_and(|path| path == wanted))
+        })
+    }
+
+    async fn until(
+        &mut self,
+        fails: &impl Fn(&str) -> bool,
+        wait: Duration,
+        done: impl Fn(&Self) -> bool,
+    ) -> Option<Result<(), String>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            self.drain();
+            if done(self) {
+                return Some(Ok(()));
+            }
+            if let Some(failure) = self.failure(fails) {
+                return Some(Err(failure));
+            }
+            if tokio::time::timeout_at(deadline, self.notify.notified()).await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    async fn answer(&mut self, file: &Path, request: Request) -> Option<Value> {
+        self.drain();
+        let again = request.applied;
+        let path = request.path.unwrap_or_default();
+        let wait = if again { Duration::ZERO } else { ANSWER_WITHIN };
+        let (ok, message) = match request.op.as_str() {
+            "list_projects" => (true, format!("{} projects", self.projects.len())),
+            "add_project" if self.known(&path).is_some() => {
+                (true, if again { format!("added {path}") } else { format!("{path} is already a project") })
+            }
+            "add_project" => {
+                let fails = |text: &str| {
+                    text == format!("{path} is not a folder.") || text.starts_with(&format!("Cannot add {path}: "))
+                };
+                if !again {
+                    self.forget(&fails);
+                    mark_applied(file, &request.op, &path);
+                    self.studio.add_project(path.clone());
+                }
+                match self.until(&fails, wait, |requests| requests.known(&path).is_some()).await? {
+                    Ok(()) => (true, format!("added {path}")),
+                    Err(message) => (false, message),
+                }
+            }
+            "remove_project" if again && self.known(&path).is_none() => (true, format!("removed {path}")),
+            "remove_project" => match self.known(&path).map(|known| known.id.clone()) {
+                None => (false, format!("{path} is not a project")),
+                Some(id) => {
+                    let fails = |text: &str| text == format!("Unknown project {id}.");
+                    if !again {
+                        self.forget(&fails);
+                        mark_applied(file, &request.op, &path);
+                        self.studio.remove_project(id.clone());
+                    }
+                    match self.until(&fails, wait, |requests| requests.known(&id).is_none()).await? {
+                        Ok(()) => (true, format!("removed {path}")),
+                        Err(message) => (false, message),
+                    }
+                }
+            },
+            other => (false, format!("unknown request {other:?}")),
+        };
+        Some(json!({ "ok": ok, "message": message, "projects": self.projects }))
+    }
+}
+
+fn mark_applied(file: &Path, op: &str, path: &str) {
+    if let Err(error) = write_private(file, &json!({ "op": op, "path": path, "applied": true })) {
+        eprintln!("local-studio-serve: could not mark {} applied: {error:#}", file.display());
+    }
+}
+
+fn read_request(path: &Path) -> anyhow::Result<Request> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
+    let Some(me) = service::uid().ok().and_then(|uid| uid.parse::<u32>().ok()) else {
+        eprintln!("local-studio-serve: could not read this user's id, so project requests go unanswered");
+        return;
+    };
+    let folder = requests_dir(&data_dir);
+    let (waker, notify) = hub::signal();
+    let mut requests = Requests {
+        subscription: studio.subscribe(waker),
+        studio,
+        notify,
+        projects: Vec::new(),
+        failures: VecDeque::new(),
+    };
+    loop {
+        tokio::time::sleep(REQUEST_EVERY).await;
+        requests.drain();
+        let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+        let files: Vec<PathBuf> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+        for done in files.iter().filter(|path| path.to_string_lossy().ends_with(".done.json")) {
+            if modified(done).elapsed().is_ok_and(|age| age > ANSWERS_KEPT) {
+                std::fs::remove_file(done).ok();
+            }
+        }
+        let mut waiting: Vec<PathBuf> = files.into_iter().filter(|path| pending(path)).collect();
+        waiting.sort_by_cached_key(|path| (modified(path), path.clone()));
+        for path in waiting {
+            if !private_to(&path, me) {
+                continue;
+            }
+            let answer = match read_request(&path) {
+                Ok(request) => {
+                    let again = request.applied;
+                    let Some(answer) = requests.answer(&path, request).await else {
+                        if !again {
+                            eprintln!(
+                                "local-studio-serve: the core has not applied {} within {} s; waiting on it",
+                                path.display(),
+                                ANSWER_WITHIN.as_secs()
+                            );
+                        }
+                        continue;
+                    };
+                    answer
+                }
+                Err(error) => {
+                    json!({ "ok": false, "message": format!("unreadable request: {error:#}"), "projects": [] })
+                }
+            };
+            match write_private(&path.with_extension("done.json"), &answer) {
+                Ok(()) => {
+                    std::fs::remove_file(&path).ok();
+                }
+                Err(error) => eprintln!("local-studio-serve: could not answer {}: {error:#}", path.display()),
+            }
         }
     }
 }
