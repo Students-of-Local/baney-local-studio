@@ -230,7 +230,7 @@ impl Links {
                     request,
                     link: minted.link,
                     url: minted.url,
-                    serving: data_dir.join("remote").join("serve.json").is_file(),
+                    serving: pairing::serving(&data_dir),
                     expires_at: minted.expires_at,
                 },
                 Err(error) => {

@@ -42,8 +42,11 @@ impl RowMachine {
             name: machine.map_or_else(|| id.to_string(), |machine| machine.name.clone()),
             icon: icon(machine.map_or("", |machine| machine.os.as_str())),
             reachable: machine.is_some_and(|machine| machine.state == MachineState::Connected),
-            status: machine
-                .map_or_else(|| "not linked".to_string(), |machine| status(machine, state.settings.time_format)),
+            status: match machine {
+                Some(machine) if machine.state == MachineState::Connected => String::new(),
+                Some(machine) => status(machine, state.settings.time_format),
+                None => "not linked".to_string(),
+            },
         }
     }
 
@@ -179,8 +182,10 @@ fn glyph(platform: &str) -> gtk::Image {
     image
 }
 
-pub fn groups(app: &Weak<App>, state: &State) -> Vec<adw::PreferencesGroup> {
-    vec![devices_group(app, state), machines_group(app, state)]
+pub fn groups(app: &Weak<App>, state: &State) -> (Vec<adw::PreferencesGroup>, Vec<(String, adw::ActionRow)>) {
+    let mut rows = Vec::new();
+    let groups = vec![devices_group(app, state), machines_group(app, state, &mut rows)];
+    (groups, rows)
 }
 
 fn devices_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
@@ -234,7 +239,7 @@ fn devices_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
     group
 }
 
-fn machines_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
+fn machines_group(app: &Weak<App>, state: &State, rows: &mut Vec<(String, adw::ActionRow)>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Other Machines").build();
     if state.machines.is_empty() {
         group.add(&adw::ActionRow::builder().title("No other machines are linked.").build());
@@ -272,6 +277,7 @@ fn machines_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
         });
         row.add_suffix(&forget);
         group.add(&row);
+        rows.push((machine.id.clone(), row));
     }
     let add = adw::ActionRow::builder().title("Add a machine").build();
     let button = suffix_button("Add a Machine…");

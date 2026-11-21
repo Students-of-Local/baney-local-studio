@@ -115,25 +115,28 @@ impl Studio {
     pub fn list_paired_devices(&self) {
         #[cfg(feature = "link")]
         self.publish_devices(crate::link::devices::Devices::new(&self.data_dir).list());
+        #[cfg(not(feature = "link"))]
+        self.mailbox.push(Update::PairedDevices { devices: Vec::new() });
     }
 
+    #[cfg_attr(not(feature = "link"), allow(unused_variables))]
     pub fn revoke_paired_device(&self, device: String) {
         #[cfg(feature = "link")]
         {
             let devices = crate::link::devices::Devices::new(&self.data_dir);
             match devices.revoke(&device) {
                 Ok(gone) if gone.is_empty() => {
-                    self.mailbox.notice(NoticeLevel::Error, format!("No paired device is named {device}"));
+                    self.mailbox.notice(NoticeLevel::Error, "That device was already revoked".to_string());
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    self.mailbox.notice(NoticeLevel::Error, format!("Could not revoke {device}: {error:#}"));
+                    self.mailbox.notice(NoticeLevel::Error, format!("Could not revoke that device: {error:#}"));
                 }
             }
             self.publish_devices(devices.list());
         }
         #[cfg(not(feature = "link"))]
-        self.mailbox.notice(NoticeLevel::Error, format!("This build cannot pair devices, so {device} is not paired"));
+        self.mailbox.notice(NoticeLevel::Error, "This build cannot pair devices".to_string());
     }
 }
 

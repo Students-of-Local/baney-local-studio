@@ -145,7 +145,7 @@ struct RowMachine: Equatable {
         name = machine?.name ?? id
         symbol = MachineGlyph.symbol(machine?.os ?? "")
         reachable = machine?.state.connected ?? false
-        status = machine.map(MachineStatus.text) ?? "not linked"
+        status = reachable ? "" : machine.map(MachineStatus.text) ?? "not linked"
     }
 }
 
