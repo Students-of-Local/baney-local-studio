@@ -88,6 +88,7 @@ The plugin family, in progress:
 | Plugin | What it is | State |
 | --- | --- | --- |
 | [Tychicus](https://github.com/baney75/tychicus) | Browser use and computer use for your agents | Ships Local Studio manifests today; becoming the default plugin |
+| [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film, voices and music on your own GPU | Ships a Local Studio manifest with six commands; joining the catalog |
 | [Gantrel](https://github.com/baney75/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
 | [UntoCaesar](https://github.com/baney75/UntoCaesar) | Local-AI tax filing that never leaves your machine | Engine and manifest on a branch |
 | [Corunis](https://github.com/baney75/Corunis) | A private organizational brain for universities | MCP server and manifest on a branch |
