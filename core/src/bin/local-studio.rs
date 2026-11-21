@@ -163,6 +163,11 @@ fn list() -> Result<(), String> {
     for plugin in &scan.plugins {
         println!("{} {}: {}", plugin.id, plugin.version, plugin.description);
         println!("  {}", consent_line(plugin, &grants));
+        if let Some((version, source, granted)) =
+            grants.granted(&plugin.id).filter(|(_, _, granted)| !granted.is_empty())
+        {
+            println!("  granted {} at {version} to code from {source}", granted.join(", "));
+        }
         for skill in &plugin.skills {
             println!("  skill {} ({})", skill.name, plugin.source());
         }
@@ -203,7 +208,10 @@ fn install(arg: &str) -> Result<(), String> {
         Some(old) => println!("installed {} {} over {old} into {}", plugin.id, plugin.version, plugin.dir.display()),
         None => println!("installed {} {} into {}", plugin.id, plugin.version, plugin.dir.display()),
     }
-    println!("  {} files, tree {}", installed.files, installed.tree);
+    println!("  {} files, tree {}, from {}", installed.files, installed.tree, installed.source);
+    if let Some(note) = &installed.note {
+        println!("  {note}");
+    }
     asks(plugin);
     println!("  {}", consent_line(plugin, &Grants::load(&root)?));
     sync(&root)

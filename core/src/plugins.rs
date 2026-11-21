@@ -16,6 +16,7 @@ pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, 
 
 pub const MANIFEST: &str = "plugin.toml";
 pub const MCP_PREFIX: &str = "plugin-";
+pub const MCP_TAG: &str = "localStudioPlugin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -343,6 +344,7 @@ pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
                 "command": absolute(&mcp.command).to_string_lossy(),
                 "args": mcp.args,
                 "cwd": dir.to_string_lossy(),
+                MCP_TAG: true,
             });
             if !env.is_empty() {
                 entry["env"] = Value::Object(env);
@@ -350,6 +352,19 @@ pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
             Some((plugin.mcp_name(), entry))
         })
         .collect()
+}
+
+fn written_by_us(plugins: &[Plugin], name: &str, entry: &Value) -> bool {
+    match entry.get(MCP_TAG) {
+        Some(tag) => tag == &Value::Bool(true),
+        None => plugins.iter().any(|plugin| {
+            plugin.mcp_name() == name
+                && plugin.mcp.as_ref().is_some_and(|mcp| {
+                    entry.get("command").and_then(Value::as_str)
+                        == Some(absolute(&mcp.command).to_string_lossy().as_ref())
+                })
+        }),
+    }
 }
 
 pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Result<bool, String> {
@@ -360,17 +375,28 @@ pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Re
         Some(Value::Object(servers)) => servers,
         Some(_) => return Err(format!("{}: mcpServers is not a JSON object", path.display())),
     };
-    let wanted = mcp_servers(plugins, grants);
+    let ours = |name: &str, entry: &Value| written_by_us(plugins, name, entry);
+    let (wanted, taken): (Map<String, Value>, Map<String, Value>) = mcp_servers(plugins, grants)
+        .into_iter()
+        .partition(|(name, _)| servers.get(name).is_none_or(|entry| ours(name, entry)));
     let current: Map<String, Value> =
-        servers.iter().filter(|(name, _)| name.starts_with(MCP_PREFIX)).map(|(k, v)| (k.clone(), v.clone())).collect();
-    if current == wanted {
-        return Ok(false);
+        servers.iter().filter(|(name, entry)| ours(name, entry)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let changed = current != wanted;
+    if changed {
+        servers.retain(|name, entry| !ours(name, entry));
+        servers.extend(wanted);
+        settings.insert("mcpServers".to_string(), Value::Object(servers));
+        crate::workspace::providers::write_private(&path, &Value::Object(settings))?;
     }
-    servers.retain(|name, _| !name.starts_with(MCP_PREFIX));
-    servers.extend(wanted);
-    settings.insert("mcpServers".to_string(), Value::Object(servers));
-    crate::workspace::providers::write_private(&path, &Value::Object(settings))?;
-    Ok(true)
+    if taken.is_empty() {
+        return Ok(changed);
+    }
+    let names: Vec<&str> = taken.keys().map(String::as_str).collect();
+    Err(format!(
+        "{}: mcpServers already has {} that Local Studio did not write, so it left them alone and that plugin MCP server is off",
+        path.display(),
+        names.join(", ")
+    ))
 }
 
 #[must_use]
@@ -383,7 +409,7 @@ pub fn sync_agent(root: &Path, agent: &Path) -> Result<bool, String> {
     sync_mcp_servers(agent, &scan(root).plugins, &grants)
 }
 
-fn absolute(path: &Path) -> PathBuf {
+pub(crate) fn absolute(path: &Path) -> PathBuf {
     path.canonicalize().or_else(|_| std::path::absolute(path)).unwrap_or_else(|_| path.to_path_buf())
 }
 

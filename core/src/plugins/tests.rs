@@ -110,7 +110,7 @@ fn servers(agent: &Path) -> Value {
 }
 
 fn sync(root: &Path, agent: &Path) {
-    let _ = sync_agent(root, agent);
+    sync_agent(root, agent).unwrap_or_else(|error| panic!("sync: {error}"));
 }
 
 fn needs(missing: &[Capability]) -> Consent {
@@ -285,7 +285,8 @@ fn untagged_entries_count_as_ours_only_when_they_match_an_installed_plugin() {
     let mine = json!({"type": "stdio", "command": "/usr/local/bin/toolbox"});
     write(&agent.join("settings.json"), &json!({ "mcpServers": { "plugin-toolbox": mine } }).to_string());
     grant(&root, "toolbox", &[Capability::McpServer]);
-    sync(&root, &agent);
+    let error = sync_agent(&root, &agent).err().unwrap_or_default();
+    assert!(error.contains("plugin-toolbox"), "the skipped plugin entry raised no error: {error:?}");
     assert_eq!(servers_at(&agent, "plugin-toolbox"), Some(mine), "a user's own plugin-toolbox entry was overwritten");
 }
 
