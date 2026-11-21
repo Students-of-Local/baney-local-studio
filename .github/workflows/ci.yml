@@ -28,6 +28,8 @@ jobs:
         run: |
           cargo build -p local-studio-core --bin local-studio --features test-hooks
           scripts/tests/plugin-grants-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/pg"
+      - name: e2e examples replace a stale credential link, never write through it
+        run: cargo build -p local-studio-core --example smoke && scripts/tests/e2e-credential-link-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/smoke"
 
   linux:
     name: Linux app
