@@ -20,6 +20,7 @@ struct Shared {
     out: Mutex<()>,
     busy: Mutex<bool>,
     interrupted: AtomicBool,
+    compacted: AtomicBool,
     turns: AtomicU64,
     answers: Mutex<Vec<(Value, Sender<String>)>>,
     thread: Mutex<String>,
@@ -203,8 +204,15 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
             shared.respond(id, &shared.thread(&params["threadId"]));
         }
         "thread/read" => shared.respond(id, &shared.thread(&params["threadId"])),
+        "thread/compact/start" => {
+            shared.compacted.store(true, Ordering::Relaxed);
+            shared.respond(id, &json!({}));
+        }
         "turn/start" => {
-            let text = input_text(params);
+            let mut text = input_text(params);
+            if shared.compacted.swap(false, Ordering::Relaxed) {
+                text.push_str(" after compact");
+            }
             if text.contains("crash") {
                 std::process::exit(1);
             }

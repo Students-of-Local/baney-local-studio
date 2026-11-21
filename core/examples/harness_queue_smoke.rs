@@ -552,11 +552,25 @@ fn stop_during_open(run: &mut Run, started: &BTreeMap<String, String>) -> anyhow
     Ok(())
 }
 
+fn compact_during_open(run: &mut Run, started: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    let thread = started.get("draft-codex-race").context("codex-race thread")?.clone();
+    std::env::set_var(RESUME_DELAY, "1500");
+    run.focus(&thread);
+    run.studio.compact(thread);
+    run.send("whiskey");
+    run.check("Codex gets a compact sent during the open before the send after it", |watch| {
+        watch.replied("reply to whiskey after compact").is_some()
+    });
+    std::env::remove_var(RESUME_DELAY);
+    Ok(())
+}
+
 fn reopened(run: &mut Run, started: &BTreeMap<String, String>) -> anyhow::Result<()> {
     run.setup("daemon connected again", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
     select_spawns_nothing(run, started)?;
     send_during_open(run, started)?;
-    stop_during_open(run, started)
+    stop_during_open(run, started)?;
+    compact_during_open(run, started)
 }
 
 fn git(work: &Path, args: &[&str]) -> anyhow::Result<()> {

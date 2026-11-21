@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -29,19 +30,23 @@ struct Rpc {
 }
 
 impl Rpc {
-    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+    fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> + Send + 'static {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (reply, answer) = oneshot::channel();
         self.replies.lock().unwrap_or_else(PoisonError::into_inner).insert(id, reply);
-        self.lines
-            .send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string())
-            .map_err(|_| "Codex has stopped.".to_string())?;
-        match tokio::time::timeout(CALL_TIMEOUT, answer).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("Codex stopped before it answered.".to_string()),
-            Err(_) => {
-                self.replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
-                Err(format!("Codex did not answer {method} within {} s.", CALL_TIMEOUT.as_secs()))
+        let mut frame = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        frame["params"] = params;
+        let sent = self.lines.send(frame.to_string()).map_err(|_| "Codex has stopped.".to_string());
+        let (replies, method) = (Arc::clone(&self.replies), method.to_string());
+        async move {
+            sent?;
+            match tokio::time::timeout(CALL_TIMEOUT, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("Codex stopped before it answered.".to_string()),
+                Err(_) => {
+                    replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+                    Err(format!("Codex did not answer {method} within {} s.", CALL_TIMEOUT.as_secs()))
+                }
             }
         }
     }
@@ -143,23 +148,25 @@ fn request_key(id: &Value) -> String {
     }
 }
 
-fn interrupt_turn(rpc: Rpc, sink: Sink, params: Option<Value>) {
+fn interrupt_turn(rpc: &Rpc, sink: Sink, params: Option<Value>) {
     let Some(params) = params else { return };
+    let reply = rpc.call("turn/interrupt", params);
     tokio::spawn(async move {
-        if let Err(error) = rpc.call("turn/interrupt", params).await {
+        if let Err(error) = reply.await {
             sink.send(Event::Failed(Failure::Interrupt, error));
         }
     });
 }
 
 fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
+    let mut reply = rpc.call("turn/start", params.clone());
     tokio::spawn(async move {
         loop {
-            match rpc.call("turn/start", params.clone()).await {
+            match reply.await {
                 Ok(started) => {
                     if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
                         let stop = turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
-                        interrupt_turn(rpc, sink, stop);
+                        interrupt_turn(&rpc, sink, stop);
                     }
                     return;
                 }
@@ -179,6 +186,7 @@ fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
                         sink.send(Event::Idle);
                         return;
                     };
+                    reply = rpc.call("turn/start", next.clone());
                     params = next;
                 }
             }
@@ -504,19 +512,21 @@ impl Codex {
         let (rpc, sink, turns) = (self.rpc.clone(), self.sink.clone(), Arc::clone(&self.turns));
         if let Some(turn) = running {
             let steer = json!({ "threadId": self.thread, "expectedTurnId": turn, "input": input });
+            let reply = rpc.call("turn/steer", steer);
             tokio::spawn(async move {
-                if let Err(error) = rpc.call("turn/steer", steer).await {
+                if let Err(error) = reply.await {
                     sink.send(Event::Failed(Failure::Send(request), error));
                 }
             });
             return Ok(());
         }
+        let reply = rpc.call("turn/start", params);
         tokio::spawn(async move {
-            match rpc.call("turn/start", params).await {
+            match reply.await {
                 Ok(started) => {
                     if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
                         let stop = turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
-                        interrupt_turn(rpc, sink, stop);
+                        interrupt_turn(&rpc, sink, stop);
                     }
                 }
                 Err(error) => {
@@ -542,9 +552,9 @@ impl Codex {
     }
 
     fn call(&self, method: &'static str, params: Value, failure: Failure) {
-        let (rpc, sink) = (self.rpc.clone(), self.sink.clone());
+        let (reply, sink) = (self.rpc.call(method, params), self.sink.clone());
         tokio::spawn(async move {
-            if let Err(error) = rpc.call(method, params).await {
+            if let Err(error) = reply.await {
                 sink.send(Event::Failed(failure, error));
             }
         });
@@ -733,7 +743,7 @@ impl Translator {
             "turn/started" => {
                 if let Some(id) = params.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
                     let stop = self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
-                    interrupt_turn(self.rpc.clone(), self.sink.clone(), stop);
+                    interrupt_turn(&self.rpc, self.sink.clone(), stop);
                 }
                 self.begin();
             }
@@ -1180,6 +1190,42 @@ mod tests {
             watcher.join().map_err(|_| anyhow::anyhow!("the watcher panicked"))?;
         }
         assert!(!gap.load(Ordering::Relaxed), "a send could start a turn while a held message was waiting to start");
+        Ok(())
+    }
+
+    #[test]
+    fn verbs_reach_codex_in_call_order() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
+        let (events, _received) = mpsc::unbounded_channel();
+        let (lines, mut written) = mpsc::unbounded_channel::<String>();
+        let mut codex = Codex {
+            rpc: Rpc { lines, replies: Replies::default(), next: Arc::default() },
+            sink: Sink::new("t", 0, events),
+            thread: "t".to_string(),
+            turns: SharedTurns::default(),
+            approvals: Arc::default(),
+            access: AccessMode::FullAccess,
+            model: None,
+            effort: None,
+            cwd: String::new(),
+            kill: None,
+        };
+        let methods = runtime.block_on(async move {
+            tokio::spawn(async move {
+                codex.compact();
+                codex.send("hello", &[], false, None)
+            })
+            .await?
+            .map_err(anyhow::Error::msg)?;
+            let mut methods = Vec::new();
+            while methods.len() < 2 {
+                let line = tokio::time::timeout(Duration::from_secs(5), written.recv()).await?;
+                let frame: Value = serde_json::from_str(&line.unwrap_or_default())?;
+                methods.push(frame["method"].as_str().unwrap_or_default().to_string());
+            }
+            anyhow::Ok(methods)
+        })?;
+        assert_eq!(methods, ["thread/compact/start", "turn/start"], "Codex got the verbs out of call order");
         Ok(())
     }
 }
