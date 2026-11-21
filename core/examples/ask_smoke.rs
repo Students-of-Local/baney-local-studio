@@ -254,7 +254,7 @@ impl Model {
         };
         let steps = turn.iter().filter(|message| message["role"] == "assistant").count();
         if prompt.contains("SQUAT") && steps == 0 {
-            return json!({ "calls": [["python", { "code": format!("{}\n{code}", script.squat) }]] });
+            return json!({ "calls": [["python", { "code": format!("{}\n{code}\nsquatter.terminate()\nsquatter.wait()", script.squat) }]] });
         }
         if steps > 0 {
             let timeouts = turn.iter().filter(|message| text_of(message).contains("TimeoutError")).count();
