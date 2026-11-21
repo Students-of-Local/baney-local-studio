@@ -492,7 +492,7 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
 fn picked_up(port: u16, host: &str, allowed: bool) -> bool {
     let since = Instant::now();
     loop {
-        if (service::probe(port, host) == Some(200)) == allowed {
+        if service::probe(port, host) == Some(if allowed { 200 } else { 403 }) {
             return true;
         }
         if since.elapsed() >= PICK_UP_WITHIN {

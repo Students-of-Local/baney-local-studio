@@ -941,12 +941,176 @@ fn service_files(run: &Run) -> anyhow::Result<()> {
     println!("ok   status --json with the service written and nothing running: {status}");
     let removed = tailnet_unmounts(&services, &settings, &written)?;
     expect(&removed, "/state", &json!("uninstalled"), "uninstall --no-load --json")?;
-    expect(&removed, "/removed", &json!([unit, settings]), "uninstall --no-load --json")?;
-    ensure!(!unit.exists() && !settings.exists(), "uninstall left {} or {}", unit.display(), settings.display());
+    expect(&removed, "/removed", &json!([unit]), "uninstall --no-load --json")?;
+    expect(&removed, "/serveJson", &json!({"state": "kept", "kept": ["tailscale"]}), "uninstall --no-load --json")?;
+    ensure!(!unit.exists(), "uninstall left {}", unit.display());
+    let kept: Value = serde_json::from_str(&read(&settings))?;
+    expect(&kept, "/tailscale/paths", &json!(["/v1/health", "/v1/ws"]), "serve.json after uninstall --no-load")?;
+    expect(&kept, "/allowHosts", &json!([]), "serve.json after uninstall --no-load")?;
     let again = service(&["uninstall", "--no-load"])?;
     expect(&again, "/state", &json!("absent"), "a repeated uninstall --json")?;
-    println!("ok   uninstall --no-load --json removed both: {removed}; again: {again}");
-    route_install(run, &services, &port)
+    println!("ok   uninstall --no-load --json removed the unit and the hosts install added, and kept serve.json for the mounts it left: {kept}");
+    route_install(run, &services, &port)?;
+    kept_settings(run, &port)?;
+    real_install(run, &port)
+}
+
+fn fake_bin(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join("fakebin");
+    std::fs::create_dir_all(&dir)?;
+    let calls = root.join("fakebin-calls.log");
+    let tailscale = format!(
+        "#!/bin/sh\necho \"tailscale $*\" >> '{log}'\ncase \"$1\" in status) echo '{{\"Self\":{{\"DNSName\":\"{TAILNET}.\"}}}}'; exit 0 ;; esac\nif [ -n \"$LS_FAIL_MOUNT\" ]; then case \"$*\" in *\"$LS_FAIL_MOUNT\"*) echo 'serve: busy' >&2; exit 1 ;; esac; fi\nexit 0\n",
+        log = calls.display()
+    );
+    let launchctl = format!(
+        "#!/bin/sh\necho \"launchctl $*\" >> '{log}'\ncase \"$1\" in print) exit 1 ;; esac\nexit 0\n",
+        log = calls.display()
+    );
+    let systemctl = format!("#!/bin/sh\necho \"systemctl $*\" >> '{log}'\nexit 0\n", log = calls.display());
+    for (name, text) in [("tailscale", tailscale), ("launchctl", launchctl), ("systemctl", systemctl)] {
+        let path = dir.join(name);
+        std::fs::write(&path, text)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+    for name in ["tailscale", "launchctl", "systemctl"] {
+        let found = Command::new("/bin/sh").args(["-c", &format!("command -v {name}")]).env("PATH", &path).output()?;
+        let found = String::from_utf8_lossy(&found.stdout).trim().to_string();
+        ensure!(
+            Path::new(&found) == dir.join(name),
+            "{name} resolves to {found:?}, not the fake; refusing a real install"
+        );
+    }
+    Ok((PathBuf::from(path), calls))
+}
+
+fn fake_run(run: &Run, path: &Path, data: &Path, fail: Option<&str>, args: &[&str]) -> anyhow::Result<(bool, Value)> {
+    let mut command = Command::new(&run.bin);
+    command
+        .args(args)
+        .arg("--json")
+        .arg("--data-dir")
+        .arg(data)
+        .env("HOME", run.root.join("fake-home"))
+        .env("PATH", path)
+        .env_remove("LS_TAILSCALE")
+        .env("LS_FAIL_MOUNT", fail.unwrap_or_default())
+        .stdin(Stdio::null());
+    let output = command.output()?;
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let value: Value = serde_json::from_str(printed.trim())
+        .with_context(|| format!("{args:?} --json printed {printed}{}", String::from_utf8_lossy(&output.stderr)))?;
+    Ok((output.status.success(), value))
+}
+
+fn kept_settings(run: &Run, port: &str) -> anyhow::Result<()> {
+    let data = run.root.join("kept-data");
+    let settings = data.join("remote").join("serve.json");
+    std::fs::create_dir_all(data.join("remote"))?;
+    let before = json!({"allowHosts": ["mine.handoff.test"], "allowTunnelHosts": ["studio.handoff.test"], "notify": ["https://hook.handoff.test/x"]});
+    std::fs::write(&settings, before.to_string())?;
+    let (path, _) = fake_bin(&run.root)?;
+    let bin = run.bin.to_string_lossy().into_owned();
+    let install = ["install", "--no-load", "--port", port, "--allow-host", "box.handoff.test", "--bin", &bin];
+    let (ok, installed) = fake_run(run, &path, &data, None, &install)?;
+    ensure!(ok, "install over an existing serve.json failed: {installed}");
+    expect(
+        &installed,
+        "/serveJson/installed",
+        &json!({"created": false, "allowHosts": ["box.handoff.test"], "allowTunnelHosts": [], "urls": [], "notify": []}),
+        "install over an existing serve.json",
+    )?;
+    let (ok, removed) = fake_run(run, &path, &data, None, &["uninstall", "--no-load"])?;
+    ensure!(ok, "uninstall failed: {removed}");
+    expect(&removed, "/serveJson/state", &json!("kept"), "uninstall after install over an existing serve.json")?;
+    let after: Value = serde_json::from_str(&read(&settings))?;
+    let wanted = json!({"allowHosts": ["mine.handoff.test"], "allowTunnelHosts": ["studio.handoff.test"], "urls": [], "notify": ["https://hook.handoff.test/x"], "port": port.parse::<u16>()?});
+    ensure!(after == wanted, "uninstall changed what install did not add: {after}, wanted {wanted}");
+    println!("ok   uninstall keeps a serve.json install did not create, with its tunnel hosts, notify and allowHosts, and removes only box.handoff.test: {after}");
+    Ok(())
+}
+
+fn real_install(run: &Run, port: &str) -> anyhow::Result<()> {
+    let data = run.root.join("mount-data");
+    let settings = data.join("remote").join("serve.json");
+    let (path, calls) = fake_bin(&run.root)?;
+    std::fs::write(&calls, "")?;
+    let bin = run.bin.to_string_lossy().into_owned();
+    let install = ["install", "--tailscale", "--port", port, "--bin", &bin];
+    let recorded = |what: &str| -> anyhow::Result<Value> {
+        let written: Value = serde_json::from_str(&read(&settings)).with_context(|| format!("serve.json {what}"))?;
+        Ok(written.pointer("/tailscale/paths").cloned().unwrap_or(Value::Null))
+    };
+    let (ok, failed) = fake_run(run, &path, &data, Some("--set-path=/v1/ws"), &install)?;
+    ensure!(
+        !ok && failed.get("state") == Some(&json!("error")),
+        "install with a failing /v1/ws mount did not fail: {failed}"
+    );
+    ensure!(
+        recorded("after the failed mount")? == json!(["/v1/health"]),
+        "the failed install recorded {}",
+        read(&settings)
+    );
+    println!(
+        "ok   F2: tailscale failed the /v1/ws mount; serve.json still records the /v1/health mount that succeeded"
+    );
+    let (ok, planned) =
+        fake_run(run, &path, &data, None, &["install", "--tailscale", "--no-load", "--port", port, "--bin", &bin])?;
+    ensure!(ok, "install --no-load failed: {planned}");
+    ensure!(
+        recorded("after --no-load")? == json!(["/v1/health"]),
+        "install --no-load dropped the recorded mount: {}",
+        read(&settings)
+    );
+    println!("ok   F1: a later install --tailscale --no-load keeps the recorded /v1/health mount");
+    let (ok, mounted) = fake_run(run, &path, &data, None, &install)?;
+    ensure!(ok, "install --tailscale with the fake tailscale failed: {mounted}");
+    expect(&mounted, "/tailscale/state", &json!("mounted"), "install --tailscale")?;
+    ensure!(recorded("after mounting")? == json!(["/v1/health", "/v1/ws"]), "install recorded {}", read(&settings));
+    if cfg!(target_os = "macos") {
+        let log = read(&calls);
+        let launchctl: Vec<&str> = log
+            .lines()
+            .filter(|line| line.starts_with("launchctl"))
+            .map(|line| line.split(' ').nth(1).unwrap_or_default())
+            .collect();
+        ensure!(
+            launchctl == ["bootout", "print", "bootstrap"],
+            "install ran launchctl {launchctl:?}, expected bootout, print, bootstrap"
+        );
+        println!("ok   F12: install waits for launchctl print to fail after bootout before bootstrap");
+    }
+    std::fs::create_dir_all(data.join("tunnel"))?;
+    std::fs::write(data.join("tunnel").join("route.json"), json!({"v":1,"owner":"local-studio","route":"tailnet","hostname":ROUTED,"aliases":[],"ports":{"mcp":8787,"serve":18093}}).to_string())?;
+    let (ok, routed) =
+        fake_run(run, &path, &data, None, &["install", "--tailscale", "--no-load", "--port", port, "--bin", &bin])?;
+    ensure!(ok, "install with route.json failed: {routed}");
+    expect(&routed, "/tailscale/state", &json!("route"), "install with route.json")?;
+    ensure!(
+        recorded("with route.json")? == json!(["/v1/health", "/v1/ws"]),
+        "install with route.json dropped the recorded mounts: {}",
+        read(&settings)
+    );
+    println!("ok   F1: install with route.json keeps both recorded mounts and allows {ROUTED}");
+    let before = read(&calls).lines().count();
+    let (ok, removed) = fake_run(run, &path, &data, None, &["uninstall"])?;
+    ensure!(ok, "uninstall failed: {removed}");
+    expect(&removed, "/tailscale/state", &json!("removed"), "uninstall")?;
+    expect(&removed, "/serveJson/state", &json!("removed"), "uninstall")?;
+    let offs: Vec<String> =
+        read(&calls).lines().skip(before).filter(|line| line.ends_with(" off")).map(str::to_string).collect();
+    ensure!(
+        offs == [
+            "tailscale serve --https=443 --set-path=/v1/health off",
+            "tailscale serve --https=443 --set-path=/v1/ws off"
+        ],
+        "uninstall turned off {offs:?}"
+    );
+    ensure!(!settings.exists(), "uninstall left the serve.json install created: {}", read(&settings));
+    println!("ok   uninstall turns off exactly the two recorded mounts and removes the serve.json install created");
+    Ok(())
 }
 
 async fn drive(run: &mut Run) -> anyhow::Result<()> {

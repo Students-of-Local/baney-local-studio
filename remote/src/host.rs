@@ -84,7 +84,13 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
     });
     let local = bind(config.port, BIND_WAIT).await?;
     let tunnel = match config.tunnel_port {
-        Some(port) => Some((bind(port, BIND_WAIT).await?, port)),
+        Some(port) => match bind(port, BIND_WAIT).await {
+            Ok(listener) => Some((listener, port)),
+            Err(error) => {
+                eprintln!("local-studio-serve: could not start the tunnel listener, serving without it: {error:#}");
+                None
+            }
+        },
         None => None,
     };
     let hub = Hub::new(Arc::clone(&studio), machine, config.hooks.clone())?;

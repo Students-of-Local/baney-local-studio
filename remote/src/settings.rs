@@ -28,6 +28,8 @@ pub struct Settings {
     pub notify: Vec<Hook>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailscale: Option<Tailscale>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<Installed>,
     #[serde(flatten)]
     pub rest: Map<String, Value>,
 }
@@ -59,6 +61,55 @@ pub struct Tailscale {
     pub host: String,
     #[serde(default)]
     pub paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Installed {
+    pub created: bool,
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    #[serde(default)]
+    pub allow_tunnel_hosts: Vec<String>,
+    #[serde(default)]
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub notify: Vec<Hook>,
+}
+
+fn appended<T: Clone + PartialEq>(known: &[T], before: &[T], after: &[T]) -> Vec<T> {
+    let mut list = known.to_vec();
+    for value in after {
+        if !before.contains(value) && !list.contains(value) {
+            list.push(value.clone());
+        }
+    }
+    list
+}
+
+impl Installed {
+    pub fn record(stored: Option<&Settings>, after: &Settings) -> Self {
+        let before = stored.cloned().unwrap_or_default();
+        let known = before.installed.clone().unwrap_or(Self { created: stored.is_none(), ..Self::default() });
+        Self {
+            created: known.created,
+            allow_hosts: appended(&known.allow_hosts, &before.allow_hosts, &after.allow_hosts),
+            allow_tunnel_hosts: appended(
+                &known.allow_tunnel_hosts,
+                &before.allow_tunnel_hosts,
+                &after.allow_tunnel_hosts,
+            ),
+            urls: appended(&known.urls, &before.urls, &after.urls),
+            notify: appended(&known.notify, &before.notify, &after.notify),
+        }
+    }
+
+    pub fn undo(&self, settings: &mut Settings) {
+        settings.allow_hosts.retain(|host| !self.allow_hosts.contains(host));
+        settings.allow_tunnel_hosts.retain(|host| !self.allow_tunnel_hosts.contains(host));
+        settings.urls.retain(|url| !self.urls.contains(url));
+        settings.notify.retain(|hook| !self.notify.contains(hook));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +158,18 @@ fn union(first: &[String], second: &[String]) -> Vec<String> {
 }
 
 impl Settings {
+    pub fn others(&self) -> Vec<String> {
+        let lists = [
+            ("allowHosts", self.allow_hosts.is_empty()),
+            ("allowTunnelHosts", self.allow_tunnel_hosts.is_empty()),
+            ("urls", self.urls.is_empty()),
+            ("notify", self.notify.is_empty()),
+            ("tailscale", self.tailscale.is_none()),
+        ];
+        let named = lists.into_iter().filter(|(_, empty)| !empty).map(|(key, _)| key.to_string());
+        named.chain(self.rest.keys().cloned()).collect()
+    }
+
     pub fn merged(&self, flags: &Settings) -> Settings {
         let mut notify = self.notify.clone();
         for hook in &flags.notify {
@@ -123,6 +186,7 @@ impl Settings {
             urls: union(&self.urls, &flags.urls),
             notify,
             tailscale: self.tailscale.clone(),
+            installed: self.installed.clone(),
             rest: self.rest.clone(),
         }
     }

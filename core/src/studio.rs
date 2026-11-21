@@ -41,6 +41,8 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const TAKEOVER_WAIT: Duration = Duration::from_secs(15);
 const TAKEOVER_POLL: Duration = Duration::from_millis(100);
+const PROBED_WITHIN: Duration = Duration::from_secs(1);
+const PROBED_POLL: Duration = Duration::from_millis(20);
 const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
 const NEW_THREAD_TITLE: &str = "New thread";
@@ -858,11 +860,17 @@ fn lock_data_dir(data_dir: &Path, take_over_serve: bool) -> Result<std::fs::File
     let mut file =
         std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(failed)?;
     let mut asked: Option<std::time::Instant> = None;
+    let since = std::time::Instant::now();
     loop {
         match file.try_lock() {
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) => {
                 let holder = std::fs::read_to_string(&path).unwrap_or_default().trim().to_string();
+                let gone = holder.parse::<u32>().map_or(true, |pid| serve::executable(pid).is_none());
+                if asked.is_none() && gone && since.elapsed() < PROBED_WITHIN {
+                    std::thread::sleep(PROBED_POLL);
+                    continue;
+                }
                 if let Some(asked) = asked {
                     if asked.elapsed() < TAKEOVER_WAIT {
                         std::thread::sleep(TAKEOVER_POLL);
@@ -953,6 +961,17 @@ mod serve {
 #[must_use]
 pub fn process_name(pid: u32) -> Option<String> {
     serve::executable(pid)
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn serve_holds_lock(data_dir: Option<String>) -> bool {
+    store::data_dir(data_dir.as_deref())
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join("studio.lock")).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .is_some_and(serve::runs_serve)
 }
 
 impl Studio {

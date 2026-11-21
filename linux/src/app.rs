@@ -6,13 +6,13 @@ use adw::prelude::*;
 use gtk::gio;
 use local_studio_core::{
     ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind, NotificationMode,
-    PromptDraft, Shelf, ThreadSettings, TranscriptOp, Update,
+    PromptDraft, Shelf, StudioError, ThreadSettings, TranscriptOp, Update,
 };
 use webkit::prelude::*;
 
 use crate::branches::BranchBar;
 use crate::composer::Composer;
-use crate::core::Core;
+use crate::core::{Core, Opened};
 use crate::dashboard::LocalPage;
 use crate::drawer::Drawer;
 use crate::editor::Editors;
@@ -295,14 +295,35 @@ impl App {
     }
 
     pub fn start_core(self: &Rc<Self>) {
+        if !local_studio_core::serve_holds_lock(None) {
+            let opened = Core::open();
+            self.core_opened(opened);
+            return;
+        }
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            sender.send_blocking(Core::open()).ok();
+        });
         let weak = Rc::downgrade(self);
-        let started = self.core.start(move || {
+        gtk::glib::spawn_future_local(async move {
+            let Ok(opened) = receiver.recv().await else { return };
             if let Some(app) = weak.upgrade() {
-                app.tick();
+                app.core_opened(opened);
             }
         });
-        if let Err(error) = started {
-            self.show_banner(&error.to_string());
+    }
+
+    fn core_opened(self: &Rc<Self>, opened: Result<Opened, StudioError>) {
+        match opened {
+            Ok(opened) => {
+                let weak = Rc::downgrade(self);
+                self.core.attach(opened, move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.tick();
+                    }
+                });
+            }
+            Err(error) => self.show_banner(&error.to_string()),
         }
     }
 

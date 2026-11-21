@@ -34,7 +34,9 @@ pub use model::{
 };
 pub use scratch::{check_scratch_agent, stored_keys_empty};
 pub use store::data_dir;
-pub use studio::{process_name, DaemonLaunch, Studio, StudioConfig, StudioError, Subscription, Waker};
+pub use studio::{
+    process_name, serve_holds_lock, DaemonLaunch, Studio, StudioConfig, StudioError, Subscription, Waker,
+};
 pub use workspace::model::*;
 pub use workspace::{endpoint_presets, terminal_preview};
 

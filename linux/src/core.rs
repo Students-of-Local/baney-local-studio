@@ -21,8 +21,13 @@ pub struct Core {
     requests: Cell<u64>,
 }
 
+pub struct Opened {
+    studio: Arc<Studio>,
+    receiver: async_channel::Receiver<()>,
+}
+
 impl Core {
-    pub fn start(&self, on_wake: impl Fn() + 'static) -> Result<(), StudioError> {
+    pub fn open() -> Result<Opened, StudioError> {
         let (sender, receiver) = async_channel::bounded(1);
         let config = StudioConfig {
             socket_path: None,
@@ -33,6 +38,11 @@ impl Core {
             take_over_serve: true,
         };
         let studio = Studio::new(config, Arc::new(ChannelWaker(sender)))?;
+        Ok(Opened { studio, receiver })
+    }
+
+    pub fn attach(&self, opened: Opened, on_wake: impl Fn() + 'static) {
+        let Opened { studio, receiver } = opened;
         match host::start(Arc::clone(&studio), None) {
             Ok(remote) => {
                 self.remote.replace(remote);
@@ -45,7 +55,6 @@ impl Core {
                 on_wake();
             }
         });
-        Ok(())
     }
 
     pub fn is_live(&self) -> bool {

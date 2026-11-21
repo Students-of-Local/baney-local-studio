@@ -3,20 +3,22 @@ use std::io::{Read, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
 
 use crate::cli::{Args, Out};
 use crate::pairing::host_name;
-use crate::settings::{self, Effective, Tailscale};
+use crate::settings::{self, Effective, Installed, Tailscale};
 use crate::{lock, VERSION};
 
 const LABEL: &str = "org.local.studio.serve";
 const UNIT: &str = "local-studio-serve.service";
 const PASSED: [&str; 2] = ["EUKHE_DAEMON_SOCKET", "EUKHE_CODING_AGENT_DIR"];
 const PROBE_WITHIN: Duration = Duration::from_secs(2);
+const BOOTOUT_WITHIN: Duration = Duration::from_secs(5);
+const BOOTOUT_POLL: Duration = Duration::from_millis(100);
 
 enum Manager {
     Launchd,
@@ -78,9 +80,13 @@ fn xml(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
-fn systemd_quoted(text: &str) -> String {
-    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$");
+fn systemd_value(text: &str) -> String {
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%");
     format!("\"{escaped}\"")
+}
+
+fn systemd_quoted(text: &str) -> String {
+    systemd_value(&text.replace('$', "$$"))
 }
 
 fn environment(eukhe: Option<&Path>) -> Vec<(String, String)> {
@@ -127,7 +133,7 @@ fn systemd_unit(arguments: &[String], variables: &[(String, String)]) -> String 
     let command: Vec<String> = arguments.iter().map(|argument| systemd_quoted(argument)).collect();
     writeln!(text, "ExecStart={}", command.join(" ")).ok();
     for (name, value) in variables {
-        writeln!(text, "Environment={}", systemd_quoted(&format!("{name}={value}"))).ok();
+        writeln!(text, "Environment={}", systemd_value(&format!("{name}={value}"))).ok();
     }
     text.push_str("Restart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n");
     text
@@ -204,7 +210,13 @@ fn load(unit: &Unit) -> anyhow::Result<()> {
     match unit.manager {
         Manager::Launchd => {
             let domain = format!("gui/{}", uid()?);
-            quiet("launchctl", &["bootout", &format!("{domain}/{LABEL}")]);
+            let target = format!("{domain}/{LABEL}");
+            if quiet("launchctl", &["bootout", &target]) {
+                let deadline = Instant::now() + BOOTOUT_WITHIN;
+                while quiet("launchctl", &["print", &target]) && Instant::now() < deadline {
+                    std::thread::sleep(BOOTOUT_POLL);
+                }
+            }
             checked("launchctl", &["bootstrap", &domain, &unit.path.to_string_lossy()])?;
         }
         Manager::Systemd => {
@@ -221,6 +233,74 @@ fn unload(unit: &Unit) -> anyhow::Result<bool> {
         Manager::Launchd => quiet("launchctl", &["bootout", &format!("gui/{}/{LABEL}", uid()?)]),
         Manager::Systemd => quiet("systemctl", &["--user", "disable", "--now", UNIT]),
     })
+}
+
+fn tailnet(
+    out: &Out,
+    data_dir: &Path,
+    https_port: u16,
+    port: u16,
+    no_load: bool,
+    stored: Option<&settings::Settings>,
+    settings: &mut settings::Settings,
+) -> anyhow::Result<Value> {
+    let route = route_host(data_dir)?;
+    let host = match &route {
+        Some(host) => host.clone(),
+        None => tailscale_host()?,
+    };
+    let recorded = settings.tailscale.clone().filter(|recorded| !recorded.paths.is_empty());
+    if let Some(recorded) = recorded.as_ref().filter(|recorded| recorded.https_port != https_port) {
+        bail!(
+            "serve.json records tailscale serve {} on https port {}: run uninstall before installing on https port {https_port}",
+            recorded.paths.join(" and "),
+            recorded.https_port
+        );
+    }
+    let paths: Vec<String> =
+        if route.is_some() { Vec::new() } else { TAILNET_PATHS.iter().map(ToString::to_string).collect() };
+    let commands: Vec<Vec<String>> = paths.iter().map(|path| mount(https_port, path, port)).collect();
+    if !settings.allow_hosts.contains(&host) {
+        settings.allow_hosts.push(host.clone());
+    }
+    let mut record = recorded.unwrap_or_else(|| Tailscale { https_port, host: host.clone(), paths: Vec::new() });
+    let state = if route.is_some() {
+        out.say(format_args!(
+            "{} names {host}: its route owns tailscale serve, so install mounts nothing",
+            data_dir.join("tunnel").join("route.json").display()
+        ));
+        "route"
+    } else if no_load {
+        for command in &commands {
+            out.say(format_args!("--no-load: would run tailscale {}", command.join(" ")));
+        }
+        "planned"
+    } else {
+        for (path, command) in paths.iter().zip(&commands) {
+            run_tailscale(command).with_context(|| {
+                format!("serve.json records the tailscale paths mounted before this one: {:?}", record.paths)
+            })?;
+            if !record.paths.contains(path) {
+                record.paths.push(path.clone());
+            }
+            settings.tailscale = Some(record.clone());
+            settings.installed = Some(Installed::record(stored, settings));
+            settings::save(data_dir, settings)?;
+        }
+        out.say(format_args!(
+            "tailscale serve: https://{host}:{https_port} {} forward to http://127.0.0.1:{port}",
+            paths.join(" and ")
+        ));
+        "mounted"
+    };
+    settings.tailscale = Some(record);
+    Ok(json!({
+        "state": state,
+        "host": host,
+        "httpsPort": https_port,
+        "paths": paths,
+        "commands": shown(&commands),
+    }))
 }
 
 pub fn install(mut args: Args) -> anyhow::Result<()> {
@@ -241,54 +321,15 @@ pub fn install(mut args: Args) -> anyhow::Result<()> {
     };
     let eukhe = eukhe.map(|eukhe| canonical(&eukhe, "--eukhe")).transpose()?;
     let unit = unit()?;
-    let mut settings = settings::load(&data_dir)?.unwrap_or_default().merged(&flags);
+    let stored = settings::load(&data_dir)?;
+    let mut settings = stored.clone().unwrap_or_default().merged(&flags);
     let config = settings.effective(&host_name());
     ensure!(config.tunnel_port != Some(config.port), "the tunnel port must differ from the local port {}", config.port);
     let mut served = Value::Null;
     if tailscale {
-        let route = route_host(&data_dir)?;
-        let host = match &route {
-            Some(host) => host.clone(),
-            None => tailscale_host()?,
-        };
-        let paths: Vec<String> =
-            if route.is_some() { Vec::new() } else { TAILNET_PATHS.iter().map(ToString::to_string).collect() };
-        let commands: Vec<Vec<String>> = paths.iter().map(|path| mount(https_port, path, config.port)).collect();
-        let state = if route.is_some() {
-            out.say(format_args!(
-                "{} names {host}: its route owns tailscale serve, so install mounts nothing",
-                data_dir.join("tunnel").join("route.json").display()
-            ));
-            "route"
-        } else if no_load {
-            for command in &commands {
-                out.say(format_args!("--no-load: would run tailscale {}", command.join(" ")));
-            }
-            "planned"
-        } else {
-            for command in &commands {
-                run_tailscale(command)?;
-            }
-            out.say(format_args!(
-                "tailscale serve: https://{host}:{https_port} {} forward to http://127.0.0.1:{}",
-                paths.join(" and "),
-                config.port
-            ));
-            "mounted"
-        };
-        if !settings.allow_hosts.contains(&host) {
-            settings.allow_hosts.push(host.clone());
-        }
-        let mounted = if state == "mounted" { paths.clone() } else { Vec::new() };
-        served = json!({
-            "state": state,
-            "host": host,
-            "httpsPort": https_port,
-            "paths": paths,
-            "commands": shown(&commands),
-        });
-        settings.tailscale = Some(Tailscale { https_port, host, paths: mounted });
+        served = tailnet(&out, &data_dir, https_port, config.port, no_load, stored.as_ref(), &mut settings)?;
     }
+    settings.installed = Some(Installed::record(stored.as_ref(), &settings));
     settings::save(&data_dir, &settings)?;
     out.say(format_args!("Wrote {}", settings::path(&data_dir).display()));
     let arguments = vec![
@@ -326,6 +367,38 @@ pub fn install(mut args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn unmount_all(
+    out: &Out,
+    data_dir: &Path,
+    no_load: bool,
+    added: &Tailscale,
+    settings: &mut settings::Settings,
+) -> anyhow::Result<(&'static str, Option<Tailscale>)> {
+    if added.paths.is_empty() {
+        return Ok(("none", None));
+    }
+    if no_load {
+        for path in &added.paths {
+            out.say(format_args!("--no-load: would run tailscale {}", unmount(added.https_port, path).join(" ")));
+        }
+        return Ok(("left", Some(added.clone())));
+    }
+    let mut left = added.clone();
+    for path in &added.paths {
+        run_tailscale(&unmount(added.https_port, path))?;
+        left.paths.retain(|known| known != path);
+        settings.tailscale = Some(left.clone());
+        settings::save(data_dir, settings)?;
+    }
+    out.say(format_args!(
+        "Removed tailscale serve {} on https port {} ({})",
+        added.paths.join(" and "),
+        added.https_port,
+        added.host
+    ));
+    Ok(("removed", None))
+}
+
 pub fn uninstall(mut args: Args) -> anyhow::Result<()> {
     let out = Out::new(&mut args);
     let no_load = args.switch("--no-load");
@@ -351,45 +424,46 @@ pub fn uninstall(mut args: Args) -> anyhow::Result<()> {
     if !no_load && matches!(unit.manager, Manager::Systemd) {
         quiet("systemctl", &["--user", "daemon-reload"]);
     }
-    if let Some(settings) = settings::load(&data_dir)? {
-        if let Some(added) = &settings.tailscale {
-            let commands: Vec<Vec<String>> = added.paths.iter().map(|path| unmount(added.https_port, path)).collect();
-            let state = if commands.is_empty() {
-                "none"
-            } else if no_load {
-                for command in &commands {
-                    out.say(format_args!("--no-load: would run tailscale {}", command.join(" ")));
-                }
-                "left"
-            } else {
-                for command in &commands {
-                    run_tailscale(command)?;
-                }
-                out.say(format_args!(
-                    "Removed tailscale serve {} on https port {} ({})",
-                    added.paths.join(" and "),
-                    added.https_port,
-                    added.host
-                ));
-                "removed"
-            };
+    let mut serve_json = Value::Null;
+    if let Some(mut settings) = settings::load(&data_dir)? {
+        if let Some(added) = settings.tailscale.clone() {
+            let (state, left) = unmount_all(&out, &data_dir, no_load, &added, &mut settings)?;
             tailscale = json!({
                 "state": state,
                 "host": added.host,
                 "httpsPort": added.https_port,
                 "paths": added.paths,
-                "commands": shown(&commands),
+                "commands": shown(&added.paths.iter().map(|path| unmount(added.https_port, path)).collect::<Vec<_>>()),
             });
+            settings.tailscale = left;
         }
+        let installed = settings.installed.take().unwrap_or_default();
+        installed.undo(&mut settings);
+        let kept = settings.others();
         let path = settings::path(&data_dir);
-        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
-        out.say(format_args!("Removed {}", path.display()));
-        removed.push(path);
+        if installed.created && kept.is_empty() {
+            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+            out.say(format_args!("Removed {}", path.display()));
+            removed.push(path);
+            serve_json = json!({ "state": "removed", "kept": kept });
+        } else {
+            if settings.tailscale.is_some() {
+                settings.installed = Some(Installed { created: installed.created, ..Installed::default() });
+            }
+            settings::save(&data_dir, &settings)?;
+            if kept.is_empty() {
+                out.say(format_args!("Kept {}: install did not create it", path.display()));
+            } else {
+                out.say(format_args!("Kept {}: it still holds {}", path.display(), kept.join(", ")));
+            }
+            serve_json = json!({ "state": "kept", "kept": kept });
+        }
     }
     out.object(&json!({
         "state": if removed.is_empty() && !unloaded { "absent" } else { "uninstalled" },
         "unloaded": unloaded,
         "removed": removed,
+        "serveJson": serve_json,
         "tailscale": tailscale,
     }));
     Ok(())
