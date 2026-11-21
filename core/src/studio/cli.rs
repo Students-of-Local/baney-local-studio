@@ -19,6 +19,7 @@ pub(super) struct Cli {
     driver: Driver,
     generation: u64,
     used: Instant,
+    restart: bool,
 }
 
 pub(super) fn name(harness: Harness) -> &'static str {
@@ -192,7 +193,8 @@ impl Actor {
         }
         let last_user_at = thread.live.as_ref().and_then(|live| live.transcript.last_user_at());
         let active = thread.live.as_ref().map(|live| live.active.clone()).unwrap_or_default();
-        self.drivers.insert(id.to_string(), Cli { driver: opened.driver, generation, used: Instant::now() });
+        self.drivers
+            .insert(id.to_string(), Cli { driver: opened.driver, generation, used: Instant::now(), restart: false });
         self.note_user_at(id, last_user_at);
         if self.focused.as_deref() == Some(id) {
             self.emit_focus(id);
@@ -352,11 +354,15 @@ impl Actor {
             self.save();
             let running = self.running(id);
             if let Some(cli) = self.drivers.get_mut(id) {
-                if let Err(error) = cli.driver.set_effort(&level) {
+                if cli.driver.set_effort(&level).is_err() {
+                    cli.restart = true;
                     if running {
-                        self.mailbox.notice(NoticeLevel::Info, error);
-                    } else if let Some(mut cli) = self.drivers.remove(id) {
-                        cli.driver.kill();
+                        self.mailbox.notice(
+                            NoticeLevel::Info,
+                            format!("{} takes the new thinking level when the running turn ends.", name(harness)),
+                        );
+                    } else {
+                        self.cli_restart_due(id);
                     }
                 }
             }
@@ -430,7 +436,30 @@ impl Actor {
         let Some(cli) = self.drivers.get_mut(&id).filter(|cli| cli.generation == generation) else { return };
         cli.used = Instant::now();
         match event {
-            Event::Session(event) => self.apply_event(&id, &event, 0).await,
+            Event::Session(event) => {
+                self.apply_event(&id, &event, 0).await;
+                if matches!(*event, SessionEvent::AgentEnd { .. }) {
+                    if let Some(thread) = self.threads.get_mut(&id) {
+                        thread.stopping = None;
+                    }
+                    self.cli_restart_due(&id);
+                }
+            }
+            Event::Idle => {
+                let busy =
+                    self.threads.get(&id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy);
+                if !busy {
+                    if let Some(thread) = self.threads.get_mut(&id) {
+                        thread.pending_run = false;
+                        thread.pending_at = None;
+                        thread.run_started_at = None;
+                        thread.stopping = None;
+                    }
+                    self.emit_info(&id);
+                    self.dirty = true;
+                    self.cli_restart_due(&id);
+                }
+            }
             Event::Approval(approval) => self.add_approval(id, approval),
             Event::ApprovalSettled(request) => self.settle_approval(&id, &request),
             Event::Context(context) => {
@@ -476,6 +505,21 @@ impl Actor {
                     let reason = failure.unwrap_or_else(|| "it exited during the turn".to_string());
                     self.mailbox.notice(NoticeLevel::Warning, format!("{} stopped: {reason}", name(harness)));
                 }
+            }
+        }
+    }
+
+    fn cli_restart_due(&mut self, id: &str) {
+        let due = self.drivers.get(id).is_some_and(|cli| cli.restart)
+            && !self.running(id)
+            && self
+                .threads
+                .get(id)
+                .and_then(|thread| thread.live.as_ref())
+                .is_none_or(|live| live.approvals.is_empty());
+        if due {
+            if let Some(mut cli) = self.drivers.remove(id) {
+                cli.driver.kill();
             }
         }
     }

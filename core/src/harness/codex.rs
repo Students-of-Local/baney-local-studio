@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOpti
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const CONTEXT_WINDOW: u64 = 272_000;
+const REMEMBERED_TURNS: usize = 16;
 
 type Replies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
@@ -73,10 +74,77 @@ struct PendingApproval {
     legacy: bool,
 }
 
+#[derive(Default)]
+struct Turns {
+    running: Option<String>,
+    finished: VecDeque<String>,
+    held: VecDeque<Value>,
+}
+
+impl Turns {
+    fn started(&mut self, id: &str) {
+        if !self.finished.iter().any(|done| done == id) {
+            self.running = Some(id.to_string());
+        }
+    }
+
+    fn completed(&mut self, id: Option<&str>) -> Option<Value> {
+        if let Some(id) = id {
+            self.finished.push_back(id.to_string());
+            if self.finished.len() > REMEMBERED_TURNS {
+                self.finished.pop_front();
+            }
+            if self.running.as_deref().is_some_and(|running| running != id) {
+                return None;
+            }
+        }
+        self.running = None;
+        self.held.pop_front()
+    }
+}
+
+type SharedTurns = Arc<Mutex<Turns>>;
+
+fn request_key(id: &Value) -> String {
+    match id {
+        Value::String(id) => id.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, params: Value) {
+    tokio::spawn(async move {
+        match rpc.call("turn/start", params).await {
+            Ok(started) => {
+                if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
+                    turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                }
+            }
+            Err(error) => {
+                if let Some(message) = notice(&format!("Codex did not start the queued message: {error}"), now_ms()) {
+                    emit_message(&sink, message);
+                }
+                sink.send(Event::Idle);
+            }
+        }
+    });
+}
+
+fn held_text(params: &Value) -> String {
+    params["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(crate) struct Codex {
     rpc: Rpc,
+    sink: Sink,
     thread: String,
-    turn: Arc<Mutex<Option<String>>>,
+    turns: SharedTurns,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
     access: AccessMode,
     model: Option<String>,
@@ -129,7 +197,7 @@ fn start(
     cwd: &str,
     sink: Option<Sink>,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-    turn: Arc<Mutex<Option<String>>>,
+    turns: SharedTurns,
 ) -> Result<Process, String> {
     let binary = program("LOCAL_STUDIO_CODEX_BIN", "codex");
     let mut command = command(&binary, cwd);
@@ -155,17 +223,11 @@ fn start(
     });
     let tail = Arc::new(Mutex::new(Vec::<String>::new()));
     let errors = Arc::clone(&tail);
-    let error_sink = sink.clone();
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
             if line.trim().is_empty() {
                 continue;
-            }
-            if let (Some(sink), Some(reason)) = (error_sink.as_ref(), stop_reason(&line)) {
-                if line.contains("ERROR") || line.contains("error") {
-                    sink.send(Event::Stopped(reason));
-                }
             }
             let mut tail = errors.lock().unwrap_or_else(PoisonError::into_inner);
             tail.push(line);
@@ -174,7 +236,7 @@ fn start(
             }
         }
     });
-    let mut translator = sink.clone().map(|sink| Translator::new(sink, rpc.clone(), approvals, turn));
+    let mut translator = sink.clone().map(|sink| Translator::new(sink, rpc.clone(), approvals, turns));
     let reader_replies = Arc::clone(&replies);
     let reader_rpc = rpc.clone();
     let done = tokio::spawn(async move {
@@ -288,8 +350,8 @@ pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
 impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
         let approvals = Arc::new(Mutex::new(HashMap::new()));
-        let turn = Arc::new(Mutex::new(None));
-        let mut process = start(&launch.cwd, Some(sink), Arc::clone(&approvals), Arc::clone(&turn))?;
+        let turns = SharedTurns::default();
+        let mut process = start(&launch.cwd, Some(sink.clone()), Arc::clone(&approvals), Arc::clone(&turns))?;
         let opened = async {
             initialize(&process.rpc).await?;
             let mut params = json!({
@@ -328,8 +390,9 @@ impl Codex {
         };
         let codex = Self {
             rpc: process.rpc.clone(),
+            sink,
             thread: thread.clone(),
-            turn,
+            turns,
             approvals,
             access: launch.access,
             model: launch.model.clone(),
@@ -345,13 +408,31 @@ impl Codex {
             return Err("Codex threads in Local Studio do not take images yet.".to_string());
         }
         let input = json!([{ "type": "text", "text": text, "text_elements": [] }]);
-        let running = self.turn.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        if let Some(turn) = running.filter(|_| steer) {
+        let params = self.turn_params(&input);
+        let running = {
+            let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+            match turns.running.clone() {
+                Some(_) if !steer => {
+                    turns.held.push_back(params);
+                    return Ok(());
+                }
+                running => running,
+            }
+        };
+        if let Some(turn) = running {
             self.rpc
                 .call("turn/steer", json!({ "threadId": self.thread, "expectedTurnId": turn, "input": input }))
                 .await?;
             return Ok(());
         }
+        let started = self.rpc.call("turn/start", params).await?;
+        if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
+            self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+        }
+        Ok(())
+    }
+
+    fn turn_params(&self, input: &Value) -> Value {
         let mut params = json!({
             "threadId": self.thread,
             "input": input,
@@ -366,15 +447,20 @@ impl Codex {
         if let Some(effort) = self.effort.as_deref().filter(|effort| !effort.is_empty()) {
             params["effort"] = json!(effort);
         }
-        let started = self.rpc.call("turn/start", params).await?;
-        if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-            *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = Some(id.to_string());
-        }
-        Ok(())
+        params
     }
 
     pub(crate) async fn interrupt(&mut self) -> Result<(), String> {
-        let turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let (turn, dropped) = {
+            let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+            (turns.running.clone(), std::mem::take(&mut turns.held))
+        };
+        for params in dropped {
+            let text = format!("Stop dropped this queued message: {}", held_text(&params));
+            if let Some(message) = notice(&text, now_ms()) {
+                emit_message(&self.sink, message);
+            }
+        }
         let turn = turn.ok_or_else(|| "Codex has no turn running.".to_string())?;
         self.rpc.call("turn/interrupt", json!({ "threadId": self.thread, "turnId": turn })).await.map(|_| ())
     }
@@ -440,7 +526,7 @@ struct Translator {
     sink: Sink,
     rpc: Rpc,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-    turn: Arc<Mutex<Option<String>>>,
+    turns: SharedTurns,
     busy: bool,
     model: String,
     items: HashMap<String, Live>,
@@ -451,17 +537,12 @@ struct Translator {
 }
 
 impl Translator {
-    fn new(
-        sink: Sink,
-        rpc: Rpc,
-        approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-        turn: Arc<Mutex<Option<String>>>,
-    ) -> Self {
+    fn new(sink: Sink, rpc: Rpc, approvals: Arc<Mutex<HashMap<String, PendingApproval>>>, turns: SharedTurns) -> Self {
         Self {
             sink,
             rpc,
             approvals,
-            turn,
+            turns,
             busy: false,
             model: String::new(),
             items: HashMap::new(),
@@ -481,7 +562,11 @@ impl Translator {
     }
 
     fn end(&mut self, error: Option<String>) {
-        *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let settled: Vec<String> =
+            self.approvals.lock().unwrap_or_else(PoisonError::into_inner).drain().map(|(id, _)| id).collect();
+        for id in settled {
+            self.sink.send(Event::ApprovalSettled(id));
+        }
         if !self.busy {
             return;
         }
@@ -496,6 +581,7 @@ impl Translator {
             return;
         }
         self.stopped = true;
+        self.forget_turns();
         if let Some(message) = notice(&reason, now_ms()) {
             emit_message(&self.sink, message);
         }
@@ -504,7 +590,14 @@ impl Translator {
     }
 
     fn finish(&mut self) {
+        self.forget_turns();
         self.end(None);
+    }
+
+    fn forget_turns(&self) {
+        let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+        turns.running = None;
+        turns.held.clear();
     }
 
     fn message(&self, kind: &str, text: &str, stop: &str, at: u64) -> Option<AgentMessage> {
@@ -524,12 +617,21 @@ impl Translator {
         match method {
             "turn/started" => {
                 if let Some(id) = params.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-                    *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = Some(id.to_string());
+                    self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
                 }
                 self.begin();
             }
+            "serverRequest/resolved" => {
+                let Some(id) = params.get("requestId") else { return };
+                let key = request_key(id);
+                if self.approvals.lock().unwrap_or_else(PoisonError::into_inner).remove(&key).is_some() {
+                    self.sink.send(Event::ApprovalSettled(key));
+                }
+            }
             "turn/completed" => {
                 let turn = params.get("turn");
+                let id = turn.and_then(|turn| turn.get("id")).and_then(Value::as_str);
+                let next = self.turns.lock().unwrap_or_else(PoisonError::into_inner).completed(id);
                 let status = text(turn, "status");
                 let error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null()).map(|error| {
                     error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string)
@@ -547,6 +649,9 @@ impl Translator {
                     None
                 };
                 self.end(failure);
+                if let Some(params) = next {
+                    start_turn(self.rpc.clone(), self.sink.clone(), Arc::clone(&self.turns), params);
+                }
             }
             "item/started" => self.item_started(item),
             "item/completed" => self.item_completed(item),
@@ -716,10 +821,7 @@ impl Translator {
                 return;
             }
         };
-        let request = match id {
-            Value::String(id) => id.clone(),
-            other => other.to_string(),
-        };
+        let request = request_key(id);
         self.approvals
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

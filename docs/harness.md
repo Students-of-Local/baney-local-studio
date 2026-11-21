@@ -21,7 +21,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 ## Claude Code driver
 
 - One long-lived process per active thread: `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --permission-prompts host --permission-mode <mode> --model <model>`, plus `--session-id <uuid>` on the first turn and `--resume <uuid>` after a restart. Kill it after 10 minutes idle; resume on the next send.
-- Find the control protocol (permission requests, interrupt, responses) by running the installed CLI (`claude --version` is 2.1.303) and reading what it emits; do not guess. Record the frames you rely on in the doc.
+- Find the control protocol (permission requests, interrupt, responses) by running the installed CLI (`claude --version` is 2.1.328) and reading what it emits; do not guess. Record the frames you rely on in the doc.
 - Access modes: Supervised to `manual`, AutoAcceptEdits to `acceptEdits`, Auto to `auto`, FullAccess to `bypassPermissions`. Permission requests become `Update::Approvals`; `answer_approval` answers them, including allow for the session.
 - `abort` sends the CLI's interrupt. Steer and queue map onto streamed user messages.
 - Usage and cost come from the CLI's result message and feed the usage report.
@@ -29,7 +29,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 
 ## Codex driver
 
-- `codex app-server` over stdio JSON-RPC (`codex-cli 0.163.0`). Generate the protocol schema with `codex app-server generate-json-schema` into a scratch dir and code against it.
+- `codex app-server` over stdio JSON-RPC (`codex-cli 0.169.0`). Generate the protocol schema with `codex app-server generate-json-schema` into a scratch dir and code against it.
 - Thread start, turn start, interrupt, approval requests and responses, model list, history read for a reopened thread. Map access modes to Codex approval policy and sandbox the same way T3 does (`apps/server/src/provider/` in pingdotgg/t3code, a clone is at `~/.t3/scratch/2026-11-17-you-are-the-lead-for-a5ac7ec9/study/t3code`).
 
 ## Models and picker
@@ -68,9 +68,9 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 
 - `LOCAL_STUDIO_CLAUDE_BIN` and `LOCAL_STUDIO_CODEX_BIN` override the programs; otherwise `claude` and `codex` come from `PATH`.
 - Every child loses `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`.
-- Stderr lines and error frames are matched against sign-in, billing and quota words (`/login`, `not logged in`, `authentication_error`, `refresh token`, `unauthorized`, `credit balance`, `billing`, `usage limit`, `quota` and similar). A match ends the turn with that error, kills the process, raises a failed notification and sends nothing more until Donovan sends again.
+- Error frames, failed results and Codex `error` notifications are matched against sign-in, billing and quota words (`/login`, `not logged in`, `authentication_error`, `refresh token`, `unauthorized`, `credit balance`, `billing`, `usage limit`, `quota` and similar). A match ends the turn with that error, kills the process, raises a failed notification and sends nothing more until Donovan sends again. Raw stderr is never matched (an MCP server logging an expired OAuth login is not an account problem); it only feeds the exit message.
 
-### Claude Code 2.1.303 frames
+### Claude Code 2.1.328 frames
 
 The process runs as:
 
@@ -99,14 +99,14 @@ We read:
 - `user` with `isReplay: true`: the CLI took up a user message. This starts the run in Local Studio (`AgentStart`, then the user message). Replays of local commands (`<local-command-stdout>`, `<command-name>`) are skipped. `user` frames with `tool_result` blocks become tool results; `tool_use_result.structuredPatch` or a create becomes the diff on the edit card.
 - `stream_event` (`message_start`, `content_block_start`, `content_block_delta` with `text_delta`, `thinking_delta` and `input_json_delta`, `content_block_stop`, `message_delta`, `message_stop`): streamed assistant text, thinking and tool calls.
 - `assistant`: the finished message; used for tool names and inputs, and as the message itself when no stream events came.
-- `control_request` with subtype `can_use_tool` (`tool_name`, `input`, `description`, `permission_suggestions`, `tool_use_id`): becomes an approval. Other subtypes get an error response.
+- `control_request` with subtype `can_use_tool` (`tool_name`, `input`, `description`, `permission_suggestions`, `tool_use_id`): becomes an approval. The card always shows the tool and the real `command`, `file_path`, `path`, `url` or `pattern` from `input`; a `description` or `title` is only a second line under it. Other subtypes get an error response.
 - `control_cancel_request`: settles that approval.
-- `result`: ends the turn. `terminal_reason` containing `abort` marks the turn aborted. `total_cost_usd` and `modelUsage` are cumulative for the life of the process, so the driver records the difference from the previous result per model. `usage` (the last call only) plus `modelUsage[*].contextWindow` give the context meter.
+- `result`: ends the turn and settles any approval still pending. Local commands such as `/compact` and `/clear` replay no user message and start no turn, so a `result` with no turn running only ends the pending send. `terminal_reason` containing `abort` marks the turn aborted. `total_cost_usd` and `modelUsage` are cumulative for the life of the process, so the driver records the difference from the previous result per model. `usage` (the last call only) plus `modelUsage[*].contextWindow` give the context meter.
 - `rate_limit_event` with a rejected status: treated as a quota stop.
 
-History on reopen comes from `~/.claude/projects/<cwd with every non-alphanumeric character as '-'>/<session>.jsonl` (`CLAUDE_CONFIG_DIR` is respected). Assistant lines are merged by `message.id`; sidechain and meta lines, `<...>` command lines and `[Request interrupted` lines are skipped.
+History on reopen comes from `~/.claude/projects/<cwd with every non-alphanumeric character as '-'>/<session>.jsonl` (`CLAUDE_CONFIG_DIR` is respected). Assistant lines are merged by `message.id`; sidechain and meta lines, the CLI's own wrappers (`<local-command`, `<command-`, `<system-reminder`, `<task-notification`, the same list the live replay filter uses) and `[Request interrupted` lines are skipped. A user message that merely starts with `<`, such as pasted HTML, stays.
 
-### Codex app-server (codex-cli 0.163.0) calls
+### Codex app-server (codex-cli 0.169.0) calls
 
 Requests we send: `initialize` (then the `initialized` notification), `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`, `thread/name/set`, `thread/compact/start`, `model/list`.
 
@@ -119,9 +119,11 @@ Access modes follow T3:
 | Auto | `on-request` | `workspace-write` | `auto_review` |
 | FullAccess | `granular` (only MCP elicitations ask) | `danger-full-access` | `user` |
 
-Notifications we read: `turn/started`, `turn/completed`, `item/started`, `item/completed`, `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `thread/tokenUsage/updated`, `error` (skipped while `willRetry` is true).
+Notifications we read: `turn/started`, `turn/completed`, `serverRequest/resolved`, `item/started`, `item/completed`, `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `thread/tokenUsage/updated`, `error` (skipped while `willRetry` is true).
 
 Items map to the Eukhe shapes: `userMessage` to a user message, `agentMessage` to assistant text, `reasoning` to thinking, `commandExecution` to a `bash` tool call with `command`, `fileChange` to an `edit` tool call with the diff, `mcpToolCall` to `server.tool`, `dynamicToolCall` to its tool name, `webSearch` to `web_search`.
+
+`turn/started` and `turn/completed` own the running turn; the `turn/start` response sets it only when that turn has not already completed. A message sent with Queue while a turn runs is held by the driver and sent with `turn/start` after `turn/completed`, one per completed turn; Steer uses `turn/steer`. Stop drops held messages and shows each one in the transcript. `turn/completed` and `serverRequest/resolved` settle pending approvals, so a card never outlives its turn.
 
 Server requests we answer: `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept`, `acceptForSession` or `decline`; the legacy `execCommandApproval` and `applyPatchApproval` with `approved`, `approved_for_session` or `denied`. Every other server request (`item/permissions/requestApproval`, `tool/requestUserInput`, `mcpServer/elicitation` and so on) gets a JSON-RPC error.
 
@@ -142,9 +144,9 @@ Each turn's spend is appended to `<data dir>/harness/usage.jsonl` (`at`, `provid
 | Verb | Claude Code | Codex |
 | --- | --- | --- |
 | Steer a running turn | Same as queue: the CLI holds a mid-turn message and runs it as the next turn | `turn/steer` |
-| Send now / remove a queued message | No queue is visible; messages go straight to the CLI | Same |
+| Send now / remove a queued message | No queue is visible; messages go straight to the CLI | No queue is visible; the driver holds queued messages until the turn ends |
 | Images in a prompt | Yes | Error: not supported yet |
-| Change thinking level mid-thread | Applies from the next process start; the idle process is restarted at once, a running one keeps its level until then | Next turn |
+| Change thinking level mid-thread | Applies from the next process start; an idle process is restarted at once, a running one is restarted when its turn ends | Next turn |
 | Compact | Sends `/compact` as a message | `thread/compact/start` |
 | Rename | Local Studio title only | `thread/name/set` too |
 | Delete | Forgets the thread; the CLI session file stays | Same |
