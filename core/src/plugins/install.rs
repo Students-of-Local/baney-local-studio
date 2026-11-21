@@ -128,29 +128,48 @@ impl Drop for Scratch {
 pub fn install(root: &Path, source: &Source, catalog: &Catalog) -> Result<Installed, Vec<String>> {
     std::fs::create_dir_all(root).map_err(|error| vec![format!("cannot create {}: {error}", root.display())])?;
     match source {
-        Source::Dir(dir) => place(root, dir, &[], None),
+        Source::Dir(dir) => place(root, dir, &[], None, &[]),
         Source::Git { url, rev } => {
             let fetched = Scratch::new(root, "fetch")?;
-            fetch(url, rev, &fetched.0)?;
-            place(root, &fetched.0, &[], None)
+            let flattened = fetch(url, rev, &fetched.0)?;
+            place(root, &fetched.0, &[], None, &flattened)
         }
         Source::Catalog(id) => {
             let entry = catalog
                 .entry(id)
                 .ok_or_else(|| vec![format!("{id} is not in the plugin catalog (use ./{id} for a folder)")])?;
             let fetched = Scratch::new(root, "fetch")?;
-            fetch(&entry.git, &entry.rev, &fetched.0)?;
+            let flattened = fetch(&entry.git, &entry.rev, &fetched.0)?;
             let dir = match &entry.subdir {
                 Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
                 None => fetched.0.clone(),
             };
-            place(root, &dir, &entry.exclude, Some(&entry.tree))
+            place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened)
         }
     }
 }
 
-fn place(root: &Path, source: &Path, exclude: &[String], expected: Option<&str>) -> Result<Installed, Vec<String>> {
+fn place(
+    root: &Path,
+    source: &Path,
+    exclude: &[String],
+    expected: Option<&str>,
+    flattened: &[PathBuf],
+) -> Result<Installed, Vec<String>> {
     let entries = walk(source, exclude).map_err(|error| vec![error])?;
+    let unlinked: Vec<String> = entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, Kind::File { .. }) && flattened.contains(&source.join(&entry.path)))
+        .map(|entry| {
+            format!(
+                "symlink came back as a regular file: {} (this system did not create the link; on Windows, turn on Developer Mode)",
+                entry.path
+            )
+        })
+        .collect();
+    if !unlinked.is_empty() {
+        return Err(unlinked);
+    }
     let tree = hash_entries(source, &entries).map_err(|error| vec![error])?;
     if let Some(expected) = expected.filter(|expected| *expected != tree) {
         return Err(vec![format!("tree hash mismatch: the catalog pins {expected}, the fetched plugin is {tree}")]);
@@ -206,12 +225,21 @@ fn manifest_id(source: &Path) -> Result<String, Vec<String>> {
     }
 }
 
-fn fetch(url: &str, rev: &str, into: &Path) -> Result<(), Vec<String>> {
+fn fetch(url: &str, rev: &str, into: &Path) -> Result<Vec<PathBuf>, Vec<String>> {
     let git = |args: &[&str]| -> Result<String, String> {
         let output = Command::new("git")
             .arg("-C")
             .arg(into)
-            .args(["-c", "advice.detachedHead=false", "-c", "core.symlinks=true"])
+            .args([
+                "-c",
+                "advice.detachedHead=false",
+                "-c",
+                "core.symlinks=true",
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
+            ])
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
@@ -232,7 +260,14 @@ fn fetch(url: &str, rev: &str, into: &Path) -> Result<(), Vec<String>> {
     if head != rev {
         return Err(vec![format!("git checked out {head}, not the pinned {rev}")]);
     }
-    std::fs::remove_dir_all(into.join(".git")).map_err(|error| vec![format!("cannot drop .git: {error}")])
+    let flattened = git(&["ls-tree", "-r", "-z", "HEAD"])
+        .map_err(|error| vec![error])?
+        .split('\0')
+        .filter_map(|line| line.strip_prefix("120000 ")?.split_once('\t').map(|(_, path)| into.join(path)))
+        .filter(|path| !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()))
+        .collect();
+    std::fs::remove_dir_all(into.join(".git")).map_err(|error| vec![format!("cannot drop .git: {error}")])?;
+    Ok(flattened)
 }
 
 #[derive(Debug)]
