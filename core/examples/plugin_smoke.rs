@@ -910,7 +910,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         put_server(agent, "web-off", None)?;
         record("queued", queued_during_run(harness, ledger_out));
         ensure!(failed.is_empty(), "failed scenarios: {}", failed.join(", "));
-        studio.run_local(cloud.clone());
+        studio.run_local(cloud.clone(), local.clone());
         harness.pump_until("switched to the local model and running", step, |view| {
             view.threads.iter().any(|row| {
                 row.id == cloud && row.model.as_deref() == Some(MID) && matches!(row.status, ThreadStatus::Working)

@@ -237,16 +237,16 @@ impl Actor {
         Ok(())
     }
 
-    pub(super) async fn run_local(&mut self, id: &str) {
+    pub(super) async fn run_local(&mut self, id: &str, local: ModelKey) {
         let Some(prompt) = self.threads.get_mut(id).and_then(|thread| thread.refused.take()) else {
             self.mailbox.notice(NoticeLevel::Info, "That message was already sent or dropped.");
             return;
         };
-        let Some(key) = self.local_choice() else {
-            self.mailbox.notice(NoticeLevel::Error, "No local model is set up. Add one in Settings, then try again.");
+        if !Self::local_provider(&local.provider) {
+            self.mailbox.notice(NoticeLevel::Error, format!("{} is not a local model.", local.model));
             return;
-        };
-        if let Err(error) = self.apply_model(id, Some(key.provider), Some(key.model), None).await {
+        }
+        if let Err(error) = self.apply_model(id, Some(local.provider), Some(local.model), None).await {
             self.mailbox.notice(NoticeLevel::Error, error);
             return;
         }

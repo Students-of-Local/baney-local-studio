@@ -378,6 +378,7 @@ enum Command {
     },
     RunLocal {
         thread: String,
+        local: ModelKey,
     },
     SendHeld {
         thread: String,
@@ -797,8 +798,8 @@ impl Studio {
         self.send_command(Command::SetModel { thread, provider, model });
     }
 
-    pub fn run_local(&self, thread: String) {
-        self.send_command(Command::RunLocal { thread });
+    pub fn run_local(&self, thread: String, local: ModelKey) {
+        self.send_command(Command::RunLocal { thread, local });
     }
 
     pub fn set_thinking_level(&self, thread: String, level: String) {
@@ -1495,7 +1496,7 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
-            Command::RunLocal { thread } => self.run_local(&thread).await,
+            Command::RunLocal { thread, local } => self.run_local(&thread, local).await,
             Command::SendHeld { thread } => self.send_held(&thread).await,
             Command::SetThinkingLevel { thread, level } => {
                 if let Err(error) = self.apply_model(&thread, None, None, Some(level)).await {
