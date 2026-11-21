@@ -3804,7 +3804,10 @@ impl Actor {
             | DaemonClientEvent::SessionListProgress { .. }
             | DaemonClientEvent::HeartbeatsChanged
             | DaemonClientEvent::StateTreeUpdate { .. } => {}
-            DaemonClientEvent::SideQuestionEvent { event, .. } => self.title_answered(&event).await,
+            DaemonClientEvent::SideQuestionEvent { event, .. } => {
+                self.text.answered(&event);
+                self.title_answered(&event).await;
+            }
         }
     }
 

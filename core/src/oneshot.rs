@@ -1,15 +1,20 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
-use eukhe_client::daemon_client::DaemonClient;
-use eukhe_types::daemon::{DaemonCommand, DaemonSessionLifecycle, PromptInput};
+use eukhe_client::daemon_client::{DaemonClient, LONG_RUNNING_REQUEST_TIMEOUT_MS};
+use eukhe_client::saved_sessions;
+use eukhe_types::daemon::{DaemonClientKind, DaemonCommand, DaemonSessionLifecycle};
 use serde_json::{json, Map, Value};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 #[derive(Clone)]
 pub(crate) struct TextGen {
     client: watch::Receiver<Option<DaemonClient>>,
     session_dir: Option<PathBuf>,
     home: String,
+    answers: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
 }
 
 impl TextGen {
@@ -18,7 +23,18 @@ impl TextGen {
         session_dir: Option<PathBuf>,
         home: String,
     ) -> Self {
-        Self { client, session_dir, home }
+        Self { client, session_dir, home, answers: Arc::default() }
+    }
+
+    pub(crate) fn answered(&self, event: &Value) {
+        let Some(request) = event.get("id").and_then(Value::as_str) else { return };
+        if event.get("status").and_then(Value::as_str) == Some("running") {
+            return;
+        }
+        let sender = self.answers.lock().unwrap_or_else(PoisonError::into_inner).remove(request);
+        if let Some(sender) = sender {
+            let _ = sender.send(event.clone());
+        }
     }
 
     pub(crate) async fn one_shot(
@@ -57,51 +73,51 @@ impl TextGen {
             .and_then(Value::as_str)
             .ok_or_else(|| "The daemon opened a session without an id.".to_string())?
             .to_string();
-        let answer = ask(&client, &active, prompt).await;
+        let answer = self.ask(&client, &active, prompt).await;
         let killed =
             client.request_ok(DaemonCommand::Kill { id: None, active_session_id: active, rest: Map::default() }).await;
         let answer = answer?;
         killed.map_err(|error| format!("{error:#}"))?;
         Ok(answer)
     }
-}
 
-async fn ask(client: &DaemonClient, active: &str, prompt: String) -> Result<String, String> {
-    client
-        .request_ok(DaemonCommand::PromptAndWait {
-            id: None,
-            active_session_id: active.to_string(),
-            message: prompt,
-            input: PromptInput {
-                content: None,
-                images: None,
-                streaming_behavior: None,
-                queue_if_busy: None,
-                expand_prompt_templates: None,
-                source: None,
-                agent_message_id: None,
-                custom_message: None,
-                queue_key: None,
-                prefix_messages: None,
-                admission_id: None,
-                rlm_notice_nonce: None,
-                reply_to: None,
-            },
-            rest: Map::default(),
-        })
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    let data = client
-        .request_ok(DaemonCommand::GetLastAssistantText {
-            id: None,
-            active_session_id: active.to_string(),
-            rest: Map::default(),
-        })
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    data.get("text")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| "The model returned no text.".to_string())
+    async fn ask(&self, client: &DaemonClient, active: &str, prompt: String) -> Result<String, String> {
+        let request = format!("oneshot:{active}");
+        let (sender, receiver) = oneshot::channel();
+        self.answers.lock().unwrap_or_else(PoisonError::into_inner).insert(request.clone(), sender);
+        let event = async {
+            saved_sessions::attach(client, active, DaemonClientKind::Watch)
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            client
+                .request_ok(DaemonCommand::StartSideQuestion {
+                    id: None,
+                    active_session_id: active.to_string(),
+                    side_question_id: request.clone(),
+                    question: prompt,
+                    previous_turns: None,
+                    rest: Map::default(),
+                })
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            tokio::time::timeout(Duration::from_millis(LONG_RUNNING_REQUEST_TIMEOUT_MS), receiver)
+                .await
+                .map_err(|_| format!("The model did not answer within {} s.", LONG_RUNNING_REQUEST_TIMEOUT_MS / 1000))?
+                .map_err(|_| "The text request was dropped.".to_string())
+        }
+        .await;
+        self.answers.lock().unwrap_or_else(PoisonError::into_inner).remove(&request);
+        let event = event?;
+        let status = event.get("status").and_then(Value::as_str).unwrap_or_default();
+        if status != "complete" {
+            let reason = event.get("errorMessage").and_then(Value::as_str).unwrap_or(status);
+            return Err(format!("The model did not answer: {reason}"));
+        }
+        event
+            .get("answer")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| "The model returned no text.".to_string())
+    }
 }
