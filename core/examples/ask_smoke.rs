@@ -25,9 +25,10 @@ const QUESTION: &str = "Is the W-2 box 1 wage $50,000.00?";
 const SECOND: &str = "Is the 1099-INT interest $412.00?";
 const THIRD: &str = "Is the 1098 mortgage interest $3,100.00?";
 
+const INTERPRETER: &str = "lsaskpy";
 const FORGED: &str = "Forged: confirm the transfer?";
 
-const PLUGIN: &str = r#"#!/usr/bin/env python3
+const PLUGIN: &str = r#"#!/usr/bin/env lsaskpy
 import hashlib, json, os, socket, struct, sys, time
 LOG = sys.argv[1]
 def log(event, **fields):
@@ -644,6 +645,7 @@ fn main() -> anyhow::Result<()> {
     local_studio_core::check_scratch_agent(&paths.agent).map_err(anyhow::Error::msg)?;
     fixture(&plugins_dir, "askfix", &["mcp-server", "ask-user"], &paths.ask_log)?;
     fixture(&plugins_dir, "plainfix", &["mcp-server"], &paths.plain_log)?;
+    interpreter(&root)?;
     write_file(&root.join("attack.py"), ATTACK, 0o644)?;
     write_file(&root.join("squat.py"), SQUAT, 0o644)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &paths.data);
@@ -662,6 +664,25 @@ fn main() -> anyhow::Result<()> {
     outcome?;
     stopped?;
     println!("PASS ask smoke ({})", root.display());
+    Ok(())
+}
+
+/// The fixtures start through `#!/usr/bin/env lsaskpy`, an interpreter found only through a directory this
+/// process puts first in its own PATH, the way Homebrew or nvm put theirs.
+fn interpreter(root: &Path) -> anyhow::Result<()> {
+    let python = Command::new("python3").args(["-c", "import sys; print(sys.executable)"]).output()?;
+    let python = String::from_utf8(python.stdout)?.trim().to_string();
+    ensure!(!python.is_empty(), "no python3");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    write_file(&bin.join(INTERPRETER), &format!("#!/bin/sh\nexec {python:?} \"$@\"\n"), 0o755)?;
+    let bare = Command::new("/usr/bin/env").env_clear().args([INTERPRETER, "-c", "pass"]).output()?;
+    ensure!(!bare.status.success(), "{INTERPRETER} is on the default search path");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![bin.clone()];
+    dirs.extend(std::env::split_paths(&path));
+    std::env::set_var("PATH", std::env::join_paths(dirs)?);
+    println!("ok   {INTERPRETER} runs {python}, and only a PATH that holds {} finds it", bin.display());
     Ok(())
 }
 
