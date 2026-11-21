@@ -267,7 +267,7 @@ impl Staged {
         root: &Path,
         sheet: Option<(&[Capability], &[Capability])>,
     ) -> Result<Installed, Vec<String>> {
-        let _grants = super::grants::lock();
+        let _lock = Grants::lock(root).map_err(|error| vec![error])?;
         let id = &self.plugin.id;
         let staged = self.staging.0.join(id);
         self.verify(&staged)?;
