@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -11,12 +12,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, user,
-    Event, Image, Launch, Sink, Spend, CODEX_PROVIDER,
+    Agent, Event, Failure, Image, Launch, Sink, Spend, CODEX_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const CONTEXT_WINDOW: u64 = 272_000;
+const REMEMBERED_TURNS: usize = 16;
 
 type Replies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
@@ -28,19 +30,23 @@ struct Rpc {
 }
 
 impl Rpc {
-    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+    fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> + Send + 'static {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (reply, answer) = oneshot::channel();
         self.replies.lock().unwrap_or_else(PoisonError::into_inner).insert(id, reply);
-        self.lines
-            .send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string())
-            .map_err(|_| "Codex has stopped.".to_string())?;
-        match tokio::time::timeout(CALL_TIMEOUT, answer).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("Codex stopped before it answered.".to_string()),
-            Err(_) => {
-                self.replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
-                Err(format!("Codex did not answer {method} within {} s.", CALL_TIMEOUT.as_secs()))
+        let mut frame = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        frame["params"] = params;
+        let sent = self.lines.send(frame.to_string()).map_err(|_| "Codex has stopped.".to_string());
+        let (replies, method) = (Arc::clone(&self.replies), method.to_string());
+        async move {
+            sent?;
+            match tokio::time::timeout(CALL_TIMEOUT, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("Codex stopped before it answered.".to_string()),
+                Err(_) => {
+                    replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+                    Err(format!("Codex did not answer {method} within {} s.", CALL_TIMEOUT.as_secs()))
+                }
             }
         }
     }
@@ -73,10 +79,144 @@ struct PendingApproval {
     legacy: bool,
 }
 
+#[derive(Default)]
+struct Turns {
+    running: Option<String>,
+    starting: bool,
+    launching: Option<Value>,
+    finished: VecDeque<String>,
+    held: VecDeque<Value>,
+    thread: String,
+    stop: bool,
+}
+
+impl Turns {
+    fn busy(&self) -> bool {
+        self.running.is_some() || self.starting
+    }
+
+    fn started(&mut self, id: &str) -> Option<Value> {
+        if self.finished.iter().any(|done| done == id) {
+            return None;
+        }
+        self.running = Some(id.to_string());
+        self.starting = false;
+        self.launching = None;
+        std::mem::take(&mut self.stop).then(|| json!({ "threadId": self.thread, "turnId": id }))
+    }
+
+    fn completed(&mut self, id: Option<&str>) -> bool {
+        if let Some(id) = id {
+            self.finished.push_back(id.to_string());
+            if self.finished.len() > REMEMBERED_TURNS {
+                self.finished.pop_front();
+            }
+            if self.running.as_deref().is_some_and(|running| running != id) {
+                return false;
+            }
+        }
+        self.running = None;
+        self.starting = false;
+        self.stop = false;
+        true
+    }
+
+    fn next(&mut self) -> Option<Value> {
+        self.launching = self.held.pop_front();
+        self.starting = self.launching.is_some();
+        self.launching.clone()
+    }
+
+    fn forget(&mut self) -> VecDeque<Value> {
+        self.running = None;
+        self.starting = false;
+        self.stop = false;
+        let mut dropped = std::mem::take(&mut self.held);
+        if let Some(launching) = self.launching.take() {
+            dropped.push_front(launching);
+        }
+        dropped
+    }
+}
+
+type SharedTurns = Arc<Mutex<Turns>>;
+
+fn request_key(id: &Value) -> String {
+    match id {
+        Value::String(id) => id.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn interrupt_turn(rpc: &Rpc, sink: Sink, params: Option<Value>) {
+    let Some(params) = params else { return };
+    let reply = rpc.call("turn/interrupt", params);
+    tokio::spawn(async move {
+        if let Err(error) = reply.await {
+            sink.send(Event::Failed(Failure::Interrupt, error));
+        }
+    });
+}
+
+fn start_turn(rpc: Rpc, sink: Sink, turns: SharedTurns, mut params: Value) {
+    let mut reply = rpc.call("turn/start", params.clone());
+    tokio::spawn(async move {
+        loop {
+            match reply.await {
+                Ok(started) => {
+                    if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
+                        let stop = turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                        interrupt_turn(&rpc, sink, stop);
+                    }
+                    return;
+                }
+                Err(error) => {
+                    let next = {
+                        let mut turns = turns.lock().unwrap_or_else(PoisonError::into_inner);
+                        if turns.launching.take().is_none() {
+                            return;
+                        }
+                        turns.next()
+                    };
+                    let text = format!("Codex did not start this queued message ({error}): {}", held_text(&params));
+                    if let Some(message) = notice(&text, now_ms()) {
+                        emit_message(&sink, message);
+                    }
+                    let Some(next) = next else {
+                        sink.send(Event::Idle);
+                        return;
+                    };
+                    reply = rpc.call("turn/start", next.clone());
+                    params = next;
+                }
+            }
+        }
+    });
+}
+
+fn report_dropped(sink: &Sink, held: VecDeque<Value>, lead: &str) {
+    for params in held {
+        if let Some(message) = notice(&format!("{lead} this queued message: {}", held_text(&params)), now_ms()) {
+            emit_message(sink, message);
+        }
+    }
+}
+
+fn held_text(params: &Value) -> String {
+    params["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(crate) struct Codex {
     rpc: Rpc,
+    sink: Sink,
     thread: String,
-    turn: Arc<Mutex<Option<String>>>,
+    turns: SharedTurns,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
     access: AccessMode,
     model: Option<String>,
@@ -103,16 +243,14 @@ fn approval_policy(access: AccessMode) -> Value {
 
 fn sandbox(access: AccessMode) -> &'static str {
     match access {
-        AccessMode::Supervised => "read-only",
-        AccessMode::AutoAcceptEdits | AccessMode::Auto => "workspace-write",
+        AccessMode::Supervised | AccessMode::AutoAcceptEdits | AccessMode::Auto => "workspace-write",
         AccessMode::FullAccess => "danger-full-access",
     }
 }
 
 fn sandbox_policy(access: AccessMode) -> Value {
     match access {
-        AccessMode::Supervised => json!({ "type": "readOnly" }),
-        AccessMode::AutoAcceptEdits | AccessMode::Auto => json!({ "type": "workspaceWrite" }),
+        AccessMode::Supervised | AccessMode::AutoAcceptEdits | AccessMode::Auto => json!({ "type": "workspaceWrite" }),
         AccessMode::FullAccess => json!({ "type": "dangerFullAccess" }),
     }
 }
@@ -129,15 +267,16 @@ fn start(
     cwd: &str,
     sink: Option<Sink>,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-    turn: Arc<Mutex<Option<String>>>,
+    turns: SharedTurns,
 ) -> Result<Process, String> {
     let binary = program("LOCAL_STUDIO_CODEX_BIN", "codex");
     let mut command = command(&binary, cwd);
     command.arg("app-server");
-    let mut child = command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?;
-    let stdin = child.stdin.take().ok_or_else(|| "Codex has no input pipe.".to_string())?;
-    let stdout = child.stdout.take().ok_or_else(|| "Codex has no output pipe.".to_string())?;
-    let stderr = child.stderr.take().ok_or_else(|| "Codex has no error pipe.".to_string())?;
+    let mut agent =
+        Agent::new(command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?, &binary);
+    let stdin = agent.child.stdin.take().ok_or_else(|| "Codex has no input pipe.".to_string())?;
+    let stdout = agent.child.stdout.take().ok_or_else(|| "Codex has no output pipe.".to_string())?;
+    let stderr = agent.child.stderr.take().ok_or_else(|| "Codex has no error pipe.".to_string())?;
     let (lines, mut outgoing) = mpsc::unbounded_channel::<String>();
     let (kill, killed) = oneshot::channel::<()>();
     let replies: Replies = Arc::new(Mutex::new(HashMap::new()));
@@ -155,17 +294,11 @@ fn start(
     });
     let tail = Arc::new(Mutex::new(Vec::<String>::new()));
     let errors = Arc::clone(&tail);
-    let error_sink = sink.clone();
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
             if line.trim().is_empty() {
                 continue;
-            }
-            if let (Some(sink), Some(reason)) = (error_sink.as_ref(), stop_reason(&line)) {
-                if line.contains("ERROR") || line.contains("error") {
-                    sink.send(Event::Stopped(reason));
-                }
             }
             let mut tail = errors.lock().unwrap_or_else(PoisonError::into_inner);
             tail.push(line);
@@ -174,7 +307,7 @@ fn start(
             }
         }
     });
-    let mut translator = sink.clone().map(|sink| Translator::new(sink, rpc.clone(), approvals, turn));
+    let mut translator = sink.clone().map(|sink| Translator::new(sink, rpc.clone(), approvals, turns));
     let reader_replies = Arc::clone(&replies);
     let reader_rpc = rpc.clone();
     let done = tokio::spawn(async move {
@@ -215,9 +348,9 @@ fn start(
     });
     tokio::spawn(async move {
         let status = tokio::select! {
-            status = child.wait() => status.ok(),
+            status = agent.child.wait() => status.ok(),
             _ = killed => {
-                child.kill().await.ok();
+                agent.kill().await;
                 None
             }
         };
@@ -237,7 +370,7 @@ fn start(
 async fn initialize(rpc: &Rpc) -> Result<(), String> {
     rpc.call(
         "initialize",
-        json!({ "clientInfo": { "name": "local-studio", "title": "Local Studio", "version": env!("CARGO_PKG_VERSION") } }),
+        json!({ "clientInfo": { "name": "local-studio", "title": "Local Studio", "version": crate::VERSION } }),
     )
     .await?;
     rpc.notify("initialized", &json!({}));
@@ -245,7 +378,7 @@ async fn initialize(rpc: &Rpc) -> Result<(), String> {
 }
 
 pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let home = crate::platform::home_or_root();
     let mut process = start(&home, None, Arc::default(), Arc::default())?;
     let listed = async {
         initialize(&process.rpc).await?;
@@ -285,11 +418,24 @@ pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
         .collect())
 }
 
+pub(crate) async fn read(cwd: &str, thread: &str) -> Result<Vec<AgentMessage>, String> {
+    let mut process = start(cwd, None, Arc::default(), Arc::default())?;
+    let read = async {
+        initialize(&process.rpc).await?;
+        process.rpc.call("thread/read", json!({ "threadId": thread, "includeTurns": true })).await
+    }
+    .await;
+    if let Some(kill) = process.kill.take() {
+        kill.send(()).ok();
+    }
+    Ok(history(read?.get("thread").unwrap_or(&Value::Null)))
+}
+
 impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
         let approvals = Arc::new(Mutex::new(HashMap::new()));
-        let turn = Arc::new(Mutex::new(None));
-        let mut process = start(&launch.cwd, Some(sink), Arc::clone(&approvals), Arc::clone(&turn))?;
+        let turns = SharedTurns::default();
+        let mut process = start(&launch.cwd, Some(sink.clone()), Arc::clone(&approvals), Arc::clone(&turns))?;
         let opened = async {
             initialize(&process.rpc).await?;
             let mut params = json!({
@@ -326,10 +472,12 @@ impl Codex {
                 return Err(error);
             }
         };
+        turns.lock().unwrap_or_else(PoisonError::into_inner).thread.clone_from(&thread);
         let codex = Self {
             rpc: process.rpc.clone(),
+            sink,
             thread: thread.clone(),
-            turn,
+            turns,
             approvals,
             access: launch.access,
             model: launch.model.clone(),
@@ -340,18 +488,79 @@ impl Codex {
         Ok((codex, thread, history))
     }
 
-    pub(crate) async fn send(&mut self, text: &str, images: &[Image], steer: bool) -> Result<(), String> {
+    pub(crate) fn send(
+        &mut self,
+        text: &str,
+        images: &[Image],
+        steer: bool,
+        request: Option<String>,
+    ) -> Result<(), String> {
         if !images.is_empty() {
             return Err("Codex threads in Local Studio do not take images yet.".to_string());
         }
         let input = json!([{ "type": "text", "text": text, "text_elements": [] }]);
-        let running = self.turn.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        if let Some(turn) = running.filter(|_| steer) {
-            self.rpc
-                .call("turn/steer", json!({ "threadId": self.thread, "expectedTurnId": turn, "input": input }))
-                .await?;
+        let params = self.turn_params(&input);
+        let running = {
+            let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+            if turns.busy() && (!steer || turns.running.is_none()) {
+                turns.held.push_back(params);
+                return Ok(());
+            }
+            turns.starting = turns.running.is_none();
+            turns.running.clone()
+        };
+        let (rpc, sink, turns) = (self.rpc.clone(), self.sink.clone(), Arc::clone(&self.turns));
+        if let Some(turn) = running {
+            let steer = json!({ "threadId": self.thread, "expectedTurnId": turn, "input": input });
+            let reply = rpc.call("turn/steer", steer);
+            tokio::spawn(async move {
+                if let Err(error) = reply.await {
+                    sink.send(Event::Failed(Failure::Send(request), error));
+                }
+            });
             return Ok(());
         }
+        let reply = rpc.call("turn/start", params);
+        tokio::spawn(async move {
+            match reply.await {
+                Ok(started) => {
+                    if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
+                        let stop = turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                        interrupt_turn(&rpc, sink, stop);
+                    }
+                }
+                Err(error) => {
+                    let next = {
+                        let mut turns = turns.lock().unwrap_or_else(PoisonError::into_inner);
+                        turns.starting = false;
+                        turns.stop = false;
+                        if turns.running.is_none() {
+                            turns.next()
+                        } else {
+                            None
+                        }
+                    };
+                    sink.send(Event::Failed(Failure::Send(request), error));
+                    match next {
+                        Some(next) => start_turn(rpc, sink, turns, next),
+                        None => sink.send(Event::Idle),
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn call(&self, method: &'static str, params: Value, failure: Failure) {
+        let (reply, sink) = (self.rpc.call(method, params), self.sink.clone());
+        tokio::spawn(async move {
+            if let Err(error) = reply.await {
+                sink.send(Event::Failed(failure, error));
+            }
+        });
+    }
+
+    fn turn_params(&self, input: &Value) -> Value {
         let mut params = json!({
             "threadId": self.thread,
             "input": input,
@@ -366,17 +575,23 @@ impl Codex {
         if let Some(effort) = self.effort.as_deref().filter(|effort| !effort.is_empty()) {
             params["effort"] = json!(effort);
         }
-        let started = self.rpc.call("turn/start", params).await?;
-        if let Some(id) = started.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-            *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = Some(id.to_string());
-        }
-        Ok(())
+        params
     }
 
-    pub(crate) async fn interrupt(&mut self) -> Result<(), String> {
-        let turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    pub(crate) fn interrupt(&mut self) -> Result<(), String> {
+        let (turn, dropped, deferred) = {
+            let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+            let deferred = turns.running.is_none() && turns.starting && turns.launching.is_none();
+            turns.stop = deferred;
+            (turns.running.clone(), std::mem::take(&mut turns.held), deferred)
+        };
+        report_dropped(&self.sink, dropped, "Stop dropped");
+        if deferred {
+            return Ok(());
+        }
         let turn = turn.ok_or_else(|| "Codex has no turn running.".to_string())?;
-        self.rpc.call("turn/interrupt", json!({ "threadId": self.thread, "turnId": turn })).await.map(|_| ())
+        self.call("turn/interrupt", json!({ "threadId": self.thread, "turnId": turn }), Failure::Interrupt);
+        Ok(())
     }
 
     pub(crate) fn answer(&mut self, request: &str, answer: ApprovalAnswer) -> Result<(), String> {
@@ -409,12 +624,12 @@ impl Codex {
         self.effort = Some(effort.to_string());
     }
 
-    pub(crate) async fn rename(&mut self, title: &str) -> Result<(), String> {
-        self.rpc.call("thread/name/set", json!({ "threadId": self.thread, "name": title })).await.map(|_| ())
+    pub(crate) fn rename(&mut self, title: &str) {
+        self.call("thread/name/set", json!({ "threadId": self.thread, "name": title }), Failure::Rename);
     }
 
-    pub(crate) async fn compact(&mut self) -> Result<(), String> {
-        self.rpc.call("thread/compact/start", json!({ "threadId": self.thread })).await.map(|_| ())
+    pub(crate) fn compact(&mut self) {
+        self.call("thread/compact/start", json!({ "threadId": self.thread }), Failure::Compact);
     }
 
     pub(crate) fn kill(&mut self) {
@@ -440,7 +655,7 @@ struct Translator {
     sink: Sink,
     rpc: Rpc,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-    turn: Arc<Mutex<Option<String>>>,
+    turns: SharedTurns,
     busy: bool,
     model: String,
     items: HashMap<String, Live>,
@@ -451,17 +666,12 @@ struct Translator {
 }
 
 impl Translator {
-    fn new(
-        sink: Sink,
-        rpc: Rpc,
-        approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-        turn: Arc<Mutex<Option<String>>>,
-    ) -> Self {
+    fn new(sink: Sink, rpc: Rpc, approvals: Arc<Mutex<HashMap<String, PendingApproval>>>, turns: SharedTurns) -> Self {
         Self {
             sink,
             rpc,
             approvals,
-            turn,
+            turns,
             busy: false,
             model: String::new(),
             items: HashMap::new(),
@@ -481,7 +691,11 @@ impl Translator {
     }
 
     fn end(&mut self, error: Option<String>) {
-        *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let settled: Vec<String> =
+            self.approvals.lock().unwrap_or_else(PoisonError::into_inner).drain().map(|(id, _)| id).collect();
+        for id in settled {
+            self.sink.send(Event::ApprovalSettled(id));
+        }
         if !self.busy {
             return;
         }
@@ -496,14 +710,18 @@ impl Translator {
             return;
         }
         self.stopped = true;
+        let dropped = self.turns.lock().unwrap_or_else(PoisonError::into_inner).forget();
         if let Some(message) = notice(&reason, now_ms()) {
             emit_message(&self.sink, message);
         }
+        report_dropped(&self.sink, dropped, "The account stop dropped");
         self.end(Some(reason.clone()));
         self.sink.send(Event::Stopped(reason));
     }
 
     fn finish(&mut self) {
+        let dropped = self.turns.lock().unwrap_or_else(PoisonError::into_inner).forget();
+        report_dropped(&self.sink, dropped, "Codex exited and dropped");
         self.end(None);
     }
 
@@ -524,12 +742,21 @@ impl Translator {
         match method {
             "turn/started" => {
                 if let Some(id) = params.get("turn").and_then(|turn| turn.get("id")).and_then(Value::as_str) {
-                    *self.turn.lock().unwrap_or_else(PoisonError::into_inner) = Some(id.to_string());
+                    let stop = self.turns.lock().unwrap_or_else(PoisonError::into_inner).started(id);
+                    interrupt_turn(&self.rpc, self.sink.clone(), stop);
                 }
                 self.begin();
             }
+            "serverRequest/resolved" => {
+                let Some(id) = params.get("requestId") else { return };
+                let key = request_key(id);
+                if self.approvals.lock().unwrap_or_else(PoisonError::into_inner).remove(&key).is_some() {
+                    self.sink.send(Event::ApprovalSettled(key));
+                }
+            }
             "turn/completed" => {
                 let turn = params.get("turn");
+                let id = turn.and_then(|turn| turn.get("id")).and_then(Value::as_str);
                 let status = text(turn, "status");
                 let error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null()).map(|error| {
                     error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string)
@@ -546,7 +773,14 @@ impl Translator {
                 } else {
                     None
                 };
+                let next = {
+                    let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+                    turns.completed(id).then(|| turns.next()).flatten()
+                };
                 self.end(failure);
+                if let Some(params) = next {
+                    start_turn(self.rpc.clone(), self.sink.clone(), Arc::clone(&self.turns), params);
+                }
             }
             "item/started" => self.item_started(item),
             "item/completed" => self.item_completed(item),
@@ -716,10 +950,7 @@ impl Translator {
                 return;
             }
         };
-        let request = match id {
-            Value::String(id) => id.clone(),
-            other => other.to_string(),
-        };
+        let request = request_key(id);
         self.approvals
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -922,4 +1153,43 @@ fn history(thread: &Value) -> Vec<AgentMessage> {
         }
     }
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    #[test]
+    fn a_held_message_never_looks_idle_when_its_turn_completes() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let _guard = runtime.enter();
+        let (events, _received) = mpsc::unbounded_channel();
+        let (lines, _written) = mpsc::unbounded_channel();
+        let rpc = Rpc { lines, replies: Replies::default(), next: Arc::default() };
+        let turns = SharedTurns::default();
+        let mut translator = Translator::new(Sink::new("t", 0, events), rpc, Arc::default(), Arc::clone(&turns));
+        let gap = Arc::new(AtomicBool::new(false));
+        for round in 0..2000 {
+            let id = format!("turn-{round}");
+            *turns.lock().unwrap_or_else(PoisonError::into_inner) =
+                Turns { running: Some(id.clone()), held: [json!({ "input": [] })].into(), ..Turns::default() };
+            translator.begin();
+            let (shared, seen) = (Arc::clone(&turns), Arc::clone(&gap));
+            let watcher = std::thread::spawn(move || loop {
+                let turns = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                if turns.held.is_empty() {
+                    break;
+                }
+                if !turns.busy() {
+                    seen.store(true, Ordering::Relaxed);
+                }
+            });
+            translator.notification("turn/completed", &json!({ "turn": { "id": id, "status": "completed" } }));
+            watcher.join().map_err(|_| anyhow::anyhow!("the watcher panicked"))?;
+        }
+        assert!(!gap.load(Ordering::Relaxed), "a send could start a turn while a held message was waiting to start");
+        Ok(())
+    }
 }

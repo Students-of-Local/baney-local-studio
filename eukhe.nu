@@ -34,6 +34,7 @@ def fetch [tag: string, cache: path]: nothing -> path {
     }
     ^tar -xzf $archive -C $partial
     rm $archive
+    rm -r -f $dir
     mv $partial $dir
     $binary
 }

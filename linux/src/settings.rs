@@ -3,7 +3,7 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use local_studio_core::{
-    ChatWidth, ColorScheme, DiffColors, DiffLayout, FollowUpBehavior, KernelState, LinkTarget, MergeMethod,
+    ChatWidth, ColorScheme, DiffColors, DiffLayout, FollowUpBehavior, KernelState, LinkTarget, Machine, MergeMethod,
     ModelOption, NewThreadWorkspace, NotificationMode, QuitConfirmation, ResponseStreaming, SendShortcut, Settings,
     TimeFormat, WritingStyle,
 };
@@ -29,6 +29,10 @@ struct Inner {
     keys: RefCell<Vec<adw::PreferencesGroup>>,
     archive_page: adw::PreferencesPage,
     archive: RefCell<Vec<adw::PreferencesGroup>>,
+    connections_page: adw::PreferencesPage,
+    connections: RefCell<Vec<adw::PreferencesGroup>>,
+    connections_shown: RefCell<String>,
+    connection_rows: RefCell<Vec<(String, adw::ActionRow)>>,
     fleet: crate::fleet::Fleet,
     kernel: adw::ActionRow,
     kernel_button: gtk::Button,
@@ -42,6 +46,12 @@ impl SettingsDialog {
         let state = app.state.borrow();
         let general = general_page(&weak, &state);
         let diagnostics = group(&general, "Diagnostics");
+        let version = adw::ActionRow::builder()
+            .title("Version")
+            .subtitle(format!("{} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL))
+            .subtitle_selectable(true)
+            .build();
+        diagnostics.add(&version);
         let kernel_button =
             gtk::Button::builder().action_name("win.install-kernel").valign(gtk::Align::Center).visible(false).build();
         let kernel = adw::ActionRow::builder().title("Python kernel").subtitle_selectable(true).build();
@@ -58,6 +68,8 @@ impl SettingsDialog {
         let fleet = crate::fleet::Fleet::new(&weak);
         fleet.render(&state);
         dialog.add(&local_page(&weak, &fleet));
+        let connections_page = page("connections", "Connections", icons::CONNECTIONS);
+        dialog.add(&connections_page);
         let archive_page = page("archive", "Archive", icons::ARCHIVE);
         dialog.add(&archive_page);
         drop(state);
@@ -71,6 +83,10 @@ impl SettingsDialog {
                 keys: RefCell::new(Vec::new()),
                 archive_page,
                 archive: RefCell::new(Vec::new()),
+                connections_page,
+                connections: RefCell::new(Vec::new()),
+                connections_shown: RefCell::new(String::new()),
+                connection_rows: RefCell::new(Vec::new()),
                 fleet,
                 kernel,
                 kernel_button,
@@ -109,6 +125,32 @@ impl SettingsDialog {
         self.refresh_keys(&weak, &state);
         self.refresh_archive(&state);
         self.refresh_kernel(&state);
+        self.refresh_connections(&weak, &state);
+    }
+
+    fn refresh_connections(&self, app: &Weak<App>, state: &State) {
+        let steady: Vec<_> =
+            state.machines.iter().map(|machine| Machine { latency_ms: None, ..machine.clone() }).collect();
+        let shown = format!("{steady:?}{:?}{}{:?}", state.devices, state.devices_loaded, state.settings.time_format);
+        if *self.inner.connections_shown.borrow() == shown && !self.inner.connections.borrow().is_empty() {
+            for (id, row) in self.inner.connection_rows.borrow().iter() {
+                if let Some(machine) = state.machines.iter().find(|machine| &machine.id == id) {
+                    let text = crate::machines::status(machine, state.settings.time_format);
+                    row.set_subtitle(&format::escape(&text));
+                }
+            }
+            return;
+        }
+        self.inner.connections_shown.replace(shown);
+        for group in self.inner.connections.take() {
+            self.inner.connections_page.remove(&group);
+        }
+        let (groups, rows) = crate::machines::groups(app, state);
+        for group in &groups {
+            self.inner.connections_page.add(group);
+        }
+        self.inner.connections.replace(groups);
+        self.inner.connection_rows.replace(rows);
     }
 
     fn refresh_kernel(&self, state: &State) {

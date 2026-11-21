@@ -8,12 +8,20 @@ use crate::model::{CommandKind, SlashCommand};
 
 mod grants;
 mod install;
+#[cfg(all(test, unix))]
+mod tests;
 
 pub use grants::{Consent, Grants, GRANTS};
 pub use install::{install, tree_hash, Catalog, CatalogEntry, Installed, Source, MAX_FILE};
 
 pub const MANIFEST: &str = "plugin.toml";
 pub const MCP_PREFIX: &str = "plugin-";
+pub const MCP_TAG: &str = "localStudioPlugin";
+/// Eukhe's settings take env values only as host variable names; Python needs any non-empty value, and every kernel has PATH.
+pub const NO_BYTECODE: (&str, &str) = ("PYTHONDONTWRITEBYTECODE", "PATH");
+pub const LOCAL_ONLY_ENV: &str = "LOCAL_STUDIO_LOCAL_ONLY";
+pub const LOCAL_ONLY_LABEL: &str = "Runs only on local models";
+pub const SESSION_OWNER: &str = "local-studio";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -87,6 +95,7 @@ pub struct Plugin {
     pub commands: Vec<PluginCommand>,
     pub capabilities: Vec<Capability>,
     pub mcp: Option<McpServer>,
+    pub local_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +165,8 @@ struct Manifest {
     #[serde(default)]
     capabilities: Vec<String>,
     mcp: Option<ManifestMcp>,
+    #[serde(default)]
+    local_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,7 +196,7 @@ pub fn plugins_dir(explicit_data_dir: Option<&str>) -> Option<PathBuf> {
     if let Some(value) = std::env::var_os("LOCAL_STUDIO_DATA_DIR").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(value).join("plugins"));
     }
-    crate::store::home_dir().map(|home| home.join(".local-studio").join("plugins"))
+    crate::store::dot_dir().ok().map(|dir| dir.join("plugins"))
 }
 
 #[must_use]
@@ -213,6 +224,12 @@ pub fn scan(root: &Path) -> Scan {
 }
 
 pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
+    if std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(vec![format!(
+            "the plugin folder is a symlink: {} (install the folder it points at with local-studio plugin install <dir>)",
+            dir.display()
+        )]);
+    }
     let manifest_path = dir.join(MANIFEST);
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|error| vec![format!("cannot read {}: {error}", manifest_path.display())])?;
@@ -274,6 +291,7 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         commands,
         capabilities,
         mcp,
+        local_only: manifest.local_only,
     })
 }
 
@@ -303,8 +321,19 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
             return None;
         }
     };
-    let prefix = env_prefix(id);
     let before = errors.len();
+    let names = |path: &Path| path.components().any(|part| install::named(part.as_os_str(), install::UNHASHED));
+    let base = std::fs::canonicalize(dir).ok();
+    let unhashed = std::iter::once(&mcp.command).chain(&mcp.args).flat_map(|path| path.split('=')).any(|part| {
+        names(Path::new(part))
+            || base.as_ref().is_some_and(|base| {
+                std::fs::canonicalize(dir.join(part)).is_ok_and(|real| real.strip_prefix(base).is_ok_and(&names))
+            })
+    });
+    if unhashed {
+        errors.push(format!("[mcp] runs a {} file, which no hash covers", install::UNHASHED));
+    }
+    let prefix = env_prefix(id);
     for (name, host) in &mcp.env {
         if !valid_env_name(name) {
             errors.push(format!("[mcp] env: bad variable name: {name:?}"));
@@ -327,30 +356,74 @@ fn valid_env_name(name: &str) -> bool {
 }
 
 #[must_use]
-pub fn mcp_servers(plugins: &[Plugin], grants: &Grants) -> Map<String, Value> {
-    plugins
+pub fn ready<'a>(plugins: &'a [Plugin], grants: &Grants) -> Vec<(&'a Plugin, Consent)> {
+    plugins.iter().map(|plugin| (plugin, grants.consent(plugin))).collect()
+}
+
+fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
+    ready
         .iter()
-        .filter(|plugin| grants.consent(plugin) == Consent::Ready && plugin.asks(Capability::McpServer))
+        .filter(|(plugin, consent)| {
+            !plugin.local_only && *consent == Consent::Ready && plugin.asks(Capability::McpServer)
+        })
+        .map(|(plugin, _)| *plugin)
         .filter_map(|plugin| {
             let mcp = plugin.mcp.as_ref()?;
             let dir = absolute(&plugin.dir);
-            let env: Map<String, Value> =
+            let mut env: Map<String, Value> =
                 mcp.env.iter().map(|(name, host)| (name.clone(), json!({ "env": host }))).collect();
+            env.insert(NO_BYTECODE.0.to_string(), json!({ "env": NO_BYTECODE.1 }));
             let mut entry = json!({
                 "type": "stdio",
                 "command": absolute(&mcp.command).to_string_lossy(),
                 "args": mcp.args,
                 "cwd": dir.to_string_lossy(),
+                MCP_TAG: true,
             });
-            if !env.is_empty() {
-                entry["env"] = Value::Object(env);
-            }
+            entry["env"] = Value::Object(env);
             Some((plugin.mcp_name(), entry))
         })
         .collect()
 }
 
-pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Result<bool, String> {
+#[must_use]
+pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
+    plugins
+        .iter()
+        .filter(|plugin| plugin.local_only)
+        .filter(|plugin| grants.consent(plugin) == Consent::Ready && plugin.asks(Capability::McpServer))
+        .filter_map(|plugin| {
+            let mcp = plugin.mcp.as_ref()?;
+            let mut env: Map<String, Value> = mcp
+                .env
+                .iter()
+                .filter_map(|(name, host)| Some((name.clone(), Value::String(std::env::var(host).ok()?))))
+                .collect();
+            env.insert(NO_BYTECODE.0.to_string(), json!("1"));
+            env.insert(LOCAL_ONLY_ENV.to_string(), json!("1"));
+            Some(json!({
+                "type": "stdio",
+                "name": plugin.mcp_name(),
+                "command": absolute(&mcp.command).to_string_lossy(),
+                "args": mcp.args,
+                "cwd": absolute(&plugin.dir).to_string_lossy(),
+                "env": env,
+            }))
+        })
+        .collect()
+}
+
+fn written_by_us(root: &Path, name: &str, entry: &Value) -> bool {
+    name.starts_with(MCP_PREFIX)
+        && match entry.get(MCP_TAG) {
+            Some(tag) => tag == &Value::Bool(true),
+            None => entry.get("command").and_then(Value::as_str).map(Path::new).is_some_and(|command| {
+                command.starts_with(root) && !command.components().any(|part| part == std::path::Component::ParentDir)
+            }),
+        }
+}
+
+pub fn sync_mcp_servers(root: &Path, agent: &Path, ready: &[(&Plugin, Consent)]) -> Result<bool, String> {
     let path = agent.join("settings.json");
     let mut settings = crate::workspace::providers::read_object(&path)?;
     let mut servers = match settings.remove("mcpServers") {
@@ -358,17 +431,28 @@ pub fn sync_mcp_servers(agent: &Path, plugins: &[Plugin], grants: &Grants) -> Re
         Some(Value::Object(servers)) => servers,
         Some(_) => return Err(format!("{}: mcpServers is not a JSON object", path.display())),
     };
-    let wanted = mcp_servers(plugins, grants);
+    let root = absolute(root);
+    let ours = |name: &str, entry: &Value| written_by_us(&root, name, entry);
+    let (wanted, taken): (Map<String, Value>, Map<String, Value>) =
+        mcp_servers(ready).into_iter().partition(|(name, _)| servers.get(name).is_none_or(|entry| ours(name, entry)));
     let current: Map<String, Value> =
-        servers.iter().filter(|(name, _)| name.starts_with(MCP_PREFIX)).map(|(k, v)| (k.clone(), v.clone())).collect();
-    if current == wanted {
-        return Ok(false);
+        servers.iter().filter(|(name, entry)| ours(name, entry)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let changed = current != wanted;
+    if changed {
+        servers.retain(|name, entry| !ours(name, entry));
+        servers.extend(wanted);
+        settings.insert("mcpServers".to_string(), Value::Object(servers));
+        crate::workspace::providers::write_private(&path, &Value::Object(settings))?;
     }
-    servers.retain(|name, _| !name.starts_with(MCP_PREFIX));
-    servers.extend(wanted);
-    settings.insert("mcpServers".to_string(), Value::Object(servers));
-    crate::workspace::providers::write_private(&path, &Value::Object(settings))?;
-    Ok(true)
+    if taken.is_empty() {
+        return Ok(changed);
+    }
+    let names: Vec<&str> = taken.keys().map(String::as_str).collect();
+    Err(format!(
+        "{}: mcpServers already has {} that Local Studio did not write, so it left them alone and that plugin MCP server is off",
+        path.display(),
+        names.join(", ")
+    ))
 }
 
 #[must_use]
@@ -378,10 +462,11 @@ pub fn agent_dir() -> Option<PathBuf> {
 
 pub fn sync_agent(root: &Path, agent: &Path) -> Result<bool, String> {
     let grants = Grants::load(root)?;
-    sync_mcp_servers(agent, &scan(root).plugins, &grants)
+    let plugins = scan(root).plugins;
+    sync_mcp_servers(root, agent, &ready(&plugins, &grants))
 }
 
-fn absolute(path: &Path) -> PathBuf {
+pub(crate) fn absolute(path: &Path) -> PathBuf {
     path.canonicalize().or_else(|_| std::path::absolute(path)).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -450,7 +535,11 @@ pub fn commands(plugins: &[Plugin]) -> Vec<SlashCommand> {
         .flat_map(|plugin| {
             plugin.commands.iter().map(|command| SlashCommand {
                 name: command.name.clone(),
-                description: command.description.clone(),
+                description: if plugin.local_only {
+                    format!("{} ({LOCAL_ONLY_LABEL})", command.description)
+                } else {
+                    command.description.clone()
+                },
                 source: plugin.source(),
                 kind: CommandKind::Plugin,
             })

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
@@ -15,9 +15,10 @@ use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use local_studio_core::link::snow::{self, HandshakeState};
 use serde_json::{json, Value};
-use snow::HandshakeState;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -35,24 +36,62 @@ const SILENCE: Duration = Duration::from_secs(60);
 const DRAIN: Duration = Duration::from_secs(2);
 const CLOSE_WITHIN: Duration = Duration::from_secs(1);
 const REVOKE_POLL: Duration = Duration::from_secs(1);
-const UNPAIRED: u16 = 4401;
-const BANNED: u16 = 4429;
-const BUSY: u16 = 1013;
-const BROKEN: u16 = 1002;
+use crate::noise::{BANNED, BROKEN, BUSY, UNPAIRED};
 
 type Socket = WebSocketStream<TokioIo<Upgraded>>;
 type Sink = SplitSink<Socket, Message>;
 type Stream = SplitStream<Socket>;
 type Reply = Response<Full<Bytes>>;
 
+pub struct Hosts {
+    pub allowed: Vec<String>,
+    pub tunnels: Vec<String>,
+}
+
 pub struct Server {
     pub hub: Arc<Hub>,
     pub devices: Devices,
     pub key: StaticKey,
     pub port: u16,
-    pub allowed: Vec<String>,
-    pub tunnels: Vec<String>,
+    pub hosts: RwLock<Hosts>,
     pub gate: Gate,
+    pub sockets: Sockets,
+}
+
+#[derive(Default)]
+pub struct Sockets(AtomicUsize);
+
+struct Open<'a>(&'a Sockets);
+
+impl Sockets {
+    fn enter(&self) -> Open<'_> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Open(self)
+    }
+
+    pub fn open(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Open<'_> {
+    fn drop(&mut self) {
+        self.0 .0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Server {
+    pub fn set_hosts(&self, hosts: Hosts) {
+        *self.hosts.write().unwrap_or_else(PoisonError::into_inner) = hosts;
+    }
+
+    fn host_allowed(&self, host: &str, route: Route) -> bool {
+        let hosts = self.hosts.read().unwrap_or_else(PoisonError::into_inner);
+        match route {
+            Route::Local => access::host_allowed(host, self.port, &hosts.allowed),
+            Route::Tunnel => access::named(host, &hosts.tunnels),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,21 +100,11 @@ pub enum Route {
     Tunnel,
 }
 
-async fn accept(listener: Option<&TcpListener>) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
-    match listener {
-        Some(listener) => listener.accept().await,
-        None => std::future::pending().await,
-    }
-}
-
-pub async fn run(local: TcpListener, tunnel: Option<TcpListener>, server: Arc<Server>, stop: impl Future<Output = ()>) {
-    tokio::spawn(revocations(Arc::clone(&server)));
-    tokio::pin!(stop);
+pub async fn listen(listener: TcpListener, route: Route, server: Arc<Server>, mut stop: watch::Receiver<bool>) {
     loop {
-        let (accepted, route) = tokio::select! {
-            () = &mut stop => return,
-            accepted = local.accept() => (accepted, Route::Local),
-            accepted = accept(tunnel.as_ref()) => (accepted, Route::Tunnel),
+        let accepted = tokio::select! {
+            _ = stop.wait_for(|stopped| *stopped) => return,
+            accepted = listener.accept() => accepted,
         };
         let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
@@ -102,7 +131,7 @@ pub async fn run(local: TcpListener, tunnel: Option<TcpListener>, server: Arc<Se
     }
 }
 
-async fn revocations(server: Arc<Server>) {
+pub async fn revocations(server: Arc<Server>) {
     let mut every = tokio::time::interval(REVOKE_POLL);
     loop {
         every.tick().await;
@@ -129,11 +158,7 @@ fn header(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&str> 
 
 fn handle(server: &Arc<Server>, mut request: Request<Incoming>, peer: SocketAddr, route: Route) -> Reply {
     let host = header(request.headers(), header::HOST).unwrap_or_default().to_string();
-    let allowed = match route {
-        Route::Local => access::host_allowed(&host, server.port, &server.allowed),
-        Route::Tunnel => access::named(&host, &server.tunnels),
-    };
-    if !allowed {
+    if !server.host_allowed(&host, route) {
         eprintln!(
             "local-studio-serve: refused a request from {} on the {route:?} listener for host {host:?}",
             peer.ip()
@@ -170,23 +195,33 @@ fn bucket(ip: IpAddr) -> String {
 }
 
 fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Client> {
-    let address = |name: &str| {
-        header(headers, name)
+    match route {
+        Route::Tunnel => header(headers, "cf-connecting-ip")
             .and_then(|value| value.split(',').next())
             .and_then(|value| value.trim().parse::<IpAddr>().ok())
-            .map(bucket)
-    };
-    match route {
-        Route::Tunnel => address("cf-connecting-ip").map(|ip| Client::Key(format!("cf:{ip}"))),
+            .map(|ip| Client::Key(format!("cf:{}", bucket(ip)))),
         Route::Local => {
+            let hop = headers
+                .get_all("x-forwarded-for")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .next_back()
+                .and_then(|value| value.trim().parse::<IpAddr>().ok())
+                .unwrap_or_else(|| peer.ip());
+            let hop = match hop {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(|| v6.to_string(), |v4| v4.to_string()),
+                IpAddr::V4(v4) => v4.to_string(),
+            };
             let login = header(headers, "tailscale-user-login").map(str::trim).filter(|login| !login.is_empty());
             if let Some(login) = login {
-                return Some(Client::Key(format!("ts:{}", login.to_ascii_lowercase())));
+                return Some(Client::Key(format!("ts:{}@{hop}", login.to_ascii_lowercase())));
             }
-            if let Some(ip) = address("x-forwarded-for") {
-                return Some(Client::Key(format!("xff:{ip}")));
-            }
-            Some(if peer.ip().is_loopback() {
+            let forwarded = headers.contains_key("x-forwarded-for")
+                || headers.keys().any(|name| name.as_str().starts_with("tailscale-"));
+            Some(if forwarded {
+                Client::Key(format!("fwd:{hop}"))
+            } else if peer.ip().is_loopback() {
                 Client::Loopback
             } else {
                 Client::Key(format!("peer:{}", bucket(peer.ip())))
@@ -503,6 +538,7 @@ async fn attached(
     protocol: u64,
     address: Client,
 ) {
+    let _open = server.sockets.enter();
     let channel = Arc::new(opened.channel);
     let said = |key: &str| hello.pointer(&format!("/device/{key}")).and_then(Value::as_str);
     if let Err(error) = server.devices.seen(&opened.device, said("name"), said("app"), said("channel")) {

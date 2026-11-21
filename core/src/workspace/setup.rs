@@ -15,6 +15,7 @@ use crate::studio::Mailbox;
 const TAIL_LINES: usize = 30;
 const TAIL_CHARS: usize = 4000;
 const PUSH_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,10 +172,24 @@ fn forward_lines<R: AsyncRead + Unpin + Send + 'static>(reader: R, lines: mpsc::
     });
 }
 
+#[cfg(unix)]
 fn shell() -> String {
     std::env::var("SHELL").ok().filter(|shell| Path::new(shell).is_file()).unwrap_or_else(|| "/bin/sh".to_string())
 }
 
+#[cfg(unix)]
+fn script_command(script: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(shell());
+    command.args(["-lc", script]);
+    command
+}
+
+#[cfg(windows)]
+fn script_command(script: &str) -> tokio::process::Command {
+    tokio::process::Command::from(crate::platform::cmd_script(script))
+}
+
+#[cfg(unix)]
 fn stop_script(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     process::signal_pid_group("-TERM", pid);
@@ -182,6 +197,13 @@ fn stop_script(pid: Option<u32>) {
         tokio::time::sleep(KILL_GRACE).await;
         process::signal_pid_group("-KILL", pid);
     });
+}
+
+#[cfg(windows)]
+fn stop_script(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        process::signal_pid_group("-KILL", pid);
+    }
 }
 
 async fn run_script(
@@ -193,9 +215,8 @@ async fn run_script(
     worktree: &Path,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<ScriptEnd, String> {
-    let mut command = tokio::process::Command::new(shell());
+    let mut command = script_command(&script.command);
     command
-        .args(["-lc", &script.command])
         .current_dir(worktree)
         .env("LOCAL_STUDIO_PROJECT_ROOT", project)
         .env("LOCAL_STUDIO_WORKTREE_PATH", worktree)
@@ -206,8 +227,7 @@ async fn run_script(
     if let Some(path) = process::joined_path() {
         command.env("PATH", path);
     }
-    #[cfg(unix)]
-    command.process_group(0);
+    crate::platform::own_group_async(&mut command);
     let mut child = command.spawn().map_err(|error| format!("could not run {}: {error}", script.name))?;
     let pid = child.id();
     setups.track(&progress.draft, pid);

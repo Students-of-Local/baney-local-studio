@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use local_studio_core::{
     AccessMode, Approval, Connection, DaemonMismatch, GitStatus, KernelState, Keybinding, LocalDashboard, LocalEngine,
-    LocalSnapshot, ModelKey, ModelOption, Project, ProjectScript, ProjectSettings, ProviderStatus, QueuedMessage,
-    Settings, SetupStage, Subagent, ThreadInfo, ThreadRow, UsagePeriod, UsageReport,
+    LocalSnapshot, Machine, ModelKey, ModelOption, PairedDevice, Project, ProjectScript, ProjectSettings,
+    ProviderStatus, QueuedMessage, Settings, SetupStage, Subagent, ThreadInfo, ThreadRow, UsagePeriod, UsageReport,
 };
 
 #[derive(Clone, Default)]
@@ -93,6 +93,12 @@ pub struct State {
     pub usage: Option<UsageReport>,
     pub usage_period: Option<UsagePeriod>,
     pub pending: Vec<PendingSend>,
+    pub machines: Vec<Machine>,
+    pub devices: Vec<PairedDevice>,
+    pub devices_loaded: bool,
+    pub pairing: Option<String>,
+    pub offer: Option<crate::machines::Offer>,
+    pub offer_error: Option<String>,
 }
 
 impl State {

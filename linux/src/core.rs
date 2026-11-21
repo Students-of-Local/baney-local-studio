@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use local_studio_core::{DaemonLaunch, Studio, StudioConfig, StudioError, Update, Waker};
+use local_studio_remote::host::{self, Handle};
 
 struct ChannelWaker(async_channel::Sender<()>);
 
@@ -16,11 +17,17 @@ impl Waker for ChannelWaker {
 #[derive(Default)]
 pub struct Core {
     studio: RefCell<Option<Arc<Studio>>>,
+    remote: RefCell<Option<Handle>>,
     requests: Cell<u64>,
 }
 
+pub struct Opened {
+    studio: Arc<Studio>,
+    receiver: async_channel::Receiver<()>,
+}
+
 impl Core {
-    pub fn start(&self, on_wake: impl Fn() + 'static) -> Result<(), StudioError> {
+    pub fn open() -> Result<Opened, StudioError> {
         let (sender, receiver) = async_channel::bounded(1);
         let config = StudioConfig {
             socket_path: None,
@@ -28,15 +35,26 @@ impl Core {
             data_dir: None,
             launch: eukhe_program().map(|program| DaemonLaunch { program }),
             controller_main: controller_main(),
+            take_over_serve: true,
         };
         let studio = Studio::new(config, Arc::new(ChannelWaker(sender)))?;
+        Ok(Opened { studio, receiver })
+    }
+
+    pub fn attach(&self, opened: Opened, on_wake: impl Fn() + 'static) {
+        let Opened { studio, receiver } = opened;
+        match host::start(Arc::clone(&studio), None) {
+            Ok(remote) => {
+                self.remote.replace(remote);
+            }
+            Err(error) => eprintln!("local-studio: the in-process server did not start: {error:#}"),
+        }
         self.studio.replace(Some(studio));
         gtk::glib::spawn_future_local(async move {
             while receiver.recv().await.is_ok() {
                 on_wake();
             }
         });
-        Ok(())
     }
 
     pub fn is_live(&self) -> bool {
@@ -61,6 +79,9 @@ impl Core {
     }
 
     pub fn stop(&self) {
+        if let Some(remote) = self.remote.take() {
+            remote.stop();
+        }
         if let Some(studio) = self.studio.take() {
             studio.shutdown();
         }

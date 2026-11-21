@@ -13,5 +13,11 @@ fn model(models: &[ModelOption]) -> Option<String> {
 }
 
 fn main() -> anyhow::Result<()> {
-    harness::run(&harness::Target { name: "harness_codex_smoke", harness: Harness::Codex, provider: "codex", model })
+    harness::run(&harness::Target {
+        name: "harness_codex_smoke",
+        harness: Harness::Codex,
+        provider: "codex",
+        model,
+        thinking: Some("low"),
+    })
 }

@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Event,
-    Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
+    assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Agent,
+    Event, Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -29,6 +29,7 @@ const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const CONTEXT_WINDOW: u64 = 200_000;
 const QUIET_STDERR: [&str; 1] = ["mcp server blocked by enterprise policy"];
 const INTERRUPTED: &str = "[Request interrupted";
+const WRAPPERS: [&str; 4] = ["<local-command", "<command-", "<system-reminder", "<task-notification"];
 
 pub(crate) struct Claude {
     lines: mpsc::UnboundedSender<String>,
@@ -89,10 +90,13 @@ impl Claude {
             command.args(["--effort", effort]);
         }
         command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
-        let mut child = command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?;
-        let stdin = child.stdin.take().ok_or_else(|| "Claude Code has no input pipe.".to_string())?;
-        let stdout = child.stdout.take().ok_or_else(|| "Claude Code has no output pipe.".to_string())?;
-        let stderr = child.stderr.take().ok_or_else(|| "Claude Code has no error pipe.".to_string())?;
+        let mut agent = Agent::new(
+            command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?,
+            &binary,
+        );
+        let stdin = agent.child.stdin.take().ok_or_else(|| "Claude Code has no input pipe.".to_string())?;
+        let stdout = agent.child.stdout.take().ok_or_else(|| "Claude Code has no output pipe.".to_string())?;
+        let stderr = agent.child.stderr.take().ok_or_else(|| "Claude Code has no error pipe.".to_string())?;
         let (lines, mut outgoing) = mpsc::unbounded_channel::<String>();
         let (kill, killed) = oneshot::channel::<()>();
         let pending = Arc::new(Mutex::new(HashMap::new()));
@@ -135,9 +139,9 @@ impl Claude {
         });
         tokio::spawn(async move {
             let status = tokio::select! {
-                status = child.wait() => status.ok(),
+                status = agent.child.wait() => status.ok(),
                 _ = killed => {
-                    child.kill().await.ok();
+                    agent.kill().await;
                     None
                 }
             };
@@ -335,7 +339,7 @@ impl Translator {
                 Value::String(text) => text.clone(),
                 _ => String::new(),
             };
-            if text.starts_with("<local-command") || text.starts_with("<command-") {
+            if wrapped(&text) {
                 return;
             }
             self.start();
@@ -508,11 +512,13 @@ impl Translator {
         }
         let tool = request.get("tool_name").and_then(Value::as_str).unwrap_or_default();
         let input = request.get("input").cloned().unwrap_or(Value::Null);
-        let summary = request
+        let summary = describe(tool, &input);
+        let note = request
             .get("description")
             .or_else(|| request.get("title"))
             .and_then(Value::as_str)
-            .map_or_else(|| describe(tool, &input), str::to_string);
+            .map(str::trim)
+            .filter(|note| !note.is_empty() && !summary.contains(note));
         self.pending.lock().unwrap_or_else(PoisonError::into_inner).insert(
             id.clone(),
             json!({ "input": input, "suggestions": request.get("permission_suggestions").cloned().unwrap_or(json!([])) }),
@@ -520,7 +526,7 @@ impl Translator {
         self.sink.send(Event::Approval(Approval {
             request_id: id,
             step: 0,
-            command: format!("{tool}: {summary}"),
+            command: note.map_or_else(|| format!("{tool}: {summary}"), |note| format!("{tool}: {summary}\n{note}")),
             effects: vec![effect(tool).to_string()],
             agent: None,
         }));
@@ -584,7 +590,13 @@ impl Translator {
     }
 
     fn end(&mut self, failure: Option<String>) {
+        let settled: Vec<String> =
+            self.pending.lock().unwrap_or_else(PoisonError::into_inner).drain().map(|(id, _)| id).collect();
+        for id in settled {
+            self.sink.send(Event::ApprovalSettled(id));
+        }
         if !self.busy {
+            self.sink.send(Event::Idle);
             return;
         }
         self.busy = false;
@@ -781,6 +793,10 @@ fn describe(tool: &str, input: &Value) -> String {
         .unwrap_or_else(|| if input.is_null() { tool.to_string() } else { input.to_string() })
 }
 
+fn wrapped(text: &str) -> bool {
+    WRAPPERS.iter().any(|wrapper| text.starts_with(wrapper))
+}
+
 fn effect(tool: &str) -> &'static str {
     match tool {
         "Read" | "Grep" | "Glob" | "LS" => "read",
@@ -794,7 +810,7 @@ fn session_file(cwd: &str, session: &str) -> Option<PathBuf> {
     let root = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
+        .or_else(|| crate::platform::home().map(|home| PathBuf::from(home).join(".claude")))?;
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let direct = root.join("projects").join(&escaped).join(format!("{session}.jsonl"));
     if direct.is_file() {
@@ -868,7 +884,7 @@ pub(crate) fn history(cwd: &str, session: &str) -> Vec<AgentMessage> {
         flush(&mut open, &mut messages);
         match &content {
             Value::String(text) => {
-                if text.starts_with('<') || text.starts_with(INTERRUPTED) || text.trim().is_empty() {
+                if wrapped(text) || text.starts_with(INTERRUPTED) || text.trim().is_empty() {
                     continue;
                 }
                 if let Some(message) = user(&content, at) {
@@ -883,7 +899,7 @@ pub(crate) fn history(cwd: &str, session: &str) -> Vec<AgentMessage> {
                 if results.is_empty() {
                     let converted = user_content(&content);
                     let text = block_text(Some(&converted));
-                    if text.starts_with('<') || text.starts_with(INTERRUPTED) {
+                    if wrapped(&text) || text.starts_with(INTERRUPTED) {
                         continue;
                     }
                     if let Some(message) = user(&converted, at) {

@@ -18,6 +18,8 @@ jobs:
       at: ${{ steps.v.outputs.at }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: hustcer/setup-nu@1b8faed9a8ff673c8ce0beae243e0b72d0787241 # v3.30
         with:
           version: 0.117.0
@@ -28,7 +30,7 @@ jobs:
           set -euo pipefail
           at=$(date -u +%Y%m%d%H%M%S)
           version=$(nu scripts/version.nu dev --at "$at" --commit "$GITHUB_SHA")
-          scripts/release.sh check-newer dev "$version"
+          scripts/release.sh check-newer dev "$version" "$GITHUB_SHA"
           printf 'at=%s\nversion=%s\n' "$at" "$version" >> "$GITHUB_OUTPUT"
 
   ci:

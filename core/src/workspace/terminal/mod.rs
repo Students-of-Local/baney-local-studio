@@ -63,7 +63,20 @@ fn pty_size(size: TerminalSize) -> PtySize {
     }
 }
 
-fn shell() -> String {
+#[cfg(unix)]
+fn shell() -> CommandBuilder {
+    let mut command = CommandBuilder::new(login_shell());
+    command.arg("-l");
+    command
+}
+
+#[cfg(windows)]
+fn shell() -> CommandBuilder {
+    CommandBuilder::new(crate::platform::command_interpreter())
+}
+
+#[cfg(unix)]
+fn login_shell() -> String {
     std::env::var("SHELL").ok().filter(|shell| !shell.is_empty() && Path::new(shell).is_file()).unwrap_or_else(|| {
         if Path::new("/bin/zsh").is_file() {
             "/bin/zsh".to_string()
@@ -80,8 +93,7 @@ impl Terminals {
         let pair = native_pty_system()
             .openpty(pty_size(size))
             .map_err(|error| format!("could not open a terminal: {error}"))?;
-        let mut command = CommandBuilder::new(shell());
-        command.arg("-l");
+        let mut command = shell();
         command.cwd(launch.cwd);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");

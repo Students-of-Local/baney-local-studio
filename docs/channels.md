@@ -2,23 +2,23 @@
 
 Every product in the Local Studio family ships on three channels: **stable**, **nightly** and **dev**. This file is the one scheme for all of them: Local Studio (desktop and iPhone), Silas, Polycarp, Tychicus, Fonsviva, Gantrel, UntoCaesar and Corunis. A product's own RELEASES.md may add detail; where it disagrees with this file, this file wins.
 
-`scripts/check-channels.sh` enforces the parts a machine can check: no workflow starts on a pushed tag, the `stable` environment runs only from `workflow_call` or `workflow_dispatch`, the version examples sort as stated, and docs/remote.md carries the protocol window. CI runs it on every pull request, and `scripts/tests/check-channels-test.sh` proves it fails on bad workflows.
+`scripts/check-channels.sh` enforces the parts a machine can check: no workflow starts on a pushed tag, no workflow pushes the `stable` branch, the `stable` environment runs only from `workflow_call` or `workflow_dispatch`, the version examples sort as stated, every workflow that stamps a build also exports its full version to the build, and docs/remote.md carries the protocol window. CI runs it on every pull request, and `scripts/tests/check-channels-test.sh` proves it fails on bad workflows. `scripts/tests/stamp-test.sh` stamps each channel, builds the `local-studio-version` crate with the stamped environment and fails unless the built binary reports the full version and channel.
 
 ## The three channels
 
 | Channel | For | Built from | When | Gate |
 | --- | --- | --- | --- | --- |
 | stable | Everyone. The default install. | `stable` branch, tag `vX.Y.Z` | When a nightly is promoted (rule below) | Promotion rule |
-| nightly | Daily drivers who want new work first, Donovan included | `main` | Once a day at 07:00 UTC, from the newest `main` commit that passed the gate, skipped when that commit already shipped | CI green on Windows, macOS and Linux, plus the product's end-to-end checks from its AGENTS.md |
+| nightly | Daily drivers who want new work first, Donovan included | `main` | Once a day at 07:00 UTC, from the newest `main` commit that passed the gate, skipped when that commit already shipped | CI green, plus the product's end-to-end checks from its AGENTS.md (Promotion rule below says what each product enforces) |
 | dev | Developers and agents testing a change | `main` | Every merge to `main` | CI green |
 
-A channel never ships half a build: CI uploads every platform into a draft release and swaps it in only when all of them succeeded (Silas's `nightly.yml` does this today; copy it). Publishing on a channel is serialized with a workflow `concurrency` group per channel (a run in progress always finishes, so a swap is never cut off halfway; GitHub keeps only the newest waiting run), and a build refuses to publish when the feed already holds a version equal to or newer than its own.
+A channel never ships half a build: CI uploads every platform into a draft release and swaps it in only when all of them succeeded (Silas's `nightly.yml` does this today; copy it). Publishing on a channel is serialized with a workflow `concurrency` group per channel (a run in progress always finishes, so a swap is never cut off halfway; GitHub keeps only the newest waiting run), and a build refuses to publish when the feed already holds a version equal to or newer than its own, or, on dev and nightly, a commit that its own commit does not contain (so re-running an old run can never move a channel back).
 
 ## Branches and tags
 
 - `main`: all work lands here by pull request. It feeds dev and nightly.
-- `stable`: moves only through the promotion workflow (below), which fast-forwards it to a promoted nightly commit, or by a hotfix pull request merged with a merge commit. Protected by a ruleset: no force pushes, and no direct pushes except by the release GitHub App, whose token only the promotion workflow mints from the `stable` environment (`RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY`). The App is needed because `GITHUB_TOKEN` cannot move a branch past commits that change workflow files.
-- `vX.Y.Z`: immutable tag on `stable` for each stable release. A tag is never reused or moved. A tag ruleset lets only the release GitHub App create tags matching `v*`. The tag is created when the stable release is published, so a failed build leaves no tag and the promotion can run again.
+- `stable`: moves only by `scripts/release-stable.sh`, which a repository admin runs to fast-forward it to a promoted commit after the build passed, or by a hotfix pull request merged with a merge commit. No workflow moves it: `GITHUB_TOKEN` cannot push a branch past commits that change workflow files and cannot be given that permission, so the push uses the admin's own credentials (`scripts/check-channels.sh` refuses a workflow that pushes `stable`). Protected by a ruleset: no deletion, no force pushes, and only repository admins may update it.
+- `vX.Y.Z`: immutable tag on `stable` for each stable release. A tag is never reused or moved. A tag ruleset lets only repository admins create tags matching `v*`. `release-stable.sh` pushes the tag together with the `stable` move, only after the draft is built, so a failed build leaves no tag and no moved branch, and the promotion can run again.
 - `nightly`: rolling tag and pre-release, moved to each new nightly. Each nightly also keeps an immutable pre-release tagged `nightly-YYYYMMDDHHMMSS` for 14 days, so any recent nightly can be reinstalled and promoted.
 - `dev`: rolling tag and pre-release, moved to each dev build. No immutable dev tags.
 - Feature branches: anything else. They never publish to a channel.
@@ -43,9 +43,11 @@ Timestamps are UTC build start. These are SemVer 2.0 strings, so for one base ve
 - Switching channel is an explicit choice, never an "upgrade", and it may install a lower version. The in-app channel setting opens the other channel's download and the user installs it; no updater crosses channels, because each build trusts only its own channel's signing key (see Update feeds).
 - Local builds never update themselves.
 
+Every binary carries its full version and channel. `scripts/version.nu <channel> --stamp --build-env` prints `LOCAL_STUDIO_VERSION` and `LOCAL_STUDIO_CHANNEL`, which `build.yml` appends to `$GITHUB_ENV` before any cargo build. The `local-studio-version` crate (`version/`) reads them at compile time, refuses a version whose base is not the workspace version, and falls back to the local build version and channel `dev` when they are unset. The core re-exports them as `local_studio_core::VERSION` and `CHANNEL` (`build_version()` and `build_channel()` in LocalStudioKit); `local-studio --version` prints both on the core CLI and the Linux app, and both apps show them in Settings. The updater compares this string, never `CARGO_PKG_VERSION` or `CFBundleShortVersionString`.
+
 Where a platform needs numbers only:
 
-- Apple: `CFBundleShortVersionString` = `X.Y.Z`; `CFBundleVersion` = the build timestamp as `YYYYMMDD.HHMMSS` (always rising, which TestFlight also needs).
+- Apple: `CFBundleShortVersionString` = `X.Y.Z`; `CFBundleVersion` = the build timestamp as `YYYYMMDD.HHMMSS` (always rising, which TestFlight also needs); `LocalStudioVersion` = the full SemVer string and `LocalStudioChannel` = the channel (`dev` for local builds).
 - Browser extensions: `version` = `X.Y.Z.B` (the Windows `B` rule below), because Chrome allows only up to four integers; `version_name` = the full SemVer string.
 - Windows file and product version: `X.Y.Z.B`, where `B` is 0 for stable and the CI run number modulo 65536 otherwise. Installers decide updates from the SemVer string, not this.
 - Windows installers: nightly and dev ship NSIS only. An MSI rejects a pre-release identifier above 65535, so a stable MSI, where a product ships one, sets its WiX version explicitly (Tauri: `bundle.windows.wix.version`) from the `X.Y.Z.B` rule.
@@ -120,13 +122,15 @@ The format is Tauri v2's updater manifest (Silas already serves it), with extra 
 
 **Nightly** publishes at 07:00 UTC. It builds the newest `main` commit for which all of these pass, and skips the day when that commit already is the nightly:
 
-1. CI green on Windows, macOS and Linux.
-2. The product's end-to-end checks from its AGENTS.md (Local Studio: the core smoke examples on a real model).
+1. CI green. For Local Studio this is `ci.yml`'s run on the push to `main` concluding success: Linux (core, app, channels) and macOS (core and kit, app) block it; the Windows job records its failures without blocking, so Windows is not part of the gate yet.
+2. The product's end-to-end checks from its AGENTS.md. For Local Studio this is a `local-studio/e2e` commit status of success on that commit (the core smoke examples on a local model, below); a commit without one is passed over.
 3. No open issue labeled `regression` and `blocks-nightly`.
 
-The real-model checks need a signed-in agent, which GitHub's runners never get, so they run on a Donovan machine. For Local Studio, `scripts/e2e.sh --post <commit>` runs the core smoke examples on a clean checkout of that commit and posts the `local-studio/e2e` commit status. Nightly reads that status and CI's own run for each of the last 30 `main` commits and takes the newest commit with both green. A commit nobody checked never ships as a nightly.
+Nightly also stops, without publishing, when that commit does not contain the nightly feed's commit, or when its `build.yml` differs from `main`'s (the run would build it with `main`'s); the next commit that passes the gate fixes either.
 
-Dev and nightly swap the rolling release by first renaming the current one to `<channel>-previous`. If publishing the new one fails, the old one gets its tag back. The old one is deleted only after the new one is live.
+The real-model checks need a GPU and a local model, which GitHub's runners never get, so they run on a Donovan machine. For Local Studio, `scripts/e2e.sh --post <commit>` runs the core smoke examples on a clean checkout of that commit against a local model and posts the `local-studio/e2e` commit status, labeled with that model; a systemd timer on abbey1 runs it on `main`'s head every day at 02:00 UTC against abbey1's Ollama (docs/e2e.md). Nightly reads that status and CI's own run for each of the last 30 `main` commits and takes the newest commit with both green. A commit nobody checked never ships as a nightly.
+
+Dev and nightly swap the rolling release by first renaming the current one to `<channel>-previous`. If publishing the new one fails, the old one gets its tag back on its own commit. The old one is deleted only after the new one is live. A run that finds `<channel>-previous` and no rolling release restores from it, on the commit of the `<channel>-previous` tag. A GitHub error other than not found is never taken to mean a missing tag or release: it stops the swap, and the swap restores the previous release. The immutable `nightly-YYYYMMDDHHMMSS` copy stays a draft until the rolling swap succeeded, so a failed run deletes it and only a build that nightly users received can be promoted.
 
 **Stable** promotes one nightly build when all of these hold:
 
@@ -136,9 +140,16 @@ Dev and nightly swap the rolling release by first renaming the current one to `<
 4. The product's TESTING.md checklist passes on that commit, and for anything with a screen, its steps were tried live on the Mac (the `live-checker` agent), not only in CI.
 5. Release notes in plain words are written, in a pull request against `main` that passes the gates `baney-review` sets.
 
-Then the product lead runs the promotion workflow on the `stable` ref: `gh workflow run promote.yml --ref stable -f nightly=nightly-YYYYMMDDHHMMSS`. It checks conditions 1 to 3 itself and stops if any fails, fast-forwards `stable` to that commit with `git push origin <sha>:refs/heads/stable` using the release App's token (skipped when `stable` is already there, so a failed run can be repeated), and calls the stable build, which signs and publishes. Publishing creates the `vX.Y.Z` tag on that commit. Then `main` bumps its base version. The `stable` GitHub Environment, which holds the stable signing key, allows only runs on the `stable` branch.
+Then the product lead releases it in two steps:
 
-**Hotfix**: a pull request into `stable`, merged with a merge commit, with a check that fails before the fix and passes after. It skips the 72 hours: `gh workflow run promote.yml --ref stable -f hotfix=true` builds and publishes `stable`'s head as `vX.Y.(Z+1)`. The hotfix must bump the workspace version to `X.Y.(Z+1)`; promote stops before changing anything if it doesn't. `stable` then merges back into `main` with a merge commit (never a squash) the same day, so later nightlies carry it.
+1. `gh workflow run promote.yml --ref main -f nightly=nightly-YYYYMMDDHHMMSS`. It checks conditions 1 to 3 itself and stops if any fails, then builds every platform into a draft release for `vX.Y.Z` whose target is the nightly's commit. It moves no branch and creates no tag. Its build runs `main`'s `build.yml`, so it stops unless that file matches the promoted commit's; an existing `vX.Y.Z` tag is reused only when it already points at that commit, which lets a promotion be built again after a failed publish. Its last job records a manifest in the run (`promote-manifest`: the draft, version, commit, whether it is a nightly promotion or a hotfix, and each asset's sha256) and points the draft at the run. A failed build discards its draft, and running it again replaces any earlier draft for that version.
+2. A repository admin runs `scripts/release-stable.sh X.Y.Z` from a checkout. It finds the one built draft and refuses unless the run it names is a finished, green `promote.yml` run on `main` whose manifest matches the draft and its current assets; for a nightly promotion it checks condition 3 again, on every retry too. It checks condition 2, fast-forwards `stable` to the draft's commit, pushes the `vX.Y.Z` tag there, checks both, and starts `stable.yml` on the `stable` ref. That run uses the promoted commit's own workflows, repeats the manifest checks, requires the tag on the draft's commit and that commit on `stable`, signs `latest.json` with the stable key only over assets whose sha256 matches the manifest, and publishes the draft. If it fails, nothing needs undoing: fix the cause and run `gh workflow run stable.yml --ref stable -f version=X.Y.Z` again, even after `stable` has moved on.
+
+Then `main` bumps its base version. The `stable` GitHub Environment, which holds the stable signing key, allows only runs on the `stable` branch.
+
+Set up once by hand, before the first stable release: the `stable` branch, starting at the commit that merged this scheme into `main`; the `stable` environment limited to the `stable` branch, holding `STABLE_UPDATER_SIGNING_KEY` and `STABLE_UPDATER_SIGNING_KEY_PASSWORD`; and the two rulesets above.
+
+**Hotfix**: a pull request into `stable`, merged with a merge commit by a repository admin, with a check that fails before the fix and passes after. It skips the 72 hours and the open-regression gate, since fixing a regression is the usual reason for a hotfix and a pull request into `stable` never closes its issue: `gh workflow run promote.yml --ref main -f hotfix=true` builds `stable`'s head as `vX.Y.(Z+1)`, then `scripts/release-stable.sh X.Y.(Z+1)` tags it (`stable` is already there) and publishes. The hotfix must bump the workspace version to `X.Y.(Z+1)` and carry `main`'s `build.yml`; promote stops before building if it doesn't. `stable` then merges back into `main` with a merge commit (never a squash) the same day, so later nightlies carry it.
 
 **Rollback**: re-publish the previous release's `latest.json` on that channel. That stops new installs from taking the bad build, but updaters never offer a lower version, so machines that already took it are repaired by rolling forward: a hotfix with a higher version that carries the good code. Never delete a release.
 

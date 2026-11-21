@@ -49,13 +49,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         configureNotifier()
         installKeyMonitors()
-        do {
-            try store.start()
-        } catch {
-            NSAlert(error: error).runModal()
-            NSApp.terminate(nil)
-            return
+        store.start { [weak self] error in
+            guard let self else { return }
+            if let error {
+                NSAlert(error: error).runModal()
+                NSApp.terminate(nil)
+                return
+            }
+            self.started(arguments, stressFlag: stressFlag, keysFlag: keysFlag, logoFlag: logoFlag)
         }
+        DispatchQueue.main.async { [weak self] in
+            self?.presentMainWindowIfMissing()
+        }
+    }
+
+    private func started(_ arguments: [String], stressFlag: Int?, keysFlag: Bool, logoFlag: Bool) {
         if ["+smoke", "+smoke-conversation", "+smoke-panels", "+smoke-providers", "+smoke-kernel"].contains(where: arguments.contains) {
             store.shell.onboardingDismissed = true
         }
@@ -107,9 +115,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let harness = LogoLoad(store: store)
             harness.start()
             logoLoad = harness
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.presentMainWindowIfMissing()
         }
     }
 

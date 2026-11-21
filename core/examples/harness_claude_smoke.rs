@@ -4,7 +4,7 @@ use local_studio_core::{Harness, ModelOption};
 mod harness;
 
 fn model(models: &[ModelOption]) -> Option<String> {
-    models.iter().find(|model| model.id == "haiku").map(|model| model.id.clone())
+    models.iter().find(|model| model.id == "claude-haiku-5-5").map(|model| model.id.clone())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -13,5 +13,6 @@ fn main() -> anyhow::Result<()> {
         harness: Harness::ClaudeCode,
         provider: "claude-code",
         model,
+        thinking: Some("low"),
     })
 }

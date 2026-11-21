@@ -1,10 +1,13 @@
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use local_studio_core::plugins::{self, Capability, Catalog, Consent, Grants, Plugin, Source};
-use local_studio_core::tunnel::{self, Ports, Status, Tunnel};
+use local_studio_core::tunnel::{self, Cloudflared, Failure, Ports, Status, Tunnel};
+use serde_json::Value;
 
-const USAGE: &str = "usage: local-studio plugin validate <dir>
+const USAGE: &str = "usage: local-studio --version
+       local-studio plugin validate <dir>
        local-studio plugin list
        local-studio plugin install <dir | catalog id | git url@full sha>
        local-studio plugin grant <id> <capability...>
@@ -12,14 +15,29 @@ const USAGE: &str = "usage: local-studio plugin validate <dir>
        local-studio plugin capabilities
        local-studio plugin hash <dir> [excluded path...]
        local-studio tunnel status [--json]
-       local-studio tunnel request [--serve <port>] [--mcp <port>]
-       local-studio tunnel up | down | release
+       local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
+       local-studio tunnel setup --tailnet [--serve <port>] [--mcp <port>] [--yes] [--json]
+       local-studio tunnel adopt [--hostname <name>] [--yes] [--json]
+       local-studio tunnel off [--json]
+       local-studio tunnel request [--serve <port>] [--mcp <port>] [--json]
+       local-studio tunnel up [--yes] [--json]
+       local-studio tunnel down | release [--json]
+       local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
+       local-studio tunnel cloudflared [--yes] [--json]
        local-studio tunnel byo";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let json = args.first() == Some(&"tunnel") && args.contains(&"--json");
+    if json {
+        args.retain(|arg| *arg != "--json");
+    }
     let outcome = match args.as_slice() {
+        ["--version"] => {
+            println!("local-studio {} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL);
+            Ok(())
+        }
         ["plugin", "validate", dir] => validate(Path::new(dir)),
         ["plugin", "list"] => list(),
         ["plugin", "install", source] => install(source),
@@ -35,27 +53,45 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
-        ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), false),
-        ["tunnel", "status", "--json"] => run_tunnel(|t| Box::pin(t.status()), true),
-        ["tunnel", "request", flags @ ..] => request_ports(flags).and_then(|ports| {
-            run_tunnel(
-                move |t| {
-                    Box::pin(t.request(ports, option_env!("LOCAL_STUDIO_CHANNEL").unwrap_or("dev"), |url| {
-                        println!("Open this address and sign in with GitHub: {url}");
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
+        ["tunnel", "status"] => status(json),
+        ["tunnel", "setup", flags @ ..] => gate(json).unwrap_or_else(|| setup(flags, json)),
+        ["tunnel", "adopt", flags @ ..] => gate(json).unwrap_or_else(|| adopt(flags, json)),
+        ["tunnel", "off"] => run_state(|t| Box::pin(t.off()), json),
+        ["tunnel", "request", flags @ ..] => gate(json).unwrap_or_else(|| {
+            request_ports(flags, tunnel::DEFAULT_PORTS).and_then(|ports| {
+                run_tunnel(
+                    move |t| {
+                        Box::pin(t.request(ports, local_studio_core::CHANNEL, move |url| {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({ "state": "confirming", "next": "needs_signin", "signinUrl": url })
+                            );
+                        } else {
+                            println!("Open this address and sign in with GitHub: {url}");
+                        }
+                        let _ = std::io::stdout().flush();
                         open_browser(url);
                     }))
-                },
-                false,
-            )
+                    },
+                    json,
+                )
+            })
         }),
-        ["tunnel", "up"] => {
-            let cloudflared =
-                std::env::var_os("LS_CLOUDFLARED").map_or_else(|| PathBuf::from("cloudflared"), PathBuf::from);
-            run_tunnel(move |t| Box::pin(async move { t.up(&cloudflared).await }), false)
+        ["tunnel", "up"] => run_tunnel(|t| Box::pin(t.up(consent(false, json))), json),
+        ["tunnel", "up", "--yes"] => run_tunnel(|t| Box::pin(t.up(consent(true, json))), json),
+        ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), json),
+        ["tunnel", "release"] => run_tunnel(|t| Box::pin(t.release()), json),
+        ["tunnel", "ports", flags @ ..] if !flags.is_empty() => {
+            let unset = Ports { serve: 0, mcp: 0 };
+            request_ports(flags, unset).and_then(|ports| {
+                let serve = (ports.serve != 0).then_some(ports.serve);
+                let mcp = (ports.mcp != 0).then_some(ports.mcp);
+                run_tunnel(move |t| Box::pin(t.set_ports(serve, mcp)), json)
+            })
         }
-        ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), false),
-        ["tunnel", "release"] => run_tunnel(|t| Box::pin(t.release()), false),
+        ["tunnel", "cloudflared"] => cloudflared(false, json),
+        ["tunnel", "cloudflared", "--yes"] => cloudflared(true, json),
         ["tunnel", "byo"] => byo(),
         _ => {
             eprintln!("{USAGE}");
@@ -92,6 +128,9 @@ fn validate(dir: &Path) -> Result<(), String> {
 }
 
 fn asks(plugin: &Plugin) {
+    if plugin.local_only {
+        println!("  {}", plugins::LOCAL_ONLY_LABEL);
+    }
     if plugin.capabilities.is_empty() {
         println!("  asks for no capabilities");
     }
@@ -107,8 +146,13 @@ fn asks(plugin: &Plugin) {
 }
 
 fn consent_line(plugin: &Plugin, grants: &Grants) -> String {
-    match grants.consent(plugin) {
+    consent_text(plugin, &grants.consent(plugin))
+}
+
+fn consent_text(plugin: &Plugin, consent: &Consent) -> String {
+    match consent {
         Consent::Ready => "ready".to_string(),
+        Consent::Refused { reason } => format!("refused, so it gets no capabilities: {reason}"),
         Consent::NeedsConsent { missing } => {
             let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
             format!(
@@ -123,7 +167,11 @@ fn consent_line(plugin: &Plugin, grants: &Grants) -> String {
 
 fn sync(root: &Path) -> Result<(), String> {
     let Some(agent) = plugins::agent_dir() else { return Ok(()) };
-    if plugins::sync_agent(root, &agent)? {
+    synced(&agent, plugins::sync_agent(root, &agent))
+}
+
+fn synced(agent: &Path, changed: Result<bool, String>) -> Result<(), String> {
+    if changed? {
         println!("updated mcpServers in {}", agent.join("settings.json").display());
     }
     Ok(())
@@ -134,9 +182,19 @@ fn list() -> Result<(), String> {
     println!("plugins dir: {}", root.display());
     let scan = plugins::scan(&root);
     let grants = Grants::load(&root)?;
-    for plugin in &scan.plugins {
+    let ready = plugins::ready(&scan.plugins, &grants);
+    for (plugin, consent) in &ready {
         println!("{} {}: {}", plugin.id, plugin.version, plugin.description);
-        println!("  {}", consent_line(plugin, &grants));
+        if plugin.local_only {
+            println!("  {}", plugins::LOCAL_ONLY_LABEL);
+        }
+        println!("  {}", consent_text(plugin, consent));
+        if let Some((version, source, granted)) =
+            grants.granted(&plugin.id).filter(|(_, _, granted)| !granted.is_empty())
+        {
+            let source = if source.is_empty() { "an earlier Local Studio" } else { source };
+            println!("  granted {} at {version} to code from {source}", granted.join(", "));
+        }
         for skill in &plugin.skills {
             println!("  skill {} ({})", skill.name, plugin.source());
         }
@@ -156,10 +214,17 @@ fn list() -> Result<(), String> {
             println!("  error: {error}");
         }
     }
-    if scan.failures.is_empty() {
+    let mut errors: Vec<String> = plugins::agent_dir()
+        .and_then(|agent| synced(&agent, plugins::sync_mcp_servers(&root, &agent, &ready)).err())
+        .into_iter()
+        .collect();
+    if !scan.failures.is_empty() {
+        errors.push(format!("{} plugins failed to load", scan.failures.len()));
+    }
+    if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("{} plugins failed to load", scan.failures.len()))
+        Err(errors.join("\n"))
     }
 }
 
@@ -177,7 +242,10 @@ fn install(arg: &str) -> Result<(), String> {
         Some(old) => println!("installed {} {} over {old} into {}", plugin.id, plugin.version, plugin.dir.display()),
         None => println!("installed {} {} into {}", plugin.id, plugin.version, plugin.dir.display()),
     }
-    println!("  {} files, tree {}", installed.files, installed.tree);
+    println!("  {} files, tree {}, from {}", installed.files, installed.tree, installed.source);
+    if let Some(note) = &installed.note {
+        println!("  {note}");
+    }
     asks(plugin);
     println!("  {}", consent_line(plugin, &Grants::load(&root)?));
     sync(&root)
@@ -209,7 +277,7 @@ fn revoke(id: &str, names: &[&str]) -> Result<(), String> {
     let mut grants = Grants::load(&root)?;
     if !grants.revoke(id, &capabilities) {
         println!("{id}: nothing to revoke");
-        return Ok(());
+        return sync(&root);
     }
     grants.save(&root)?;
     match installed(&root, id) {
@@ -219,15 +287,25 @@ fn revoke(id: &str, names: &[&str]) -> Result<(), String> {
     sync(&root)
 }
 
-type TunnelCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Status, String>> + 'a>>;
+type TunnelCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Status, Failure>> + 'a>>;
+
+fn failed(failure: &Failure, as_json: bool) -> String {
+    if !as_json {
+        return failure.message.clone();
+    }
+    let error =
+        serde_json::json!({ "state": "error", "next": "error", "code": failure.code, "message": failure.message });
+    println!("{error}");
+    String::new()
+}
 
 fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: bool) -> Result<(), String> {
-    let tunnel = Tunnel::open(None)?;
+    let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
     let runtime =
         tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
-    let status = runtime.block_on(call(&tunnel))?;
+    let status = runtime.block_on(call(&tunnel)).map_err(|failure| failed(&failure, as_json))?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&status).map_err(|error| error.to_string())?);
+        println!("{}", serde_json::to_string(&status).map_err(|error| error.to_string())?);
         return Ok(());
     }
     println!("{}: {}", status.state, status.message);
@@ -246,9 +324,111 @@ fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: 
     Ok(())
 }
 
-fn request_ports(flags: &[&str]) -> Result<Ports, String> {
-    let usage = "usage: local-studio tunnel request [--serve <port>] [--mcp <port>]";
-    let mut ports = tunnel::DEFAULT_PORTS;
+type StateCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Failure>> + 'a>>;
+
+fn gate(as_json: bool) -> Option<Result<(), String>> {
+    let value = tunnel::waitlist(local_studio_core::CHANNEL, tunnel::platform())?;
+    show(&value, as_json);
+    Some(Ok(()))
+}
+
+fn status(as_json: bool) -> Result<(), String> {
+    if let Some(value) = tunnel::waitlist(local_studio_core::CHANNEL, tunnel::platform()) {
+        let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
+        if tunnel.is_unset() {
+            show(&value, as_json);
+            return Ok(());
+        }
+    }
+    run_tunnel(|t| Box::pin(t.status()), as_json)
+}
+
+fn show(value: &Value, as_json: bool) {
+    if as_json {
+        println!("{value}");
+        return;
+    }
+    let text = |key: &str| value.get(key).and_then(Value::as_str);
+    println!("{}: {}", text("state").unwrap_or("error"), text("message").unwrap_or(""));
+    for step in value.get("plan").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        println!("  - {step}");
+    }
+    for (key, label) in [("command", "run"), ("url", "open"), ("mcpUrl", "MCP address"), ("wsUrl", "phone address")] {
+        if let Some(found) = text(key) {
+            println!("  {label}: {found}");
+        }
+    }
+}
+
+fn run_state(call: impl for<'a> FnOnce(&'a Tunnel) -> StateCall<'a>, as_json: bool) -> Result<(), String> {
+    let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+    let value = runtime.block_on(call(&tunnel)).map_err(|failure| failed(&failure, as_json))?;
+    show(&value, as_json);
+    Ok(())
+}
+
+fn port_value(value: Option<&&str>, usage: &str) -> Result<u16, String> {
+    value.and_then(|value| value.parse().ok()).ok_or_else(|| usage.to_string())
+}
+
+fn setup(flags: &[&str], json: bool) -> Result<(), String> {
+    let usage = "usage: local-studio tunnel setup (--cloudflare <hostname> [--alias <name>]... | --tailnet) [--serve <port>] [--mcp <port>] [--yes] [--json]";
+    let (mut cloudflare, mut tailnet, mut yes) = (None, false, false);
+    let (mut aliases, mut serve, mut mcp) = (Vec::new(), None, None);
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        match *flag {
+            "--cloudflare" => cloudflare = Some(rest.next().ok_or(usage)?.to_string()),
+            "--alias" => aliases.push(rest.next().ok_or(usage)?.to_string()),
+            "--tailnet" => tailnet = true,
+            "--yes" => yes = true,
+            "--serve" => serve = Some(port_value(rest.next(), usage)?),
+            "--mcp" => mcp = Some(port_value(rest.next(), usage)?),
+            _ => return Err(usage.to_string()),
+        }
+    }
+    match (cloudflare, tailnet) {
+        (Some(host), false) => {
+            run_state(move |t| Box::pin(t.setup_cloudflare(host, aliases, serve, mcp, consent(yes, json))), json)
+        }
+        (None, true) if aliases.is_empty() => run_state(move |t| Box::pin(t.setup_tailnet(serve, mcp)), json),
+        _ => Err(usage.to_string()),
+    }
+}
+
+fn adopt(flags: &[&str], json: bool) -> Result<(), String> {
+    let usage = "usage: local-studio tunnel adopt [--hostname <name>] [--yes] [--json]";
+    let (mut hostname, mut yes) = (None, false);
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        match *flag {
+            "--hostname" => hostname = Some(rest.next().ok_or(usage)?.to_string()),
+            "--yes" => yes = true,
+            _ => return Err(usage.to_string()),
+        }
+    }
+    let go = move |plan: &Value| {
+        if yes {
+            return true;
+        }
+        if json || !std::io::stdin().is_terminal() {
+            return false;
+        }
+        for step in plan.get("plan").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            println!("  - {step}");
+        }
+        print!("Adopt Tychicus's tunnel this way? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    };
+    run_state(move |t| Box::pin(t.adopt(hostname, go, consent(yes, json))), json)
+}
+
+fn request_ports(flags: &[&str], mut ports: Ports) -> Result<Ports, String> {
+    let usage = "usage: local-studio tunnel request | ports [--serve <port>] [--mcp <port>]";
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         let value: u16 = rest.next().and_then(|value| value.parse().ok()).ok_or(usage)?;
@@ -265,13 +445,72 @@ fn open_browser(url: &str) {
     if std::env::var_os("LS_TUNNEL_NO_BROWSER").is_some() {
         return;
     }
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let _ = std::process::Command::new(opener)
+    let _ = opener()
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+#[cfg(unix)]
+fn opener() -> std::process::Command {
+    std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" })
+}
+
+#[cfg(windows)]
+fn opener() -> std::process::Command {
+    let mut command = std::process::Command::new("rundll32.exe");
+    command.arg("url.dll,FileProtocolHandler");
+    command
+}
+
+fn consent(yes: bool, as_json: bool) -> impl FnOnce(&Path, &[String]) -> bool {
+    move |target, notes| {
+        if yes {
+            return true;
+        }
+        if as_json || !std::io::stdin().is_terminal() {
+            return false;
+        }
+        for note in notes {
+            println!("{note}");
+        }
+        print!(
+            "Download cloudflared {} from github.com/cloudflare/cloudflared, check its pinned SHA-256, and install it at {}? [y/N] ",
+            tunnel::CLOUDFLARED_VERSION,
+            target.display()
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    }
+}
+
+fn cloudflared(yes: bool, as_json: bool) -> Result<(), String> {
+    let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+    let found = runtime
+        .block_on(tunnel.cloudflared(consent(yes, as_json), "local-studio tunnel cloudflared --yes"))
+        .map_err(|failure| failed(&failure, as_json))?;
+    if as_json {
+        let pinned = matches!(found, Cloudflared::Pinned(_));
+        let path = found.path().display().to_string();
+        let version = tunnel::CLOUDFLARED_VERSION;
+        println!(
+            "{}",
+            serde_json::json!({ "state": "ready", "next": "ready", "path": path, "pinned": pinned, "version": version })
+        );
+        return Ok(());
+    }
+    match found {
+        Cloudflared::Dev(path) => println!("LS_CLOUDFLARED: {} (a dev override, not checked)", path.display()),
+        Cloudflared::Pinned(path) => {
+            println!("cloudflared {} at {} (pinned digest checked)", tunnel::CLOUDFLARED_VERSION, path.display());
+        }
+    }
+    Ok(())
 }
 
 fn byo() -> Result<(), String> {

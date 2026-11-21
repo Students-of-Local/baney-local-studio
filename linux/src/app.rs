@@ -6,13 +6,13 @@ use adw::prelude::*;
 use gtk::gio;
 use local_studio_core::{
     ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind, NotificationMode,
-    PromptDraft, Shelf, ThreadSettings, TranscriptOp, Update,
+    PromptDraft, Shelf, StudioError, ThreadSettings, TranscriptOp, Update,
 };
 use webkit::prelude::*;
 
 use crate::branches::BranchBar;
 use crate::composer::Composer;
-use crate::core::Core;
+use crate::core::{Core, Opened};
 use crate::dashboard::LocalPage;
 use crate::drawer::Drawer;
 use crate::editor::Editors;
@@ -57,6 +57,7 @@ pub enum Target {
     TerminalCopy,
     TerminalChat,
     Provider,
+    Pairing,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -294,14 +295,35 @@ impl App {
     }
 
     pub fn start_core(self: &Rc<Self>) {
+        if !local_studio_core::serve_holds_lock(None) {
+            let opened = Core::open();
+            self.core_opened(opened);
+            return;
+        }
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            sender.send_blocking(Core::open()).ok();
+        });
         let weak = Rc::downgrade(self);
-        let started = self.core.start(move || {
+        gtk::glib::spawn_future_local(async move {
+            let Ok(opened) = receiver.recv().await else { return };
             if let Some(app) = weak.upgrade() {
-                app.tick();
+                app.core_opened(opened);
             }
         });
-        if let Err(error) = started {
-            self.show_banner(&error.to_string());
+    }
+
+    fn core_opened(self: &Rc<Self>, opened: Result<Opened, StudioError>) {
+        match opened {
+            Ok(opened) => {
+                let weak = Rc::downgrade(self);
+                self.core.attach(opened, move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.tick();
+                    }
+                });
+            }
+            Err(error) => self.show_banner(&error.to_string()),
         }
     }
 
@@ -648,8 +670,12 @@ impl App {
                     Some(Target::Files | Target::Preview) => self.panel.files.failed(&message),
                     Some(Target::Devices) => self.panel.devices.failed(&message),
                     Some(Target::Provider) => crate::providers::failed(self, &request, &message),
+                    Some(Target::Pairing) => crate::machines::pairing_failed(self, &request, &message),
                     _ => self.toast(&message),
                 }
+            }
+            Update::LocalOnly { thread, message, local, .. } => {
+                crate::actions::local_only(self, thread, &message, local.as_ref());
             }
             Update::Notice { level, text } => match level {
                 local_studio_core::NoticeLevel::Error | local_studio_core::NoticeLevel::Warning => {
@@ -657,6 +683,29 @@ impl App {
                 }
                 local_studio_core::NoticeLevel::Info => self.toast(&text),
             },
+            Update::Machines { mut machines } => {
+                machines.sort_by_cached_key(|machine| machine.name.to_lowercase());
+                self.state.borrow_mut().machines = machines;
+                dirty.sidebar = true;
+                dirty.settings = true;
+            }
+            Update::Pairing { request, link, url, serving, expires_at } => {
+                if self.take_request(&request) == Some(Target::Pairing) {
+                    let mut state = self.state.borrow_mut();
+                    if state.pairing.as_deref() == Some(request.as_str()) {
+                        state.offer = Some(crate::machines::Offer { link, url, serving, expires_at });
+                        state.offer_error = None;
+                        drop(state);
+                        crate::machines::render_pairing(self);
+                    }
+                }
+            }
+            Update::PairedDevices { devices } => {
+                let mut state = self.state.borrow_mut();
+                state.devices = devices;
+                state.devices_loaded = true;
+                dirty.settings = true;
+            }
         }
     }
 
@@ -945,6 +994,7 @@ impl App {
         self.settings.replace(Some(dialog));
         self.core.run(|studio| {
             studio.load_providers();
+            studio.list_paired_devices();
         });
         let request = self.core.request();
         self.core.run(|studio| studio.list_archived(request));

@@ -303,10 +303,7 @@ enum StudioPaths {
     }
 
     static var version: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "Development"
-        guard let build = info?["CFBundleVersion"] as? String, build != short else { return short }
-        return "\(short) (\(build))"
+        "\(buildVersion()) (\(buildChannel()))"
     }
 
     @MainActor static func reveal(_ url: URL) {

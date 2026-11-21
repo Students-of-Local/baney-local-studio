@@ -1,0 +1,10 @@
+[package]
+name = "local-studio-version"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The full SemVer version and release channel stamped into every Local Studio binary at build time"
+
+[lints]
+workspace = true

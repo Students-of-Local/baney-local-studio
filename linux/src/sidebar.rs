@@ -26,6 +26,7 @@ struct Card {
     hint: Option<u8>,
     when: String,
     since: Option<i64>,
+    machine: Option<crate::machines::RowMachine>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -566,6 +567,7 @@ impl Sidebar {
                     since: (row.status == ThreadStatus::Working)
                         .then(|| state.run_start(&row.id, row.status_since))
                         .flatten(),
+                    machine: row.machine.as_deref().map(|id| crate::machines::RowMachine::new(state, id)),
                 })));
             }
             if rows.len() > limit {
@@ -976,6 +978,15 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
     if row.unread {
         column.add_css_class("unread");
     }
+    let tooltip: Vec<String> = card
+        .machine
+        .iter()
+        .map(crate::machines::RowMachine::tooltip)
+        .chain(row.note.clone().filter(|note| !note.is_empty()))
+        .collect();
+    if !tooltip.is_empty() {
+        column.set_tooltip_text(Some(&tooltip.join("\n")));
+    }
     let title: gtk::Widget = if card.renaming {
         rename_entry(app, row)
     } else {
@@ -1000,6 +1011,13 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
         badge.set_opacity(0.5);
         line.append(&badge);
         line.append(&title);
+        if let Some(machine) = &card.machine {
+            let glyph = icons::styled(machine.icon, "ls-meta");
+            if !machine.reachable {
+                glyph.set_opacity(0.6);
+            }
+            line.append(&glyph);
+        }
         if row.pinned {
             line.append(&icons::image(icons::PIN));
         }
@@ -1067,8 +1085,25 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
     column.append(&top);
     column.append(&title);
     let branch = row.branch.clone().filter(|branch| !branch.is_empty());
-    if branch.is_some() || row.additions > 0 || row.deletions > 0 || row.pull_request.is_some() {
+    if card.machine.is_some()
+        || branch.is_some()
+        || row.additions > 0
+        || row.deletions > 0
+        || row.pull_request.is_some()
+    {
         let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        if let Some(machine) = &card.machine {
+            let tag = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+            tag.append(&icons::styled(machine.icon, "ls-meta"));
+            let name = gtk::Label::new(Some(&machine.name));
+            name.add_css_class("ls-meta");
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            tag.append(&name);
+            if !machine.reachable {
+                tag.set_opacity(0.6);
+            }
+            bottom.append(&tag);
+        }
         let label = gtk::Label::new(branch.as_deref());
         label.add_css_class("ls-meta");
         label.set_xalign(0.0);
@@ -1103,9 +1138,6 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
             bottom.append(&del);
         }
         column.append(&bottom);
-    }
-    if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
-        column.set_tooltip_text(Some(note));
     }
     column.upcast()
 }
