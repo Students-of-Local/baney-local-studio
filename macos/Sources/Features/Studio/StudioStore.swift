@@ -26,6 +26,7 @@ final class StudioStore {
     @ObservationIgnored private let launch: DaemonLaunch?
     @ObservationIgnored private let controllerMain: String?
     @ObservationIgnored private var pump: UpdatePump?
+    @ObservationIgnored private var remoteHost: RemoteHost?
 
     init(launch: DaemonLaunch?, controllerMain: String? = nil) {
         self.launch = launch
@@ -48,7 +49,7 @@ final class StudioStore {
     }
 
     func start() throws {
-        let config = StudioConfig(socketPath: nil, sessionDir: nil, dataDir: nil, launch: launch, controllerMain: controllerMain)
+        let config = StudioConfig(socketPath: nil, sessionDir: nil, dataDir: nil, launch: launch, controllerMain: controllerMain, takeOverServe: true)
         let pump = UpdatePump { [weak self] studio, updates in
             guard let self, self.core.studio === studio else { return }
             self.receive(updates)
@@ -57,11 +58,14 @@ final class StudioStore {
         core.studio = studio
         pump.attach(studio)
         self.pump = pump
+        remoteHost = startRemoteHost(studio: studio, dataDir: nil)
     }
 
     func stop() {
         pump?.attach(nil)
         pump = nil
+        remoteHost?.stop()
+        remoteHost = nil
         core.studio?.shutdown()
         core.studio = nil
         requests.reset()
