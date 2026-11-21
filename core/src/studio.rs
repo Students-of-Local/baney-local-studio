@@ -454,7 +454,7 @@ impl Studio {
         let (client_slot, client_watch) = watch::channel(None);
         let query = DaemonQuery::new(client_watch.clone(), session_dir.clone());
         let home = home.to_string_lossy().into_owned();
-        let text = TextGen::new(client_watch, session_dir.clone(), home.clone());
+        let text = TextGen::new(client_watch, session_dir.clone(), daemon::agent_dir(), home.clone());
         let controller_main = config.controller_main.filter(|value| !value.is_empty()).map(PathBuf::from);
         let workspace = Workspace::new(
             runtime.handle().clone(),
@@ -1235,7 +1235,10 @@ impl Actor {
                 }
             }
             Command::Compact { thread } if self.harness(&thread).is_some() => self.cli_compact(&thread).await,
-            Command::Compact { thread } => match self.ensure_open(&thread).await {
+            Command::Compact { thread } => match self.ensure_open(&thread).await.and_then(|active| {
+                self.thread_refuses(&thread)?;
+                Ok(active)
+            }) {
                 Ok(active) => {
                     let command = DaemonCommand::Compact {
                         id: None,
@@ -1889,8 +1892,17 @@ impl Actor {
             .as_deref()
             .or(effective.default_provider.as_deref())
             .map_or(Harness::Eukhe, harness::harness_of);
-        if harness == Harness::Eukhe && self.client.is_none() {
-            return Err("Not connected to the Eukhe daemon yet.".to_string());
+        if harness == Harness::Eukhe {
+            if self.client.is_none() {
+                return Err("Not connected to the Eukhe daemon yet.".to_string());
+            }
+            let chosen = settings.provider.as_deref().or(effective.default_provider.as_deref());
+            let provider = match chosen {
+                Some(provider) => Some(provider.to_string()),
+                None if self.workspace.claude_signed_in() => self.daemon_default().await?.0.map(|key| key.provider),
+                None => None,
+            };
+            self.workspace.eukhe_refuses(provider.as_deref())?;
         }
         let choice = match settings.worktree {
             WorktreeChoice::Default => match effective.new_thread_workspace {
@@ -1922,8 +1934,6 @@ impl Actor {
                 .cli_create(draft, harness, cwd, project_path, settings.access, model, thinking, fan_out, prompt)
                 .await;
         }
-        let provider = settings.provider.or(effective.default_provider);
-        self.workspace.eukhe_refuses(provider.as_deref())?;
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let created = saved_sessions::create_resident(&client, None, self.create_config(&cwd))
             .await
@@ -1947,6 +1957,7 @@ impl Actor {
         });
         self.save();
         self.attach(&id, &created.active_session_id).await?;
+        let provider = settings.provider.or(effective.default_provider);
         let model = settings.model.or(effective.default_model);
         let thinking = settings.thinking_level.or(effective.default_thinking_level);
         if (provider.is_some() && model.is_some()) || thinking.is_some() {
@@ -2005,6 +2016,9 @@ impl Actor {
         }
         let active = self.ensure_open(id).await?;
         let cli = self.harness(id).is_some();
+        if !cli {
+            self.thread_refuses(id)?;
+        }
         let message = if !cli && (message.starts_with('/') || message.contains('$')) {
             self.resources(id, &active).await.expand(&message)
         } else {
@@ -2073,6 +2087,17 @@ impl Actor {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Refuses a model call on an Eukhe thread whose current model is `anthropic` on the Claude sign-in.
+    fn thread_refuses(&self, id: &str) -> Result<(), String> {
+        let provider = self
+            .threads
+            .get(id)
+            .and_then(|thread| thread.live.as_ref())
+            .and_then(|live| live.state.model.as_ref())
+            .map(|model| model.provider.as_str());
+        self.workspace.eukhe_refuses(provider)
     }
 
     fn thread_project(&self, id: &str) -> Option<String> {
@@ -2157,6 +2182,10 @@ impl Actor {
         };
         let active = live.active.clone();
         let next_steering = format!("steering:{}", live.state.queue.steering.len());
+        if let Err(refused) = self.thread_refuses(id) {
+            self.mailbox.notice(NoticeLevel::Error, refused);
+            return;
+        }
         let result = if lane == "followUp" {
             self.call(DaemonCommand::MutateQueuedMessage {
                 id: None,
@@ -2412,6 +2441,7 @@ impl Actor {
             return Err(cli::unsupported(harness, "fork"));
         }
         let active = self.ensure_open(id).await?;
+        self.thread_refuses(id)?;
         let tree = self
             .call(DaemonCommand::GetSessionTree { id: None, active_session_id: active.clone(), rest: Map::default() })
             .await?;
@@ -3451,6 +3481,10 @@ impl Actor {
             ));
         }
         let active = self.ensure_open(id).await?;
+        if let Err(refused) = self.thread_refuses(id) {
+            self.release(id).await;
+            return Err(refused);
+        }
         let request = format!("title:{id}:{}", now_ms());
         self.titles.insert(request.clone(), id.to_string());
         let command = DaemonCommand::StartSideQuestion {

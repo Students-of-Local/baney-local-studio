@@ -26,7 +26,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ENDPOINT_HEADER: &str = "x-local-studio-endpoint";
 const EXCERPT: usize = 200;
 const ANTHROPIC: &str = "anthropic";
-const CLAUDE_SIGN_IN: &str = "Eukhe's Claude models are hidden: its Claude subscription sign-in identifies as Claude Code and can get the Anthropic account restricted. Use Claude Code (your claude CLI sign-in) for Claude, or save an Anthropic API key.";
+pub(crate) const CLAUDE_SIGN_IN: &str = "Eukhe's Claude models are hidden: its Claude subscription sign-in identifies as Claude Code and can get the Anthropic account restricted. Use Claude Code (your claude CLI sign-in) for Claude, or save an Anthropic API key.";
 
 struct BuiltIn {
     id: &'static str,
@@ -654,6 +654,21 @@ fn chosen_key(key: &ProviderKey) -> Option<String> {
     }
 }
 
+/// Whether Eukhe's `auth.json` holds the Claude subscription sign-in for `anthropic`; only its type is read.
+pub(crate) fn claude_signed_in(agent: Option<&Path>) -> bool {
+    agent
+        .and_then(|agent| read_object(&agent.join("auth.json")).ok())
+        .is_some_and(|auth| stored(&auth, ANTHROPIC) == Some(ProviderCredential::SignedIn))
+}
+
+/// Refuses an Eukhe run on `anthropic` while that sign-in holds, so Claude goes through the claude CLI.
+pub(crate) fn eukhe_refuses(agent: Option<&Path>, provider: Option<&str>) -> Result<(), String> {
+    if provider == Some(ANTHROPIC) && claude_signed_in(agent) {
+        return Err(CLAUDE_SIGN_IN.to_string());
+    }
+    Ok(())
+}
+
 impl Workspace {
     pub(crate) fn set_models_reloader(&self, reloader: ModelsReloader) {
         *self.inner.models_reloader.lock().unwrap_or_else(PoisonError::into_inner) = Some(reloader);
@@ -674,19 +689,12 @@ impl Workspace {
             .ok_or_else(|| "Eukhe's agent folder is unknown because HOME is not set.".to_string())
     }
 
-    fn claude_signed_in(&self) -> bool {
-        self.inner
-            .agent_dir
-            .as_deref()
-            .and_then(|agent| read_object(&agent.join("auth.json")).ok())
-            .is_some_and(|auth| stored(&auth, ANTHROPIC) == Some(ProviderCredential::SignedIn))
+    pub(crate) fn claude_signed_in(&self) -> bool {
+        claude_signed_in(self.inner.agent_dir.as_deref())
     }
 
     pub(crate) fn eukhe_refuses(&self, provider: Option<&str>) -> Result<(), String> {
-        if provider == Some(ANTHROPIC) && self.claude_signed_in() {
-            return Err(CLAUDE_SIGN_IN.to_string());
-        }
-        Ok(())
+        eukhe_refuses(self.inner.agent_dir.as_deref(), provider)
     }
 
     pub(crate) fn models_loaded(&self, mut models: Vec<ModelOption>, mut errors: Vec<String>) -> Vec<ModelOption> {
