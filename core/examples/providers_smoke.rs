@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 #[path = "support/real_model.rs"]
 mod real_model;
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(90);
+const STEP_TIMEOUT: Duration = Duration::from_secs(600);
 const KEY: &str = "sk-stub-local-smoke-0001";
 const WRONG_KEY: &str = "sk-stub-wrong-0002";
 const OPENAI_KEY: &str = "sk-openai-smoke-not-real";
@@ -362,7 +362,7 @@ fn main() -> anyhow::Result<()> {
     let base = args.next().map_or_else(|| PathBuf::from("/tmp/ls-providers"), PathBuf::from);
     let root = base.join(format!("run-{}", std::process::id()));
     let real = root.join("real");
-    let _credentials = real_model::install(&real.join("agent"))?;
+    real_model::install(&real.join("agent"))?;
     run(&daemon, &real, None)?;
     let custom = root.join("custom");
     let agent = custom.join("agent");
@@ -428,7 +428,7 @@ fn drive(
     harness.pump_until("project added", |view| view.projects.len() == 1)?;
     let project = harness.view.projects[0].clone();
     let Some(port) = stub else {
-        built_in(harness, &project)?;
+        real_provider(harness, &project)?;
         let request = harness.request();
         harness.studio.load_usage(request, UsagePeriod::Day);
         harness.pump_until("usage report loaded", |view| view.usage.is_some())?;
@@ -441,16 +441,19 @@ fn drive(
     cleanup(harness, agent, original)
 }
 
-fn built_in(harness: &mut Harness, project: &str) -> anyhow::Result<()> {
-    let (provider, model) = (real_model::PROVIDER, real_model::MODEL);
+fn real_provider(harness: &mut Harness, project: &str) -> anyhow::Result<()> {
+    let (provider, model) = (real_model::provider(), real_model::model());
     harness.studio.load_models();
-    harness.pump_until("the real built-in provider is signed in and its model is configured", |view| {
-        view.provider(provider).is_some_and(|status| {
-            status.kind == ProviderKind::BuiltIn
-                && status.credential != ProviderCredential::Missing
-                && status.configured
-        }) && view.has_model(provider, model)
-    })?;
+    harness.pump_until(
+        "the local model's keyless provider is listed as needing no key and its model is configured",
+        |view| {
+            view.provider(provider).is_some_and(|status| {
+                status.kind == ProviderKind::Custom
+                    && status.credential == ProviderCredential::NotRequired
+                    && status.configured
+            }) && view.has_model(provider, model)
+        },
+    )?;
     let thread = harness.start(
         "real-draft",
         project,
@@ -459,7 +462,7 @@ fn built_in(harness: &mut Harness, project: &str) -> anyhow::Result<()> {
     )?;
     let watched = thread.clone();
     let expected = format!("{provider}/{model}");
-    harness.pump_until("a thread on the real built-in provider gets a streamed reply", move |view| {
+    harness.pump_until("a thread on the local model gets a streamed reply", move |view| {
         !view.answer(&watched).trim().is_empty()
             && view.idle(&watched)
             && view.thread_models.get(&watched) == Some(&expected)

@@ -22,7 +22,7 @@ use serde_json::Map;
 #[path = "support/real_model.rs"]
 mod real_model;
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(90);
+const STEP_TIMEOUT: Duration = Duration::from_secs(600);
 const PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
     0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49,
@@ -480,7 +480,7 @@ fn main() -> anyhow::Result<()> {
     let repo = root.join("repo");
     let agent_dir = root.join("agent");
     let data = root.join("data");
-    let _credentials = real_model::install(&agent_dir)?;
+    real_model::install(&agent_dir)?;
     make_repo(&repo)?;
     let repo = repo.canonicalize()?;
     let port = free_port()?;
@@ -568,7 +568,7 @@ fn project_scripts_and_settings(harness: &mut Harness, project: &str) -> anyhow:
     harness.studio.close_terminal(terminal);
 
     let overrides = ProjectSettings {
-        default_model: Some(real_model::MODEL.to_string()),
+        default_model: Some(real_model::model().to_string()),
         new_thread_workspace: Some(NewThreadWorkspace::Worktree),
         new_worktrees_start_from_origin: Some(false),
         ..ProjectSettings::default()
@@ -577,8 +577,8 @@ fn project_scripts_and_settings(harness: &mut Harness, project: &str) -> anyhow:
     let id = project.clone();
     harness.pump_until("project overrides change the effective settings only for the project", move |view| {
         view.project_settings.iter().rev().find(|(owner, _, _)| *owner == id).is_some_and(|(_, settings, effective)| {
-            settings.default_model.as_deref() == Some(real_model::MODEL)
-                && effective.default_model.as_deref() == Some(real_model::MODEL)
+            settings.default_model.as_deref() == Some(real_model::model())
+                && effective.default_model.as_deref() == Some(real_model::model())
                 && effective.new_thread_workspace == NewThreadWorkspace::Worktree
                 && !effective.new_worktrees_start_from_origin
         }) && view.settings.as_ref().is_some_and(|global| global.new_thread_workspace == NewThreadWorkspace::Local)
@@ -719,8 +719,8 @@ fn text_generation_and_cleanup(harness: &mut Harness, project: &str) -> anyhow::
     git(Path::new(&project), &["reset", "--quiet", "--hard", "origin/watched"])?;
     let fixtures = PathBuf::from(std::env::var_os("FAKE_GH_DIR").context("fake gh")?);
     let mut settings = harness.view.settings.clone().context("settings")?;
-    settings.text_generation_provider = Some(real_model::PROVIDER.to_string());
-    settings.text_generation_model = Some(real_model::MODEL.to_string());
+    settings.text_generation_provider = Some(real_model::provider().to_string());
+    settings.text_generation_model = Some(real_model::model().to_string());
     settings.writing_style = WritingStyle::Custom;
     settings.writing_instructions =
         format!("Begin the commit subject or pull request title with the word {GENERATED_MARK}.");
@@ -1414,7 +1414,7 @@ fn second_run(harness: &mut Harness, project: &str) -> anyhow::Result<()> {
         view.project_scripts.iter().any(|(owner, scripts)| *owner == id && scripts.len() == 2)
             && view.project_settings.iter().any(|(owner, settings, effective)| {
                 *owner == id
-                    && settings.default_model.as_deref() == Some(real_model::MODEL)
+                    && settings.default_model.as_deref() == Some(real_model::model())
                     && effective.new_thread_workspace == NewThreadWorkspace::Worktree
             })
     })?;

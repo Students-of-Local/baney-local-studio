@@ -18,7 +18,7 @@ use serde_json::Map;
 #[path = "support/real_model.rs"]
 mod real_model;
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(150);
+const STEP_TIMEOUT: Duration = Duration::from_secs(600);
 const MARK: &str = "smoke-ok";
 const RENAMED: &str = "Renamed smoke";
 const STEER: &str = "Also include the word steered in your final reply.";
@@ -367,7 +367,7 @@ fn main() -> anyhow::Result<()> {
     let data = root.join("data");
     std::fs::create_dir_all(&work)?;
     std::fs::create_dir_all(agent_dir.join("skills").join("smoke-skill"))?;
-    let _credentials = real_model::install(&agent_dir)?;
+    real_model::install(&agent_dir)?;
     std::fs::create_dir_all(agent_dir.join("prompts"))?;
     std::fs::write(
         agent_dir.join("skills").join("smoke-skill").join("SKILL.md"),
@@ -600,16 +600,16 @@ fn catalog(harness: &mut Harness) -> anyhow::Result<ModelKey> {
         models.iter().map(|model| &model.provider).collect::<BTreeSet<_>>()
     );
     ensure!(
-        models
-            .iter()
-            .any(|model| model.provider == real_model::PROVIDER && model.id == real_model::MODEL && model.configured),
+        models.iter().any(|model| model.provider == real_model::provider()
+            && model.id == real_model::model()
+            && model.configured),
         "{}/{} is not a configured model in the catalog",
-        real_model::PROVIDER,
-        real_model::MODEL
+        real_model::provider(),
+        real_model::model()
     );
     let other = models
         .iter()
-        .find(|model| model.id != real_model::MODEL)
+        .find(|model| model.id != real_model::model())
         .context("the catalog has no model besides the real one")?;
     Ok(ModelKey { provider: other.provider.clone(), model: other.id.clone() })
 }
@@ -873,7 +873,7 @@ fn round_four_sessions(harness: &mut Harness, ids: &Ids, always: &str) -> anyhow
     harness.pump_until("agent session restarted", |view| {
         view.notices.iter().any(|notice| notice == "The agent session restarted.") && view.row(always).is_some()
     })?;
-    let fan = ModelKey { provider: real_model::PROVIDER.to_string(), model: real_model::MODEL.to_string() };
+    let fan = ModelKey { provider: real_model::provider().to_string(), model: real_model::model().to_string() };
     studio.start_threads(
         "draft-fan".to_string(),
         Some(ids.project.clone()),

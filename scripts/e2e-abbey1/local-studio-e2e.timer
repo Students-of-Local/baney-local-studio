@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Local Studio e2e gate, before the 07:00 UTC nightly
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
