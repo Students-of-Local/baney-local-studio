@@ -22,7 +22,7 @@ mod watch;
 mod writer;
 
 pub use self::api::terminal_preview;
-pub use self::providers::endpoint_presets;
+pub use self::providers::{configured_providers, endpoint_presets, Provider};
 pub(crate) use self::setup::PreparedWorktree;
 
 use std::collections::{BTreeMap, HashMap};

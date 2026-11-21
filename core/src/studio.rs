@@ -30,7 +30,7 @@ use crate::model::{
 use crate::oneshot::TextGen;
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
-use crate::skills::Resources;
+use crate::skills::{Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
@@ -62,6 +62,7 @@ const DELIVERY_SLACK_MS: i64 = 2_000;
 
 mod ask;
 mod cli;
+mod local_only;
 mod remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,6 +394,13 @@ enum Command {
         thread: String,
         provider: String,
         model: String,
+    },
+    RunLocal {
+        thread: String,
+        local: ModelKey,
+    },
+    SendHeld {
+        thread: String,
     },
     SetThinkingLevel {
         thread: String,
@@ -821,6 +829,10 @@ impl Studio {
         self.send_command(Command::SetModel { thread, provider, model });
     }
 
+    pub fn run_local(&self, thread: String, local: ModelKey) {
+        self.send_command(Command::RunLocal { thread, local });
+    }
+
     pub fn set_thinking_level(&self, thread: String, level: String) {
         self.send_command(Command::SetThinkingLevel { thread, level });
     }
@@ -1073,6 +1085,9 @@ struct Thread {
     allowed_effects: Vec<String>,
     resources: Option<Resources>,
     rlm_children: Vec<Subagent>,
+    refused: Option<PromptDraft>,
+    held: Vec<(PromptDraft, Delivery, Option<String>)>,
+    served: Option<String>,
 }
 
 struct Actor {
@@ -1585,6 +1600,8 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
+            Command::RunLocal { thread, local } => self.run_local(&thread, local).await,
+            Command::SendHeld { thread } => self.send_held(&thread).await,
             Command::SetThinkingLevel { thread, level } => {
                 if let Err(error) = self.apply_model(&thread, None, None, Some(level)).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
@@ -2362,11 +2379,21 @@ impl Actor {
         } else {
             self.ensure_open(id).await?
         };
-        let message = if !cli && (message.starts_with('/') || message.contains('$')) {
-            self.resources(id, &active).await.expand(&message)
+        if self.running(id) && self.threads.get(id).is_some_and(|thread| !thread.held.is_empty()) {
+            self.hold(id, &prompt, delivery, request);
+            return Ok(());
+        }
+        let expansion = if !(message.starts_with('/') || message.contains('$')) {
+            Expansion { text: message.clone(), plugins: Vec::new() }
+        } else if cli {
+            Resources::default().with_plugins(self.plugins()).expand(&message)
         } else {
-            message
+            self.resources(id, &active).await.expand(&message)
         };
+        if !self.local_only_gate(id, &active, &expansion.plugins, &prompt, delivery, request.clone()).await? {
+            return Ok(());
+        }
+        let message = if cli { message } else { expansion.text };
         let images = (!prompt.images.is_empty()).then(|| {
             Value::Array(
                 prompt
@@ -2463,14 +2490,25 @@ impl Actor {
             notes.push(error);
             plugins::Grants::default()
         });
-        for plugin in &scan.plugins {
-            if let plugins::Consent::NeedsConsent { missing } = grants.consent(plugin) {
-                let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
-                notes.push(format!("{} needs consent for {}, so its MCP server is off", plugin.id, names.join(", ")));
+        let ready = plugins::ready(&scan.plugins, &grants);
+        for (plugin, consent) in &ready {
+            match consent {
+                plugins::Consent::Ready => {}
+                plugins::Consent::NeedsConsent { missing } => {
+                    let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+                    notes.push(format!(
+                        "{} needs consent for {}, so its MCP server is off",
+                        plugin.id,
+                        names.join(", ")
+                    ));
+                }
+                plugins::Consent::Refused { reason } => {
+                    notes.push(format!("{} cannot be granted, so its MCP server is off: {reason}", plugin.id));
+                }
             }
         }
         if let Some(agent) = crate::daemon::agent_dir() {
-            if let Err(error) = plugins::sync_mcp_servers(dir, &agent, &scan.plugins, &grants) {
+            if let Err(error) = plugins::sync_mcp_servers(dir, &agent, &ready) {
                 notes.push(error);
             }
         }
@@ -2813,6 +2851,7 @@ impl Actor {
             fork.activity_at = Some(now);
             fork.project = flags.project;
             fork.access = flags.access;
+            fork.local_only = flags.local_only;
         });
         self.save();
         self.threads.insert(fork_id.clone(), Thread { path, cwd, ..Thread::default() });
@@ -2829,6 +2868,9 @@ impl Actor {
         model: Option<String>,
         level: Option<String>,
     ) -> Result<(), String> {
+        if let Some(provider) = &provider {
+            self.keep_local(id, provider)?;
+        }
         if self.harness(id).is_some() {
             return self.cli_model(id, provider, model, level);
         }
@@ -3670,6 +3712,7 @@ impl Actor {
                 if let Some(thread) = self.threads.get_mut(&id) {
                     thread.run_started_at = None;
                 }
+                self.itself.send(Command::SendHeld { thread: id.clone() });
             }
             if flipped {
                 self.emit_info(&id);
@@ -3792,7 +3835,11 @@ impl Actor {
         }
         let project = self.thread_project(id);
         let settings = self.workspace.effective_settings(project.as_deref());
-        if let (Some(provider), Some(model)) = (settings.text_generation_provider, settings.text_generation_model) {
+        let generator = settings
+            .text_generation_provider
+            .zip(settings.text_generation_model)
+            .filter(|(provider, _)| self.store.flags(id).local_only.is_none() || Self::local_provider(provider));
+        if let Some((provider, model)) = generator {
             let excerpt: String = self
                 .saved
                 .get(id)
@@ -3975,6 +4022,7 @@ impl Actor {
             self.refresh_saved().await;
         }
         self.emit_info(id);
+        self.send_held(id).await;
         self.release(id).await;
     }
 

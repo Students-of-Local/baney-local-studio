@@ -206,7 +206,7 @@ pub fn acp_servers(
     let asking: Vec<Plugin> = plugins.iter().filter(|plugin| asks(plugin, grants)).cloned().collect();
     let mut servers = Vec::new();
     let mut errors = Vec::new();
-    for (name, entry) in super::mcp_servers(&asking, grants) {
+    for (name, entry) in super::mcp_servers(&super::ready(&asking, grants)) {
         let Some(plugin) = asking.iter().find(|plugin| plugin.mcp_name() == name) else { continue };
         if foreign.contains(&name) {
             continue;

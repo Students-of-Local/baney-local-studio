@@ -191,6 +191,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ThreadSearch { .. }
         | Update::Queue { .. }
         | Update::ComposerText { .. }
+        | Update::LocalOnly { .. }
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }
         | Update::Pairing { .. }

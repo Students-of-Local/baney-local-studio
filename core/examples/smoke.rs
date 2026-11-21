@@ -221,6 +221,7 @@ impl Harness {
             | Update::ProviderModels { .. }
             | Update::Keybindings { .. }
             | Update::RequestDone { .. }
+            | Update::LocalOnly { .. }
             | Update::ProjectScripts { .. }
             | Update::ProjectSettings { .. }
             | Update::WorktreeSetup { .. }

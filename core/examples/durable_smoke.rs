@@ -114,6 +114,7 @@ impl Harness {
             | Update::QuestionsSettled { .. }
             | Update::Queue { .. }
             | Update::ComposerText { .. }
+            | Update::LocalOnly { .. }
             | Update::Models { .. }
             | Update::DaemonDefault { .. }
             | Update::Machines { .. }
