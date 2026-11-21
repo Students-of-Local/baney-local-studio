@@ -643,6 +643,17 @@ else
 fi
 
 if [ -x "$DRIVER" ]; then
+  echo "== first-F2: install_plugin with a request id whose sheet is already open"
+  fresh f2
+  sheeted 1.0.0 '"mcp-server", "screen-capture"'
+  out=$(CONSENT_DRIVER_AGAIN=1 drive "$S/src/sheet" cancel)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  if echo "$out" | grep -q '^AGAIN refused: A permission sheet with that request is already open$' \
+    && echo "$out" | grep -q '^DONE Nothing installed or granted for Sheet$'; then
+    pass "first-F2 a repeated request id fails at once and the open sheet still answers"
+  else
+    fail "first-F2 a repeated request id fails at once and the open sheet still answers"
+  fi
   echo "== sol-F1: the staged copy changes while the install sheet is open"
   for change in edit add; do
     fresh "f1$change"

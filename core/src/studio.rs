@@ -2428,8 +2428,12 @@ impl Actor {
             Ok(plugins::Offer::Installed(message)) => Self::plugins_done(&root, &mailbox, request, Ok(message)),
             Ok(plugins::Offer::Ask(pending)) => {
                 let mut pendings = consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                pendings.push(*pending);
-                mailbox.push(Update::Consents { consents: pendings.requests() });
+                if pendings.push(*pending) {
+                    mailbox.push(Update::Consents { consents: pendings.requests() });
+                } else {
+                    let message = "A permission sheet with that request is already open".to_string();
+                    mailbox.push(Update::RequestFailed { request, message });
+                }
             }
             Err(message) => mailbox.push(Update::RequestFailed { request, message }),
         });
