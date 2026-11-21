@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Event,
-    Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
+    assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Agent,
+    Event, Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -89,10 +89,13 @@ impl Claude {
             command.args(["--effort", effort]);
         }
         command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
-        let mut child = command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?;
-        let stdin = child.stdin.take().ok_or_else(|| "Claude Code has no input pipe.".to_string())?;
-        let stdout = child.stdout.take().ok_or_else(|| "Claude Code has no output pipe.".to_string())?;
-        let stderr = child.stderr.take().ok_or_else(|| "Claude Code has no error pipe.".to_string())?;
+        let mut agent = Agent::new(
+            command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?,
+            &binary,
+        );
+        let stdin = agent.child.stdin.take().ok_or_else(|| "Claude Code has no input pipe.".to_string())?;
+        let stdout = agent.child.stdout.take().ok_or_else(|| "Claude Code has no output pipe.".to_string())?;
+        let stderr = agent.child.stderr.take().ok_or_else(|| "Claude Code has no error pipe.".to_string())?;
         let (lines, mut outgoing) = mpsc::unbounded_channel::<String>();
         let (kill, killed) = oneshot::channel::<()>();
         let pending = Arc::new(Mutex::new(HashMap::new()));
@@ -135,9 +138,9 @@ impl Claude {
         });
         tokio::spawn(async move {
             let status = tokio::select! {
-                status = child.wait() => status.ok(),
+                status = agent.child.wait() => status.ok(),
                 _ = killed => {
-                    child.kill().await.ok();
+                    agent.kill().await;
                     None
                 }
             };

@@ -379,7 +379,8 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
         .recursive(true)
         .mode(0o700)
         .create(dir)
-        .map_err(|error| format!("Could not create {}: {error}", dir.display()))
+        .map_err(|error| format!("Could not create {}: {error}", dir.display()))?;
+    crate::platform::set_mode(dir, 0o700).map_err(|error| format!("Could not make {} private: {error}", dir.display()))
 }
 
 fn replace_file(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {

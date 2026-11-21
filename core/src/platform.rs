@@ -41,8 +41,38 @@ pub(crate) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn set_mode(path: &Path, _mode: u32) -> std::io::Result<()> {
-    std::fs::metadata(path).map(|_| ())
+pub(crate) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    let metadata = std::fs::metadata(path)?;
+    if mode.trailing_zeros() >= 6 {
+        owner_only(path, metadata.is_dir())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn owner_only(path: &Path, dir: bool) -> std::io::Result<()> {
+    let user = std::env::var("USERNAME")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .ok_or_else(|| std::io::Error::other("USERNAME is not set, so the owner-only ACL cannot be set"))?;
+    let account = match std::env::var("USERDOMAIN").ok().filter(|domain| !domain.is_empty()) {
+        Some(domain) => format!("{domain}\\{user}"),
+        None => user,
+    };
+    let grant = if dir { format!("{account}:(OI)(CI)F") } else { format!("{account}:F") };
+    let status = std::process::Command::new(system32("icacls.exe"))
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", &grant, "/Q"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("icacls could not make {} private to {account} ({status})", path.display())))
+    }
 }
 
 #[cfg(unix)]

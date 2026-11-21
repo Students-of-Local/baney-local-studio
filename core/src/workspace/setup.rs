@@ -15,6 +15,7 @@ use crate::studio::Mailbox;
 const TAIL_LINES: usize = 30;
 const TAIL_CHARS: usize = 4000;
 const PUSH_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +189,7 @@ fn script_command(script: &str) -> tokio::process::Command {
     tokio::process::Command::from(crate::platform::cmd_script(script))
 }
 
+#[cfg(unix)]
 fn stop_script(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     process::signal_pid_group("-TERM", pid);
@@ -195,6 +197,13 @@ fn stop_script(pid: Option<u32>) {
         tokio::time::sleep(KILL_GRACE).await;
         process::signal_pid_group("-KILL", pid);
     });
+}
+
+#[cfg(windows)]
+fn stop_script(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        process::signal_pid_group("-KILL", pid);
+    }
 }
 
 async fn run_script(

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use eukhe_types::daemon::{SessionEvent, StreamUpdate, ToolOutput};
 use eukhe_types::session::AgentMessage;
 use serde_json::{json, Value};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption};
@@ -291,6 +291,44 @@ fn bare_program(name: &str) -> PathBuf {
 fn bare_program(name: &str) -> PathBuf {
     crate::workspace::process::which(name).unwrap_or_else(|| PathBuf::from(name))
 }
+
+pub(super) struct Agent {
+    pub(super) child: Child,
+    tree: bool,
+}
+
+impl Agent {
+    pub(super) fn new(child: Child, program: &Path) -> Self {
+        let tree = program
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat"));
+        Self { child, tree }
+    }
+
+    pub(super) async fn kill(&mut self) {
+        end_tree(&mut self.child, self.tree);
+        self.child.kill().await.ok();
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        end_tree(&mut self.child, self.tree);
+    }
+}
+
+#[cfg(windows)]
+fn end_tree(child: &mut Child, tree: bool) {
+    if tree && matches!(child.try_wait(), Ok(None)) {
+        if let Some(pid) = child.id() {
+            crate::platform::taskkill(pid, true);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn end_tree(_child: &mut Child, _tree: bool) {}
 
 fn command(program: &PathBuf, cwd: &str) -> Command {
     let mut command = Command::new(program);
