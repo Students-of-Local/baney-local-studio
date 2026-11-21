@@ -1378,6 +1378,7 @@ dependencies = [
  "ignore",
  "image",
  "libghostty-vt",
+ "local-studio-version",
  "notify",
  "portable-pty",
  "reqwest",
@@ -1422,6 +1423,10 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
 ]
+
+[[package]]
+name = "local-studio-version"
+version = "0.1.0"
 
 [[package]]
 name = "lock_api"

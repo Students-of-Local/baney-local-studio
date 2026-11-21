@@ -2,7 +2,7 @@
 
 Every product in the Local Studio family ships on three channels: **stable**, **nightly** and **dev**. This file is the one scheme for all of them: Local Studio (desktop and iPhone), Silas, Polycarp, Tychicus, Fonsviva, Gantrel, UntoCaesar and Corunis. A product's own RELEASES.md may add detail; where it disagrees with this file, this file wins.
 
-`scripts/check-channels.sh` enforces the parts a machine can check: no workflow starts on a pushed tag, no workflow pushes the `stable` branch, the `stable` environment runs only from `workflow_call` or `workflow_dispatch`, the version examples sort as stated, and docs/remote.md carries the protocol window. CI runs it on every pull request, and `scripts/tests/check-channels-test.sh` proves it fails on bad workflows.
+`scripts/check-channels.sh` enforces the parts a machine can check: no workflow starts on a pushed tag, no workflow pushes the `stable` branch, the `stable` environment runs only from `workflow_call` or `workflow_dispatch`, the version examples sort as stated, every workflow that stamps a build also exports its full version to the build, and docs/remote.md carries the protocol window. CI runs it on every pull request, and `scripts/tests/check-channels-test.sh` proves it fails on bad workflows. `scripts/tests/stamp-test.sh` stamps each channel, builds the `local-studio-version` crate with the stamped environment and fails unless the built binary reports the full version and channel.
 
 ## The three channels
 
@@ -43,9 +43,11 @@ Timestamps are UTC build start. These are SemVer 2.0 strings, so for one base ve
 - Switching channel is an explicit choice, never an "upgrade", and it may install a lower version. The in-app channel setting opens the other channel's download and the user installs it; no updater crosses channels, because each build trusts only its own channel's signing key (see Update feeds).
 - Local builds never update themselves.
 
+Every binary carries its full version and channel. `scripts/version.nu <channel> --stamp --build-env` prints `LOCAL_STUDIO_VERSION` and `LOCAL_STUDIO_CHANNEL`, which `build.yml` appends to `$GITHUB_ENV` before any cargo build. The `local-studio-version` crate (`version/`) reads them at compile time, refuses a version whose base is not the workspace version, and falls back to the local build version and channel `dev` when they are unset. The core re-exports them as `local_studio_core::VERSION` and `CHANNEL` (`build_version()` and `build_channel()` in LocalStudioKit); `local-studio --version` prints both on the core CLI and the Linux app, and both apps show them in Settings. The updater compares this string, never `CARGO_PKG_VERSION` or `CFBundleShortVersionString`.
+
 Where a platform needs numbers only:
 
-- Apple: `CFBundleShortVersionString` = `X.Y.Z`; `CFBundleVersion` = the build timestamp as `YYYYMMDD.HHMMSS` (always rising, which TestFlight also needs).
+- Apple: `CFBundleShortVersionString` = `X.Y.Z`; `CFBundleVersion` = the build timestamp as `YYYYMMDD.HHMMSS` (always rising, which TestFlight also needs); `LocalStudioVersion` = the full SemVer string and `LocalStudioChannel` = the channel (`dev` for local builds).
 - Browser extensions: `version` = `X.Y.Z.B` (the Windows `B` rule below), because Chrome allows only up to four integers; `version_name` = the full SemVer string.
 - Windows file and product version: `X.Y.Z.B`, where `B` is 0 for stable and the CI run number modulo 65536 otherwise. Installers decide updates from the SemVer string, not this.
 - Windows installers: nightly and dev ship NSIS only. An MSI rejects a pre-release identifier above 65535, so a stable MSI, where a product ships one, sets its WiX version explicitly (Tauri: `bundle.windows.wix.version`) from the `X.Y.Z.B` rule.

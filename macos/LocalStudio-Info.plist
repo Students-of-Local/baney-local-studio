@@ -33,6 +33,10 @@
 	<string>0.0.0</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.0.0</string>
+	<key>LocalStudioVersion</key>
+	<string>0.0.0</string>
+	<key>LocalStudioChannel</key>
+	<string>dev</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>LSApplicationCategoryType</key>

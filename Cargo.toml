@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "kit", "remote"]
+members = ["core", "kit", "remote", "version"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 local-studio-core = { path = "core" }
+local-studio-version = { path = "version" }
 eukhe-client = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.73" }
 eukhe-types = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.73" }
 anyhow = "1"

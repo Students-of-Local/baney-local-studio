@@ -47,8 +47,8 @@ jobs:
           version: 0.117.0
       - name: Stamp the channel identity
         run: |
-          stamped=$(nu scripts/version.nu "$CHANNEL" --stamp --at "$AT" --commit "$COMMIT")
-          [ "$stamped" = "$VERSION" ] || { echo "::error::stamped $stamped, expected $VERSION"; exit 1; }
+          nu scripts/version.nu "$CHANNEL" --stamp --build-env --at "$AT" --commit "$COMMIT" | tee -a "$GITHUB_ENV"
+          grep -qxF "LOCAL_STUDIO_VERSION=$VERSION" "$GITHUB_ENV" || { echo "::error::stamped a version other than $VERSION"; exit 1; }
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: linux
@@ -86,8 +86,8 @@ jobs:
           key: release
       - name: Stamp the channel identity
         run: |
-          stamped=$(nu scripts/version.nu "$CHANNEL" --stamp --at "$AT" --commit "$COMMIT")
-          [ "$stamped" = "$VERSION" ] || { echo "::error::stamped $stamped, expected $VERSION"; exit 1; }
+          nu scripts/version.nu "$CHANNEL" --stamp --build-env --at "$AT" --commit "$COMMIT" | tee -a "$GITHUB_ENV"
+          grep -qxF "LOCAL_STUDIO_VERSION=$VERSION" "$GITHUB_ENV" || { echo "::error::stamped a version other than $VERSION"; exit 1; }
       # An ad-hoc build is a new app to macOS each time, so without the Apple secrets nothing ships and the
       # release skips the Xcode build: CI's macos-app job already shows whether it compiles. With the secrets
       # set, a failed macOS build blocks the release.
