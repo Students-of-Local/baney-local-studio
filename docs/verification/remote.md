@@ -159,6 +159,14 @@ local-studio-serve install --tailscale --name <mac> --bin ~/.local/opt/local-stu
 - `project list` through the new app printed `listed` and exited 0. The Mac has no `state.json`, so 0 projects is the right answer.
 - #53 on the installed app: with the app running, moving `serve.json` away made 18093 refuse within 1 s; restoring the same file made it serve again within 1.5 s. The launchd agent kept waiting throughout, and health over the tailnet answered afterward.
 
+### Redeploy at 40ecae022 (#69)
+
+2026-11-21. Serve was rebuilt from main at 40ecae022. The app was not rebuilt, since #69 changes only the CLI.
+
+- Parish1: the new serve binary was copied into place and the user unit restarted. `status --json` reported `serving`, and `project list` printed `listed` with the probe project, exiting 0.
+- The Mac: the launchd agent was restarted on the new binary with the app open. It waited while the app served, `status --json` named the app as the owner, `project list` printed `listed` and exited 0, and health on 18093 answered.
+- The case #62 reported, an owner that holds the lock but never answers a list, was checked live before merge with a frozen serve (`kill -STOP`): `list` exited 0 with the projects from `state.json` and removed its own request (#69).
+
 ## Machines UI
 
 Snapshots, light and dark:
