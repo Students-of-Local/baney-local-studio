@@ -15,6 +15,9 @@ window=${OLLAMA_WINDOW:-$(command -v ollama-window || echo "$HOME/.local/bin/oll
 window_who=${E2E_WINDOW_WHO:-local-studio-e2e}
 window_minutes=${E2E_WINDOW_MINUTES:-60}
 window_wait=${E2E_WINDOW_WAIT_MINUTES:-180}
+remote_ip=${E2E_REMOTE_IP:-$(ip -4 route get 1.1.1.1 2> /dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')}
+[ -n "$remote_ip" ] || remote_ip=$(ipconfig getifaddr en0 2> /dev/null || true)
+[ -n "$remote_ip" ] || { echo "no non-loopback IPv4 address for local_smoke's remote stub; set E2E_REMOTE_IP" >&2; exit 2; }
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
 examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke stuck_smoke providers_smoke local_smoke plugin_smoke harness_claude_smoke harness_codex_smoke)
@@ -85,7 +88,7 @@ for example in "${examples[@]}"; do
   echo "== $example"
   dir="$scratch/$example"
   case $example in
-    local_smoke) args=("$eukhe" "$dir" 127.0.0.1 localhost) ;;
+    local_smoke) args=("$eukhe" "$dir" "$remote_ip" "$remote_ip") ;;
     plugin_smoke) args=("$eukhe" "$dir" "$scratch/plugin-models.json" "$root/examples/plugins/smoothstone") ;;
     *) args=("$eukhe" "$dir") ;;
   esac
