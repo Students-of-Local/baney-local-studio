@@ -71,7 +71,7 @@ cleanup() {
   done
   [ -n "$keeper" ] && kill "$keeper" 2> /dev/null || true
   [ -n "$claimed" ] && "$window" release "$window_who" > /dev/null || true
-  rm -rf "$scratch" 2> /dev/null || { sleep 5; rm -rf "$scratch"; }
+  rm -rf "$scratch" 2> /dev/null || { sleep 5; rm -rf "$scratch" || true; }
 }
 trap cleanup EXIT
 eukhe=$(realpath "$("${NU:-nu}" -c 'use eukhe.nu; eukhe binary . target/eukhe')")
@@ -88,7 +88,7 @@ done
 cp "$target/debug/local-studio" "$bin/"
 export PLUGIN_SMOKE_MODEL=${PLUGIN_SMOKE_MODEL:-$model}
 printf '{"providers":{"local-fleet":{"name":"local-fleet","baseUrl":"%s","api":"openai-completions","apiKey":"none","models":[{"id":"%s","contextWindow":%s}]}}}\n' "$base" "$PLUGIN_SMOKE_MODEL" "$context_window" > "$scratch/plugin-models.json"
-claim || { status failure "the GPU window on $(hostname -s) stayed busy"; exit 1; }
+claim || { status error "the GPU window on $(hostname -s) stayed busy"; exit 1; }
 status pending "local model $LOCAL_STUDIO_SMOKE_MODEL: core e2e running on $(hostname -s)"
 started=$SECONDS
 for example in "${examples[@]}"; do
@@ -100,7 +100,7 @@ for example in "${examples[@]}"; do
     plugin_smoke) args=("$eukhe" "$dir" "$scratch/plugin-models.json" "$root/examples/plugins/smoothstone") ;;
     *) args=("$eukhe" "$dir") ;;
   esac
-  claim || { status failure "lost the GPU window on $(hostname -s) before $example"; exit 1; }
+  claim || { status error "lost the GPU window on $(hostname -s) before $example"; exit 1; }
   from=$SECONDS
   if ! (cd "$bin" && "./$example" "${args[@]}"); then
     timings+=("$example failed after $((SECONDS - from)) s")

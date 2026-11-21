@@ -83,9 +83,38 @@ fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refuses a location that could be real before anything there is replaced: a symlinked agent dir,
+/// one that resolves into a real `.eukhe` or `.pi`, or a regular auth.json that holds keys.
+fn check_location(agent_dir: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    ensure!(
+        !std::fs::symlink_metadata(agent_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()),
+        "{} is a symlink; run against a scratch agent dir",
+        agent_dir.display()
+    );
+    std::fs::create_dir_all(agent_dir)?;
+    let resolved = std::fs::canonicalize(agent_dir)?;
+    ensure!(
+        !resolved
+            .components()
+            .any(|part| matches!(part, std::path::Component::Normal(name) if name == ".pi" || name == ".eukhe")),
+        "{} is a real agent dir; run against a scratch agent dir",
+        agent_dir.display()
+    );
+    let auth = agent_dir.join("auth.json");
+    if let Ok(metadata) = std::fs::symlink_metadata(&auth) {
+        ensure!(
+            !metadata.is_file() || metadata.nlink() != 1 || local_studio_core::stored_keys_empty(agent_dir),
+            "{} holds credentials; this run needs a scratch auth.json holding {{}}",
+            auth.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn install(agent_dir: &Path) -> anyhow::Result<()> {
     let target = target()?;
-    std::fs::create_dir_all(agent_dir)?;
+    check_location(agent_dir)?;
     let price = json!({ "input": PRICE_PER_MILLION, "output": PRICE_PER_MILLION, "cacheRead": 0, "cacheWrite": 0 });
     let mut models = vec![json!({
         "id": &target.model,

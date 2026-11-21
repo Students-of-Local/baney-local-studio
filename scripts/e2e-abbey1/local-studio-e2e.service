@@ -7,6 +7,6 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=%h/.config/local-studio-e2e.env
 WorkingDirectory=%h/Projects/_work/local-studio-e2e
-ExecStart=/usr/bin/env bash -c 'git fetch -q origin main && git checkout -q --detach FETCH_HEAD && exec scripts/e2e.sh --post'
+ExecStart=/usr/bin/env bash -c 'git fetch -q origin main && git checkout -qf --detach FETCH_HEAD && git clean -fdq && exec scripts/e2e.sh --post'
 TimeoutStartSec=8h
 Nice=10
