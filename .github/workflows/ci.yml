@@ -50,6 +50,7 @@ jobs:
       - run: scripts/check-channels.sh
       - run: scripts/tests/check-channels-test.sh
       - run: scripts/tests/e2e-target-test.sh
+      - run: scripts/tests/release-feed-test.sh
       - name: Version strings sort local < dev < nightly < stable
         run: |
           set -euo pipefail

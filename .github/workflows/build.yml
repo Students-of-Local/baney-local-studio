@@ -148,13 +148,24 @@ jobs:
           rm "$RUNNER_TEMP/certificate.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
-          find "$app/Contents" -type f -print0 | xargs -0 file --no-pad | awk -F': ' '/Mach-O/ {print $1}' |
+          sign() {
+            local entitlements="$RUNNER_TEMP/entitlements.plist"
+            codesign -d --entitlements - --xml "$1" > "$entitlements" 2> /dev/null || : > "$entitlements"
+            if [ -s "$entitlements" ]; then
+              /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.get-task-allow' "$entitlements" > /dev/null 2>&1 || true
+              codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$APPLE_SIGNING_IDENTITY" "$1"
+            else
+              codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$1"
+            fi
+          }
+          find "$app/Contents" \( -type d \( -name '*.framework' -o -name '*.appex' -o -name '*.xpc' -o -name '*.app' \) -o -type f \) -print0 |
+            while IFS= read -r -d '' code; do
+              if [ -d "$code" ] || file -b "$code" | grep -q '^Mach-O'; then printf '%s\n' "$code"; fi
+            done |
             awk -F/ '{print NF "\t" $0}' | sort -rn | cut -f2- |
-            while IFS= read -r code; do
-              codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$code"
-            done
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
-          codesign --verify --strict --verbose=2 "$app"
+            while IFS= read -r code; do sign "$code"; done
+          sign "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/notary.p8"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_API_KEY_ID" \

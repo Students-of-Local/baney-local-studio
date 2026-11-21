@@ -28,6 +28,10 @@ for wf in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
   fi
 done
 
+if [ -f "$root/scripts/release.sh" ] && grep -nE '\| *(head|grep +-q)' "$root/scripts/release.sh" > /dev/null; then
+  err "scripts/release.sh pipes into head or grep -q; with inherit_errexit the writer dies of SIGPIPE and stops the publish"
+fi
+
 order=(0.2.0 0.2.1 0.3.0-dev.20261117131042 0.3.0-dev.20261118090500 0.3.0-nightly.202611160700 0.3.0-nightly.20261117070000 0.3.0)
 if [ "$(npx -y semver@7.6.3 "${order[@]}" 2>/dev/null)" != "$(printf '%s\n' "${order[@]}")" ]; then
   err "versions do not sort stable < hotfix < dev < nightly < next stable"

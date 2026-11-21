@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s inherit_errexit 2> /dev/null || true
 : "${REPO:?set REPO to owner/name}"
 : "${GH_TOKEN:?set GH_TOKEN}"
 semver=semver@7.6.3
@@ -11,20 +12,45 @@ die() { echo "::error::$*" >&2; exit 1; }
 feed_url() {
   case $1 in
     stable) echo "https://github.com/$REPO/releases/latest/download/latest.json" ;;
-    nightly | dev) echo "https://github.com/$REPO/releases/download/$1/latest.json" ;;
+    nightly | dev | nightly-previous | dev-previous) echo "https://github.com/$REPO/releases/download/$1/latest.json" ;;
     *) die "unknown channel $1" ;;
   esac
 }
 
-feed() { curl -fsSL "$(feed_url "$1")" 2>/dev/null || true; }
+feed() {
+  local out code
+  out=$(mktemp)
+  code=$(curl -sSL -o "$out" -w '%{http_code}' "$(feed_url "$1")") || { rm -f "$out"; die "could not read the $1 feed"; }
+  case $code in
+    200) cat "$out" ;;
+    404) ;;
+    *) rm -f "$out"; die "the $1 feed answered HTTP $code" ;;
+  esac
+  rm -f "$out"
+}
 
-feed_field() { feed "$1" | jq -r --arg f "$2" '.[$f] // empty' 2>/dev/null || true; }
+feed_field() {
+  local body
+  body=$(feed "$1") || exit 1
+  [ -n "$body" ] || return 0
+  jq -r --arg f "$2" '.[$f] // empty' <<< "$body" || die "the $1 feed is not JSON"
+}
 
 check_newer() {
-  local current
-  current=$(feed_field "$1" version)
-  [ -n "$current" ] || return 0
-  npx -y "$semver" -p -r ">${current%%+*}" "${2%%+*}" > /dev/null || die "the $1 feed already holds $current, which is not older than $2"
+  local channel=$1 version=$2 commit=${3:-} src=$1 current previous
+  current=$(feed_field "$src" version)
+  if [ -z "$current" ] && [ "$channel" != stable ]; then
+    src="$channel-previous"
+    current=$(feed_field "$src" version)
+  fi
+  if [ -n "$current" ]; then
+    npx -y "$semver" -p -r ">${current%%+*}" "${version%%+*}" > /dev/null || die "the $src feed already holds $current, which is not older than $version"
+  fi
+  if [ -z "$commit" ] || [ "$channel" = stable ]; then return 0; fi
+  previous=$(feed_field "$src" commit)
+  [ -n "$previous" ] || return 0
+  git cat-file -e "$previous^{commit}" 2> /dev/null || die "the $src feed holds $previous, which this checkout does not have; check out with fetch-depth 0"
+  git merge-base --is-ancestor "$previous" "$commit" || die "the $src feed holds $previous, which $commit does not contain; publishing it would move $channel back"
 }
 
 name_of() {
@@ -104,10 +130,10 @@ verify_promote() {
 
 notes() {
   local channel=$1 version=$2 commit=$3 previous
-  previous=$(feed_field "$channel" commit)
+  previous=$(feed_field "$channel" commit) || exit 1
   echo "$(name_of "$channel") $version, built from ${commit:0:7}."
   if [ -n "$previous" ] && git merge-base --is-ancestor "$previous" "$commit" 2> /dev/null; then
-    git log --no-merges --format='- %s' "$previous..$commit" | head -n 50
+    git log --no-merges -n 50 --format='- %s' "$previous..$commit"
   fi
   [ "${MAC_SIGNED:-}" = true ] || echo "No macOS build: the Apple signing secrets are not set."
 }
@@ -157,7 +183,6 @@ keep_nightly() {
   for file in "$dir"/*; do upload "$kept" "$file"; done
   feed_json nightly "$version" "$commit" "$dir" "https://github.com/$REPO/releases/download/$tag" "$notes" > "$RUNNER_TEMP/latest.json"
   upload "$kept" "$RUNNER_TEMP/latest.json"
-  gh api -X PATCH "repos/$REPO/releases/$kept" -F draft=false -F prerelease=true -f make_latest=false -f body="$notes" > /dev/null
 }
 
 prune_nightlies() {
@@ -174,15 +199,29 @@ prune_nightlies() {
 }
 
 lookup() {
-  local out
-  out=$(gh api "$1" -q "$2" 2> /dev/null) && echo "$out" || true
+  local out err
+  err=$(mktemp)
+  if out=$(gh api "$1" -q "$2" 2> "$err"); then
+    rm -f "$err"
+    echo "$out"
+  elif grep -q 'HTTP 404' "$err"; then
+    rm -f "$err"
+  else
+    cat "$err" >&2
+    rm -f "$err"
+    die "could not read $1"
+  fi
 }
 
 release_id() { lookup "repos/$REPO/releases/tags/$1" .id; }
 
 tag_sha() { lookup "repos/$REPO/git/ref/tags/$1" .object.sha; }
 
-drop_tag() { [ -z "$(tag_sha "$1")" ] || gh api -X DELETE "repos/$REPO/git/refs/tags/$1"; }
+drop_tag() {
+  local sha
+  sha=$(tag_sha "$1") || return 1
+  [ -z "$sha" ] || gh api -X DELETE "repos/$REPO/git/refs/tags/$1"
+}
 
 retag() { gh api -X PATCH "repos/$REPO/releases/$1" -f tag_name="$2" -f target_commitish="$3" "${@:4}" > /dev/null; }
 
@@ -190,15 +229,18 @@ swap_rolling() {
   local channel=$1 id=$2 commit=$3 text=$4 previous="$1-previous" old old_sha stale
   old=$(release_id "$channel")
   stale=$(release_id "$previous")
+  old_sha=
   if [ -z "$old" ] && [ -n "$stale" ]; then
     echo "the $channel release is missing; $previous is the last good one"
     old=$stale
-  elif [ -n "$stale" ]; then
-    gh api -X DELETE "repos/$REPO/releases/$stale"
-    drop_tag "$previous"
+    old_sha=$(tag_sha "$previous")
+  else
+    if [ -n "$stale" ]; then
+      gh api -X DELETE "repos/$REPO/releases/$stale"
+      drop_tag "$previous"
+    fi
+    [ -z "$old" ] || old_sha=$(tag_sha "$channel")
   fi
-  old_sha=
-  [ -z "$old" ] || old_sha=$(tag_sha "$(lookup "repos/$REPO/releases/$old" .tag_name)")
   if [ -n "$old" ] && [ -z "$old_sha" ]; then
     echo "the $channel release has no tag left; removing it"
     gh api -X DELETE "repos/$REPO/releases/$old"
@@ -208,8 +250,7 @@ swap_rolling() {
     drop_tag "$previous"
     retag "$old" "$previous" "$old_sha"
   fi
-  drop_tag "$channel"
-  if retag "$id" "$channel" "$commit" -F draft=false -F prerelease=true -f make_latest=false -f body="$text"; then
+  if drop_tag "$channel" && retag "$id" "$channel" "$commit" -F draft=false -F prerelease=true -f make_latest=false -f body="$text"; then
     if [ -n "$old" ]; then
       gh api -X DELETE "repos/$REPO/releases/$old"
       drop_tag "$previous"
@@ -227,7 +268,7 @@ swap_rolling() {
 
 publish() {
   local channel=$1 id=$2 version=$3 commit=$4 dir="$RUNNER_TEMP/assets" text base stale got
-  check_newer "$channel" "$version"
+  check_newer "$channel" "$version" "$commit"
   fetch_assets "$id" "$dir"
   if [ -n "${PROMOTE_MANIFEST:-}" ]; then
     got=$(for file in "$dir"/*; do printf '%s\t%s\n' "$(basename "$file")" "$(sha256sum "$file" | cut -d' ' -f1)"; done |
@@ -246,13 +287,16 @@ publish() {
     gh api -X DELETE "repos/$REPO/releases/assets/$stale"
   done
   upload "$id" "$RUNNER_TEMP/latest.json"
-  check_newer "$channel" "$version"
+  check_newer "$channel" "$version" "$commit"
   if [ "$channel" = stable ]; then
     gh api -X PATCH "repos/$REPO/releases/$id" -F draft=false -F prerelease=false -f make_latest=true -f body="$text" > /dev/null
   else
     swap_rolling "$channel" "$id" "$commit" "$text"
   fi
-  [ "$channel" = nightly ] && prune_nightlies
+  if [ "$channel" = nightly ]; then
+    gh api -X PATCH "repos/$REPO/releases/$kept" -F draft=false -F prerelease=true -f make_latest=false -f body="$text" > /dev/null
+    prune_nightlies
+  fi
   return 0
 }
 
