@@ -119,6 +119,33 @@ jobs:
         continue-on-error: true
         run: nu macos/build.nu
 
+  ios-app:
+    name: iPhone app
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hustcer/setup-nu@1b8faed9a8ff673c8ce0beae243e0b72d0787241 # v3.30
+        with:
+          version: 0.117.0
+      - name: Newest Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          sudo xcodebuild -runFirstLaunch
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
+      - name: Generate, lint and build with warnings as errors
+        run: nu ios/ci.nu
+      - name: Design snapshots
+        if: hashFiles('ios/Packages/LocalStudioDesign/Package.swift') != ''
+        run: nu ios/ci.nu snapshots "$RUNNER_TEMP/design-snapshots"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: hashFiles('ios/Packages/LocalStudioDesign/Package.swift') != ''
+        with:
+          name: design-snapshots
+          path: ${{ runner.temp }}/design-snapshots
+          if-no-files-found: error
+
   windows:
     name: Windows (core and kit, not shipped)
     runs-on: windows-latest

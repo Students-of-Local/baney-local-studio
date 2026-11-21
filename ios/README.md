@@ -35,6 +35,8 @@ cd ios && swiftlint lint --strict
 
 `project.yml` is the source of the Xcode project; edit it and run `xcodegen generate`, and commit both.
 
+`nu ios/ci.nu` is the CI job (`iPhone app`), and it runs the same on a Mac (`env -u DEVELOPER_DIR` when that points at CommandLineTools): it fetches the pinned XcodeGen and SwiftLint release zips into `ios/build/tools/` (checked against their sha256), fails if `xcodegen generate` changes `ios/`, runs `swiftlint lint --strict`, then runs `build-for-testing` on every library product under `ios/Packages` and the `LocalStudio`, `LocalStudio Nightly` and `LocalStudio Dev` schemes for `generic/platform=iOS Simulator` with signing off and warnings as errors. `nu ios/ci.nu snapshots <dir>` renders the design snapshots from `Packages/LocalStudioDesign`.
+
 ## Transport
 
 `MachineConnection` keeps four layers apart. The socket moves opaque messages: one text opening header, then binary only. `SecureChannel` takes the header as the Noise prologue, runs the handshake (`XXpsk3` to pair, `KK` after) and seals and opens each message. `RecordReader` and `RecordWriter` carry the `0x01`, `0x02` and `0x03` records and join chunked JSON. `FrameCodec` turns JSON into frames. `NoiseChannel` is the real `SecureChannel`: `Noise.swift` is the Noise state machine written to the spec on CryptoKit (`Noise_XXpsk3_25519_ChaChaPoly_SHA256` and `Noise_KK_25519_ChaChaPoly_SHA256`). `PassThroughChannel` sends the handshake messages with the right shapes and no cryptography; the app uses it only with `-LSPassThrough YES`, which the smoke passes for `fake-studio`.
