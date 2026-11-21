@@ -10,9 +10,9 @@ use base64::Engine;
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use futures_util::{SinkExt, StreamExt};
+use local_studio_core::link::snow::{self, TransportState};
 use local_studio_core::{DaemonLaunch, Studio, StudioConfig, Waker};
 use serde_json::{json, Map, Value};
-use snow::TransportState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -957,10 +957,10 @@ async fn drive(run: &mut Run) -> anyhow::Result<()> {
         "pairing hello had no snapshot"
     );
     println!("ok   a phone paired with serve and got a snapshot");
-    let link = tunnel_live(run, &phone, link).await?;
+    let link = Box::pin(tunnel_live(run, &phone, link)).await?;
     allow_host_live(run, "box-serve.handoff.test", run.serve_pid()?, "serve").await?;
-    let link = takeover(run, &phone, link).await?;
-    let mut link = hand_back(run, &phone, link).await?;
+    let link = Box::pin(takeover(run, &phone, link)).await?;
+    let mut link = Box::pin(hand_back(run, &phone, link)).await?;
     tunnel_removed(run).await?;
     Command::new("kill").args(["-TERM", &run.serve_pid()?.to_string()]).status()?;
     let code = link.closed(QUICK).await?;
@@ -1010,7 +1010,7 @@ async fn smoke(eukhe: &Path, root: &Path) -> anyhow::Result<()> {
         apps: Vec::new(),
         report: Vec::new(),
     };
-    let outcome = drive(&mut run).await;
+    let outcome = Box::pin(drive(&mut run)).await;
     if outcome.is_err() {
         let log = run.serve_log();
         let lines: Vec<&str> = log.lines().collect();

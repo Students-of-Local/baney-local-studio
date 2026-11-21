@@ -187,6 +187,7 @@ impl Desk {
             data_dir: Some(data.to_string_lossy().into_owned()),
             launch: Some(DaemonLaunch { program: eukhe.to_string_lossy().into_owned() }),
             controller_main: None,
+            take_over_serve: false,
         };
         let studio =
             Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>).map_err(|error| anyhow::anyhow!("{error}"))?;
