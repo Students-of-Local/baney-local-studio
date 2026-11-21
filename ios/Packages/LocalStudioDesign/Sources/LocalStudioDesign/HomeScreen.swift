@@ -171,7 +171,7 @@ public struct HomeScreen: View {
                 .accessibilityLabel("Machines, \(content.health.title)")
             }
         }
-        .safeAreaInset(edge: .bottom) { cluster }
+        .safeAreaBar(edge: .bottom) { cluster }
         .sensoryFeedback(.success, trigger: swiped)
     }
 
