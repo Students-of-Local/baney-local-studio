@@ -309,16 +309,16 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
         }
     };
     let before = errors.len();
-    let names = |name: &str| {
-        std::iter::once(&mcp.command).chain(&mcp.args).any(|path| {
-            path.split('=').flat_map(|part| Path::new(part).components()).any(|part| part.as_os_str() == name)
-        })
-    };
-    if names(install::UNHASHED) {
+    let names = |path: &Path| path.components().any(|part| install::named(part.as_os_str(), install::UNHASHED));
+    let base = std::fs::canonicalize(dir).ok();
+    let unhashed = std::iter::once(&mcp.command).chain(&mcp.args).flat_map(|path| path.split('=')).any(|part| {
+        names(Path::new(part))
+            || base.as_ref().is_some_and(|base| {
+                std::fs::canonicalize(dir.join(part)).is_ok_and(|real| real.strip_prefix(base).is_ok_and(&names))
+            })
+    });
+    if unhashed {
         errors.push(format!("[mcp] runs a {} file, which no hash covers", install::UNHASHED));
-    }
-    if names(install::GIT) {
-        errors.push(format!("[mcp] runs a file inside {}, which git rewrites on its own", install::GIT));
     }
     let prefix = env_prefix(id);
     for (name, host) in &mcp.env {

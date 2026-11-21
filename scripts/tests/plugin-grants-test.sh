@@ -138,32 +138,45 @@ dd if=/dev/urandom of="$D/plugins/gitbig/.git/objects/pack/big.pack" bs=1048576 
 ls_ plugin grant gitbig mcp-server > /dev/null 2>&1
 echo "  plugin list (one scan), seconds:"
 time (ls_ plugin list > /dev/null 2>&1)
-echo "  plugin list: $(status gitbig)"
+gitbig=$(status gitbig)
+echo "  plugin list: $gitbig"
+case $gitbig in *"file over 10 MB: .git/objects/pack/big.pack"*) pass "first-F1 size limit covers .git";; *) fail "first-F1 size limit covers .git";; esac
 
-echo "== first-F2: git status and git fetch in a checkout plugin"
+checkout() {
+  mkdir -p "$S/origin/$1"
+  manifest "$S/origin/$1" "${2:-bin/server}"
+  script "$S/origin/$1/bin/server" box
+  git -C "$S/origin/$1" init -q -b main && git -C "$S/origin/$1" add -A && git -C "$S/origin/$1" commit -qm v1
+}
+
+upstream() {
+  echo "$2" >> "$S/origin/$1/README"
+  git -C "$S/origin/$1" add -A && git -C "$S/origin/$1" commit -qm "$2"
+}
+
+ended() {
+  local id=$1 label=$2 now
+  sync_
+  now=$(status "$id")
+  echo "  plugin list: $now, plugin-$id in mcpServers: $(entry "$A" "plugin-$id")"
+  case $now in "needs consent"*) [ "$(entry "$A" "plugin-$id")" = "no" ] && { pass "$label"; return; } ;; esac
+  fail "$label"
+}
+
+echo "== first-F2: a git command in a checkout plugin ends consent cleanly"
 fresh f2git
-mkdir -p "$S/origin/gitbox"
-manifest "$S/origin/gitbox"
-script "$S/origin/gitbox/bin/server" box
-git -C "$S/origin/gitbox" init -q -b main && git -C "$S/origin/gitbox" add -A && git -C "$S/origin/gitbox" commit -qm v1
+checkout gitbox
 P=$D/plugins/gitbox
 git clone -q "$S/origin/gitbox" "$P"
 echo "  grant: $(ls_ plugin grant gitbox mcp-server 2>&1 | head -1)"
+upstream gitbox v2
+git -C "$P" fetch -q
+ended gitbox "first-F2 git fetch ends consent"
+echo "  grant again: $(ls_ plugin grant gitbox mcp-server 2>&1 | head -1)"
 touch "$P/plugin.toml"
 git -C "$P" status > /dev/null
 echo "  after git status: $(status gitbox)"
-after_status=$(status gitbox)
-echo "more" > "$S/origin/gitbox/README"
-git -C "$S/origin/gitbox" add -A && git -C "$S/origin/gitbox" commit -qm v2
-git -C "$P" fetch -q
-sync_
-after_fetch=$(status gitbox)
-echo "  after git fetch: $after_fetch, plugin-gitbox in mcpServers: $(entry "$A" plugin-gitbox)"
-if [ "$after_status" = "ready" ] && [ "$after_fetch" = "ready" ] && [ "$(entry "$A" plugin-gitbox)" = "yes" ]; then
-  pass "first-F2 git status and fetch keep consent"
-else
-  fail "first-F2 git status and fetch keep consent"
-fi
+echo "  grant again: $(ls_ plugin grant gitbox mcp-server 2>&1 | head -1)"
 git -C "$P" config core.pager "sh -c 'echo swapped'"
 edited gitbox "first-F2 .git/config stays covered"
 
@@ -190,6 +203,125 @@ ln -s ../.git/objects/payload "$P/bin/server"
 echo "  grant: $(ls_ plugin grant gitobj mcp-server 2>&1 | head -1)"
 script "$P/.git/objects/payload" swapped
 edited gitobj "first-F2 symlink into .git/objects stays covered"
+
+echo "== first-F2: plugin install <dir> from a checkout keeps consent through git commands"
+fresh f2dev
+checkout devbox
+git clone -q "$S/origin/devbox" "$S/work"
+echo "  install: $(ls_ plugin install "$S/work" 2>&1 | head -1)"
+echo "  grant: $(ls_ plugin grant devbox mcp-server 2>&1 | head -1)"
+upstream devbox v2
+git -C "$S/work" fetch -q
+touch "$S/work/plugin.toml"
+git -C "$S/work" status > /dev/null
+sync_
+dev=$(status devbox)
+echo "  after git fetch and git status in the checkout: $dev, plugin-devbox in mcpServers: $(entry "$A" plugin-devbox)"
+if [ "$dev" = "ready" ] && [ "$(entry "$A" plugin-devbox)" = "yes" ]; then pass "first-F2 installed copy keeps consent"; else fail "first-F2 installed copy keeps consent"; fi
+
+echo "== first-F2: files that vanish while consent reads the folder"
+fresh f2race
+checkout racebox
+P=$D/plugins/racebox
+git clone -q "$S/origin/racebox" "$P"
+echo "  grant: $(ls_ plugin grant racebox mcp-server 2>&1 | head -1)"
+python3 -I -c '
+import os, sys
+d = sys.argv[1]
+while True:
+    for i in range(200):
+        open(os.path.join(d, "churn%d.lock" % i), "w").close()
+    for i in range(200):
+        os.unlink(os.path.join(d, "churn%d.lock" % i))
+' "$P/.git" &
+churn=$!
+seen=""
+for _ in $(seq 40); do
+  now=$(status racebox)
+  case $now in "needs consent"* | ready) ;; *) seen="$now"; break ;; esac
+done
+kill "$churn"
+wait "$churn" 2> /dev/null
+echo "  40 scans while git-like lock files come and go: ${seen:-every one ready or needs consent}"
+if [ -z "$seen" ]; then pass "first-F2 vanished file is no error"; else fail "first-F2 vanished file is no error"; fi
+
+echo "== first-F1: lib -> .git with command lib/objects/payload"
+fresh hf1
+checkout libgit lib/objects/payload
+P=$D/plugins/libgit
+git clone -q "$S/origin/libgit" "$P"
+ln -s .git "$P/lib"
+script "$P/.git/objects/payload" reviewed
+echo "  grant: $(ls_ plugin grant libgit mcp-server 2>&1 | head -1)"
+script "$P/.git/objects/payload" swapped
+edited libgit "first-F1 lib -> .git payload stays covered"
+
+echo "== sol-F1: bin/repo -> ../.git with command bin/repo/objects/server"
+fresh hsol1
+checkout repobox bin/repo/objects/server
+P=$D/plugins/repobox
+git clone -q "$S/origin/repobox" "$P"
+ln -s ../.git "$P/bin/repo"
+script "$P/.git/objects/server" reviewed
+echo "  grant: $(ls_ plugin grant repobox mcp-server 2>&1 | head -1)"
+script "$P/.git/objects/server" swapped
+edited repobox "sol-F1 bin/repo -> ../.git server stays covered"
+
+echo "== second-S1: command .Git/objects/payload on a case-insensitive disk"
+fresh hs1
+checkout casebox .Git/objects/payload
+P=$D/plugins/casebox
+git clone -q "$S/origin/casebox" "$P"
+script "$P/.git/objects/payload" reviewed
+[ -f "$P/.Git/objects/payload" ] && echo "  this disk is case-insensitive" || echo "  this disk is case-sensitive, so .Git does not reach .git"
+echo "  grant: $(ls_ plugin grant casebox mcp-server 2>&1 | head -1)"
+script "$P/.git/objects/payload" swapped
+edited casebox "second-S1 .Git payload stays covered"
+
+echo "== second-S1: command .ds_store and a symlink to .DS_STORE"
+fresh hs1ds
+P=$D/plugins/lowerds
+manifest "$P" .ds_store
+script "$P/.DS_Store" reviewed
+echo "  grant: $(ls_ plugin grant lowerds mcp-server 2>&1 | head -1)"
+script "$P/.DS_Store" swapped
+edited lowerds "second-S1 command .ds_store refused"
+P=$D/plugins/upperds
+manifest "$P"
+script "$P/.DS_Store" reviewed
+ln -s ../.DS_STORE "$P/bin/server"
+echo "  grant: $(ls_ plugin grant upperds mcp-server 2>&1 | head -1)"
+script "$P/.DS_Store" swapped
+edited upperds "second-S1 symlink to .DS_STORE refused"
+P=$D/plugins/foldds
+manifest "$P" $'.DS_\xc5\xbftore'
+script "$P/.DS_Store" reviewed
+echo "  grant (command .DS_ with a long s, which APFS folds to .DS_Store): $(ls_ plugin grant foldds mcp-server 2>&1 | head -1)"
+script "$P/.DS_Store" swapped
+edited foldds "second-S1 command .DS_Store spelled with a long s refused"
+
+echo "== second-S3: a socket and a FIFO in the plugin folder"
+fresh s3
+P=$D/plugins/sockbox
+manifest "$P"
+script "$P/bin/server" box
+python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$P/run.sock"
+mkfifo "$P/run.fifo"
+echo "  grant: $(ls_ plugin grant sockbox mcp-server 2>&1 | head -1)"
+sync_
+sock=$(status sockbox)
+echo "  plugin list: $sock, plugin-sockbox in mcpServers: $(entry "$A" plugin-sockbox)"
+if [ "$sock" = "ready" ] && [ "$(entry "$A" plugin-sockbox)" = "yes" ]; then pass "second-S3 socket and FIFO keep consent"; else fail "second-S3 socket and FIFO keep consent"; fi
+for kind in sock fifo; do
+  P=$D/plugins/run$kind
+  manifest "$P" "run.$kind"
+  if [ $kind = sock ]; then python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$P/run.sock"; else mkfifo "$P/run.fifo"; fi
+  ls_ plugin grant "run$kind" mcp-server > /dev/null 2>&1
+  sync_
+  named=$(status "run$kind")
+  echo "  command run.$kind: $named, plugin-run$kind in mcpServers: $(entry "$A" "plugin-run$kind")"
+  if [ "$named" != "ready" ] && [ "$(entry "$A" "plugin-run$kind")" = "no" ]; then pass "second-S3 command run.$kind gets no entry"; else fail "second-S3 command run.$kind gets no entry"; fi
+done
 
 echo "== second-F9: a tagged entry copied under a name without the plugin- prefix"
 fresh f9

@@ -304,8 +304,7 @@ struct Entry {
 
 /// Finder writes `.DS_Store` into any folder it shows; no runtime loads one, so no hash covers it.
 pub const UNHASHED: &str = ".DS_Store";
-pub const GIT: &str = ".git";
-const GIT_STATE: [&str; 5] = ["index", "FETCH_HEAD", "logs", "objects", "refs/remotes"];
+const GIT: &str = ".git";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Walk {
@@ -314,10 +313,20 @@ enum Walk {
 }
 
 fn skipped(path: &Path, walk: Walk) -> bool {
-    match walk {
-        Walk::Install => path.starts_with(GIT),
-        Walk::Consent => GIT_STATE.iter().any(|state| path.starts_with(Path::new(GIT).join(state))),
-    }
+    walk == Walk::Install && path.starts_with(GIT)
+}
+
+pub(crate) fn named(part: &std::ffi::OsStr, name: &str) -> bool {
+    part.to_str().is_some_and(|part| part.eq_ignore_ascii_case(name))
+}
+
+fn unhashed(real: &Path, walk: Walk) -> bool {
+    real.components().any(|part| named(part.as_os_str(), UNHASHED))
+        || (walk == Walk::Install && real.components().next().is_some_and(|part| named(part.as_os_str(), GIT)))
+}
+
+fn gone(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
 }
 
 fn walk(root: &Path, exclude: &[String], mode: Walk) -> Result<Vec<Entry>, String> {
@@ -329,7 +338,11 @@ fn walk(root: &Path, exclude: &[String], mode: Walk) -> Result<Vec<Entry>, Strin
     let mut pending: Vec<PathBuf> = vec![PathBuf::new()];
     while let Some(relative) = pending.pop() {
         let dir = root.join(&relative);
-        let listing = std::fs::read_dir(&dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+        let listing = match std::fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(error) if gone(&error) && !relative.as_os_str().is_empty() => continue,
+            Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
+        };
         for item in listing {
             let item = item.map_err(|error| error.to_string())?;
             let name = item.file_name();
@@ -337,7 +350,11 @@ fn walk(root: &Path, exclude: &[String], mode: Walk) -> Result<Vec<Entry>, Strin
             if skipped(&path, mode) || excluded.contains(&path) {
                 continue;
             }
-            let meta = std::fs::symlink_metadata(item.path()).map_err(|error| error.to_string())?;
+            let meta = match std::fs::symlink_metadata(item.path()) {
+                Ok(meta) => meta,
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
             if name == UNHASHED && meta.is_file() {
                 continue;
             }
@@ -348,7 +365,11 @@ fn walk(root: &Path, exclude: &[String], mode: Walk) -> Result<Vec<Entry>, Strin
                 .ok_or_else(|| format!("not a UTF-8 path: {}", path.display()))?
                 .join("/");
             let kind = if meta.file_type().is_symlink() {
-                Kind::Link(std::fs::read_link(item.path()).map_err(|error| error.to_string())?)
+                match std::fs::read_link(item.path()) {
+                    Ok(target) => Kind::Link(target),
+                    Err(error) if gone(&error) => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
             } else if meta.is_dir() {
                 pending.push(path);
                 Kind::Dir
@@ -390,7 +411,7 @@ fn link_refusal(root: &Path, link: &str, target: &Path, mode: Walk) -> Option<St
     let resolved = resolved(root, link).filter(|_| stays_inside(link, target));
     match resolved {
         None => Some(format!("symlink points outside the plugin or nowhere: {link} -> {}", target.display())),
-        Some(real) if real.components().any(|part| part.as_os_str() == UNHASHED) || skipped(&real, mode) => {
+        Some(real) if unhashed(&real, mode) => {
             Some(format!("symlink points at a file no hash covers: {link} -> {}", target.display()))
         }
         Some(_) => None,
@@ -408,7 +429,9 @@ fn refusals(root: &Path, entries: &[Entry], mode: Walk) -> Vec<String> {
             Kind::File { executable: true, .. } if mode == Walk::Install && !entry.path.starts_with("bin/") => {
                 refusals.push(format!("executable outside bin/: {}", entry.path));
             }
-            Kind::Other => refusals.push(format!("not a regular file, folder or symlink: {}", entry.path)),
+            Kind::Other if mode == Walk::Install => {
+                refusals.push(format!("not a regular file, folder or symlink: {}", entry.path));
+            }
             _ => {}
         }
     }
@@ -422,9 +445,11 @@ fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
             Kind::File { executable, .. } => {
                 let path = root.join(&entry.path);
                 let mut bytes: Vec<u8> = Vec::new();
-                std::fs::File::open(&path)
-                    .and_then(|file| file.take(MAX_FILE + 1).read_to_end(&mut bytes))
-                    .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+                match std::fs::File::open(&path).and_then(|file| file.take(MAX_FILE + 1).read_to_end(&mut bytes)) {
+                    Ok(_) => {}
+                    Err(error) if gone(&error) => continue,
+                    Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+                }
                 if bytes.len() as u64 > MAX_FILE {
                     return Err(format!("file over 10 MB: {}", entry.path));
                 }
@@ -445,7 +470,7 @@ pub fn tree_hash(root: &Path, exclude: &[String]) -> Result<String, String> {
     hash_entries(root, &walk(root, exclude, Walk::Install)?)
 }
 
-/// The hash consent checks: the whole folder as it is now, `.git` included except the state git rewrites on its own.
+/// The hash consent checks: the whole folder as it is now, `.git` included, so code there is covered too.
 pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
     let entries = walk(root, &[], Walk::Consent)?;
     let refused = refusals(root, &entries, Walk::Consent);
