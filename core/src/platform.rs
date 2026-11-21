@@ -110,6 +110,19 @@ pub(crate) fn is_executable(_metadata: &Metadata) -> bool {
 }
 
 #[cfg(unix)]
+pub(crate) fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new().read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path)
+}
+
+#[cfg(unix)]
 pub(crate) fn symlink(link: &Path, at: &Path, _to_dir: bool) -> std::io::Result<()> {
     std::os::unix::fs::symlink(link, at)
 }

@@ -9,6 +9,8 @@ description = "Shared Local Studio logic: the Eukhe daemon client, session model
 [features]
 ffi = ["dep:uniffi"]
 wire = []
+# Pause points for scripts/tests/plugin-grants-test.sh. Never on in a shipped build.
+test-hooks = []
 link = ["wire", "dep:snow", "dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
@@ -39,6 +41,9 @@ uniffi = { workspace = true, optional = true }
 snow = { version = "0.10", optional = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [lints]
 workspace = true

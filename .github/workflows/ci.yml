@@ -24,6 +24,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Plugin grants end to end
+        run: |
+          cargo build -p local-studio-core --bin local-studio --features test-hooks
+          scripts/tests/plugin-grants-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/pg"
 
   linux:
     name: Linux app
