@@ -455,6 +455,7 @@ impl App {
                     crate::images::show(self, &data);
                 }
             }
+            Update::Consents { consents } => crate::consent::show(self, &consents),
             Update::Approvals { thread, approvals } => {
                 let mut state = self.state.borrow_mut();
                 if state.selected.as_deref() == Some(thread.as_str()) {

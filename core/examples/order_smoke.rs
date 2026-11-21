@@ -106,6 +106,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Machines { .. }
         | Update::Pairing { .. }
         | Update::PairedDevices { .. }
+        | Update::Consents { .. }
         | Update::Commands { .. }
         | Update::Skills { .. }
         | Update::Subagents { .. }

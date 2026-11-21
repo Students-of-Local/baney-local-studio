@@ -23,9 +23,9 @@ use crate::daemon::{self, DaemonQuery};
 use crate::harness::{self, Envelope};
 use crate::images;
 use crate::model::{
-    AccessMode, Approval, ApprovalAnswer, Block, Connection, DaemonMismatch, Delivery, Harness, ItemKind, ModelKey,
-    ModelOption, NoticeLevel, NotificationKind, PromptDraft, Subagent, ThreadInfo, ThreadRow, ThreadSettings,
-    TranscriptOp, Update, WorktreeChoice,
+    AccessMode, Approval, ApprovalAnswer, Block, Connection, ConsentAnswer, DaemonMismatch, Delivery, Harness,
+    ItemKind, ModelKey, ModelOption, NoticeLevel, NotificationKind, PromptDraft, Subagent, ThreadInfo, ThreadRow,
+    ThreadSettings, TranscriptOp, Update, WorktreeChoice,
 };
 use crate::oneshot::TextGen;
 use crate::plugins::{self, Plugin};
@@ -169,6 +169,7 @@ fn remembered(update: &Update) -> bool {
             | Update::Threads { .. }
             | Update::Models { .. }
             | Update::DaemonDefault { .. }
+            | Update::Consents { .. }
     )
 }
 
@@ -407,6 +408,18 @@ enum Command {
         request: String,
         project: Option<String>,
     },
+    InstallPlugin {
+        request: String,
+        source: String,
+    },
+    AnswerConsent {
+        request: String,
+        answer: ConsentAnswer,
+    },
+    PluginsDone {
+        request: String,
+        outcome: Result<String, String>,
+    },
     ListArchived {
         request: String,
     },
@@ -644,6 +657,7 @@ impl Studio {
             generation: 0,
             codex_models: Vec::new(),
             plugin_consent: Vec::new(),
+            consents: Arc::default(),
         };
         runtime.spawn(actor.run(receiver, cli_events));
         Ok(Arc::new(Self {
@@ -824,6 +838,14 @@ impl Studio {
 
     pub fn list_skills(&self, request: String, project: Option<String>) {
         self.send_command(Command::ListSkills { request, project });
+    }
+
+    pub fn install_plugin(&self, request: String, source: String) {
+        self.send_command(Command::InstallPlugin { request, source });
+    }
+
+    pub fn answer_consent(&self, request: String, answer: ConsentAnswer) {
+        self.send_command(Command::AnswerConsent { request, answer });
     }
 
     pub fn list_archived(&self, request: String) {
@@ -1104,6 +1126,7 @@ struct Actor {
     generation: u64,
     codex_models: Vec<ModelOption>,
     plugin_consent: Vec<String>,
+    consents: Arc<std::sync::Mutex<plugins::Pendings>>,
 }
 
 struct DaemonFacts {
@@ -1147,6 +1170,7 @@ impl Actor {
         self.push_projects();
         self.push_models();
         self.load_codex_models();
+        self.plugins();
         let launch = self.launch.clone();
         self.bundled =
             tokio::task::spawn_blocking(move || daemon::bundled_version(launch.as_ref())).await.ok().flatten();
@@ -1540,6 +1564,15 @@ impl Actor {
                     Err(message) => Update::RequestFailed { request, message },
                 };
                 self.mailbox.push(update);
+            }
+            Command::InstallPlugin { request, source } => self.install_plugin(request, source),
+            Command::AnswerConsent { request, answer } => self.answer_consent(request, answer),
+            Command::PluginsDone { request, outcome } => {
+                self.plugins();
+                self.mailbox.push(match outcome {
+                    Ok(message) => Update::RequestDone { request, message },
+                    Err(message) => Update::RequestFailed { request, message },
+                });
             }
             Command::ListSkills { request, project } => {
                 let update = match self.project_resources(project).await {
@@ -2398,6 +2431,7 @@ impl Actor {
             self.plugin_errors = errors;
         }
         let mut notes: Vec<String> = Vec::new();
+        let mut offers: Vec<(&Plugin, Vec<plugins::Capability>)> = Vec::new();
         let grants = plugins::Grants::load(dir).unwrap_or_else(|error| {
             notes.push(error);
             plugins::Grants::default()
@@ -2407,6 +2441,7 @@ impl Actor {
             match consent {
                 plugins::Consent::Ready => {}
                 plugins::Consent::NeedsConsent { missing } => {
+                    offers.push((plugin, missing.clone()));
                     let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
                     notes.push(format!(
                         "{} needs consent for {}, so its MCP server is off",
@@ -2424,6 +2459,19 @@ impl Actor {
                 notes.push(error);
             }
         }
+        let mut pendings = self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut offered = false;
+        for (plugin, missing) in offers {
+            if !pendings.offered(plugin) {
+                if let Some(pending) = plugins::offer_grant(plugin, &missing, &grants) {
+                    offered |= pendings.push(pending);
+                }
+            }
+        }
+        if offered {
+            self.mailbox.push(Update::Consents { consents: pendings.requests() });
+        }
+        drop(pendings);
         if notes != self.plugin_consent {
             if !notes.is_empty() {
                 self.mailbox.notice(NoticeLevel::Info, format!("Plugins: {}", notes.join("; ")));
@@ -2431,6 +2479,54 @@ impl Actor {
             self.plugin_consent = notes;
         }
         scan.plugins
+    }
+
+    fn install_plugin(&mut self, request: String, source: String) {
+        let Some(root) = self.plugins_dir.clone() else {
+            self.mailbox.push(Update::RequestFailed { request, message: "No plugins folder: HOME is not set".into() });
+            return;
+        };
+        let (consents, mailbox, itself) = (Arc::clone(&self.consents), Arc::clone(&self.mailbox), self.itself.clone());
+        tokio::task::spawn_blocking(move || match plugins::offer_install(&root, &source, request.clone()) {
+            Ok(plugins::Offer::Installed(message)) => {
+                itself.send(Command::PluginsDone { request, outcome: Ok(message) });
+            }
+            Ok(plugins::Offer::Ask(pending)) => {
+                let mut pendings = consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if pendings.push(*pending) {
+                    mailbox.push(Update::Consents { consents: pendings.requests() });
+                } else {
+                    let message = "A permission sheet with that request is already open".to_string();
+                    mailbox.push(Update::RequestFailed { request, message });
+                }
+            }
+            Err(message) => mailbox.push(Update::RequestFailed { request, message }),
+        });
+    }
+
+    fn answer_consent(&mut self, request: String, answer: ConsentAnswer) {
+        let mut pendings = self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = pendings.take(&request);
+        self.mailbox.push(Update::Consents { consents: pendings.requests() });
+        drop(pendings);
+        let (Some(pending), Some(root)) = (pending, self.plugins_dir.clone()) else {
+            self.mailbox.notice(NoticeLevel::Info, "That permission sheet is no longer open.");
+            return;
+        };
+        match answer {
+            ConsentAnswer::Cancel => {
+                let message = format!("Nothing installed or granted for {}", pending.request().name);
+                drop(pending);
+                self.mailbox.push(Update::RequestDone { request, message });
+            }
+            ConsentAnswer::Install { sensitive } => {
+                let itself = self.itself.clone();
+                tokio::task::spawn_blocking(move || {
+                    let outcome = plugins::answer(&root, pending, &sensitive);
+                    itself.send(Command::PluginsDone { request, outcome });
+                });
+            }
+        }
     }
 
     async fn resources(&mut self, id: &str, active: &str) -> Resources {
@@ -3738,7 +3834,10 @@ impl Actor {
             | DaemonClientEvent::SessionListProgress { .. }
             | DaemonClientEvent::HeartbeatsChanged
             | DaemonClientEvent::StateTreeUpdate { .. } => {}
-            DaemonClientEvent::SideQuestionEvent { event, .. } => self.title_answered(&event).await,
+            DaemonClientEvent::SideQuestionEvent { event, .. } => {
+                self.text.answered(&event);
+                self.title_answered(&event).await;
+            }
         }
     }
 

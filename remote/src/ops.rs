@@ -25,7 +25,7 @@ pub fn arg<T: DeserializeOwned>(args: &Value, key: &str) -> Result<T, OpError> {
 pub fn correlation(op: &str) -> Option<&'static str> {
     match op {
         "start_thread" => Some("draft"),
-        "answer_approval" => None,
+        "answer_approval" | "answer_consent" => None,
         _ => Some("request"),
     }
 }
@@ -64,6 +64,7 @@ pub fn dispatch(
         "send_queued_now" => studio.send_queued_now(arg(a, "thread")?, arg(a, "queued")?),
         "remove_queued" => studio.remove_queued(arg(a, "thread")?, arg(a, "queued")?),
         "answer_approval" => studio.answer_approval(arg(a, "thread")?, arg(a, "request")?, arg(a, "answer")?),
+        "answer_consent" => studio.answer_consent(arg(a, "request")?, arg(a, "answer")?),
         "answer_questions" => {
             return Err(OpError::new(
                 "not_built",

@@ -294,6 +294,7 @@ impl Harness {
             | Update::Machines { .. }
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
+            | Update::Consents { .. }
             | Update::Commands { .. }
             | Update::Notification { .. }
             | Update::ArchivedThreads { .. }

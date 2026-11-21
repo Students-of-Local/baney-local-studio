@@ -131,6 +131,7 @@ Requests the phone may send. Each op outside the Session area is a `Studio` or `
 | --- | --- |
 | Session | `hello`, `ping`, `watch` `{thread}`, `unwatch` `{thread}`, `load_earlier` `{thread, before, limit}`, `blob_put` `{blob, size, mime}` |
 | Turns | `send` `{request, thread, prompt, delivery}`, `abort` `{thread}`, `send_queued_now` `{thread, queued}`, `remove_queued` `{thread, queued}`, `answer_approval` `{thread, request, answer}`, `answer_questions` `{thread, request, answers}`, `compact` `{thread}` |
+| Plugins | `answer_consent` `{request, answer}`: `answer` is `{"type": "cancel"}` or `{"type": "install", "sensitive": [<capability id>]}` (docs/plugins.md, Consent sheet) |
 | Threads | `start_thread` `{draft, project, prompt, settings, request?}`, `rename_thread` `{thread, title}`, `regenerate_title` `{thread}`, `fork_thread` `{thread}`, `set_archived` `{thread, archived}`, `set_pinned` `{thread, pinned}`, `set_settled` `{thread, settled}`, `snooze` `{thread, until}`, `mark_unread` `{thread, unread}`, `search_threads` `{request, query, limit}`, `list_archived` `{request}` |
 | Agent | `load_models`, `set_model` `{thread, provider, model}`, `set_thinking_level` `{thread, level}`, `set_access_mode` `{thread, mode}`, `list_commands` `{request, project}`, `list_skills` `{request, project}`, `cancel_subagent` `{thread, child}` |
 | Read only | `load_message_image` `{request, thread, entry, index}`, `git_status` `{project}`, `load_diff` `{request, project, scope}`, `list_pull_requests` `{request, project}`, `load_pull_request` `{request, project, number}`, `read_file` `{request, project, relative}` |
@@ -139,7 +140,7 @@ Updates the phone receives (`type`):
 
 | Scope | Types |
 | --- | --- |
-| Global | `connection`, `projects`, `threads`, `thread_started`, `models`, `daemon_default`, `notification`, `theme`, `notice` |
+| Global | `connection`, `projects`, `threads`, `thread_started`, `models`, `daemon_default`, `consents`, `notification`, `theme`, `notice` |
 | Watched thread | `thread`, `transcript`, `approvals`, `questions`, `questions_settled`, `queue`, `subagents`, `worktree_setup` |
 | Answers to a request (sent only to the requesting device) | `request_done`, `request_failed`, `thread_search`, `archived_threads`, `commands`, `skills`, `git_status`, `diff`, `pull_requests`, `pull_request_detail`, `blob` |
 

@@ -284,6 +284,7 @@ impl Harness {
             | Update::Machines { .. }
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
+            | Update::Consents { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
             | Update::LocalDashboard { .. } => {}
