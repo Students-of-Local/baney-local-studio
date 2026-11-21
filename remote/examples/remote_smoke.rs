@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -12,13 +13,14 @@ use eukhe_types::daemon::DaemonCommand;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use local_studio_core::link::snow::{self, TransportState};
+use local_studio_core::plugins::{self, Capability, Grants};
 use local_studio_core::{
     AccessMode, Approval, Connection, DaemonLaunch, Delivery, Item, ItemKind, PromptDraft, Studio, StudioConfig,
     ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -194,6 +196,10 @@ struct View {
     git_status: u32,
     notifications: u32,
     needs_approval: HashMap<String, u32>,
+    needs_answer: HashMap<String, u32>,
+    questions: HashMap<String, (String, String)>,
+    question_counts: HashMap<String, u32>,
+    settled: HashSet<String>,
     blobs: HashMap<String, Received>,
     failed: HashMap<String, Value>,
     cuts: HashMap<String, u64>,
@@ -344,7 +350,17 @@ impl View {
                 self.notifications += 1;
                 if matches!(kind, local_studio_core::NotificationKind::NeedsApproval) {
                     *self.needs_approval.entry(thread).or_default() += 1;
+                } else if matches!(kind, local_studio_core::NotificationKind::NeedsAnswer) {
+                    *self.needs_answer.entry(thread).or_default() += 1;
                 }
+            }
+            Update::Questions { thread, request, questions, .. } => {
+                let text = questions.first().map(|question| question.question.clone()).unwrap_or_default();
+                *self.question_counts.entry(request.clone()).or_default() += 1;
+                self.questions.insert(request, (thread, text));
+            }
+            Update::QuestionsSettled { request, .. } => {
+                self.settled.insert(request);
             }
             Update::Notice { level, text } => println!("     notice {level:?}: {text}"),
             Update::RequestFailed { request, message } => println!("     request {request} failed: {message}"),
@@ -2021,6 +2037,77 @@ async fn shared_ids(project: &str, a: &mut Client, c: &mut Client) -> anyhow::Re
     Ok(())
 }
 
+fn ask_fixture(data: &Path) -> anyhow::Result<()> {
+    let plugins_dir = data.join("plugins");
+    let dir = plugins_dir.join("askfix");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("plugin.toml"),
+        "id = \"askfix\"\nversion = \"1.0.0\"\ndescription = \"remote smoke fixture\"\ncapabilities = [\"mcp-server\", \"ask-user\"]\n\n[mcp]\ncommand = \"server.py\"\n",
+    )?;
+    std::fs::write(dir.join("server.py"), "#!/usr/bin/env python3\nimport sys\nfor _ in sys.stdin:\n    pass\n")?;
+    std::fs::set_permissions(dir.join("server.py"), std::fs::Permissions::from_mode(0o755))?;
+    let plugin = plugins::load(&dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+    let mut grants = Grants::load(&plugins_dir).map_err(anyhow::Error::msg)?;
+    grants.grant(&plugin, &[Capability::McpServer, Capability::AskUser]).map_err(anyhow::Error::msg)?;
+    grants.save(&plugins_dir).map_err(anyhow::Error::msg)
+}
+
+async fn plugin_question(run: &Run, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
+    ask_fixture(&run.serve.data)?;
+    let settings = json!({ "provider": "remote-smoke-absent", "model": "absent", "thinkingLevel": "off", "access": "supervised", "worktree": { "type": "local" } });
+    let args = json!({ "draft": "d-ask", "project": run.project, "prompt": prompt("ask start"), "settings": settings });
+    a.call("start_thread", args).await?;
+    a.until("a thread for the plugin question", SETUP, |view| view.started.contains_key("d-ask")).await?;
+    let thread = a.view().started["d-ask"].clone();
+    a.call("watch", json!({ "thread": thread })).await?;
+    a.call("abort", json!({ "thread": thread })).await?;
+    a.until("the plugin question thread idle", SETUP, |view| view.idle(&thread)).await?;
+    let saved: Vec<Value> = serde_json::from_slice(&std::fs::read(run.serve.data.join("ask-tokens.json"))?)?;
+    let token = saved
+        .iter()
+        .find(|entry| entry["plugin"] == "askfix" && entry["thread"] == thread.as_str())
+        .and_then(|entry| entry["token"].as_str())
+        .context("serve issued askfix no token for the thread")?
+        .to_string();
+    let mut stream = UnixStream::connect(run.serve.data.join("ask.sock")).await?;
+    let serve = run.serve.child.as_ref().map(Child::id).context("serve is not running")?;
+    let peer = stream.peer_cred()?.pid();
+    ensure!(peer == i32::try_from(serve).ok(), "ask.sock is served by pid {peer:?}, not serve {serve}");
+    let text = "Is the 1099-DIV dividend $87.00?";
+    let ask = json!({ "token": token, "thread": thread, "text": text, "choices": ["Yes", "No"] });
+    stream.write_all(format!("{ask}\n").as_bytes()).await?;
+    let asked = |view: &View| {
+        view.questions.iter().find(|(_, (on, said))| *on == thread && said == text).map(|(request, _)| request.clone())
+    };
+    a.until("phone A gets the plugin question and a needs_answer notification", QUICK, |view| {
+        asked(view).is_some() && view.needs_answer.get(&thread).is_some_and(|count| *count > 0)
+    })
+    .await?;
+    let request = asked(&a.view()).context("phone A lost the question")?;
+    let before = c.view().question_counts.get(&request).copied().unwrap_or_default();
+    c.call("watch", json!({ "thread": thread })).await?;
+    c.until("phone C gets the pending question replayed on watch", QUICK, |view| {
+        view.question_counts.get(&request).copied().unwrap_or_default() > before
+    })
+    .await?;
+    let mut answers = Map::new();
+    answers.insert(text.to_string(), json!("Yes"));
+    c.call("answer_questions", json!({ "thread": thread, "request": request, "answers": answers })).await?;
+    for client in [&*a, &*c] {
+        client.until("questions_settled reaches the watcher", QUICK, |view| view.settled.contains(&request)).await?;
+    }
+    let mut line = String::new();
+    tokio::time::timeout(QUICK, tokio::io::BufReader::new(&mut stream).read_line(&mut line)).await??;
+    let reply: Value = serde_json::from_str(&line).with_context(|| format!("ask.sock replied {line:?}"))?;
+    ensure!(reply == json!({ "status": "answered", "answer": "Yes" }), "the plugin got {reply}");
+    for client in [&mut *a, &mut *c] {
+        client.call("unwatch", json!({ "thread": thread })).await?;
+    }
+    println!("ok   a plugin question on ask.sock (peer pid {serve}, serve's) reaches phone A with needs_answer, replays to phone C on watch, C answers, both get questions_settled and the plugin gets {reply}");
+    Ok(())
+}
+
 async fn restart_watch(
     run: &mut Run,
     eukhe: &Path,
@@ -3268,6 +3355,7 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let mut a = Box::pin(listener_checks(run, a, &a_phone)).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
+    plugin_question(run, &mut a, &mut c).await?;
     duplicate_replay(&mut a).await?;
     worktree_route(run, &mut a).await?;
     let (mut a, mut c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
