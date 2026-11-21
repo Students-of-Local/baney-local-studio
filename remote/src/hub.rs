@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use local_studio_core::{FileContent, ImageAttachment, Item, PromptDraft, Studio, TranscriptOp, Update, Waker};
@@ -31,16 +31,27 @@ const SEND_LOG: Duration = Duration::from_secs(60);
 const MAX_SEND_LOG: usize = 256;
 const BUFFERED: usize = 2000;
 const BUFFERED_BYTES: usize = 64 << 20;
-const KEPT: Duration = Duration::from_secs(600);
 const MAX_WATCH: usize = 64;
 const MAX_BLOB: usize = 25 << 20;
 const MAX_PENDING: usize = 100 << 20;
+const MAX_DOWNLOADS: usize = 64 << 20;
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_QUEUED_ITEMS: usize = 2 * BUFFERED;
 const MAX_QUEUED_BYTES: usize = 256 << 20;
 const FRAME_BUDGET: usize = crate::noise::MAX_JSON - 4096;
 const REPLACED: u16 = 4409;
 const SNAPSHOT: [&str; 5] = ["connection", "projects", "threads", "models", "daemon_default"];
+
+fn kept() -> Duration {
+    static KEPT: OnceLock<Duration> = OnceLock::new();
+    *KEPT.get_or_init(|| {
+        std::env::var("LOCAL_STUDIO_SERVE_KEPT_SECS")
+            .ok()
+            .and_then(|secs| secs.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .map_or(Duration::from_secs(600), Duration::from_secs)
+    })
+}
 
 pub struct Blob {
     pub id: [u8; BLOB_ID],
@@ -54,6 +65,13 @@ pub enum Out {
 }
 
 impl Out {
+    fn blob(&self) -> usize {
+        match self {
+            Self::Update { blob: Some(blob), .. } => blob.data.len(),
+            _ => 0,
+        }
+    }
+
     fn size(&self) -> usize {
         match self {
             Self::Frame(text) => text.len(),
@@ -69,6 +87,7 @@ pub type ConnId = u64;
 struct Queued {
     items: AtomicUsize,
     bytes: AtomicUsize,
+    blobs: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -99,13 +118,15 @@ pub fn outbound() -> (Tx, Rx, Arc<Notify>, Arc<Notify>) {
 
 impl Tx {
     pub fn send(&self, out: Out) -> bool {
-        let size = out.size();
+        let (size, blob) = (out.size(), out.blob());
         let items = self.queued.items.fetch_add(1, Ordering::SeqCst);
         let bytes = self.queued.bytes.fetch_add(size, Ordering::SeqCst);
+        self.queued.blobs.fetch_add(blob, Ordering::SeqCst);
         let full = items >= MAX_QUEUED_ITEMS || (items > 0 && bytes + size > MAX_QUEUED_BYTES);
         if full || self.out.send(out).is_err() {
             self.queued.items.fetch_sub(1, Ordering::SeqCst);
             self.queued.bytes.fetch_sub(size, Ordering::SeqCst);
+            self.queued.blobs.fetch_sub(blob, Ordering::SeqCst);
             if full {
                 self.cut.notify_one();
             }
@@ -120,6 +141,7 @@ impl Rx {
         let out = self.out.recv().await?;
         self.queued.items.fetch_sub(1, Ordering::SeqCst);
         self.queued.bytes.fetch_sub(out.size(), Ordering::SeqCst);
+        self.queued.blobs.fetch_sub(out.blob(), Ordering::SeqCst);
         Some(out)
     }
 }
@@ -152,7 +174,6 @@ struct Session {
     watching: HashSet<String>,
     left_at: Option<Instant>,
     uploads: HashMap<[u8; BLOB_ID], Upload>,
-    prompt_tags: VecDeque<String>,
     outstanding: VecDeque<(String, Instant)>,
 }
 
@@ -167,7 +188,6 @@ impl Session {
             watching: HashSet::new(),
             left_at: None,
             uploads: HashMap::new(),
-            prompt_tags: VecDeque::new(),
             outstanding: VecDeque::new(),
         }
     }
@@ -179,7 +199,7 @@ impl Session {
         self.buffered += weight(&text, blob.as_deref());
         while self.buffer.len() > BUFFERED
             || self.buffered > BUFFERED_BYTES
-            || self.buffer.front().is_some_and(|entry| now.duration_since(entry.at) > KEPT)
+            || self.buffer.front().is_some_and(|entry| now.duration_since(entry.at) > kept())
         {
             let Some(entry) = self.buffer.pop_front() else { break };
             self.buffered -= weight(&entry.text, entry.blob.as_deref());
@@ -193,6 +213,14 @@ impl Session {
 
     fn pending(&self) -> usize {
         self.uploads.values().map(|upload| upload.size).sum()
+    }
+
+    fn downloads(&self) -> usize {
+        self.conn.as_ref().map_or(0, |(_, tx)| tx.queued.blobs.load(Ordering::SeqCst))
+    }
+
+    fn drop_partial(&mut self) {
+        self.uploads.retain(|_, upload| upload.ack.is_none());
     }
 
     fn close(&mut self, code: u16, reason: &str) {
@@ -239,19 +267,20 @@ impl<T> Remembered<T> {
 
 struct Tag {
     device: String,
-    op: &'static str,
     given: String,
+    accepted: Option<String>,
 }
 
 struct Ledger {
     key: String,
     ids: HashSet<String>,
     outcomes: Remembered<Arc<str>>,
+    tags: VecDeque<String>,
 }
 
 impl Ledger {
     fn new(key: String) -> Self {
-        Self { key, ids: HashSet::new(), outcomes: Remembered::default() }
+        Self { key, ids: HashSet::new(), outcomes: Remembered::default(), tags: VecDeque::new() }
     }
 
     fn full(&self) -> bool {
@@ -278,6 +307,7 @@ struct State {
     git: HashMap<String, HashSet<String>>,
     sends: HashMap<String, (String, Instant)>,
     setups: HashMap<String, Arc<str>>,
+    drafts: HashMap<String, String>,
 }
 
 impl State {
@@ -348,8 +378,8 @@ impl State {
     }
 
     fn remember_outcome(&mut self, tag: &str, routed: &Value, text: &Arc<str>) {
-        let Some(Tag { device, op, given }) = self.tags.get(tag) else { return };
-        let key = accepted_key(op, given);
+        let Some(Tag { device, accepted: Some(key), .. }) = self.tags.get(tag) else { return };
+        let key = key.clone();
         let kept = if text.len() <= MAX_OUTCOME {
             Some(Arc::clone(text))
         } else {
@@ -366,6 +396,49 @@ impl State {
         if let (Some(ledger), Some(kept)) = (self.ledgers.get_mut(device.as_str()), kept) {
             ledger.outcome(&key, &kept);
         }
+    }
+
+    fn over_downloads(&mut self, owner: &str, request: &str, size: usize) -> bool {
+        let pending = self.sessions.get(owner).map_or(0, Session::downloads);
+        if pending + size <= MAX_DOWNLOADS {
+            return false;
+        }
+        let failed = json!({
+            "type": "request_failed",
+            "request": request,
+            "code": "downloads_pending",
+            "message": format!(
+                "{pending} bytes of earlier downloads are still on their way to this device; a {size} byte answer would pass the {MAX_DOWNLOADS} byte budget. Ask again once they arrive"
+            ),
+        });
+        self.deliver(owner, text_of(&failed), None);
+        true
+    }
+
+    fn local_setup(&mut self, thread: &str, done: bool, value: &Value) {
+        let text = text_of(value);
+        if done && value.get("error").is_none_or(Value::is_null) {
+            self.setups.remove(thread);
+        } else {
+            self.setups.insert(thread.to_string(), Arc::clone(&text));
+        }
+        if let Some(mirror) = self.mirrors.get_mut(thread) {
+            mirror.setup = Some(Arc::clone(&text));
+        }
+        self.send_watchers(thread, &text);
+    }
+
+    fn started(&mut self, tag: &str, thread: &str) {
+        let Some(text) = self.setups.remove(tag) else { return };
+        let Ok(mut value) = serde_json::from_str::<Value>(&text) else { return };
+        value["thread"] = Value::String(thread.to_string());
+        let text = text_of(&value);
+        self.drafts.insert(tag.to_string(), thread.to_string());
+        self.setups.insert(thread.to_string(), Arc::clone(&text));
+        if let Some(mirror) = self.mirrors.get_mut(thread) {
+            mirror.setup = Some(Arc::clone(&text));
+        }
+        self.send_watchers(thread, &text);
     }
 
     fn live(&mut self, device: &str, conn: ConnId) -> Result<&mut Session, OpError> {
@@ -402,10 +475,18 @@ impl State {
         }
     }
 
+    fn drop_ledger(&mut self, device: &str) {
+        if let Some(ledger) = self.ledgers.remove(device) {
+            for tag in ledger.tags {
+                self.tags.remove(&tag);
+            }
+        }
+    }
+
     fn drop_session(&mut self, studio: &Studio, device: &str, code: u16, reason: &str) {
         let Some(mut session) = self.sessions.remove(device) else { return };
         session.close(code, reason);
-        for tag in session.prompt_tags.iter().chain(session.outstanding.iter().map(|(tag, _)| tag)) {
+        for (tag, _) in &session.outstanding {
             self.tags.remove(tag);
         }
         for thread in session.watching {
@@ -429,17 +510,119 @@ fn windowed_reset(thread: &str, items: &[Item]) -> Arc<str> {
     let mut shown = items.len().min(WINDOW);
     loop {
         let earlier = items.len() - shown;
-        let update = json!({
+        let mut update = json!({
             "type": "transcript",
             "thread": thread,
             "op": { "type": "reset", "items": &items[earlier..], "earlier": earlier },
         });
+        if shown <= 1 {
+            fit(&mut update, "/op/items/0");
+            return text_of(&update);
+        }
         let text = update.to_string();
-        if text.len() <= FRAME_BUDGET || shown <= 1 {
+        if text.len() <= FRAME_BUDGET {
             return Arc::from(text);
         }
         shown /= 2;
     }
+}
+
+fn escaped(byte: u8) -> usize {
+    match byte {
+        b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+        0..=0x1f => 6,
+        _ => 1,
+    }
+}
+
+fn quoted(text: &str) -> usize {
+    2 + text.bytes().map(escaped).sum::<usize>()
+}
+
+fn size(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(text) => quoted(text),
+        Value::Array(items) => 2 + items.iter().map(size).sum::<usize>() + items.len().saturating_sub(1),
+        Value::Object(fields) => {
+            2 + fields.iter().map(|(name, field)| quoted(name) + 1 + size(field)).sum::<usize>()
+                + fields.len().saturating_sub(1)
+        }
+    }
+}
+
+fn shrink(value: &mut Value, budget: usize) {
+    let mut total = size(value);
+    if total <= budget {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            let room = budget.saturating_sub(2);
+            let (mut used, mut end) = (0, 0);
+            for (at, byte) in text.bytes().enumerate() {
+                used += escaped(byte);
+                if used > room {
+                    break;
+                }
+                end = at + 1;
+            }
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        Value::Array(items) => {
+            let mut used = 2;
+            let mut keep = 0;
+            for item in items.iter_mut() {
+                let need = size(item) + 1;
+                if used + need <= budget {
+                    used += need;
+                    keep += 1;
+                    continue;
+                }
+                let room = budget.saturating_sub(used + 1);
+                shrink(item, room);
+                if size(item) <= room {
+                    keep += 1;
+                }
+                break;
+            }
+            items.truncate(keep);
+        }
+        Value::Object(fields) => {
+            let mut order: Vec<(usize, String)> =
+                fields.iter().map(|(name, field)| (size(field), name.clone())).collect();
+            order.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+            for (own, name) in order {
+                let Some(field) = fields.get_mut(&name) else { continue };
+                shrink(field, own.saturating_sub(total - budget));
+                total = total - own + size(field);
+                if total <= budget {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fit(value: &mut Value, pointer: &str) -> bool {
+    let total = size(value);
+    if total <= FRAME_BUDGET {
+        return false;
+    }
+    let Some(part) = value.pointer_mut(pointer) else { return false };
+    let own = size(part);
+    shrink(part, FRAME_BUDGET.saturating_sub(total - own + 32));
+    let cut = own - size(part);
+    if let Some(fields) = part.as_object_mut() {
+        fields.insert("cut".to_string(), json!(cut));
+    }
+    true
 }
 
 pub struct Signal(Arc<Notify>);
@@ -492,7 +675,7 @@ impl Hub {
     }
 
     pub async fn reap(self: Arc<Self>) {
-        let mut every = tokio::time::interval(Duration::from_secs(15));
+        let mut every = tokio::time::interval(Duration::from_secs(15).min(kept() / 2));
         loop {
             every.tick().await;
             let mut state = self.state();
@@ -500,14 +683,15 @@ impl Hub {
             let gone: Vec<String> = state
                 .sessions
                 .iter()
-                .filter(|(_, session)| session.left_at.is_some_and(|left| now.duration_since(left) > KEPT))
+                .filter(|(_, session)| session.left_at.is_some_and(|left| now.duration_since(left) > kept()))
                 .map(|(device, _)| device.clone())
                 .collect();
             for device in gone {
+                eprintln!("local-studio-serve: released device {device}'s session after {} s away", kept().as_secs());
                 state.drop_session(&self.studio, &device, 1000, "gone");
             }
             for session in state.sessions.values_mut() {
-                session.uploads.retain(|_, upload| now.duration_since(upload.at) <= KEPT);
+                session.uploads.retain(|_, upload| now.duration_since(upload.at) <= kept());
             }
         }
     }
@@ -557,6 +741,8 @@ impl Hub {
                         }
                     }
                 }
+                let mut value = value;
+                fit(&mut value, "/op/item");
                 state.send_watchers(&thread, &text_of(&value));
             }
             Update::Thread { thread, .. }
@@ -574,17 +760,28 @@ impl Hub {
                 *slot = Some(Arc::clone(&text));
                 state.send_watchers(&thread, &text);
             }
-            Update::WorktreeSetup { thread, done, error, .. } => {
-                let text = text_of(&value);
-                if done && error.is_none() {
-                    state.setups.remove(&thread);
+            Update::WorktreeSetup { thread: draft, done, .. } if !state.drafts.contains_key(&draft) => {
+                let Some((owner, given)) = state.tagged(&draft) else {
+                    state.local_setup(&draft, done, &value);
+                    return;
+                };
+                if done {
+                    state.setups.remove(&draft);
                 } else {
-                    state.setups.insert(thread.clone(), Arc::clone(&text));
+                    state.setups.insert(draft, text_of(&value));
                 }
-                if let Some(mirror) = state.mirrors.get_mut(&thread) {
-                    mirror.setup = Some(Arc::clone(&text));
+                let mut routed = value;
+                routed["thread"] = Value::String(given);
+                state.deliver(&owner, text_of(&routed), None);
+            }
+            Update::WorktreeSetup { thread: draft, done, .. } => {
+                let Some(thread) = state.drafts.get(&draft).cloned() else { return };
+                if done {
+                    state.drafts.remove(&draft);
                 }
-                state.send_watchers(&thread, &text);
+                let mut value = value;
+                value["thread"] = Value::String(thread.clone());
+                state.local_setup(&thread, done, &value);
             }
             Update::Notification { thread, kind: notification, .. } => {
                 state.broadcast(&text_of(&value));
@@ -600,6 +797,9 @@ impl Hub {
             Update::MessageImage { request: tag, mime_type, data } => {
                 let Some((owner, request)) = state.tagged(&tag) else { return };
                 state.finish(&tag);
+                if state.over_downloads(&owner, &request, data.len()) {
+                    return;
+                }
                 let Ok(id) = random::<BLOB_ID>() else { return };
                 let header = json!({ "type": "blob", "request": request, "blob": hex(&id), "size": data.len(), "mime": mime_type });
                 state.deliver(&owner, text_of(&header), Some(Arc::new(Blob { id, data })));
@@ -619,6 +819,9 @@ impl Hub {
                         return;
                     }
                 };
+                if state.over_downloads(&owner, &request, data.len()) {
+                    return;
+                }
                 let Ok(id) = random::<BLOB_ID>() else { return };
                 let header = json!({ "type": "blob", "request": request, "blob": hex(&id), "size": data.len(), "mime": mime, "path": path, "language": language });
                 state.deliver(&owner, text_of(&header), Some(Arc::new(Blob { id, data })));
@@ -636,6 +839,11 @@ impl Hub {
                         let text = text_of(&routed);
                         let tag =
                             ["request", "draft"].into_iter().find_map(|field| value.get(field).and_then(Value::as_str));
+                        if let (Some(tag), Some(thread)) =
+                            (value.get("draft").and_then(Value::as_str), value.get("thread").and_then(Value::as_str))
+                        {
+                            state.started(tag, thread);
+                        }
                         if let Some(tag) = tag {
                             state.remember_outcome(tag, &routed, &text);
                         }
@@ -655,7 +863,8 @@ impl Hub {
                 | "diff"
                 | "pull_requests"
                 | "pull_request_detail" => {
-                    if let Some((owner, routed)) = state.routed(&value) {
+                    if let Some((owner, mut routed)) = state.routed(&value) {
+                        fit(&mut routed, "");
                         state.deliver(&owner, text_of(&routed), None);
                         if let Some(tag) = value.get("request").and_then(Value::as_str) {
                             state.finish(tag);
@@ -714,12 +923,14 @@ impl Hub {
             state.sessions.insert(device.to_string(), Session::new(key.to_string()));
         }
         if state.ledgers.get(device).is_none_or(|ledger| ledger.key != key) {
+            state.drop_ledger(device);
             state.ledgers.insert(device.to_string(), Ledger::new(key.to_string()));
         }
         let snapshot: Vec<Value> =
             state.snapshot.iter().flatten().filter_map(|text| serde_json::from_str(text).ok()).collect();
         let Some(session) = state.sessions.get_mut(device) else { return Some(conn) };
         session.close(REPLACED, "replaced by a newer socket");
+        session.drop_partial();
         let delta = !fresh
             && resume.epoch.as_deref() == Some(self.epoch.as_str())
             && resume.seq.is_some_and(|seq| {
@@ -772,6 +983,7 @@ impl Hub {
             if session.conn.as_ref().is_some_and(|(id, _)| *id == conn) {
                 session.conn = None;
                 session.left_at = Some(Instant::now());
+                session.drop_partial();
             }
         }
     }
@@ -788,7 +1000,15 @@ impl Hub {
             eprintln!("local-studio-serve: device {device} was revoked; closing its socket");
             state.drop_session(&self.studio, &device, 4401, "revoked");
         }
-        state.ledgers.retain(|device, ledger| known.get(device) == Some(&ledger.key));
+        let revoked: Vec<String> = state
+            .ledgers
+            .iter()
+            .filter(|(device, ledger)| known.get(*device) != Some(&ledger.key))
+            .map(|(device, _)| device.clone())
+            .collect();
+        for device in revoked {
+            state.drop_ledger(&device);
+        }
     }
 
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
@@ -835,8 +1055,12 @@ impl Hub {
         let mut shown = limit.min(before);
         loop {
             let start = before - shown;
-            let page = json!({ "thread": thread, "start": start, "items": &items[start..before] });
-            if shown <= 1 || page.to_string().len() <= FRAME_BUDGET {
+            let mut page = json!({ "thread": thread, "start": start, "items": &items[start..before] });
+            if shown <= 1 {
+                fit(&mut page, "/items/0");
+                return Ok(page);
+            }
+            if page.to_string().len() <= FRAME_BUDGET {
                 return Ok(page);
             }
             shown /= 2;
@@ -859,7 +1083,20 @@ impl Hub {
                 return Err(OpError::new("bad_args", format!("args.{field} may be at most {MAX_ACK} bytes")));
             }
         }
-        let key = given.as_ref().filter(|_| prompt_op).map(|given| accepted_key(op, given));
+        let asked = match args.get("request") {
+            Some(Value::String(asked)) if op == "start_thread" => Some(asked.clone()),
+            Some(_) if op == "start_thread" => {
+                return Err(OpError::new("bad_args", "args.request must be a string"));
+            }
+            _ => None,
+        };
+        if asked.as_ref().is_some_and(|asked| asked.len() > MAX_ACK) {
+            return Err(OpError::new("bad_args", format!("args.request may be at most {MAX_ACK} bytes")));
+        }
+        let key = match asked {
+            Some(asked) => Some(accepted_key("start_thread#request", &asked)),
+            None => given.as_ref().filter(|_| prompt_op).map(|given| accepted_key(op, given)),
+        };
         if let Some(key) = &key {
             let ledger = state.ledgers.get_mut(device);
             if let Some(ledger) = ledger.as_ref().filter(|ledger| ledger.ids.contains(key)) {
@@ -893,21 +1130,18 @@ impl Hub {
         let mut prompt = |value: &Value| resolve_prompt(session, value);
         ops::dispatch(&self.studio, op, &args, &mut prompt)?;
         if let Some((tag, given)) = tag {
-            let op = match op {
-                "send" => "send",
-                "start_thread" => "start_thread",
-                _ => "answered",
-            };
-            state.tags.insert(tag.clone(), Tag { device: device.to_string(), op, given });
-            let session = state.live(device, conn)?;
+            let accepted = key.clone().filter(|_| prompt_op);
+            state.tags.insert(tag.clone(), Tag { device: device.to_string(), given, accepted });
             let mut evicted = Vec::new();
             if prompt_op {
-                session.prompt_tags.push_back(tag);
-                while session.prompt_tags.len() > REMEMBERED {
-                    evicted.extend(session.prompt_tags.pop_front());
+                if let Some(ledger) = state.ledgers.get_mut(device) {
+                    ledger.tags.push_back(tag);
+                    while ledger.tags.len() > REMEMBERED {
+                        evicted.extend(ledger.tags.pop_front());
+                    }
                 }
             } else {
-                session.outstanding.push_back((tag, Instant::now()));
+                state.live(device, conn)?.outstanding.push_back((tag, Instant::now()));
             }
             for old in evicted {
                 state.tags.remove(&old);
@@ -954,7 +1188,7 @@ impl Hub {
             let now = Instant::now();
             let session = state.live(device, conn)?;
             let mut expired = Vec::new();
-            while session.outstanding.front().is_some_and(|(_, at)| now.duration_since(*at) > KEPT) {
+            while session.outstanding.front().is_some_and(|(_, at)| now.duration_since(*at) > kept()) {
                 expired.extend(session.outstanding.pop_front().map(|(tag, _)| tag));
             }
             let waiting = session.outstanding.len();

@@ -378,7 +378,11 @@ impl Command {
         match self {
             Command::Send { prompt, .. }
             | Command::StartThread { prompt, .. }
-            | Command::StartThreads { prompt, .. } => Some(prompt.images.iter().map(|image| image.data.len()).sum()),
+            | Command::StartThreads { prompt, .. } => Some(
+                prompt.text.len()
+                    + prompt.files.iter().map(String::len).sum::<usize>()
+                    + prompt.images.iter().map(|image| image.data.len()).sum::<usize>(),
+            ),
             _ => None,
         }
     }

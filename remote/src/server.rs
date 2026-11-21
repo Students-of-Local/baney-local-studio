@@ -170,23 +170,33 @@ fn bucket(ip: IpAddr) -> String {
 }
 
 fn client_of(route: Route, headers: &HeaderMap, peer: SocketAddr) -> Option<Client> {
-    let address = |name: &str| {
-        header(headers, name)
+    match route {
+        Route::Tunnel => header(headers, "cf-connecting-ip")
             .and_then(|value| value.split(',').next())
             .and_then(|value| value.trim().parse::<IpAddr>().ok())
-            .map(bucket)
-    };
-    match route {
-        Route::Tunnel => address("cf-connecting-ip").map(|ip| Client::Key(format!("cf:{ip}"))),
+            .map(|ip| Client::Key(format!("cf:{}", bucket(ip)))),
         Route::Local => {
+            let hop = headers
+                .get_all("x-forwarded-for")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .next_back()
+                .and_then(|value| value.trim().parse::<IpAddr>().ok())
+                .unwrap_or_else(|| peer.ip());
+            let hop = match hop {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(|| v6.to_string(), |v4| v4.to_string()),
+                IpAddr::V4(v4) => v4.to_string(),
+            };
             let login = header(headers, "tailscale-user-login").map(str::trim).filter(|login| !login.is_empty());
             if let Some(login) = login {
-                return Some(Client::Key(format!("ts:{}", login.to_ascii_lowercase())));
+                return Some(Client::Key(format!("ts:{}@{hop}", login.to_ascii_lowercase())));
             }
-            if let Some(ip) = address("x-forwarded-for") {
-                return Some(Client::Key(format!("xff:{ip}")));
-            }
-            Some(if peer.ip().is_loopback() {
+            let forwarded = headers.contains_key("x-forwarded-for")
+                || headers.keys().any(|name| name.as_str().starts_with("tailscale-"));
+            Some(if forwarded {
+                Client::Key(format!("fwd:{hop}"))
+            } else if peer.ip().is_loopback() {
                 Client::Loopback
             } else {
                 Client::Key(format!("peer:{}", bucket(peer.ip())))

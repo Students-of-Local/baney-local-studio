@@ -278,9 +278,33 @@ impl Devices {
 
     pub fn revoke(&self, device: &str) -> anyhow::Result<Vec<Device>> {
         self.edit(|ledger| {
-            let (gone, kept) =
-                ledger.devices.drain(..).partition(|known| known.info.id == device || known.info.name == device);
-            ledger.devices = kept;
+            let wanted = device.to_ascii_lowercase();
+            let by_key = wanted.len() >= 8 && wanted.bytes().all(|byte| byte.is_ascii_hexdigit());
+            let matches = |test: &dyn Fn(&Device) -> bool| -> Vec<usize> {
+                ledger.devices.iter().enumerate().filter(|(_, known)| test(known)).map(|(at, _)| at).collect()
+            };
+            let mut found = matches(&|known| known.info.id == device);
+            if found.is_empty() && by_key {
+                found = matches(&|known| known.key.starts_with(&wanted));
+            }
+            if found.is_empty() {
+                found = matches(&|known| known.info.name == device);
+            }
+            if found.len() > 1 {
+                let listed: Vec<String> = found
+                    .iter()
+                    .map(|at| {
+                        let known = &ledger.devices[*at];
+                        format!("{} (key {})", known.info.id, &known.key[..known.key.len().min(16)])
+                    })
+                    .collect();
+                anyhow::bail!(
+                    "{} paired devices match {device:?}: {}; revoke one by its id or key fingerprint",
+                    found.len(),
+                    listed.join(", ")
+                );
+            }
+            let gone = found.first().map(|at| ledger.devices.remove(*at)).into_iter().collect();
             Ok(gone)
         })
     }
