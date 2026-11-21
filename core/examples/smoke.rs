@@ -592,7 +592,9 @@ fn first_run(harness: &mut Harness, work: &Path) -> anyhow::Result<Ids> {
 
 fn catalog(harness: &mut Harness) -> anyhow::Result<ModelKey> {
     harness.studio.load_models();
-    harness.pump_until("model catalog loaded", |view| view.models.is_some())?;
+    harness.pump_until("Eukhe's model catalog loaded", |view| {
+        view.models.as_ref().is_some_and(|models| models.iter().any(|model| model.provider == real_model::provider()))
+    })?;
     let models = harness.view.models.clone().unwrap_or_default();
     println!(
         "     {} models from {:?}",

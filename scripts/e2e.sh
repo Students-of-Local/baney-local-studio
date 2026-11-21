@@ -62,7 +62,7 @@ cleanup() {
     [ -S "$socket" ] && [ -n "$bin" ] && "$bin/smoke" --stop "$socket" || true
   done
   [ -n "$claimed" ] && "$window" release "$window_who" > /dev/null || true
-  rm -rf "$scratch"
+  rm -rf "$scratch" 2> /dev/null || { sleep 5; rm -rf "$scratch"; }
 }
 trap cleanup EXIT
 eukhe=$(realpath "$("${NU:-nu}" -c 'use eukhe.nu; eukhe binary . target/eukhe')")
