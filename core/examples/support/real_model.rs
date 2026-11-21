@@ -10,6 +10,7 @@ use serde_json::json;
 pub const MODEL_ENV: &str = "LOCAL_STUDIO_SMOKE_MODEL";
 pub const BASE_ENV: &str = "LOCAL_STUDIO_SMOKE_BASE_URL";
 pub const CONTEXT_ENV: &str = "LOCAL_STUDIO_SMOKE_CONTEXT";
+pub const IMAGE_ENV: &str = "LOCAL_STUDIO_SMOKE_IMAGE_MODEL";
 const BASE: &str = "http://127.0.0.1:11434/v1";
 const CONTEXT: u64 = 32_768;
 const MAX_TOKENS: u64 = 8_192;
@@ -18,6 +19,7 @@ const PRICE_PER_MILLION: f64 = 1.0;
 struct Target {
     provider: String,
     model: String,
+    image: Option<String>,
     base: String,
     context: u64,
 }
@@ -40,7 +42,18 @@ fn target() -> anyhow::Result<&'static Target> {
         Some(value) => value.trim().parse().with_context(|| format!("{CONTEXT_ENV} must be a token count"))?,
         None => CONTEXT,
     };
-    Ok(TARGET.get_or_init(|| Target { provider: provider.to_string(), model: model.to_string(), base, context }))
+    let image = match std::env::var(IMAGE_ENV).ok().filter(|value| !value.is_empty()) {
+        Some(value) => {
+            let (image_provider, image) = value
+                .split_once('/')
+                .filter(|(_, image)| !image.is_empty())
+                .with_context(|| format!("{IMAGE_ENV}={value:?} is not <provider>/<model>"))?;
+            ensure!(image_provider == provider, "{IMAGE_ENV} must use the provider of {MODEL_ENV} ({provider})");
+            Some(image.to_string()).filter(|image| image != model)
+        }
+        None => None,
+    };
+    Ok(TARGET.get_or_init(|| Target { provider: provider.to_string(), model: model.to_string(), image, base, context }))
 }
 
 pub fn provider() -> &'static str {
@@ -49,6 +62,10 @@ pub fn provider() -> &'static str {
 
 pub fn model() -> &'static str {
     TARGET.get().map_or("", |target| target.model.as_str())
+}
+
+pub fn image_model() -> &'static str {
+    TARGET.get().map_or("", |target| target.image.as_deref().unwrap_or(&target.model))
 }
 
 fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
@@ -61,6 +78,28 @@ pub fn install(agent_dir: &Path) -> anyhow::Result<()> {
     let target = target()?;
     std::fs::create_dir_all(agent_dir)?;
     let price = json!({ "input": PRICE_PER_MILLION, "output": PRICE_PER_MILLION, "cacheRead": 0, "cacheWrite": 0 });
+    let mut models = vec![json!({
+        "id": &target.model,
+        "name": &target.model,
+        "reasoning": false,
+        "input": if target.image.is_some() { json!(["text"]) } else { json!(["text", "image"]) },
+        "contextWindow": target.context,
+        "maxTokens": MAX_TOKENS,
+        "cost": price,
+    })];
+    if let Some(image) = &target.image {
+        models.push(json!({
+            "id": image,
+            "name": image,
+            "reasoning": true,
+            "thinkingLevelMap": { "off": "none" },
+            "compat": { "thinkingFormat": "openai", "supportsReasoningEffort": true },
+            "input": ["text", "image"],
+            "contextWindow": target.context,
+            "maxTokens": MAX_TOKENS,
+            "cost": price,
+        }));
+    }
     let catalog = json!({
         "providers": {
             &target.provider: {
@@ -68,15 +107,7 @@ pub fn install(agent_dir: &Path) -> anyhow::Result<()> {
                 "baseUrl": &target.base,
                 "api": "openai-completions",
                 "apiKey": "none",
-                "models": [{
-                    "id": &target.model,
-                    "name": &target.model,
-                    "reasoning": false,
-                    "input": ["text"],
-                    "contextWindow": target.context,
-                    "maxTokens": MAX_TOKENS,
-                    "cost": price,
-                }]
+                "models": models
             }
         }
     });
@@ -88,8 +119,12 @@ pub fn install(agent_dir: &Path) -> anyhow::Result<()> {
     write_private(&agent_dir.join("auth.json"), b"{}")?;
     local_studio_core::check_scratch_agent(agent_dir).map_err(anyhow::Error::msg)?;
     println!(
-        "     local model {}/{} at {}, context {}, no key (auth.json is {{}}), priced at ${PRICE_PER_MILLION} per million tokens in the scratch catalog",
-        target.provider, target.model, target.base, target.context
+        "     local model {}/{} (images: {}) at {}, context {}, no key (auth.json is {{}}), priced at ${PRICE_PER_MILLION} per million tokens in the scratch catalog",
+        target.provider,
+        target.model,
+        image_model(),
+        target.base,
+        target.context
     );
     Ok(())
 }

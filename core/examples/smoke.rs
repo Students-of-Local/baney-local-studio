@@ -786,6 +786,11 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
             && !reply_to(view.items(&first), "Template says hello").trim().is_empty()
             && idle(view, &first)
     })?;
+    let switched = real_model::image_model() != real_model::model();
+    if switched {
+        studio.set_model(first.clone(), real_model::provider().to_string(), real_model::image_model().to_string());
+        studio.set_thinking_level(first.clone(), "off".to_string());
+    }
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(640, 320, image::Rgba([40, 90, 200, 255]))
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
@@ -806,7 +811,10 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
     })?;
     let seen = reply_to(harness.view.items(&first), IMAGE);
     ensure!(seen.to_lowercase().contains("blue"), "the model did not see the blue image: {seen:?}");
-    println!("ok   the model saw the attached image ({})", seen.trim());
+    println!("ok   {} saw the attached image ({})", real_model::image_model(), seen.trim());
+    if switched {
+        studio.set_model(first.clone(), real_model::provider().to_string(), real_model::model().to_string());
+    }
     let entry = harness
         .view
         .items(&first)
