@@ -171,16 +171,14 @@ fn approval_policy(access: AccessMode) -> Value {
 
 fn sandbox(access: AccessMode) -> &'static str {
     match access {
-        AccessMode::Supervised => "read-only",
-        AccessMode::AutoAcceptEdits | AccessMode::Auto => "workspace-write",
+        AccessMode::Supervised | AccessMode::AutoAcceptEdits | AccessMode::Auto => "workspace-write",
         AccessMode::FullAccess => "danger-full-access",
     }
 }
 
 fn sandbox_policy(access: AccessMode) -> Value {
     match access {
-        AccessMode::Supervised => json!({ "type": "readOnly" }),
-        AccessMode::AutoAcceptEdits | AccessMode::Auto => json!({ "type": "workspaceWrite" }),
+        AccessMode::Supervised | AccessMode::AutoAcceptEdits | AccessMode::Auto => json!({ "type": "workspaceWrite" }),
         AccessMode::FullAccess => json!({ "type": "dangerFullAccess" }),
     }
 }
