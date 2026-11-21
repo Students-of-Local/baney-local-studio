@@ -703,6 +703,61 @@ if [ -x "$DRIVER" ]; then
     fail "second-G3 a sheet whose rows went stale is refused and installs nothing"
   fi
 
+  echo "== first-F1 / sol-F2: the grant sheets Studio offers when it scans the installed plugins"
+  fresh scan
+  mkdir -p "$S/src/granter/bin"
+  printf 'id = "granter"\nname = "Granter"\nversion = "1.0.0"\ndescription = "Installed and never granted"\ncapabilities = ["mcp-server", "ask-user", "screen-capture"]\n[mcp]\ncommand = "bin/server"\n' > "$S/src/granter/plugin.toml"
+  script "$S/src/granter/bin/server" granter
+  ls_ plugin install "$S/src/granter" > /dev/null
+  H=$D/plugins/handmade
+  manifest "$H"
+  script "$H/bin/server" handmade
+  mkdir -p "$H/.git/hooks"
+  script "$H/.git/hooks/post-checkout" hook
+  E=$D/plugins/edited
+  manifest "$E"
+  script "$E/bin/server" reviewed
+  Q=$D/plugins/dropped
+  folder() { (cd "$1" && find . -print0 | sort -z | xargs -0 ls -ld | awk '{ print $1, $NF }'; find . -type f -print0 | sort -z | xargs -0 shasum) | shasum | cut -c1-16; }
+  kept=$(folder "$H")
+  hook="printf '#!/bin/sh\necho swapped\n' > $E/bin/server && mkdir -p $Q/bin && printf 'id = \"dropped\"\nversion = \"1.0.0\"\ndescription = \"Dropped in\"\ncapabilities = [\"mcp-server\"]\n[mcp]\ncommand = \"bin/server\"\n' > $Q/plugin.toml && printf '#!/bin/sh\n' > $Q/bin/server && chmod 755 $Q/bin/server"
+  out=$(CONSENT_DRIVER_HOOK=$hook drive scan consent:granter@1.0.0=install consent:handmade@1.0.0=cancel consent:edited@1.0.0=install)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  grants: granter '$(granted granter)', handmade '$(granted handmade)', edited '$(granted edited)'; handmade folder $kept before, $(folder "$H") after"
+  if [ "$(echo "$out" | grep -A1 '^OPEN consent:granter@1.0.0$' | sed -n 's/^SHEET .* rows=//p')" = "mcp-server:needed,ask-user:needed,screen-capture:sensitive" ]; then
+    pass "first-F1 a plugin installed with plugin install gets a consent:<id>@<version> sheet at startup"
+  else
+    fail "first-F1 a plugin installed with plugin install gets a consent:<id>@<version> sheet at startup"
+  fi
+  if echo "$out" | grep -q '^DONE consent:granter@1.0.0: Granter 1.0.0 has 2 new permissions, but it is off: .*(local-studio plugin grant granter screen-capture)$' \
+    && [ "$(granted granter)" = "ask-user,mcp-server" ]; then
+    pass "first-F1 Install on the scan sheet grants the needed rows and says the plugin stays off"
+  else
+    fail "first-F1 Install on the scan sheet grants the needed rows and says the plugin stays off"
+  fi
+  if echo "$out" | grep -q '^FAILED consent:edited@1.0.0: edited changed after the sheet opened, so nothing was granted$' \
+    && [ "$(granted edited)" = none ]; then
+    pass "first-F1 a file edited between the offer and the answer is refused"
+  else
+    fail "first-F1 a file edited between the offer and the answer is refused"
+  fi
+  if echo "$out" | grep -q '^DONE consent:handmade@1.0.0: Nothing installed or granted for handmade$' \
+    && [ "$(granted handmade)" = none ] && [ "$(folder "$H")" = "$kept" ]; then
+    pass "first-F1 Cancel on the scan sheet leaves the plugin untouched"
+  else
+    fail "first-F1 Cancel on the scan sheet leaves the plugin untouched"
+  fi
+  if echo "$out" | grep -q '^OPEN-AFTER consent:dropped@1.0.0$'; then
+    pass "first-F1 the scan after the answers offers only the new plugin, no answered sheet again"
+  else
+    fail "first-F1 the scan after the answers offers only the new plugin, no answered sheet again"
+  fi
+  if echo "$out" | grep -A2 '^OPEN consent:handmade@1.0.0$' | grep -q '^SHEET .* findings=1 ' \
+    && echo "$out" | grep -q '^FINDING executable not named in the manifest: .git/hooks/post-checkout$'; then
+    pass "sol-F2 the scan sheet lists an executable under .git"
+  else
+    fail "sol-F2 the scan sheet lists an executable under .git"
+  fi
   echo "== sol-F1: the staged copy changes while the install sheet is open"
   for change in edit add; do
     fresh "f1$change"
