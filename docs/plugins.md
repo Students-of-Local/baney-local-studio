@@ -9,7 +9,14 @@ What a capability grant covers, when it carries over to an update, and which `mc
 - the record's `tree` equals the hash of the plugin folder as it is now, and
 - every capability it asks for is in the record.
 
-Anything else is "needs consent": its skills, prompts and commands still work, and it gets no MCP server. Local Studio hashes the folder each time it checks consent, so a folder changed in place, or replaced by hand, needs consent again. That hash covers the whole folder, `.git` included (`plugin hash` skips a top-level `.git` for catalog pins), and skips only `.DS_Store` files, which Finder writes and no runtime loads. A plugin whose `[mcp]` command or args name a `.DS_Store` file does not load. A plugin that keeps state should keep it outside its own folder; Local Studio's entry for its server sets `PYTHONDONTWRITEBYTECODE`, so Python writes no `__pycache__` there.
+Anything else is "needs consent": its skills, prompts and commands still work, and it gets no MCP server. Local Studio hashes the folder each time it checks consent (once per scan), so a folder changed in place, or replaced by hand, needs consent again. The change takes effect at the next sync (the next Studio scan or `plugin` command), not at the moment of the edit: until then, sessions can still start the old entry. A plugin that keeps state should keep it outside its own folder; Local Studio's entry for its server sets `PYTHONDONTWRITEBYTECODE`, so Python writes no `__pycache__` there.
+
+The consent hash covers the whole folder, a top-level `.git` included, except:
+
+- `.DS_Store` files, which Finder writes and no runtime loads, and
+- the state git rewrites on its own: `.git/index`, `.git/FETCH_HEAD`, `.git/logs/`, `.git/objects/` and `.git/refs/remotes/`, so `git status` and `git fetch` in a checkout keep consent. A commit, checkout or pull changes the tree and needs consent again.
+
+(`plugin hash` skips a top-level `.git` entirely, for catalog pins.) A plugin whose `[mcp]` command or args name a `.DS_Store` file or anything inside `.git` does not load. A plugin with capabilities is refused, and can't be granted, while its folder holds any of these: a symlink that leaves the folder, dangles, or points at something the hash skips (a `.DS_Store`, or the git state above); a file over 10 MB; or anything that is not a file, folder or symlink. `plugin list` shows `refused` with the reason. Each check reads no file over 10 MB, so a large file costs a stat, not a read.
 
 Grants from before this rule have no `tree`, so each plugin with capabilities asks once more after the upgrade. Granting it again records the tree and leaves the source empty (unknown origin). The next catalog install of that id counts as an update of it; an install from git or a folder drops it.
 
@@ -30,6 +37,10 @@ The source is the catalog id, the git URL without its commit, or the folder's ab
 Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true` and `"PYTHONDONTWRITEBYTECODE": {"env": "PATH"}` in its `env` (Eukhe takes env values only as host variable names, and Python needs any non-empty value). Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
 
 - an entry tagged `"localStudioPlugin": true`, or
-- an untagged entry named `plugin-<name>` whose `command` or `cwd` lies inside the plugins folder (entries from before the tag, including one whose plugin moved its command or no longer loads).
+- an untagged entry named `plugin-<name>` whose `command` is an absolute path inside the plugins folder, with no `..` (entries from before the tag, including one whose plugin moved its command or no longer loads). Its `cwd` does not count: Local Studio never writes a command outside the plugins folder.
 
-Every other entry stays, whatever its name, including `plugin-manager` or an untagged `plugin-<name>` that runs code from outside the plugins folder. If a ready plugin's name is already taken by an entry Local Studio did not write, the user's entry stays, that plugin's server is off, and sync reports the name as an error (a notice in the app, an `error:` line in the CLI).
+Every other entry stays, whatever its name, including `plugin-manager`, an untagged `plugin-<name>` that runs code from outside the plugins folder even with its `cwd` inside it, and a tagged entry copied to a name without the `plugin-` prefix. If a ready plugin's name is already taken by an entry Local Studio did not write, the user's entry stays, that plugin's server is off, and sync reports the name as an error (a notice in the app, an `error:` line in the CLI).
+
+## Downgrades
+
+Builds from before grants were bound to code reject a `grants.json` that has `tree` and `source` fields. Running one of them on the same data dir fails every `plugin` command, and its Studio treats every plugin as ungranted and removes their MCP entries. Go back to a build with this rule to recover; the file itself is fine.
