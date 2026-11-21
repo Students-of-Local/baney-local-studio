@@ -586,10 +586,14 @@ for line in sys.stdin:
         Ok(agent)
     }
 
-    fn drop_web_search(agent: &Path) -> anyhow::Result<()> {
+    fn put_server(agent: &Path, name: &str, server: Option<Value>) -> anyhow::Result<()> {
         let path = agent.join("settings.json");
         let mut settings: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-        settings.get_mut("mcpServers").and_then(Value::as_object_mut).context("mcpServers")?.remove("web-search");
+        let servers = settings.get_mut("mcpServers").and_then(Value::as_object_mut).context("mcpServers")?;
+        match server {
+            Some(server) => servers.insert(name.to_string(), server),
+            None => servers.remove(name),
+        };
         write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
         Ok(())
     }
@@ -703,6 +707,36 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(report)
     }
 
+    fn refused(
+        harness: &mut Harness,
+        key: &str,
+        text: &str,
+        on: ThreadSettings,
+        hits: &AtomicUsize,
+    ) -> anyhow::Result<()> {
+        let studio = Arc::clone(&harness.studio);
+        let (start, before) = (hits.load(Ordering::SeqCst), cloud_tokens(&usage(harness, &format!("{key}-before"))?));
+        let project = harness.view.projects[0].id.clone();
+        studio.start_thread(key.to_string(), Some(project), prompt(text), on);
+        harness.pump_until(&format!("{key} thread started"), STEP, |view| view.thread(key).is_some())?;
+        let thread = harness.view.thread(key).context("thread")?;
+        let refused = harness.pump_until(&format!("{key} refused"), Duration::from_secs(20), |view| {
+            view.refusals.iter().any(|(id, _, _)| *id == thread)
+        });
+        std::thread::sleep(Duration::from_secs(3));
+        let after = cloud_tokens(&usage(harness, &format!("{key}-after"))?);
+        let sent = hits.load(Ordering::SeqCst) - start;
+        studio.abort(thread.clone());
+        harness.pump_until(&format!("{key} thread stopped"), STEP, |view| view.idle(&thread))?;
+        let message = harness.view.refusals.iter().rev().find(|(id, _, _)| *id == thread).map(|(_, text, _)| text);
+        ensure!(
+            refused.is_ok() && sent == 0 && after == before,
+            "{text:?}: refusal {message:?}, {sent} connections to {CLOUD_HOST}, {CLOUD} usage {before:?} -> {after:?}"
+        );
+        println!("     {key}: {message:?}");
+        Ok(())
+    }
+
     fn cloud_tokens(report: &UsageReport) -> (u64, u64) {
         report
             .by_model
@@ -792,7 +826,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             view.refusals.iter().any(|(thread, message, _)| *thread == web_thread && message.contains("web-search"))
         })?;
         println!("ok   check 4a: a local thread with a connected web-search MCP server refuses /ledger and names it");
-        drop_web_search(agent)?;
+        put_server(agent, "web-search", None)?;
 
         studio.start_thread("cloud".to_string(), Some(project.clone()), prompt(ask), settings(CLOUD, CLOUD_MODEL));
         harness.pump_until("cloud thread started", step, |view| view.thread("cloud").is_some())?;
@@ -822,6 +856,19 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             local.model
         );
 
+        let mut failed: Vec<String> = Vec::new();
+        let mut record = |name: &str, result: anyhow::Result<()>| match result {
+            Ok(()) => println!("ok   scenario {name}"),
+            Err(error) => {
+                println!("FAIL scenario {name}: {error:#}");
+                failed.push(name.to_string());
+            }
+        };
+        let off = json!({ "type": "stdio", "command": "/usr/bin/true", "enabled": false });
+        put_server(agent, "web-off", Some(off))?;
+        record("server-off", refused(harness, "off", ask, settings(LOCAL, MID), hits));
+        put_server(agent, "web-off", None)?;
+        ensure!(failed.is_empty(), "failed scenarios: {}", failed.join(", "));
         studio.run_local(cloud.clone());
         harness.pump_until("switched to the local model and running", step, |view| {
             view.threads.iter().any(|row| {

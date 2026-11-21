@@ -155,7 +155,10 @@ impl Actor {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter(|connection| connection.get("connected").and_then(Value::as_bool) == Some(true))
+            .filter(|connection| {
+                let flag = |key: &str| connection.get(key).and_then(Value::as_bool) != Some(false);
+                flag("userDeclared") || flag("connected")
+            })
             .filter_map(|connection| connection.get("server").and_then(Value::as_str))
             .filter(|server| !ours.iter().any(|own| own == server))
             .map(str::to_string)
