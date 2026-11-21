@@ -184,13 +184,13 @@ fn place(
     if !unlinked.is_empty() {
         return Err(unlinked);
     }
-    let tree = hash_entries(source, &entries).map_err(|error| vec![error])?;
-    if let Some(expected) = expected.filter(|expected| *expected != tree) {
-        return Err(vec![format!("tree hash mismatch: the catalog pins {expected}, the fetched plugin is {tree}")]);
-    }
     let refusals = refusals(source, &entries, Walk::Install);
     if !refusals.is_empty() {
         return Err(refusals);
+    }
+    let tree = hash_entries(source, &entries).map_err(|error| vec![error])?;
+    if let Some(expected) = expected.filter(|expected| *expected != tree) {
+        return Err(vec![format!("tree hash mismatch: the catalog pins {expected}, the fetched plugin is {tree}")]);
     }
     let id = manifest_id(source)?;
     let staging = Scratch::new(root, "install")?;
@@ -313,7 +313,7 @@ enum Walk {
 }
 
 fn skipped(path: &Path, walk: Walk) -> bool {
-    walk == Walk::Install && path.starts_with(GIT)
+    walk == Walk::Install && path.components().next().is_some_and(|part| named(part.as_os_str(), GIT))
 }
 
 pub(crate) fn named(part: &std::ffi::OsStr, name: &str) -> bool {
@@ -355,7 +355,7 @@ fn walk(root: &Path, exclude: &[String], mode: Walk) -> Result<Vec<Entry>, Strin
                 Err(error) if gone(&error) => continue,
                 Err(error) => return Err(error.to_string()),
             };
-            if name == UNHASHED && meta.is_file() {
+            if named(&name, UNHASHED) && meta.is_file() {
                 continue;
             }
             let text = path
@@ -438,22 +438,47 @@ fn refusals(root: &Path, entries: &[Entry], mode: Walk) -> Vec<String> {
     refusals
 }
 
+fn read_regular(path: &Path) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let file = crate::platform::open_without_waiting(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    file.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+    Ok(Some((bytes, crate::platform::is_executable(&meta))))
+}
+
+#[cfg(debug_assertions)]
+fn test_gate() {
+    let Some(gate) = std::env::var_os("LOCAL_STUDIO_TEST_HASH_GATE").map(PathBuf::from) else { return };
+    let _ = std::fs::write(gate.join("walked"), b"");
+    let started = std::time::Instant::now();
+    while !gate.join("go").exists() && started.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    test_gate();
     let mut listing = String::new();
     for entry in entries {
         match &entry.kind {
-            Kind::File { executable, .. } => {
+            Kind::File { .. } => {
                 let path = root.join(&entry.path);
-                let mut bytes: Vec<u8> = Vec::new();
-                match std::fs::File::open(&path).and_then(|file| file.take(MAX_FILE + 1).read_to_end(&mut bytes)) {
-                    Ok(_) => {}
+                let (bytes, executable) = match read_regular(&path) {
+                    Ok(Some(read)) => read,
+                    Ok(None) => {
+                        return Err(format!("{} changed while it was read: it is no longer a regular file", entry.path))
+                    }
                     Err(error) if gone(&error) => continue,
                     Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
-                }
+                };
                 if bytes.len() as u64 > MAX_FILE {
                     return Err(format!("file over 10 MB: {}", entry.path));
                 }
-                let mode = if *executable { "x" } else { "-" };
+                let mode = if executable { "x" } else { "-" };
                 let _ = writeln!(listing, "F {mode} {} {}", hex(&Sha256::digest(&bytes)), entry.path);
             }
             Kind::Link(target) => {
@@ -467,17 +492,40 @@ fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
 }
 
 pub fn tree_hash(root: &Path, exclude: &[String]) -> Result<String, String> {
-    hash_entries(root, &walk(root, exclude, Walk::Install)?)
-}
-
-/// The hash consent checks: the whole folder as it is now, `.git` included, so code there is covered too.
-pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
-    let entries = walk(root, &[], Walk::Consent)?;
-    let refused = refusals(root, &entries, Walk::Consent);
+    let entries = walk(root, exclude, Walk::Install)?;
+    let refused = refusals(root, &entries, Walk::Install);
     if !refused.is_empty() {
-        return Err(refused.join("; "));
+        return Err(refused.join("\n"));
     }
     hash_entries(root, &entries)
+}
+
+/// The folder consent checks: all of it as it is now, `.git` included, so code there is covered too.
+pub(crate) struct Live<'a> {
+    root: &'a Path,
+    entries: Vec<Entry>,
+}
+
+impl<'a> Live<'a> {
+    pub(crate) fn check(root: &'a Path) -> Result<Self, String> {
+        if std::fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(format!("the plugin folder is a symlink: {}", root.display()));
+        }
+        let entries = walk(root, &[], Walk::Consent)?;
+        let refused = refusals(root, &entries, Walk::Consent);
+        if !refused.is_empty() {
+            return Err(refused.join("; "));
+        }
+        Ok(Self { root, entries })
+    }
+
+    pub(crate) fn hash(&self) -> Result<String, String> {
+        hash_entries(self.root, &self.entries)
+    }
+}
+
+pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
+    Live::check(root)?.hash()
 }
 
 fn hex(bytes: &[u8]) -> String {

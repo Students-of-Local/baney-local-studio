@@ -218,6 +218,12 @@ pub fn scan(root: &Path) -> Scan {
 }
 
 pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
+    if std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(vec![format!(
+            "the plugin folder is a symlink: {} (install the folder it points at with local-studio plugin install <dir>)",
+            dir.display()
+        )]);
+    }
     let manifest_path = dir.join(MANIFEST);
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|error| vec![format!("cannot read {}: {error}", manifest_path.display())])?;
