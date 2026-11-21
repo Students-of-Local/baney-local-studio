@@ -1,8 +1,9 @@
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use local_studio_core::plugins::{self, Capability, Catalog, Consent, Grants, Plugin, Source};
-use local_studio_core::tunnel::{self, Ports, Status, Tunnel};
+use local_studio_core::tunnel::{self, Cloudflared, Failure, Ports, Status, Tunnel};
 
 const USAGE: &str = "usage: local-studio --version
        local-studio plugin validate <dir>
@@ -13,13 +14,20 @@ const USAGE: &str = "usage: local-studio --version
        local-studio plugin capabilities
        local-studio plugin hash <dir> [excluded path...]
        local-studio tunnel status [--json]
-       local-studio tunnel request [--serve <port>] [--mcp <port>]
-       local-studio tunnel up | down | release
+       local-studio tunnel request [--serve <port>] [--mcp <port>] [--json]
+       local-studio tunnel up [--yes] [--json]
+       local-studio tunnel down | release [--json]
+       local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
+       local-studio tunnel cloudflared [--yes] [--json]
        local-studio tunnel byo";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let json = args.first() == Some(&"tunnel") && args.contains(&"--json");
+    if json {
+        args.retain(|arg| *arg != "--json");
+    }
     let outcome = match args.as_slice() {
         ["--version"] => {
             println!("local-studio {} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL);
@@ -40,27 +48,40 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
-        ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), false),
-        ["tunnel", "status", "--json"] => run_tunnel(|t| Box::pin(t.status()), true),
-        ["tunnel", "request", flags @ ..] => request_ports(flags).and_then(|ports| {
+        ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), json),
+        ["tunnel", "request", flags @ ..] => request_ports(flags, tunnel::DEFAULT_PORTS).and_then(|ports| {
             run_tunnel(
                 move |t| {
-                    Box::pin(t.request(ports, option_env!("LOCAL_STUDIO_CHANNEL").unwrap_or("dev"), |url| {
-                        println!("Open this address and sign in with GitHub: {url}");
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    Box::pin(t.request(ports, option_env!("LOCAL_STUDIO_CHANNEL").unwrap_or("dev"), move |url| {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({ "state": "confirming", "next": "needs_signin", "signinUrl": url })
+                            );
+                        } else {
+                            println!("Open this address and sign in with GitHub: {url}");
+                        }
+                        let _ = std::io::stdout().flush();
                         open_browser(url);
                     }))
                 },
-                false,
+                json,
             )
         }),
-        ["tunnel", "up"] => {
-            let cloudflared =
-                std::env::var_os("LS_CLOUDFLARED").map_or_else(|| PathBuf::from("cloudflared"), PathBuf::from);
-            run_tunnel(move |t| Box::pin(async move { t.up(&cloudflared).await }), false)
+        ["tunnel", "up"] => run_tunnel(|t| Box::pin(t.up(consent(false, json))), json),
+        ["tunnel", "up", "--yes"] => run_tunnel(|t| Box::pin(t.up(consent(true, json))), json),
+        ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), json),
+        ["tunnel", "release"] => run_tunnel(|t| Box::pin(t.release()), json),
+        ["tunnel", "ports", flags @ ..] if !flags.is_empty() => {
+            let unset = Ports { serve: 0, mcp: 0 };
+            request_ports(flags, unset).and_then(|ports| {
+                let serve = (ports.serve != 0).then_some(ports.serve);
+                let mcp = (ports.mcp != 0).then_some(ports.mcp);
+                run_tunnel(move |t| Box::pin(t.set_ports(serve, mcp)), json)
+            })
         }
-        ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), false),
-        ["tunnel", "release"] => run_tunnel(|t| Box::pin(t.release()), false),
+        ["tunnel", "cloudflared"] => cloudflared(false, json),
+        ["tunnel", "cloudflared", "--yes"] => cloudflared(true, json),
         ["tunnel", "byo"] => byo(),
         _ => {
             eprintln!("{USAGE}");
@@ -224,15 +245,25 @@ fn revoke(id: &str, names: &[&str]) -> Result<(), String> {
     sync(&root)
 }
 
-type TunnelCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Status, String>> + 'a>>;
+type TunnelCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Status, Failure>> + 'a>>;
+
+fn failed(failure: &Failure, as_json: bool) -> String {
+    if !as_json {
+        return failure.message.clone();
+    }
+    let error =
+        serde_json::json!({ "state": "error", "next": "error", "code": failure.code, "message": failure.message });
+    println!("{error}");
+    String::new()
+}
 
 fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: bool) -> Result<(), String> {
-    let tunnel = Tunnel::open(None)?;
+    let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
     let runtime =
         tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
-    let status = runtime.block_on(call(&tunnel))?;
+    let status = runtime.block_on(call(&tunnel)).map_err(|failure| failed(&failure, as_json))?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&status).map_err(|error| error.to_string())?);
+        println!("{}", serde_json::to_string(&status).map_err(|error| error.to_string())?);
         return Ok(());
     }
     println!("{}: {}", status.state, status.message);
@@ -251,9 +282,8 @@ fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: 
     Ok(())
 }
 
-fn request_ports(flags: &[&str]) -> Result<Ports, String> {
-    let usage = "usage: local-studio tunnel request [--serve <port>] [--mcp <port>]";
-    let mut ports = tunnel::DEFAULT_PORTS;
+fn request_ports(flags: &[&str], mut ports: Ports) -> Result<Ports, String> {
+    let usage = "usage: local-studio tunnel request | ports [--serve <port>] [--mcp <port>]";
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         let value: u16 = rest.next().and_then(|value| value.parse().ok()).ok_or(usage)?;
@@ -288,6 +318,54 @@ fn opener() -> std::process::Command {
     let mut command = std::process::Command::new("rundll32.exe");
     command.arg("url.dll,FileProtocolHandler");
     command
+}
+
+fn consent(yes: bool, as_json: bool) -> impl FnOnce(&Path, &[String]) -> bool {
+    move |target, notes| {
+        if yes {
+            return true;
+        }
+        if as_json || !std::io::stdin().is_terminal() {
+            return false;
+        }
+        for note in notes {
+            println!("{note}");
+        }
+        print!(
+            "Download cloudflared {} from github.com/cloudflare/cloudflared, check its pinned SHA-256, and install it at {}? [y/N] ",
+            tunnel::CLOUDFLARED_VERSION,
+            target.display()
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    }
+}
+
+fn cloudflared(yes: bool, as_json: bool) -> Result<(), String> {
+    let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+    let found = runtime
+        .block_on(tunnel.cloudflared(consent(yes, as_json), "local-studio tunnel cloudflared --yes"))
+        .map_err(|failure| failed(&failure, as_json))?;
+    if as_json {
+        let pinned = matches!(found, Cloudflared::Pinned(_));
+        let path = found.path().display().to_string();
+        let version = tunnel::CLOUDFLARED_VERSION;
+        println!(
+            "{}",
+            serde_json::json!({ "state": "ready", "next": "ready", "path": path, "pinned": pinned, "version": version })
+        );
+        return Ok(());
+    }
+    match found {
+        Cloudflared::Dev(path) => println!("LS_CLOUDFLARED: {} (a dev override, not checked)", path.display()),
+        Cloudflared::Pinned(path) => {
+            println!("cloudflared {} at {} (pinned digest checked)", tunnel::CLOUDFLARED_VERSION, path.display());
+        }
+    }
+    Ok(())
 }
 
 fn byo() -> Result<(), String> {
