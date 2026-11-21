@@ -14,7 +14,7 @@ use serde_json::Map;
 #[path = "support/real_model.rs"]
 mod real_model;
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(120);
+const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const MARK: &str = "step-done";
 const PROMPT: &str = "Say one short sentence about what you will do, then use the bash tool to run exactly this command once: `sleep 3 && echo step-done`. After it finishes, reply with only the word done.";
 
@@ -161,6 +161,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Machines { .. }
         | Update::Pairing { .. }
         | Update::PairedDevices { .. }
+        | Update::Consents { .. }
         | Update::Commands { .. }
         | Update::Skills { .. }
         | Update::Subagents { .. }
@@ -279,7 +280,7 @@ fn main() -> anyhow::Result<()> {
     let agent_dir = root.join("agent");
     let work = root.join("work");
     std::fs::create_dir_all(&work)?;
-    let _credentials = real_model::install(&agent_dir)?;
+    real_model::install(&agent_dir)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     let socket = root.join("d.sock");

@@ -11,6 +11,7 @@ final class StudioStore {
     private(set) var kernel: KernelState?
     var kernelNoticeHidden = false
     private(set) var daemonMismatch: DaemonMismatch?
+    private(set) var consents: [ConsentRequest] = []
 
     let inbox: InboxStore
     let conversation: ConversationStore
@@ -135,6 +136,17 @@ final class StudioStore {
         inbox.setPending(conversation.pendingRows(), aliases: conversation.aliases, workingSection: pages.settings?.workingSection ?? true)
     }
 
+    func answerConsent(_ consent: ConsentRequest, _ answer: ConsentAnswer) {
+        consents.removeAll { $0.request == consent.request }
+        requests.watch(consent.request) { [weak self] outcome in
+            switch outcome {
+            case .done(let message): self?.post(.info, message)
+            case .failed(let message): self?.post(.error, message)
+            }
+        }
+        core.run { $0.answerConsent(request: consent.request, answer: answer) }
+    }
+
     func post(_ level: NoticeLevel, _ text: String) {
         notice = StudioNotice(level: level, text: text)
     }
@@ -192,6 +204,8 @@ final class StudioStore {
             if let problem = conversation.apply(thread: thread, op: op) {
                 post(.error, problem)
             }
+        case .consents(let consents):
+            self.consents = consents
         case .approvals(let thread, let approvals):
             conversation.setApprovals(thread: thread, approvals: approvals)
         case .questions(let thread, let request, let source, let questions):

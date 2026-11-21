@@ -88,7 +88,7 @@ fn installed(root: &Path, source: &Source, catalog: &Catalog) -> (Plugin, Consen
 fn grant(root: &Path, id: &str, capabilities: &[Capability]) {
     let plugin = load(&root.join(id)).unwrap_or_else(|errors| panic!("{errors:?}"));
     let mut grants = Grants::load(root).unwrap_or_else(|error| panic!("{error}"));
-    grants.grant(&plugin, capabilities).unwrap_or_else(|error| panic!("{error}"));
+    grants.grant(&plugin, capabilities, None).unwrap_or_else(|error| panic!("{error}"));
     grants.save(root).unwrap_or_else(|error| panic!("{error}"));
 }
 

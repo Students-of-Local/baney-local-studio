@@ -18,10 +18,10 @@ use serde_json::Map;
 #[path = "support/real_model.rs"]
 mod real_model;
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(150);
+const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const MARK: &str = "smoke-ok";
 const RENAMED: &str = "Renamed smoke";
-const STEER: &str = "Also include the word steered in your final reply.";
+const STEER: &str = "Change of plan: after the command, reply with only the word steered instead of done.";
 
 fn bash_prompt(command: &str) -> String {
     format!("Use the bash tool to run exactly this command once: `{command}`. Then reply with only the word done.")
@@ -216,6 +216,7 @@ impl Harness {
             | Update::Machines { .. }
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
+            | Update::Consents { .. }
             | Update::LocalDashboard { .. }
             | Update::Providers { .. }
             | Update::ProviderModels { .. }
@@ -373,15 +374,15 @@ fn main() -> anyhow::Result<()> {
     let data = root.join("data");
     std::fs::create_dir_all(&work)?;
     std::fs::create_dir_all(agent_dir.join("skills").join("smoke-skill"))?;
-    let _credentials = real_model::install(&agent_dir)?;
+    real_model::install(&agent_dir)?;
     std::fs::create_dir_all(agent_dir.join("prompts"))?;
     std::fs::write(
         agent_dir.join("skills").join("smoke-skill").join("SKILL.md"),
-        "---\nname: smoke-skill\ndescription: Answers the smoke check\n---\nSay smoke-skill-body.",
+        "---\nname: smoke-skill\ndescription: Answers the smoke check\n---\nReply with only the words smoke-skill-body. Do not call any tools.",
     )?;
     std::fs::write(
         agent_dir.join("prompts").join("smoke-template.md"),
-        "---\ndescription: A smoke template\n---\nTemplate says $1",
+        "---\ndescription: A smoke template\n---\nReply with only the words Template says $1. Do not call any tools.",
     )?;
     git(&work, &["init", "-q", "-b", "main"])?;
     git(
@@ -495,6 +496,7 @@ struct Ids {
 
 const REWIND: &str = "Reply with only the word rewound.";
 const IMAGE: &str = "What color fills this image? Reply with one word.";
+const TEMPLATE_HELLO: &str = "Reply with only the words Template says hello. Do not call any tools.";
 const FAN: &str = "Reply with only the word fan.";
 
 fn drive(config: &StudioConfig, work: &Path) -> anyhow::Result<()> {
@@ -599,7 +601,9 @@ fn first_run(harness: &mut Harness, work: &Path) -> anyhow::Result<Ids> {
 
 fn catalog(harness: &mut Harness) -> anyhow::Result<ModelKey> {
     harness.studio.load_models();
-    harness.pump_until("model catalog loaded", |view| view.models.is_some())?;
+    harness.pump_until("Eukhe's model catalog loaded", |view| {
+        view.models.as_ref().is_some_and(|models| models.iter().any(|model| model.provider == real_model::provider()))
+    })?;
     let models = harness.view.models.clone().unwrap_or_default();
     println!(
         "     {} models from {:?}",
@@ -607,16 +611,16 @@ fn catalog(harness: &mut Harness) -> anyhow::Result<ModelKey> {
         models.iter().map(|model| &model.provider).collect::<BTreeSet<_>>()
     );
     ensure!(
-        models
-            .iter()
-            .any(|model| model.provider == real_model::PROVIDER && model.id == real_model::MODEL && model.configured),
+        models.iter().any(|model| model.provider == real_model::provider()
+            && model.id == real_model::model()
+            && model.configured),
         "{}/{} is not a configured model in the catalog",
-        real_model::PROVIDER,
-        real_model::MODEL
+        real_model::provider(),
+        real_model::model()
     );
     let other = models
         .iter()
-        .find(|model| model.id != real_model::MODEL)
+        .find(|model| model.id != real_model::model())
         .context("the catalog has no model besides the real one")?;
     Ok(ModelKey { provider: other.provider.clone(), model: other.id.clone() })
 }
@@ -787,16 +791,32 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
     })?;
     studio.send("send-template".to_string(), first.clone(), prompt("/smoke-template hello"), Delivery::Queue);
     harness.pump_until("prompt template expanded with its argument and answered", |view| {
-        user_texts(view, &first).iter().any(|text| text == "Template says hello")
-            && !reply_to(view.items(&first), "Template says hello").trim().is_empty()
+        user_texts(view, &first).iter().any(|text| text == TEMPLATE_HELLO)
+            && !reply_to(view.items(&first), TEMPLATE_HELLO).trim().is_empty()
             && idle(view, &first)
     })?;
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(640, 320, image::Rgba([40, 90, 200, 255]))
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    studio.start_thread(
+        "draft-image".to_string(),
+        Some(ids.project.clone()),
+        prompt("Reply with the one word ready."),
+        settings(AccessMode::Supervised),
+    );
+    harness.pump_until("image thread started and answered", |view| {
+        view.thread("draft-image").is_some_and(|id| view.done_by_thread.get(&id) == Some(&1) && idle(view, &id))
+    })?;
+    let pictured = harness.view.thread("draft-image").context("no image thread")?;
+    studio.select_thread(Some(pictured.clone()));
+    harness.pump_until("image thread focused", |view| view.resets.get(&pictured).is_some_and(|count| *count >= 1))?;
+    if real_model::image_model() != real_model::model() {
+        studio.set_model(pictured.clone(), real_model::provider().to_string(), real_model::image_model().to_string());
+        studio.set_thinking_level(pictured.clone(), "off".to_string());
+    }
     studio.send(
         "send-image".to_string(),
-        first.clone(),
+        pictured.clone(),
         PromptDraft {
             text: IMAGE.to_string(),
             images: vec![ImageAttachment { mime_type: "image/png".to_string(), data: png.clone() }],
@@ -805,16 +825,16 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
         Delivery::Queue,
     );
     harness.pump_until("user image carried as a downscaled thumbnail and answered", |view| {
-        view.items(&first).iter().any(|item| matches!(&item.kind, ItemKind::User { thumbnails, entry: Some(_), .. } if thumbnails.len() == 1 && thumbnails[0].width == 512 && thumbnails[0].height == 256))
-            && !reply_to(view.items(&first), IMAGE).trim().is_empty()
-            && idle(view, &first)
+        view.items(&pictured).iter().any(|item| matches!(&item.kind, ItemKind::User { thumbnails, entry: Some(_), .. } if thumbnails.len() == 1 && thumbnails[0].width == 512 && thumbnails[0].height == 256))
+            && !reply_to(view.items(&pictured), IMAGE).trim().is_empty()
+            && idle(view, &pictured)
     })?;
-    let seen = reply_to(harness.view.items(&first), IMAGE);
+    let seen = reply_to(harness.view.items(&pictured), IMAGE);
     ensure!(seen.to_lowercase().contains("blue"), "the model did not see the blue image: {seen:?}");
-    println!("ok   the model saw the attached image ({})", seen.trim());
+    println!("ok   {} saw the attached image ({})", real_model::image_model(), seen.trim());
     let entry = harness
         .view
-        .items(&first)
+        .items(&pictured)
         .iter()
         .rev()
         .find_map(|item| match &item.kind {
@@ -827,8 +847,11 @@ fn round_four_resources(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> 
             | ItemKind::Compaction { .. } => None,
         })
         .context("the image message has no entry")?;
-    studio.load_message_image("image-1".to_string(), first.clone(), entry, 0);
+    studio.load_message_image("image-1".to_string(), pictured.clone(), entry, 0);
     harness.pump_until("full image loaded on demand", |view| view.image.as_ref() == Some(&png))?;
+    let before = harness.view.resets.get(&first).copied().unwrap_or(0);
+    studio.select_thread(Some(first.clone()));
+    harness.pump_until("first thread focused again", |view| view.resets.get(&first).copied().unwrap_or(0) > before)?;
     Ok(())
 }
 
@@ -880,7 +903,7 @@ fn round_four_sessions(harness: &mut Harness, ids: &Ids, always: &str) -> anyhow
     harness.pump_until("agent session restarted", |view| {
         view.notices.iter().any(|notice| notice == "The agent session restarted.") && view.row(always).is_some()
     })?;
-    let fan = ModelKey { provider: real_model::PROVIDER.to_string(), model: real_model::MODEL.to_string() };
+    let fan = ModelKey { provider: real_model::provider().to_string(), model: real_model::model().to_string() };
     studio.start_threads(
         "draft-fan".to_string(),
         Some(ids.project.clone()),

@@ -642,7 +642,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let loaded = plugin_store::load(&dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
         ensure!(loaded.local_only, "the fixture did not load as local_only");
         let mut grants = Grants::load(plugins).map_err(anyhow::Error::msg)?;
-        grants.grant(&loaded, &[Capability::McpServer]).map_err(anyhow::Error::msg)?;
+        grants.grant(&loaded, &[Capability::McpServer], None).map_err(anyhow::Error::msg)?;
         grants.save(plugins).map_err(anyhow::Error::msg)?;
         Ok(())
     }

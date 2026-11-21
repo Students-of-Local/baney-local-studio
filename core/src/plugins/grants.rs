@@ -9,6 +9,10 @@ use super::{Capability, Plugin};
 
 pub const GRANTS: &str = "grants.json";
 
+pub struct GrantsLock {
+    _file: std::fs::File,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grants {
@@ -35,6 +39,15 @@ pub enum Consent {
 }
 
 impl Grants {
+    pub fn lock(root: &Path) -> Result<GrantsLock, String> {
+        crate::workspace::providers::create_private_dir(root)?;
+        let path = root.join("grants.json.lock");
+        let failed = |error: std::io::Error| format!("cannot lock {}: {error}", path.display());
+        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&path).map_err(failed)?;
+        file.lock().map_err(failed)?;
+        Ok(GrantsLock { _file: file })
+    }
+
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = root.join(GRANTS);
         let object = crate::workspace::providers::read_object(&path)?;
@@ -125,11 +138,19 @@ impl Grants {
         note
     }
 
-    pub fn grant(&mut self, plugin: &Plugin, capabilities: &[Capability]) -> Result<(), String> {
+    pub fn grant(
+        &mut self,
+        plugin: &Plugin,
+        capabilities: &[Capability],
+        reviewed: Option<&str>,
+    ) -> Result<(), String> {
         if let Some(extra) = capabilities.iter().find(|capability| !plugin.asks(**capability)) {
             return Err(format!("{} {} does not ask for {}", plugin.id, plugin.version, extra.name()));
         }
         let tree = live_hash(&plugin.dir)?;
+        if reviewed.is_some_and(|reviewed| reviewed != tree) {
+            return Err(format!("{} changed after the sheet opened, so nothing was granted", plugin.id));
+        }
         let record = self.plugins.get(&plugin.id);
         let current = record.filter(|grant| grant.tree == tree);
         // A slice 2 record has no tree: keep its source (empty, unknown origin) rather than invent one.

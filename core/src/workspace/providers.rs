@@ -428,7 +428,7 @@ pub(super) fn read_files(agent: Option<&Path>) -> Files {
     Files { providers, auth, errors }
 }
 
-fn create_private_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<(), String> {
     if dir.is_dir() {
         return Ok(());
     }

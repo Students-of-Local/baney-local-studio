@@ -25,7 +25,7 @@ pub fn arg<T: DeserializeOwned>(args: &Value, key: &str) -> Result<T, OpError> {
 pub fn correlation(op: &str) -> Option<&'static str> {
     match op {
         "start_thread" => Some("draft"),
-        "answer_approval" | "answer_questions" => None,
+        "answer_approval" | "answer_questions" | "answer_consent" => None,
         _ => Some("request"),
     }
 }
@@ -65,6 +65,7 @@ pub fn dispatch(
         "remove_queued" => studio.remove_queued(arg(a, "thread")?, arg(a, "queued")?),
         "answer_approval" => studio.answer_approval(arg(a, "thread")?, arg(a, "request")?, arg(a, "answer")?),
         "answer_questions" => studio.answer_questions(arg(a, "thread")?, arg(a, "request")?, arg(a, "answers")?),
+        "answer_consent" => studio.answer_consent(arg(a, "request")?, arg(a, "answer")?),
         "compact" => studio.compact(arg(a, "thread")?),
         "start_thread" => {
             let (draft, project, settings) = (arg(a, "draft")?, arg(a, "project")?, arg(a, "settings")?);

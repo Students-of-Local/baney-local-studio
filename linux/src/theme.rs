@@ -132,6 +132,16 @@ popover.ls-palette > contents { padding: 0; }
 .ls-emoji { font-size: 18px; min-width: 36px; min-height: 36px; padding: 0; }
 .ls-commit-box { border: 1px solid var(--border-color); border-radius: 10px; background: alpha(currentColor, 0.03); }
 .ls-commit-box textview, .ls-commit-box textview text { background: transparent; }
+.ls-consent-tile { border-radius: 8px; background: alpha(var(--accent-bg-color), 0.16); color: var(--accent-color); }
+.ls-consent-title { font-family: serif; font-size: 22px; font-weight: 500; }
+.ls-consent-secondary { font-size: 13px; color: alpha(currentColor, 0.62); }
+.ls-consent-scan { font-size: 13px; }
+.ls-consent-heading { font-size: 12px; font-weight: 600; color: alpha(currentColor, 0.62); }
+.ls-consent-clean { color: var(--success-color); }
+.ls-consent-finding { color: var(--error-color); }
+.ls-consent-link { padding: 0 4px; min-height: 0; color: var(--accent-color); }
+.ls-consent-tag { font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; color: var(--error-color); background: alpha(var(--error-color), 0.12); }
+.ls-consent-footer { padding: 18px; background: alpha(currentColor, 0.03); }
 .ls-dash-tab { padding: 8px 7px; min-height: 0; border-radius: 0; }
 .ls-dash-tab label { color: alpha(var(--window-fg-color), 0.62); font-weight: 400; }
 .ls-dash-tab:checked { background: none; box-shadow: inset 0 -2px var(--window-fg-color); }

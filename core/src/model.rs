@@ -455,6 +455,56 @@ pub struct Approval {
     pub agent: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum ConsentNeed {
+    Needed,
+    Sensitive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct ConsentRow {
+    pub id: String,
+    pub need: ConsentNeed,
+    pub sentence: String,
+    pub scope: String,
+    pub gates: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct ConsentRequest {
+    pub request: String,
+    pub plugin: String,
+    pub name: String,
+    pub icon: Option<String>,
+    pub description: String,
+    pub version: String,
+    pub install: bool,
+    pub update_from: Option<String>,
+    pub source: String,
+    pub pin: Option<String>,
+    pub files: u64,
+    pub findings: Vec<String>,
+    pub rows: Vec<ConsentRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum ConsentAnswer {
+    Cancel,
+    Install { sensitive: Vec<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -604,6 +654,9 @@ pub enum Update {
     QuestionsSettled {
         thread: String,
         request: String,
+    },
+    Consents {
+        consents: Vec<ConsentRequest>,
     },
     Queue {
         thread: String,
