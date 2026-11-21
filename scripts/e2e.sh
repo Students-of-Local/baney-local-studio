@@ -16,7 +16,7 @@ post=
 commit=${1:-$(git rev-parse HEAD)}
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "$commit^{commit}")" ] || { echo "check out $commit first" >&2; exit 2; }
 commit=$(git rev-parse HEAD)
-git diff --quiet HEAD || { echo "the checkout has uncommitted changes" >&2; exit 2; }
+[ -z "$(git status --porcelain --untracked-files=all)" ] || { echo "the checkout is not clean (uncommitted or untracked files):" >&2; git status --short --untracked-files=all >&2; exit 2; }
 root=$(pwd)
 
 for file in core/examples/*.rs; do
