@@ -147,6 +147,10 @@ struct RowMachine: Equatable {
         reachable = machine?.state.connected ?? false
         status = reachable ? "" : machine.map(MachineStatus.text) ?? "not linked"
     }
+
+    var label: String {
+        reachable ? "On \(name)" : "On \(name), \(status)"
+    }
 }
 
 struct InboxRowView: View, Equatable {
@@ -230,7 +234,7 @@ struct InboxRowView: View, Equatable {
 
     private var accessibilityText: String {
         var parts = [row.title.isEmpty ? "Untitled thread" : row.title, projectName]
-        if let machine { parts.append("On \(machine.name)") }
+        if let machine { parts.append(machine.label) }
         if let glyph = StatusBadge.glyph(row.status) { parts.append(glyph.title) }
         if row.pinned { parts.append("Pinned") }
         if row.unread { parts.append("Unread") }
@@ -422,7 +426,7 @@ struct InboxRowView: View, Equatable {
 
     private var tooltip: String {
         var lines = [row.title, projectName]
-        if let machine { lines.append(machine.reachable ? "On \(machine.name)" : "On \(machine.name), \(machine.status)") }
+        if let machine { lines.append(machine.label) }
         if let branch = row.branch { lines.append(branch) }
         if let model = row.model { lines.append([row.provider, model].compactMap(\.self).joined(separator: " · ")) }
         if let note = row.note { lines.append(note) }

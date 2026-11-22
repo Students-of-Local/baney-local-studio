@@ -750,6 +750,7 @@ impl Hub {
             Update::Projects { projects } => Update::Projects {
                 projects: projects.into_iter().filter(|project| project.machine.is_none()).collect(),
             },
+            Update::Machines { .. } | Update::Pairing { .. } | Update::PairedDevices { .. } => return,
             update => update,
         };
         let value = match serde_json::to_value(&update) {
