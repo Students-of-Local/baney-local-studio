@@ -208,6 +208,10 @@ final class StudioStore {
             self.consents = consents
         case .approvals(let thread, let approvals):
             conversation.setApprovals(thread: thread, approvals: approvals)
+        case .questions(let thread, let request, let source, let questions):
+            conversation.setQuestions(thread: thread, request: request, source: source, questions: questions)
+        case .questionsSettled(let thread, let request):
+            conversation.settleQuestion(thread: thread, request: request)
         case .queue(let thread, let queued):
             conversation.setQueue(thread: thread, queued: queued)
         case .composerText(let thread, let text):
