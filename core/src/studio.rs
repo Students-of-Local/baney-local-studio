@@ -2320,9 +2320,7 @@ impl Actor {
                     PreparedWorktree::Local => project.clone(),
                 }
             }
-            (WorktreeChoice::NewWorktree { .. }, None) => {
-                return Err("A new worktree needs a project.".to_string());
-            }
+            (WorktreeChoice::NewWorktree { .. }, None) => return Err("A new worktree needs a project.".to_string()),
             (WorktreeChoice::Local | WorktreeChoice::Default, Some(project)) => project.clone(),
             (WorktreeChoice::Local | WorktreeChoice::Default, None) => self.home.clone(),
         };
