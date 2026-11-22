@@ -31,7 +31,17 @@ Local Studio ships on three channels. Stable opens with the first public release
 
 Stable and nightly install side by side and share your threads. Dev keeps its own data. The full scheme is in [docs/channels.md](docs/channels.md).
 
-**Linux (dev channel):** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/baney75/local-studio/releases/tag/dev). Dev keeps its own data, so threads made there do not carry over to nightly or stable.
+**Nightly, macOS on Apple Silicon or Linux x86_64:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/baney75/local-studio/main/scripts/install.sh | bash -s -- --channel nightly
+```
+
+The script reads the channel's feed, checks the download's sha256 and its signature against the channel key built into the script, installs it (`/Applications` on macOS, `~/.local` on Linux) and opens it. Checking the signature needs minisign, OpenSSL 3 or python3. Use `--channel stable` or `--channel dev` for the other channels. After that the app keeps itself current: it checks its own channel every 6 hours, downloads and verifies the update, and shows **Update** in the window and **Restart to Update** in Settings → General. Turn off Automatic updates there to download by hand.
+
+Nightly and dev macOS builds are signed with the project's own certificate and are not notarized, so install them with the script, which checks them first. Stable is notarized.
+
+**Linux (dev channel) by hand:** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/baney75/local-studio/releases/tag/dev). Dev keeps its own data, so threads made there do not carry over to nightly or stable.
 
 **From source, macOS:**
 

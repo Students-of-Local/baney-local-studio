@@ -138,6 +138,7 @@ fn run(scratch: &Path) -> Outcome {
     step("a bad signature is refused", smoke.bad_signature())?;
     let staged = smoke.newer()?;
     println!("ok: a newer signed build is offered, downloaded and staged ({})", staged.artifact.display());
+    step("scripts/install.sh installs only a verified build", smoke.install_script())?;
     step("the Tauri signer's own output verifies", smoke.tauri_signer())?;
     let target = smoke.install(V0)?;
     step("apply swaps in the new build and keeps the previous one", smoke.apply_good(&staged, &target))?;
@@ -520,6 +521,89 @@ impl Smoke {
             return Err(format!("staged outside the data dir: {}", staged.artifact.display()));
         }
         Ok(staged)
+    }
+
+    fn run_install_script(&self, prefix: &Path, verifier: &str) -> Result<(bool, String), String> {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("scripts").join("install.sh");
+        let output = Command::new("bash")
+            .arg(script)
+            .args(["--channel", "nightly", "--no-open", "--feed"])
+            .arg(format!("{}/nightly/latest.json", self.base))
+            .arg("--public-key")
+            .arg(self.key.public())
+            .arg("--prefix")
+            .arg(prefix)
+            .env("LOCAL_STUDIO_INSTALL_VERIFIER", verifier)
+            .env("TMPDIR", self.root.join("tmp"))
+            .output()
+            .map_err(|error| format!("install.sh: {error}"))?;
+        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        Ok((output.status.success(), text.trim().to_string()))
+    }
+
+    fn installed_by_script(prefix: &Path) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            prefix.join("Applications").join(format!("{NAME}.app"))
+        } else {
+            prefix.join("lib").join("local-studio-nightly")
+        }
+    }
+
+    fn install_script(&self) -> Outcome {
+        std::fs::create_dir_all(self.root.join("tmp")).map_err(|error| error.to_string())?;
+        let body = self.artifact(V1, Kind::Good)?;
+        self.publish("install", V1, &body, Some(self.key.sign(&body, &self.asset)), None)?;
+        let mut ran = 0;
+        for verifier in ["minisign", "openssl", "python3"] {
+            let prefix = self.root.join(format!("install-{verifier}"));
+            let (ok, text) = self.run_install_script(&prefix, verifier)?;
+            if !ok && text.ends_with("is not installed") {
+                println!("   SKIP: {verifier} is not installed here");
+                continue;
+            }
+            if !ok {
+                return Err(format!("install.sh with {verifier} failed: {text}"));
+            }
+            let target = Self::installed_by_script(&prefix);
+            let reports = Self::reports(&target)?;
+            if reports != format!("local-studio {V1} (nightly)") {
+                return Err(format!("install.sh with {verifier} installed a build that reports {reports}"));
+            }
+            if !cfg!(target_os = "macos") {
+                for path in [
+                    prefix.join("bin").join("local-studio-nightly"),
+                    prefix.join("share").join("applications").join("dev.localstudio.LocalStudio.Nightly.desktop"),
+                ] {
+                    if !path.exists() {
+                        return Err(format!("install.sh did not create {}", path.display()));
+                    }
+                }
+            }
+            println!("   installed with {verifier}: {}", target.display());
+            ran += 1;
+        }
+        if ran == 0 {
+            return Err("no signature verifier (minisign, OpenSSL 3, python3) is available to install.sh".to_string());
+        }
+        let refusals = [
+            ("install-other-key", Some(self.other.sign(&body, &self.asset)), None, "signed with another key"),
+            ("install-tampered", Some(self.key.sign(b"another file", &self.asset)), None, "does not verify"),
+            ("install-bad-sha", Some(self.key.sign(&body, &self.asset)), Some("0".repeat(64)), "sha256"),
+            ("install-unsigned", None, None, "no signature"),
+        ];
+        for (case, signature, sha, want) in refusals {
+            self.publish(case, V1, &body, signature, sha)?;
+            let prefix = self.root.join(case);
+            let (ok, text) = self.run_install_script(&prefix, "")?;
+            if ok || !text.contains(want) {
+                return Err(format!("install.sh for {case} gave ok={ok}: {text}"));
+            }
+            if Self::installed_by_script(&prefix).exists() {
+                return Err(format!("install.sh for {case} left an install behind"));
+            }
+            println!("   refused as expected: {}", text.lines().last().unwrap_or_default());
+        }
+        Ok(())
     }
 
     fn tauri_signer(&self) -> Outcome {

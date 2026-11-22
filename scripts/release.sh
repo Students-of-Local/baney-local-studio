@@ -135,7 +135,13 @@ notes() {
   if [ -n "$previous" ] && git merge-base --is-ancestor "$previous" "$commit" 2> /dev/null; then
     git log --no-merges -n 50 --format='- %s' "$previous..$commit"
   fi
-  [ "${MAC_SIGNED:-}" = true ] || echo "No macOS build: the Apple signing secrets are not set."
+  if [ "${MAC_SIGNED:-}" = true ]; then
+    [ "$channel" = stable ] || echo "The macOS build is signed with the self-issued Local Studio Code Signing identity and is not notarized; install it with scripts/install.sh, which checks its signature first."
+  elif [ "$channel" = stable ]; then
+    echo "No macOS build: the Apple signing and notarization secrets are not set."
+  else
+    echo "No macOS build: MAC_SIGNING_P12 is not set."
+  fi
 }
 
 feed_json() {

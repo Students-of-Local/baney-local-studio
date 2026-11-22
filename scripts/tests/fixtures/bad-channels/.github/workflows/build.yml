@@ -5,3 +5,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: nu scripts/version.nu "$CHANNEL" --stamp --at "$AT" --commit "$COMMIT"
+  macos:
+    runs-on: macos-26
+    steps:
+      - env:
+          MAC_SIGNING_P12: ${{ secrets.MAC_SIGNING_P12 }}
+        run: codesign --force --options runtime --sign "Local Studio Code Signing" "$app"
