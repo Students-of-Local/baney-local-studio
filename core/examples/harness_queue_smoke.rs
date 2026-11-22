@@ -610,7 +610,18 @@ fn claude_resend_cases(run: &mut Run, account: &Account) -> anyhow::Result<()> {
         run.send("limit juliet three");
         Ok(())
     };
-    limit_resend(run, account, "after a steered follow-up", steer, ("limit juliet three", None))
+    limit_resend(run, account, "after a steered follow-up", steer, ("limit juliet three", None))?;
+    let effort = |run: &mut Run| {
+        run.slow("slow limit kilo four")?;
+        run.studio.set_thinking_level(run.thread(), "medium".to_string());
+        Ok(())
+    };
+    limit_resend(run, account, "after an effort change during the turn", effort, ("slow limit kilo four", None))?;
+    let text = |run: &mut Run| {
+        run.send("limit-text november four");
+        Ok(())
+    };
+    limit_resend(run, account, "after a limit named only in the result text", text, ("limit-text november four", None))
 }
 
 fn codex_resend_cases(run: &mut Run, account: &Account) -> anyhow::Result<()> {

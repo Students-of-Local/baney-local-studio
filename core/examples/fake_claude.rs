@@ -93,6 +93,12 @@ fn run(
         );
         return;
     }
+    if text.contains("limit-text") && limited() {
+        emit(
+            &json!({ "type": "result", "subtype": "success", "is_error": true, "result": "You've hit your limit \u{b7} resets 3pm" }),
+        );
+        return;
+    }
     if text.contains("limit") && limited() {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
         emit(&json!({

@@ -413,7 +413,7 @@ fn command(program: &PathBuf, cwd: &str) -> Command {
 fn stop_reason(text: &str) -> Option<String> {
     let text = plain(text);
     let lower = text.to_ascii_lowercase();
-    if !STOP_WORDS.iter().any(|word| lower.contains(word)) {
+    if !STOP_WORDS.iter().chain(LIMIT_WORDS.iter()).any(|word| lower.contains(word)) {
         return None;
     }
     let message = ["ERROR ", "WARN "]

@@ -33,7 +33,7 @@ pub(super) struct Cli {
     ended: Option<String>,
 }
 
-struct Asked {
+pub(super) struct Asked {
     text: String,
     images: Vec<Image>,
 }
@@ -865,6 +865,8 @@ impl Actor {
                 resend = cli.limited_turn();
                 cli.driver.kill();
             }
+        } else if let Some(thread) = self.threads.get_mut(&id) {
+            resend = thread.retired_turn.take();
         }
         if !self.drivers.contains_key(&id) {
             self.cli_halt(&id).await;
@@ -966,7 +968,9 @@ impl Actor {
         }
         if let Some(mut cli) = self.drivers.remove(id) {
             cli.driver.kill();
-            self.threads.entry(id.to_string()).or_default().retired = Some(cli.generation);
+            let thread = self.threads.entry(id.to_string()).or_default();
+            thread.retired = Some(cli.generation);
+            thread.retired_turn = cli.limited_turn();
         }
     }
 
