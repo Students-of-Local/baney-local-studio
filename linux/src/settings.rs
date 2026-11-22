@@ -39,6 +39,7 @@ struct Inner {
     t3_group: adw::PreferencesGroup,
     t3_rows: RefCell<Vec<gtk::Widget>>,
     t3_shown: RefCell<String>,
+    updates: crate::updates::UpdatesGroup,
 }
 
 impl SettingsDialog {
@@ -53,6 +54,8 @@ impl SettingsDialog {
             .description("Brings accounts, projects, model picks, favorites, hidden models, keybindings and appearance over from T3 Code and follows its changes. A value you change in Local Studio is never overwritten.")
             .build();
         general.add(&t3_group);
+        let updates = crate::updates::UpdatesGroup::new(&weak);
+        general.add(&updates.group);
         let diagnostics = group(&general, "Diagnostics");
         let version = adw::ActionRow::builder()
             .title("Version")
@@ -101,6 +104,7 @@ impl SettingsDialog {
                 t3_group,
                 t3_rows: RefCell::new(Vec::new()),
                 t3_shown: RefCell::new(String::new()),
+                updates,
             }),
         };
         settings.refresh(app);
@@ -136,6 +140,7 @@ impl SettingsDialog {
         self.refresh_keys(&weak, &state);
         self.refresh_archive(&state);
         self.refresh_kernel(&state);
+        self.refresh_updates(&state);
         self.refresh_connections(&weak, &state);
         self.refresh_t3(&weak, &state);
     }
@@ -154,6 +159,10 @@ impl SettingsDialog {
             self.inner.t3_group.add(row);
         }
         self.inner.t3_rows.replace(rows);
+    }
+
+    pub fn refresh_updates(&self, state: &State) {
+        self.inner.updates.refresh(state);
     }
 
     fn refresh_connections(&self, app: &Weak<App>, state: &State) {

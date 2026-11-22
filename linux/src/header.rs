@@ -1,4 +1,5 @@
 use adw::prelude::*;
+use local_studio_core::AppUpdateState;
 
 use crate::actions;
 use crate::icons;
@@ -21,6 +22,9 @@ pub struct Header {
     git: adw::SplitButton,
     open: adw::SplitButton,
     scripts: gtk::MenuButton,
+    update: gtk::Button,
+    update_icon: gtk::Stack,
+    update_label: gtk::Label,
 }
 
 impl Header {
@@ -34,6 +38,8 @@ impl Header {
         back.set_action_name(Some("win.back-to-thread"));
         back.set_visible(false);
         bar.pack_start(&back);
+        let (update, update_icon, update_label) = update_button();
+        bar.pack_start(&update);
         let project = gtk::Label::new(None);
         project.add_css_class("ls-crumb-project");
         let slash = gtk::Label::new(Some("/"));
@@ -113,7 +119,31 @@ impl Header {
             git,
             open,
             scripts,
+            update,
+            update_icon,
+            update_label,
         }
+    }
+
+    fn render_update(&self, state: &State) {
+        let (version, applying) = match &state.update {
+            Some(AppUpdateState::Ready { version, .. }) => (version.as_str(), false),
+            Some(AppUpdateState::Applying { version }) => (version.as_str(), true),
+            _ => {
+                self.update.set_visible(false);
+                return;
+            }
+        };
+        self.update.set_visible(true);
+        self.update.set_sensitive(!applying);
+        self.update_icon.set_visible_child_name(if applying { "spinner" } else { "icon" });
+        self.update_label.set_label(if applying { "Updating…" } else { "Update Ready" });
+        let description = if applying {
+            format!("Installing Local Studio {version}. It restarts when the install finishes.")
+        } else {
+            format!("Restart to Update to {version}")
+        };
+        icons::describe(&self.update, &description);
     }
 
     pub fn set_agents(&self, running: usize) {
@@ -149,6 +179,7 @@ impl Header {
     }
 
     pub fn render(&self, state: &State) {
+        self.render_update(state);
         let on_thread = state.page == Page::Thread;
         self.crumb.set_visible(on_thread);
         self.page_title.set_visible(!on_thread);
@@ -240,4 +271,20 @@ impl Header {
             self.git.set_tooltip_text(Some(tooltip));
         }
     }
+}
+
+fn update_button() -> (gtk::Button, gtk::Stack, gtk::Label) {
+    let icon = gtk::Stack::new();
+    icon.add_named(&icons::image(icons::UPDATE), Some("icon"));
+    let spinner = adw::Spinner::new();
+    spinner.set_size_request(icons::SIZE, icons::SIZE);
+    icon.add_named(&spinner, Some("spinner"));
+    let label = gtk::Label::new(Some("Update Ready"));
+    let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    face.append(&icon);
+    face.append(&label);
+    let button = gtk::Button::builder().child(&face).action_name("win.apply-update").visible(false).build();
+    button.add_css_class("ls-update-ready");
+    icons::describe(&button, "Restart to Update");
+    (button, icon, label)
 }
