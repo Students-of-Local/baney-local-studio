@@ -271,11 +271,9 @@ pub fn scan(root: &Path) -> Scan {
 }
 
 pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
-    if std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err(vec![format!(
-            "the plugin folder is a symlink: {} (install the folder it points at with local-studio plugin install <dir>)",
-            dir.display()
-        )]);
+    let linked = std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink());
+    if linked {
+        linked_inside_home(dir).map_err(|error| vec![error])?;
     }
     let manifest_path = dir.join(MANIFEST);
     let text = std::fs::read_to_string(&manifest_path)
@@ -299,6 +297,13 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
     }
     if manifest.description.trim().is_empty() {
         errors.push("description is empty".to_string());
+    }
+    if linked && !manifest.capabilities.is_empty() {
+        errors.push(format!(
+            "the plugin folder is a symlink and the plugin asks for capabilities ({}): {} (install the folder it points at with local-studio plugin install <dir>)",
+            manifest.capabilities.join(", "),
+            dir.display()
+        ));
     }
     let capabilities = capabilities_in(&manifest.capabilities, &mut errors);
     let gates = gates_in(&manifest.gates, &capabilities, &mut errors);
@@ -356,6 +361,23 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         mcp,
         local_only: manifest.local_only,
     })
+}
+
+fn linked_inside_home(dir: &Path) -> Result<(), String> {
+    let install = "install the folder it points at with local-studio plugin install <dir>";
+    let target = dir
+        .canonicalize()
+        .map_err(|error| format!("the plugin folder is a symlink that points nowhere: {} ({error})", dir.display()))?;
+    let home = crate::store::home_dir().and_then(|home| home.canonicalize().ok());
+    if home.is_some_and(|home| target != home && target.starts_with(&home)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the plugin folder is a symlink to {}, outside your home folder: {} ({install})",
+            target.display(),
+            dir.display()
+        ))
+    }
 }
 
 fn capabilities_in(names: &[String], errors: &mut Vec<String>) -> Vec<Capability> {

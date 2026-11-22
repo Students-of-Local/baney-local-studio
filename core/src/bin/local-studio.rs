@@ -114,7 +114,8 @@ fn root() -> Result<PathBuf, String> {
 }
 
 fn validate(dir: &Path) -> Result<(), String> {
-    let plugin = plugins::load(dir).map_err(|errors| errors.join("\n"))?;
+    let resolved = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let plugin = plugins::load(&resolved).map_err(|errors| errors.join("\n"))?;
     println!(
         "OK {} {} ({} skills, {} prompts, {} commands)",
         plugin.id,
