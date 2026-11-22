@@ -292,6 +292,7 @@ final class StudioStore {
             inbox.setProjectScripts(project: project, scripts: scripts)
         case .projectSettings(let project, let settings, let effective):
             inbox.setProjectSettings(project: project, settings: settings, effective: effective)
+            conversation.projectDefaults[project] = effective
         case .worktreeSetup(let thread, let stages, let done, let error):
             conversation.setWorktreeSetup(thread: thread, stages: stages, done: done, error: error)
         case .daemon(let socket, let version, let pid, let mismatch):

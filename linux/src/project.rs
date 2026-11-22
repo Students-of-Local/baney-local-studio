@@ -277,7 +277,8 @@ fn defaults_group(app: &Rc<App>, open: &Rc<Open>, settings: &ProjectSettings) ->
             .map(|level| (*level).to_string());
     });
     combo(app, open, &group, "Thinking", &level_names, level_index, &apply_level);
-    let inherited = if global.access_follows_model { "Match the model" } else { format::access_label(global.default_access) };
+    let inherited =
+        if global.access_follows_model { "Match the model" } else { format::access_label(global.default_access) };
     let mut access_names = vec![format!("Inherit ({inherited})")];
     access_names.extend(format::ACCESS_MODES.iter().map(|mode| format::access_label(*mode).to_string()));
     let access_index =

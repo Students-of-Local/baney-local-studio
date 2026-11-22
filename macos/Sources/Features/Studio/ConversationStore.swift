@@ -38,6 +38,7 @@ final class ConversationStore {
     var modelPickerPresented = false
     var followsEnd = true
     let newThread = NewThreadOptions()
+    var projectDefaults: [String: Settings] = [:]
     let stash = ComposerStash()
     private(set) var pullsRequest: String?
     @ObservationIgnored private(set) var pullsProject: String?
@@ -823,13 +824,14 @@ final class ConversationStore {
         return currentModel(settings: settings)?.thinkingLevels ?? []
     }
 
-    func access(settings: Settings?) -> AccessMode {
+    func access(settings: Settings?, project: String?) -> AccessMode {
         if thread != nil {
             return info?.access ?? .supervised
         }
+        let defaults = project.flatMap { projectDefaults[$0] } ?? settings
         return newThread.access ?? defaultAccess(
-            followsModel: settings?.accessFollowsModel ?? true,
-            fixed: settings?.defaultAccess ?? .supervised,
+            followsModel: defaults?.accessFollowsModel ?? true,
+            fixed: defaults?.defaultAccess ?? .supervised,
             model: currentModel(settings: settings)?.id
         )
     }
@@ -860,7 +862,7 @@ final class ConversationStore {
                 provider: model?.provider,
                 model: model?.id,
                 thinkingLevel: thinkingLevel(settings: settings),
-                access: fanOut.isEmpty ? access(settings: settings) : newThread.access,
+                access: newThread.access,
                 worktree: newThread.worktreeChoice(settings: settings, defaultBranch: defaultBranch)
             )
             if let tier = serviceTier(settings: settings) {
@@ -979,7 +981,7 @@ final class ConversationStore {
             thread: draft, project: project, title: String(line.prefix(80)), cwd: "",
             model: model.map { ModelRef(provider: $0.provider, id: $0.id, name: $0.name, reasoning: $0.reasoning) },
             thinkingLevel: thinkingLevel(settings: settings) ?? "", thinkingLevels: thinkingLevels(settings: settings),
-            access: access(settings: settings), busy: true, runStartedAt: Int64(Date.now.timeIntervalSince1970 * 1000),
+            access: access(settings: settings, project: project), busy: true, runStartedAt: Int64(Date.now.timeIntervalSince1970 * 1000),
             compacting: false, retryAttempt: 0, queued: 0, context: nil, branch: nil, worktree: nil,
             serviceTier: serviceTier(settings: settings), serviceTiers: serviceTiers(settings: settings), goal: nil, harness: .eukhe
         )

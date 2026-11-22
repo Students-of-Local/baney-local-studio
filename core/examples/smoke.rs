@@ -131,6 +131,7 @@ impl Harness {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply(&mut self, update: Update) -> anyhow::Result<()> {
         match update {
             Update::Connection { state } => {
@@ -393,6 +394,8 @@ fn main() -> anyhow::Result<()> {
         &work,
         &["-c", "user.name=Smoke", "-c", "user.email=smoke@example.com", "commit", "-q", "--allow-empty", "-m", "init"],
     )?;
+    std::fs::create_dir_all(&data)?;
+    std::fs::write(data.join("settings.json"), r#"{"defaultAccess":"fullAccess"}"#)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     let socket = root.join("d.sock");
@@ -863,13 +866,21 @@ fn round_four_settings(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> {
     let studio = Arc::clone(&harness.studio);
     let first = ids.first.clone();
     let mut settings = harness.view.settings.clone().context("no settings update")?;
+    ensure!(
+        !settings.access_follows_model && settings.default_access == AccessMode::FullAccess,
+        "settings saved before Match the model lost their fixed access"
+    );
+    println!("ok   settings saved before Match the model kept their fixed access");
     settings.follow_up_behavior = FollowUpBehavior::Steer;
     settings.response_streaming = ResponseStreaming::Turn;
+    settings.access_follows_model = true;
+    settings.default_access = AccessMode::Supervised;
     studio.update_settings(settings);
     harness.pump_until("settings applied", |view| {
         view.settings.as_ref().is_some_and(|settings| {
             settings.follow_up_behavior == FollowUpBehavior::Steer
                 && settings.response_streaming == ResponseStreaming::Turn
+                && settings.access_follows_model
         })
     })?;
     harness.view.partial_text = false;
