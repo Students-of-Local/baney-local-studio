@@ -33,7 +33,7 @@ local-studio fleet share --active 60 --away max
 - `--active <watts|off>`: how many watts fleet work may draw while the person is using the machine. `off` means it does not lend while they are present.
 - `--away <watts|max>`: the cap while they are away. `max` means no cap.
 
-Both take whole watts from 0 to 2000 and either may be left out to keep its value. `share` sets lending to `idle`: the machine lends only while no other program uses its GPU, it is on AC power, and (on the media host) parish-media says the GPU is free. Any of those taking the GPU back reclaims it at once.
+Both take whole watts up to 2000 (`--active` from 0, `--away` from 1) and either may be left out to keep its value. `share` sets lending to `idle`: the machine lends only while no other program uses its GPU, it is on AC power, and (on the media host) parish-media says the GPU is free. Any of those taking the GPU back reclaims it at once.
 
 Ask the person for the two numbers. If they don't care, `--active off --away max` lends only while they are away, with no cap.
 
@@ -44,7 +44,21 @@ local-studio fleet power-helper          # prints the sudoers rule and the comma
 local-studio fleet power-helper --yes    # checks it with visudo, installs it with sudo
 ```
 
-It allows only `nvidia-smi -i <GPU index> -pl <watts>` for the user who ran it. `sudo` asks for that person's password, so they run the `--yes` step themselves. It refuses on machines without an NVIDIA GPU, which need no helper.
+It allows only `nvidia-smi -i <GPU index> -pl <watts>` for the user who ran it. `sudo` asks for that person's password, so they run the `--yes` step themselves. It refuses on machines without an NVIDIA GPU, which need no helper, and when the `nvidia-smi` on `PATH` sits somewhere a non-root user can change (a conda env, `~/.local/bin`): put the driver's `/usr/bin` first in `PATH` and run it again. The controller notices the new rule within a minute; there is no need to run `share` again.
+
+### Presence on Linux desktops that don't report idle
+
+`power.presenceSource` saying "the desktop does not report idle time" means the desktop never sets logind's idle hint (Hyprland and many window managers), so the controller can't tell whether someone is at the screen and applies the away cap. On Hyprland, have hypridle set the hint (add to `~/.config/hypr/hypridle.conf`, then restart hypridle; untested live):
+
+```
+listener {
+    timeout = 60
+    on-timeout = busctl call org.freedesktop.login1 /org/freedesktop/login1/session/auto org.freedesktop.login1.Session SetIdleHint b true
+    on-resume = busctl call org.freedesktop.login1 /org/freedesktop/login1/session/auto org.freedesktop.login1.Session SetIdleHint b false
+}
+```
+
+`fleet status` should then show `owner: present` or `away` with a `logind session` source.
 
 To stop sharing:
 
@@ -65,7 +79,7 @@ local-studio fleet status --json
 | `discover`         | Whether this machine looks for other machines                                                 |
 | `reason`           | Plain words for why it is or isn't lending, such as "In use, so it lends at up to 60 W."      |
 | `checks`           | Each lending check with `ok` and a detail                                                     |
-| `power.activeWatts`, `power.awayWatts` | The caps set by `share` (`0` = no lending while present, `null` = no cap)   |
+| `power.activeWatts`, `power.awayWatts` | The caps set by `share` (`activeWatts` 0 = no lending while present, `awayWatts` `null` = no cap) |
 | `power.present`    | Whether someone is using the machine now (`null` when it can't tell or lending is off)        |
 | `power.presenceSource` | How that was read (macOS input idle time, a logind session, or why it can't tell)         |
 | `power.capW`       | The cap in force now, or `null`                                                               |

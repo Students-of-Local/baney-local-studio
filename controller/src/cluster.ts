@@ -74,6 +74,10 @@ const MediaStatus = Schema.Struct({
 const POOL_PORTS: [number, number] = [18100, 18299];
 const MEDIA = () => join(homedir(), ".local/bin/parish-media");
 
+// awayWatts 0 by hand would read as "lend at 0 W" while the GPU's floor still lets it draw; treat it as the
+// lowest cap, which the lever clamps to the GPU's minimum and says so.
+const awayCap = (w: number | null | undefined): number | null => (w === null || w === undefined ? null : Math.max(1, w));
+
 export const clusterSettings = (c: Config) => ({
   discover: c.cluster?.discover ?? false,
   lend: (c.cluster?.lend ?? "never") as LocalLendMode,
@@ -84,7 +88,7 @@ export const clusterSettings = (c: Config) => ({
   rpcPort: c.cluster?.rpcPort ?? 50052,
   rpcServer: c.cluster?.rpcServer ?? "rpc-server",
   llamaServer: c.cluster?.llamaServer ?? "llama-server",
-  power: { activeWatts: c.cluster?.power?.activeWatts ?? 0, awayWatts: c.cluster?.power?.awayWatts ?? null },
+  power: { activeWatts: Math.max(0, c.cluster?.power?.activeWatts ?? 0), awayWatts: awayCap(c.cluster?.power?.awayWatts) },
 });
 
 const proof = (key: string, nonce: string, id: string, target: string): string => createHmac("sha256", key).update(`${nonce}|${id}|${normUrl(target)}`).digest("hex");

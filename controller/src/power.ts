@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { arch, platform } from "node:os";
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
@@ -11,13 +11,32 @@ const PERIOD_MS = 200;
 const CONTAINER_TICKS = 10;
 const APPLE_GPU_W = 30;
 const MIN_FRACTION = 0.1;
-const HELPER_TTL_MS = 60_000;
+// How long a cached helper check or a failed sudo stays trusted. The smoke test shortens it.
+const HELPER_TTL_MS = Number(process.env.LOCAL_STUDIO_TEST_POWER_TTL_MS) || 60_000;
 const LIMITS_TTL_MS = 30_000;
+// A GPU with no adjustable limit and no readable draw gets a fixed share of this nominal wattage.
+const NOMINAL_GPU_W = 150;
+const UNMEASURED_AFTER_MS = 2_000;
 
 const Restore = Schema.Record(Schema.String, Schema.Struct({ index: Schema.Number, originalW: Schema.Number }));
 type Restore = Record<string, { index: number; originalW: number }>;
 
 export const restorePath = () => join(home, "power-restore.json");
+export const pausedPath = () => join(home, "power-paused.json");
+
+// What the duty cycle may have left stopped or paused if the controller dies mid-cycle. Each pid carries
+// its command name, so a reused pid that now belongs to something else is never continued.
+const Paused = Schema.Struct({ pids: Schema.Array(Schema.Struct({ pid: Schema.Number, comm: Schema.String })), containers: Schema.Array(Schema.String) });
+
+const commOf = (pid: number): string | null => {
+  try {
+    if (platform() === "linux") return readFileSync(`/proc/${pid}/comm`, "utf8").trim() || null;
+    const r = Bun.spawnSync(["ps", "-o", "comm=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+    return r.exitCode === 0 ? r.stdout.toString().trim().split("/").pop() || null : null;
+  } catch {
+    return null;
+  }
+};
 
 const readRestore = (): Restore => {
   try {
@@ -63,7 +82,16 @@ const watts = (w: number): string => (Number.isInteger(w) ? String(w) : w.toFixe
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 
-const nvsmi = () => Bun.which("nvidia-smi");
+// The resolved path, because the sudoers rule names the real file (see `local-studio fleet power-helper`).
+const nvsmi = (): string | null => {
+  const found = Bun.which("nvidia-smi");
+  if (!found) return null;
+  try {
+    return realpathSync(found);
+  } catch {
+    return found;
+  }
+};
 
 const queryLimits = async (): Promise<Limits[] | null> => {
   const bin = nvsmi();
@@ -90,7 +118,7 @@ const sudoNote = (why: string): string =>
 export const makePower = (d: PowerDeps) => {
   let cap: number | null = null;
   let note: string | null = null;
-  let sudoFailed: string | null = null;
+  let sudoFailed: { why: string; at: number } | null = null;
   let limitsCache: { at: number; value: Limits[] | null } = { at: 0, value: null };
   let helperCache: { at: number; value: "installed" | "missing" | "unsupported" } | null = null;
   let helperBusy = false;
@@ -101,6 +129,10 @@ export const makePower = (d: PowerDeps) => {
   let dutyCap = 0;
   let dutyUuids: string[] = [];
   let dutySource: "nvidia" | "macmon" | "fixed" = "fixed";
+  let dutyNominal = NOMINAL_GPU_W;
+  let dutyAt = 0;
+  let unmeasured = false;
+  let pausedKey = "";
   let fraction = 1;
   let looping: Promise<void> | null = null;
   const stopped = new Set<number>();
@@ -211,13 +243,20 @@ export const makePower = (d: PowerDeps) => {
       if (dutySource === "fixed") fraction = clamp(dutyCap / APPLE_GPU_W, MIN_FRACTION, 1);
       else {
         const m = measuredNow();
-        if (m !== null) fraction = clamp(fraction + 0.3 * fraction * (dutyCap - m) / Math.max(m, 1), MIN_FRACTION, 1);
+        if (m !== null) {
+          unmeasured = false;
+          fraction = clamp(fraction + 0.3 * fraction * (dutyCap - m) / Math.max(m, 1), MIN_FRACTION, 1);
+        } else if (Date.now() - dutyAt > UNMEASURED_AFTER_MS) {
+          unmeasured = true;
+          fraction = clamp(dutyCap / dutyNominal, MIN_FRACTION, 1);
+        }
       }
       const f = fraction;
       contAll();
       const slot = tick % CONTAINER_TICKS;
       const runTicks = Math.max(1, Math.round(CONTAINER_TICKS * f));
       const names = d.containers();
+      if (f < 0.999) record(d.pids(), names);
       if (slot === 0) for (const n of [...paused]) {
         paused.delete(n);
         void dockerCall("unpause", n);
@@ -238,14 +277,42 @@ export const makePower = (d: PowerDeps) => {
     contAll();
   };
 
-  const startDuty = (share: number, uuids: string[], source: "nvidia" | "macmon" | "fixed") => {
+  const record = (pids: number[], containers: string[]) => {
+    const key = `${pids.join(",")}|${containers.join(",")}`;
+    if (key === pausedKey) return;
+    pausedKey = key;
+    const list = pids.flatMap((pid) => {
+      const comm = commOf(pid);
+      return comm ? [{ pid, comm }] : [];
+    });
+    if (list.length || containers.length) writeJson(pausedPath(), { pids: list, containers });
+    else rmSync(pausedPath(), { force: true });
+  };
+
+  const continueLeftovers = async () => {
+    if (!existsSync(pausedPath())) return;
+    let rec: typeof Paused.Type | undefined;
+    try {
+      rec = decodeJson(Paused, readFileSync(pausedPath(), "utf8"));
+    } catch {
+      rec = undefined;
+    }
+    for (const { pid, comm } of rec?.pids ?? []) if (commOf(pid) === comm) signal(pid, "SIGCONT");
+    await Promise.all((rec?.containers ?? []).map((n) => Effect.runPromise(exec(["docker", "unpause", n], 15_000))));
+    rmSync(pausedPath(), { force: true });
+  };
+
+  const startDuty = (share: number, uuids: string[], source: "nvidia" | "macmon" | "fixed", nominal = NOMINAL_GPU_W) => {
     dutyCap = share;
     dutyUuids = uuids;
+    dutyNominal = Math.max(1, nominal);
     if (duty && dutySource !== source) stopStream();
     dutySource = source;
     startStream();
     if (!duty) {
       duty = true;
+      dutyAt = Date.now();
+      unmeasured = false;
       fraction = source === "fixed" ? clamp(share / APPLE_GPU_W, MIN_FRACTION, 1) : 1;
       looping = loop();
     }
@@ -261,6 +328,11 @@ export const makePower = (d: PowerDeps) => {
     await Promise.all([...paused].map((n) => dockerCall("unpause", n)));
     paused.clear();
     stopStream();
+    unmeasured = false;
+    if (pausedKey) {
+      pausedKey = "";
+      rmSync(pausedPath(), { force: true });
+    }
   };
 
   const restoreLimits = async (): Promise<string | null> => {
@@ -305,10 +377,22 @@ export const makePower = (d: PowerDeps) => {
       }
       return;
     }
+    // Nothing borrowed yet: no lever. Limiting idle GPUs would only slow the owner's own work.
+    if (!fleetUuids.length && !d.pids().length && !d.containers().length) {
+      await stopDuty();
+      note = await restoreLimits();
+      perGpu.clear();
+      return;
+    }
+    if (sudoFailed && Date.now() - sudoFailed.at > HELPER_TTL_MS) sudoFailed = null;
     const targets = nv.filter((g) => !fleetUuids.length || fleetUuids.includes(g.uuid));
     const list = targets.length ? targets : nv;
     const each = Math.floor(want / list.length);
     const lim = await limits();
+    const nominal = (g: RawGpu) => {
+      const l = lim?.find((x) => x.uuid === g.uuid);
+      return l?.limitW ?? l?.maxW ?? NOMINAL_GPU_W;
+    };
     const notes: string[] = [];
     const dutyFor: RawGpu[] = [];
     for (const g of list) {
@@ -323,9 +407,12 @@ export const makePower = (d: PowerDeps) => {
         continue;
       }
       const w = clamp(each, Math.ceil(l.minW), Math.floor(l.maxW));
-      if (each < l.minW) notes.push(`${g.name} can't go below ${watts(l.minW)} W.`);
+      const floor = each < l.minW ? `${g.name} can't go below ${watts(l.minW)} W.` : null;
       const had = perGpu.get(g.uuid);
-      if (had?.lever === "nvidia-limit" && had.limitW === w) continue;
+      if (had?.lever === "nvidia-limit" && had.limitW === w) {
+        if (floor) notes.push(floor);
+        continue;
+      }
       const rec = readRestore();
       const fresh = !rec[g.uuid];
       if (fresh) {
@@ -334,7 +421,7 @@ export const makePower = (d: PowerDeps) => {
       }
       const failed = await setLimit(l.index, w);
       if (failed) {
-        sudoFailed = failed;
+        sudoFailed = { why: failed, at: Date.now() };
         if (fresh && had?.lever !== "nvidia-limit") {
           delete rec[g.uuid];
           saveRestore(rec);
@@ -342,13 +429,27 @@ export const makePower = (d: PowerDeps) => {
         dutyFor.push(g);
         continue;
       }
+      if (floor) notes.push(floor);
       perGpu.set(g.uuid, { uuid: g.uuid, index: l.index, lever: "nvidia-limit", limitW: w, originalW: rec[g.uuid]!.originalW });
     }
-    if (sudoFailed && dutyFor.length) notes.unshift(sudoNote(sudoFailed));
+    if (sudoFailed && dutyFor.length) notes.unshift(sudoNote(sudoFailed.why));
+    for (const [uuid, g] of [...perGpu]) {
+      if (list.some((x) => x.uuid === uuid) || dutyFor.some((x) => x.uuid === uuid)) continue;
+      // A GPU that no longer carries fleet work gets its own limit back.
+      if (g.lever === "nvidia-limit" && g.originalW !== null) {
+        const failed = await setLimit(g.index, g.originalW);
+        if (failed) notes.push(`Could not restore GPU ${g.index}'s original power limit; it stays recorded in ${restorePath()}.`);
+        else {
+          const rec = readRestore();
+          delete rec[uuid];
+          saveRestore(rec);
+        }
+      }
+      perGpu.delete(uuid);
+    }
     for (const g of dutyFor) perGpu.set(g.uuid, { uuid: g.uuid, index: g.index, lever: "duty-cycle", limitW: null, originalW: null });
-    for (const uuid of [...perGpu.keys()]) if (!list.some((g) => g.uuid === uuid)) perGpu.delete(uuid);
     note = notes.length ? [...new Set(notes)].join(" ") : null;
-    if (dutyFor.length) startDuty(each * dutyFor.length, dutyFor.map((g) => g.uuid), "nvidia");
+    if (dutyFor.length) startDuty(each * dutyFor.length, dutyFor.map((g) => g.uuid), "nvidia", dutyFor.reduce((n, g) => n + nominal(g), 0));
     else await stopDuty();
   };
 
@@ -363,7 +464,10 @@ export const makePower = (d: PowerDeps) => {
         return;
       }
       const r = await Effect.runPromise(exec(["sudo", "-n", "-l", bin!, "-i", "0", "-pl", "100"], 10_000));
-      helperCache = { at: Date.now(), value: r.code === 0 ? "installed" : "missing" };
+      const value = r.code === 0 ? "installed" : "missing";
+      // The helper was just installed: try the NVIDIA limit again on the next tick instead of duty-cycling on.
+      if (value === "installed" && helperCache?.value !== "installed") sudoFailed = null;
+      helperCache = { at: Date.now(), value };
     } finally {
       helperBusy = false;
     }
@@ -384,6 +488,7 @@ export const makePower = (d: PowerDeps) => {
     set: (want: number | null, fleetUuids: string[]) => serial(() => (want === null ? (cap === null && !duty && !Object.keys(readRestore()).length ? Promise.resolve() : release()) : apply(want, fleetUuids))),
     stop: () => serial(release),
     recover: () => serial(async () => {
+      await continueLeftovers();
       note = await restoreLimits();
     }),
     retry: () => {
@@ -393,7 +498,12 @@ export const makePower = (d: PowerDeps) => {
     resume: (pid: number) => {
       if (stopped.delete(pid)) signal(pid, "SIGCONT");
     },
-    note: () => note,
+    note: () => {
+      if (!(duty && unmeasured)) return note;
+      const pct = Math.round(fraction * 100);
+      const why = `It can't read the GPU's power draw, so it runs fleet work ${pct}% of the time instead.`;
+      return note ? `${note} ${why}` : why;
+    },
     helper,
     view: (fleetUuids: string[]) => {
       const m = duty ? measuredNow() : null;
@@ -402,7 +512,7 @@ export const makePower = (d: PowerDeps) => {
       return {
         capW: cap,
         lever: overall(),
-        measured: !(duty && dutySource === "fixed") && (d.gpus().length > 0 || dutySource === "macmon"),
+        measured: !(duty && (dutySource === "fixed" || unmeasured)) && (d.gpus().length > 0 || dutySource === "macmon"),
         measuredW: m ?? (draw.length ? Math.round(draw.reduce((a, b) => a + b, 0) * 10) / 10 : null),
         gpus: [...perGpu.values()],
       };

@@ -201,6 +201,7 @@ export interface Presence {
 
 const PRESENT_IDLE_S = 60;
 const GRAPHICAL = new Set(["x11", "wayland", "mir"]);
+const USER_CLASS = new Set(["user", "user-early"]);
 
 const testPresence = (): Presence | null => {
   const v = process.env.LOCAL_STUDIO_TEST_PRESENT;
@@ -215,20 +216,28 @@ const logind: Effect.Effect<Presence> = Effect.gen(function* () {
   if (list.code !== 0) return { present: null, source: `loginctl failed: ${lastLine(list)}`, idleSeconds: null };
   const ids = list.stdout.split("\n").map((l) => l.trim().split(/\s+/)[0] ?? "").filter((id) => /^[\w-]+$/.test(id));
   if (!ids.length) return { present: false, source: "logind: no sessions", idleSeconds: null };
-  const show = yield* exec(["loginctl", "show-session", ...ids, "-p", "Id", "-p", "Type", "-p", "Active", "-p", "Remote", "-p", "IdleHint", "-p", "IdleSinceHint"], 5_000);
+  const show = yield* exec(["loginctl", "show-session", ...ids, "-p", "Id", "-p", "Type", "-p", "Class", "-p", "Active", "-p", "Remote", "-p", "IdleHint", "-p", "IdleSinceHint"], 5_000);
   const sessions = show.stdout.split(/\n\s*\n/).map((block) => Object.fromEntries(block.split("\n").flatMap((l) => {
     const i = l.indexOf("=");
     return i > 0 ? [[l.slice(0, i), l.slice(i + 1).trim()]] : [];
   })) as Record<string, string>);
-  const local = sessions.filter((s) => GRAPHICAL.has(s.Type ?? "") && s.Active === "yes" && s.Remote !== "yes");
+  // Greeter and lock-screen sessions are active graphical sessions too, but nobody is using the machine.
+  const local = sessions.filter((s) => GRAPHICAL.has(s.Type ?? "") && USER_CLASS.has(s.Class ?? "user") && s.Active === "yes" && s.Remote !== "yes");
   if (!local.length) return { present: false, source: "logind: no active local graphical session", idleSeconds: null };
-  const idle = local.map((s) => {
+  // Some desktops (Hyprland with hypridle, many window managers) never set IdleHint, so logind reports
+  // "not idle" from login onward. Saying "present" there would stop lending for good; say "unknown" instead.
+  const reporting = local.filter((s) => s.IdleHint === "yes" || Number(s.IdleSinceHint || "0") > 0);
+  if (!reporting.length) {
+    const s = local[0]!;
+    return { present: null, source: `logind session ${s.Id} (${s.Type}): the desktop does not report idle time (IdleHint is never set)`, idleSeconds: null };
+  }
+  const idle = reporting.map((s) => {
     if (s.IdleHint !== "yes") return 0;
     const since = Number(s.IdleSinceHint);
     return since > 0 ? Math.max(0, Math.floor((Date.now() - since / 1000) / 1000)) : PRESENT_IDLE_S;
   });
   const least = Math.min(...idle);
-  const s = local[idle.indexOf(least)]!;
+  const s = reporting[idle.indexOf(least)]!;
   return { present: least < PRESENT_IDLE_S, source: `logind session ${s.Id} (${s.Type})`, idleSeconds: least };
 });
 

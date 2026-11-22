@@ -215,9 +215,10 @@ export const LocalCluster = Schema.Struct({
 export type LocalCluster = typeof LocalCluster.Type;
 
 const Watts = Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 0, maximum: 2000 }));
+const AwayWatts = Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 2000 }));
 export const LocalPowerRequest = Schema.Struct({
   activeWatts: Schema.optionalKey(Watts),
-  awayWatts: Schema.optionalKey(Schema.NullOr(Watts)),
+  awayWatts: Schema.optionalKey(Schema.NullOr(AwayWatts)),
 });
 export type LocalPowerRequest = typeof LocalPowerRequest.Type;
 

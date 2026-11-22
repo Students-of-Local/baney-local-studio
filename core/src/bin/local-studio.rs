@@ -723,6 +723,7 @@ fn fleet_open() -> Result<Fleet, String> {
         std::env::var_os("LOCAL_STUDIO_CONTROLLER_HOME").filter(|home| !home.is_empty()).map(PathBuf::from),
         Some(data.join("controller")),
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local-studio-controller")),
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local-studio-t3")),
     ];
     let key = json_text(&settings, "fleetKey").or_else(|| {
         homes.into_iter().flatten().find_map(|home| json_text(&read_value(&home.join("config.json")), "fleetKey"))
@@ -802,13 +803,13 @@ fn fleet_set(body: &Value, as_json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn watts_flag(raw: &str, word: &str, none: Value) -> Result<Value, String> {
+fn watts_flag(raw: &str, word: &str, none: Value, least: u32) -> Result<Value, String> {
     if raw == word {
         return Ok(none);
     }
     match raw.parse::<u32>() {
-        Ok(watts) if watts <= 2000 => Ok(Value::from(watts)),
-        _ => Err(format!("{raw} is not a wattage: use a whole number from 0 to 2000, or {word}")),
+        Ok(watts) if (least..=2000).contains(&watts) => Ok(Value::from(watts)),
+        _ => Err(format!("{raw} is not a wattage: use a whole number from {least} to 2000, or {word}")),
     }
 }
 
@@ -818,8 +819,8 @@ fn share_body(flags: &[&str]) -> Result<Value, String> {
     while let Some(flag) = rest.next() {
         let value = rest.next().ok_or_else(|| USAGE.to_string())?;
         match *flag {
-            "--active" => power.insert("activeWatts".into(), watts_flag(value, "off", Value::from(0))?),
-            "--away" => power.insert("awayWatts".into(), watts_flag(value, "max", Value::Null)?),
+            "--active" => power.insert("activeWatts".into(), watts_flag(value, "off", Value::from(0), 0)?),
+            "--away" => power.insert("awayWatts".into(), watts_flag(value, "max", Value::Null, 1)?),
             _ => return Err(USAGE.to_string()),
         };
     }
@@ -869,7 +870,7 @@ fn fleet_show(value: &Value, as_json: bool) {
     println!(
         "  power while in use: {}; while away: {}",
         watts_text(power.get("activeWatts"), "does not lend", "no cap"),
-        watts_text(power.get("awayWatts"), "0 W", "no cap")
+        watts_text(power.get("awayWatts"), "up to 1 W", "no cap")
     );
     let owner = match power.get("present").and_then(Value::as_bool) {
         Some(true) => "present",
@@ -924,13 +925,44 @@ fn sudoers_text(user: &str, nvidia_smi: &Path) -> String {
     )
 }
 
+/// The nvidia-smi the sudoers rule may name: the first one on PATH, resolved through symlinks, and only when
+/// root owns it and every directory above it and no other user or group can write any of them. A rule for a
+/// file the user could replace would hand root to anything running as the user.
+#[cfg(unix)]
+fn trusted_nvidia_smi(found: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let real =
+        std::fs::canonicalize(found).map_err(|error| format!("could not resolve {}: {error}", found.display()))?;
+    let meta = std::fs::metadata(&real).map_err(|error| format!("could not read {}: {error}", real.display()))?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(format!("{} is not an executable file, so no sudoers rule is written.", real.display()));
+    }
+    for path in real.ancestors() {
+        let meta = std::fs::metadata(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            let which = if path == real { "that file".to_string() } else { path.display().to_string() };
+            return Err(format!(
+                "nvidia-smi resolves to {}, and {which} is not owned by root or can be changed by another user or group. A sudoers rule for it would let any program running as you become root, so none is written. Install the NVIDIA driver's nvidia-smi (usually /usr/bin/nvidia-smi) and put its directory first in PATH.",
+                real.display()
+            ));
+        }
+    }
+    Ok(real)
+}
+
+#[cfg(not(unix))]
+fn trusted_nvidia_smi(found: &Path) -> Result<PathBuf, String> {
+    Err(format!("{} can't be checked on this system, so no sudoers rule is written.", found.display()))
+}
+
 fn power_helper(yes: bool) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err("The power helper is only for Linux machines with an NVIDIA GPU. On this machine the controller caps fleet work by pausing it in short bursts, which needs no setup.".to_string());
     }
-    let nvidia_smi = on_path("nvidia-smi").ok_or(
+    let found = on_path("nvidia-smi").ok_or(
         "This machine has no NVIDIA GPU (nvidia-smi is not installed), so there is no power limit to set. The controller caps fleet work by pausing it instead.",
     )?;
+    let nvidia_smi = trusted_nvidia_smi(&found)?;
     let listed = std::process::Command::new(&nvidia_smi).arg("-L").output().map_err(|error| error.to_string())?;
     if !listed.status.success() || !String::from_utf8_lossy(&listed.stdout).contains("GPU ") {
         return Err("nvidia-smi lists no GPU on this machine, so there is no power limit to set.".to_string());
@@ -947,39 +979,63 @@ fn power_helper(yes: bool) -> Result<(), String> {
         "It lets {user} run only `{} -i <GPU index> -pl <watts>` as root without a password, so the Local controller can cap fleet GPU work and put the original limit back.",
         nvidia_smi.display()
     );
-    let staged = std::env::temp_dir().join(format!("local-studio-power.{}", std::process::id()));
-    println!("It runs: visudo -cf {}", staged.display());
-    println!("         sudo install -m 0440 -o root -g root {} {SUDOERS_PATH}", staged.display());
+    println!("The rule never touches a file you can write: it is checked with `visudo -cf -`, piped into a root-owned");
+    println!("{SUDOERS_STAGED} (sudo skips names with a dot), checked again there, then moved into place.");
     if !yes {
         println!("Nothing was changed. Run `local-studio fleet power-helper --yes` to install it.");
         return Ok(());
     }
-    std::fs::write(&staged, &text).map_err(|error| format!("could not write {}: {error}", staged.display()))?;
-    let result = install_sudoers(&staged, &nvidia_smi);
-    let _ = std::fs::remove_file(&staged);
-    result
+    install_sudoers(&text, &nvidia_smi)
 }
 
-fn install_sudoers(staged: &Path, nvidia_smi: &Path) -> Result<(), String> {
-    let visudo = on_path("visudo").or_else(|| Some(PathBuf::from("/usr/sbin/visudo")).filter(|path| path.is_file()));
-    let visudo = visudo.ok_or("visudo is not installed, so the rule can't be checked before it is installed.")?;
-    let checked =
-        std::process::Command::new(visudo).arg("-cf").arg(staged).output().map_err(|error| error.to_string())?;
+/// Sudo ignores files in /etc/sudoers.d whose names contain a dot, so a half-checked rule here is never live.
+const SUDOERS_STAGED: &str = "/etc/sudoers.d/.local-studio-power.new";
+
+fn run_with_stdin(program: &str, args: &[&str], input: &str) -> Result<std::process::Output, String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run {program}: {error}"))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    stdin.write_all(input.as_bytes()).map_err(|error| error.to_string())?;
+    drop(stdin);
+    child.wait_with_output().map_err(|error| error.to_string())
+}
+
+fn said(output: &std::process::Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&output.stdout).trim(), String::from_utf8_lossy(&output.stderr).trim())
+}
+
+fn install_sudoers(text: &str, nvidia_smi: &Path) -> Result<(), String> {
+    let checked = run_with_stdin("visudo", &["-cf", "-"], text)
+        .or_else(|_| run_with_stdin("/usr/sbin/visudo", &["-cf", "-"], text))
+        .map_err(|_| "visudo is not installed, so the rule can't be checked before it is installed.".to_string())?;
     if !checked.status.success() {
-        return Err(format!(
-            "visudo refused the rule, so nothing was installed: {}{}",
-            String::from_utf8_lossy(&checked.stdout).trim(),
-            String::from_utf8_lossy(&checked.stderr).trim()
-        ));
+        return Err(format!("visudo refused the rule, so nothing was installed: {}", said(&checked)));
     }
-    let installed = std::process::Command::new("sudo")
-        .args(["install", "-m", "0440", "-o", "root", "-g", "root"])
-        .arg(staged)
-        .arg(SUDOERS_PATH)
-        .status()
-        .map_err(|error| error.to_string())?;
-    if !installed.success() {
-        return Err(format!("sudo install failed, so {SUDOERS_PATH} was not written."));
+    let staged = run_with_stdin(
+        "sudo",
+        &["install", "-m", "0440", "-o", "root", "-g", "root", "/dev/stdin", SUDOERS_STAGED],
+        text,
+    )?;
+    if !staged.status.success() {
+        return Err(format!("sudo install failed, so {SUDOERS_PATH} was not written: {}", said(&staged)));
+    }
+    let sudo =
+        |args: &[&str]| std::process::Command::new("sudo").args(args).output().map_err(|error| error.to_string());
+    let rechecked = sudo(&["visudo", "-cf", SUDOERS_STAGED])?;
+    if !rechecked.status.success() {
+        let _ = sudo(&["rm", "-f", SUDOERS_STAGED]);
+        return Err(format!("visudo refused the installed copy, so it was removed: {}", said(&rechecked)));
+    }
+    let moved = sudo(&["mv", "-f", SUDOERS_STAGED, SUDOERS_PATH])?;
+    if !moved.status.success() {
+        let _ = sudo(&["rm", "-f", SUDOERS_STAGED]);
+        return Err(format!("could not move the rule into {SUDOERS_PATH}: {}", said(&moved)));
     }
     let allowed = std::process::Command::new("sudo")
         .args(["-n", "-l"])
