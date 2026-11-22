@@ -653,6 +653,7 @@ export const makeCluster = (d: ClusterDeps) => {
         measured: p.measured,
         measuredW: state === "lent" ? p.measuredW : null,
         helper: lever.helper(),
+        maxW: lever.maxW(),
         gpus: p.gpus,
       },
       draining,

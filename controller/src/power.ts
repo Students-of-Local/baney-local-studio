@@ -524,6 +524,18 @@ export const makePower = (d: PowerDeps) => {
       return note ? `${note} ${why}` : why;
     },
     helper,
+    // The most the fleet could draw here: the sum of each NVIDIA GPU's max_limit, or a nominal Apple GPU.
+    // The app uses it as the top of its power sliders.
+    maxW: (): number | null => {
+      const nv = d.gpus().filter((g) => !g.stale);
+      if (!nv.length) return platform() === "darwin" && arch() === "arm64" ? APPLE_GPU_W : null;
+      if (Date.now() - limitsCache.at > LIMITS_TTL_MS) void serial(() => limits());
+      const max = nv.flatMap((g) => {
+        const w = limitsCache.value?.find((l) => l.uuid === g.uuid)?.maxW;
+        return w ? [w] : [];
+      });
+      return max.length ? max.reduce((a, b) => a + b, 0) : null;
+    },
     view: (fleetUuids: string[]) => {
       const m = duty ? measuredNow() : null;
       const gpus = d.gpus().filter((g) => !fleetUuids.length || fleetUuids.includes(g.uuid));

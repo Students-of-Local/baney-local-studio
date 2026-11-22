@@ -72,7 +72,63 @@ extension PagesFixtures {
                     phase: .ready, message: nil
                 ),
             ],
-            models: poolModels, machines: fleetMachines
+            models: poolModels, machines: fleetMachines,
+            power: power(present: false, cap: nil, lever: .none, measured: nil)
+        )
+        return pod
+    }
+
+    private static func power(
+        present: Bool?, cap: Double?, lever: LocalPowerLever, measured: Double?,
+        away: UInt32? = nil, helper: LocalPowerHelper = .installed, max: Double? = 495,
+        source: String = "logind session 2 (wayland)"
+    ) -> LocalClusterPower {
+        LocalClusterPower(
+            activeWatts: 60, awayWatts: away, present: present,
+            presenceSource: source, capW: cap, lever: lever,
+            measuredW: measured, helper: helper, maxW: max
+        )
+    }
+
+    static var powerInUseMachine: LocalController {
+        var pod = egpuMachine
+        pod.cluster?.reason = "In use, so it lends at up to 60 W."
+        pod.cluster?.power = power(present: true, cap: 60, lever: .dutyCycle, measured: 48)
+        return pod
+    }
+
+    static var powerAwayMachine: LocalController {
+        var pod = egpuMachine
+        pod.cluster?.reason = "Idle, so its GPU is lent to the fleet, at up to 150 W."
+        pod.cluster?.power = power(present: false, cap: 150, lever: .nvidiaLimit, measured: 141, away: 150)
+        return pod
+    }
+
+    static var powerDutyCycleMachine: LocalController {
+        var mac = appleSiliconMachine
+        mac.cluster?.lend = .idle
+        mac.cluster?.state = .lent
+        mac.cluster?.reason = "In use, so it lends at up to 20 W. It can't read this machine's power draw (macmon is not installed), so it runs fleet work 66% of the time instead."
+        mac.cluster?.power = LocalClusterPower(
+            activeWatts: 20, awayWatts: nil, present: true, presenceSource: "macOS input idle time", capW: 20,
+            lever: .dutyCycle, measuredW: nil, helper: .unsupported, maxW: 30
+        )
+        return mac
+    }
+
+    static var powerHelperMissingMachine: LocalController {
+        var pod = egpuMachine
+        pod.cluster?.reason = "In use, so it lends at up to 60 W."
+        pod.cluster?.power = power(present: true, cap: 60, lever: .dutyCycle, measured: 57, away: 200, helper: .missing)
+        return pod
+    }
+
+    static var powerPresenceUnknownMachine: LocalController {
+        var pod = egpuMachine
+        pod.cluster?.reason = "Idle, so its GPU is lent to the fleet, at up to 200 W."
+        pod.cluster?.power = power(
+            present: nil, cap: 200, lever: .dutyCycle, measured: 143, away: 200,
+            source: "logind session 2 (wayland): the desktop does not report idle time (IdleHint is never set)"
         )
         return pod
     }
@@ -124,7 +180,11 @@ extension PagesFixtures {
         mac.hardware?.egpuNote = "Apple Silicon Macs cannot use an external GPU. Use a GPU on another machine in your fleet instead."
         mac.cluster = LocalCluster(
             discover: true, lend: .never, state: .off, reason: "Lending is off. This Mac has no GPU the fleet can use.", rpc: false, draining: false,
-            freeMib: 0, checks: [], lent: [], pools: [], models: [], machines: Array(fleetMachines.prefix(2))
+            freeMib: 0, checks: [], lent: [], pools: [], models: [], machines: Array(fleetMachines.prefix(2)),
+            power: LocalClusterPower(
+                activeWatts: 0, awayWatts: nil, present: nil, presenceSource: "", capW: nil, lever: .none,
+                measuredW: nil, helper: .unsupported, maxW: nil
+            )
         )
         return mac
     }

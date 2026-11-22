@@ -1,14 +1,28 @@
 use std::rc::Rc;
 
 use local_studio_core::{
-    LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalController, LocalGpu, LocalHardware, LocalHotplug,
-    LocalLendMode, LocalLendState, LocalLentServer, LocalMachineStatus, LocalPool, LocalPoolModel, LocalPoolPhase,
-    LocalSnapshot, LocalThunderbolt, LocalThunderboltState, Update,
+    LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalClusterPower, LocalController, LocalGpu, LocalHardware,
+    LocalHotplug, LocalLendMode, LocalLendState, LocalLentServer, LocalMachineStatus, LocalPool, LocalPoolModel,
+    LocalPoolPhase, LocalPowerHelper, LocalPowerLever, LocalSnapshot, LocalThunderbolt, LocalThunderboltState, Update,
 };
 
 use crate::app::App;
 
-pub const SCENES: [&str; 3] = ["local-cluster-lending", "local-cluster-reclaimed", "local-cluster-apple-silicon"];
+pub const SCENES: [&str; 13] = [
+    "local-cluster-lending",
+    "local-cluster-reclaimed",
+    "local-cluster-apple-silicon",
+    "local-cluster-power-in-use",
+    "local-cluster-power-in-use-light",
+    "local-cluster-power-away",
+    "local-cluster-power-away-light",
+    "local-cluster-power-duty-cycle",
+    "local-cluster-power-duty-cycle-light",
+    "local-cluster-power-helper-missing",
+    "local-cluster-power-helper-missing-light",
+    "local-cluster-power-presence-unknown",
+    "local-cluster-power-presence-unknown-light",
+];
 
 const GIB: u64 = 1_073_741_824;
 const EGPU_LINK: &str = "PCIe 3.0 x4, about 3.9 GB/s over the cable. Loading a model takes longer than on an internal slot; once it is loaded, decoding speed is nearly the same.";
@@ -212,6 +226,7 @@ fn parish_cluster(reclaimed: bool) -> LocalCluster {
             )],
             models,
             machines: fleet(),
+            power: LocalClusterPower::default(),
         }
     } else {
         LocalCluster {
@@ -236,6 +251,14 @@ fn parish_cluster(reclaimed: bool) -> LocalCluster {
             pools: vec![pool(LocalPoolPhase::Ready, None)],
             models,
             machines: fleet(),
+            power: LocalClusterPower {
+                active_watts: 60,
+                present: Some(false),
+                presence_source: text("logind session 2 (wayland)"),
+                helper: LocalPowerHelper::Installed,
+                max_w: Some(495.0),
+                ..LocalClusterPower::default()
+            },
         }
     }
 }
@@ -269,14 +292,65 @@ fn apple() -> LocalController {
         pools: Vec::new(),
         models: Vec::new(),
         machines: fleet().into_iter().take(2).collect(),
+        power: LocalClusterPower::default(),
     };
     controller("gil-mbp", "http://127.0.0.1:18091", true, hardware, cluster)
+}
+
+fn powered(scene: &str) -> LocalController {
+    let mut shown = if scene.starts_with("local-cluster-power-duty-cycle") { apple() } else { parish(false) };
+    let Some(cluster) = shown.cluster.as_mut() else { return shown };
+    let power = &mut cluster.power;
+    if scene.starts_with("local-cluster-power-in-use") {
+        cluster.reason = text("In use, so it lends at up to 60 W.");
+        power.present = Some(true);
+        power.cap_w = Some(60.0);
+        power.lever = LocalPowerLever::DutyCycle;
+        power.measured_w = Some(48.0);
+    } else if scene.starts_with("local-cluster-power-away") {
+        cluster.reason = text("Idle, so its GPU is lent to the fleet, at up to 150 W.");
+        power.away_watts = Some(150);
+        power.cap_w = Some(150.0);
+        power.lever = LocalPowerLever::NvidiaLimit;
+        power.measured_w = Some(141.0);
+    } else if scene.starts_with("local-cluster-power-duty-cycle") {
+        cluster.lend = LocalLendMode::Idle;
+        cluster.state = LocalLendState::Lent;
+        cluster.reason = text("In use, so it lends at up to 20 W. It can't read this machine's power draw (macmon is not installed), so it runs fleet work 66% of the time instead.");
+        *power = LocalClusterPower {
+            active_watts: 20,
+            present: Some(true),
+            presence_source: text("macOS input idle time"),
+            cap_w: Some(20.0),
+            lever: LocalPowerLever::DutyCycle,
+            ..LocalClusterPower::default()
+        };
+    } else if scene.starts_with("local-cluster-power-presence-unknown") {
+        cluster.reason = text("Idle, so its GPU is lent to the fleet, at up to 200 W.");
+        power.present = None;
+        power.presence_source =
+            text("logind session 2 (wayland): the desktop does not report idle time (IdleHint is never set)");
+        power.away_watts = Some(200);
+        power.cap_w = Some(200.0);
+        power.lever = LocalPowerLever::DutyCycle;
+        power.measured_w = Some(143.0);
+    } else {
+        cluster.reason = text("In use, so it lends at up to 60 W.");
+        power.present = Some(true);
+        power.away_watts = Some(200);
+        power.cap_w = Some(60.0);
+        power.lever = LocalPowerLever::DutyCycle;
+        power.measured_w = Some(57.0);
+        power.helper = LocalPowerHelper::Missing;
+    }
+    shown
 }
 
 pub fn stage(app: &Rc<App>, scene: &str) {
     let shown = match scene {
         "local-cluster-reclaimed" => parish(true),
         "local-cluster-apple-silicon" => apple(),
+        _ if scene.starts_with("local-cluster-power-") => powered(scene),
         _ => parish(false),
     };
     let url = shown.url.clone();

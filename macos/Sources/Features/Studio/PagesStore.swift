@@ -19,6 +19,7 @@ enum LocalPendingKey: Hashable {
     case authorize(String, String)
     case lending(String)
     case discovery(String)
+    case power(String)
     case pool(String)
     case stopPool(String, String)
 }

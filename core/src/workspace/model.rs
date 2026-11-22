@@ -50,6 +50,7 @@ pub enum LocalAction {
     Authorize { controller: String, uuid: String },
     SetLending { controller: String, lend: LocalLendMode },
     SetDiscovery { controller: String, discover: bool },
+    SetPowerBudget { controller: String, active_watts: u32, away_watts: Option<u32> },
     LaunchPool { controller: String, model: String },
     StopPool { controller: String, pool: String },
 }
@@ -1123,7 +1124,7 @@ pub struct LocalClusterMachine {
     pub free_mib: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct LocalCluster {
@@ -1139,6 +1140,43 @@ pub struct LocalCluster {
     pub pools: Vec<LocalPool>,
     pub models: Vec<LocalPoolModel>,
     pub machines: Vec<LocalClusterMachine>,
+    #[cfg_attr(feature = "wire", serde(default))]
+    pub power: LocalClusterPower,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalPowerLever {
+    #[default]
+    None,
+    NvidiaLimit,
+    DutyCycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalPowerHelper {
+    Installed,
+    Missing,
+    #[default]
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalClusterPower {
+    pub active_watts: u32,
+    pub away_watts: Option<u32>,
+    pub present: Option<bool>,
+    pub presence_source: String,
+    pub cap_w: Option<f64>,
+    pub lever: LocalPowerLever,
+    pub measured_w: Option<f64>,
+    pub helper: LocalPowerHelper,
+    pub max_w: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

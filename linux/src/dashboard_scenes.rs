@@ -44,6 +44,7 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         "local-dashboard-light" => Some((ColorScheme::Light, None)),
         "local-dashboard-gildrb" => Some((ColorScheme::Light, Some(crate::colors::GILDRB.to_string()))),
         "local-dashboard-gildrb-dark" => Some((ColorScheme::Dark, Some(crate::colors::GILDRB.to_string()))),
+        _ if cluster && scene.ends_with("-light") => Some((ColorScheme::Light, None)),
         _ => None,
     };
     if let Some((color_scheme, theme)) = appearance {

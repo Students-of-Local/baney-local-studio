@@ -14,11 +14,12 @@ use serde_json::{json, Value};
 use tokio::task::JoinSet;
 
 use super::model::{
-    LocalAction, LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalController, LocalDownload, LocalEndpoint,
-    LocalEngineState, LocalGpu, LocalHardware, LocalHotplug, LocalJob, LocalLendMode, LocalLendState, LocalLentServer,
-    LocalMachineStatus, LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase, LocalRecipe, LocalRecord,
-    LocalRegistry, LocalRegistryMatch, LocalShare, LocalSnapshot, LocalTailnet, LocalThunderbolt,
-    LocalThunderboltState, LocalUsage, RegistryModel, RegistryVariant, Settings, TailnetDevice, UsageDay,
+    LocalAction, LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalClusterPower, LocalController,
+    LocalDownload, LocalEndpoint, LocalEngineState, LocalGpu, LocalHardware, LocalHotplug, LocalJob, LocalLendMode,
+    LocalLendState, LocalLentServer, LocalMachineStatus, LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase,
+    LocalPowerHelper, LocalPowerLever, LocalRecipe, LocalRecord, LocalRegistry, LocalRegistryMatch, LocalShare,
+    LocalSnapshot, LocalTailnet, LocalThunderbolt, LocalThunderboltState, LocalUsage, RegistryModel, RegistryVariant,
+    Settings, TailnetDevice, UsageDay,
 };
 use super::process;
 use super::time::{day_key, monday_of, now_ms, parse_rfc3339_ms, DAY_MS};
@@ -221,8 +222,69 @@ fn lend_state(value: &Value) -> LocalLendState {
     }
 }
 
-fn cluster(value: &Value) -> LocalCluster {
+fn power_lever(value: &Value) -> LocalPowerLever {
+    match text(value, "lever").as_str() {
+        "nvidia-limit" => LocalPowerLever::NvidiaLimit,
+        "duty-cycle" => LocalPowerLever::DutyCycle,
+        _ => LocalPowerLever::None,
+    }
+}
+
+fn watts(value: &Value, key: &str) -> Option<u32> {
+    value.get(key).and_then(Value::as_u64).and_then(|watts| u32::try_from(watts).ok())
+}
+
+fn power_max(power: &Value, hardware: Option<&Value>) -> Option<f64> {
+    if let Some(max) = float(power, "maxW").filter(|max| *max > 0.0) {
+        return Some(max);
+    }
+    let reported = array(power, "gpus");
+    let max: Vec<f64> = reported.iter().filter_map(|gpu| float(gpu, "maxW")).collect();
+    if !max.is_empty() {
+        return Some(max.iter().sum());
+    }
+    let lending: Vec<u64> = reported.iter().filter_map(|gpu| gpu.get("index").and_then(Value::as_u64)).collect();
+    let limits: Vec<f64> = hardware
+        .map(|hardware| array(hardware, "gpus"))
+        .unwrap_or_default()
+        .iter()
+        .filter(|gpu| {
+            lending.is_empty() || gpu.get("index").and_then(Value::as_u64).is_some_and(|i| lending.contains(&i))
+        })
+        .filter_map(|gpu| {
+            let index = gpu.get("index").and_then(Value::as_u64);
+            reported
+                .iter()
+                .find(|entry| entry.get("index").and_then(Value::as_u64) == index)
+                .and_then(|entry| float(entry, "originalW"))
+                .or_else(|| float(gpu, "powerLimitW"))
+        })
+        .collect();
+    (!limits.is_empty()).then(|| limits.iter().sum())
+}
+
+fn cluster_power(value: Option<&Value>, hardware: Option<&Value>) -> LocalClusterPower {
+    let Some(power) = value else { return LocalClusterPower::default() };
+    LocalClusterPower {
+        active_watts: watts(power, "activeWatts").unwrap_or(0),
+        away_watts: watts(power, "awayWatts"),
+        present: power.get("present").and_then(Value::as_bool),
+        presence_source: text(power, "presenceSource"),
+        cap_w: float(power, "capW"),
+        lever: power_lever(power),
+        measured_w: float(power, "measuredW"),
+        helper: match text(power, "helper").as_str() {
+            "installed" => LocalPowerHelper::Installed,
+            "missing" => LocalPowerHelper::Missing,
+            _ => LocalPowerHelper::Unsupported,
+        },
+        max_w: power_max(power, hardware),
+    }
+}
+
+fn cluster(value: &Value, hardware: Option<&Value>) -> LocalCluster {
     LocalCluster {
+        power: cluster_power(value.get("power"), hardware),
         discover: flag(value, "discover"),
         lend: lend_mode(value),
         state: lend_state(value),
@@ -578,7 +640,9 @@ fn controller(
         requests: usage_rows.iter().map(|row| unsigned(row, "requests")).sum(),
         tokens: tokens_of(usage_rows, "", "9999"),
         measured_requests: usage_rows.iter().map(|row| unsigned(row, "measuredRequests")).sum(),
-        cluster: snapshot.filter(|_| !gone).and_then(|snapshot| snapshot.get("cluster")).map(cluster),
+        cluster: snapshot
+            .filter(|_| !gone)
+            .and_then(|snapshot| snapshot.get("cluster").map(|value| cluster(value, snapshot.get("hardware")))),
     }
 }
 
@@ -1019,6 +1083,7 @@ impl Local {
             LocalAction::Authorize { .. }
             | LocalAction::SetLending { .. }
             | LocalAction::SetDiscovery { .. }
+            | LocalAction::SetPowerBudget { .. }
             | LocalAction::LaunchPool { .. }
             | LocalAction::StopPool { .. } => self.cluster_action(&root, action).await?,
         }
@@ -1080,6 +1145,7 @@ impl Local {
             LocalAction::Authorize { .. }
             | LocalAction::SetLending { .. }
             | LocalAction::SetDiscovery { .. }
+            | LocalAction::SetPowerBudget { .. }
             | LocalAction::LaunchPool { .. }
             | LocalAction::StopPool { .. }
             | LocalAction::Registry { .. }
@@ -1121,6 +1187,17 @@ impl Local {
                     Method::POST,
                     "/api/cluster",
                     Some(json!({ "discover": discover })),
+                    ACTION_TIMEOUT,
+                )
+                .await?;
+            }
+            LocalAction::SetPowerBudget { controller, active_watts, away_watts } => {
+                let endpoint = self.target(root, &controller).await?;
+                self.request(
+                    &endpoint,
+                    Method::POST,
+                    "/api/cluster",
+                    Some(json!({ "power": { "activeWatts": active_watts, "awayWatts": away_watts } })),
                     ACTION_TIMEOUT,
                 )
                 .await?;
@@ -1218,6 +1295,7 @@ impl Local {
             | LocalAction::Authorize { .. }
             | LocalAction::SetLending { .. }
             | LocalAction::SetDiscovery { .. }
+            | LocalAction::SetPowerBudget { .. }
             | LocalAction::LaunchPool { .. }
             | LocalAction::StopPool { .. } => {}
         }
