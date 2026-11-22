@@ -64,7 +64,7 @@ private struct StageRow: View {
         HStack(spacing: 8) {
             Group {
                 if stage.state == .running {
-                    LogoMark()
+                    EmberMark(working: true)
                         .frame(width: 12, height: 12)
                 } else {
                     Image(systemName: symbol)

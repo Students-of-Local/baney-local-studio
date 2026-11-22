@@ -98,6 +98,7 @@ struct RootView: View {
                                 .focusRegionFrame(.terminal, in: shell)
                         }
                     }
+                    .background { HearthGlow(lit: store.conversation.busy) }
                     .overlay { PreviewMiniPlayerView(store: store) }
                     .overlay(alignment: .top) { NoticeStack(store: store) }
                     .frame(maxWidth: .infinity)

@@ -385,7 +385,7 @@ struct PanelMessage: View {
                     Image(systemName: symbol)
                         .icon(.display, .secondary)
                 } else {
-                    LogoMark(style: .coin)
+                    EmberMark(working: true)
                         .frame(width: 26, height: 26)
                 }
             }
@@ -523,7 +523,7 @@ private struct AgentRow: View {
             HStack(alignment: .top, spacing: 8) {
                 Group {
                     if agent.running {
-                        LogoMark()
+                        EmberMark(working: true)
                             .frame(width: 14, height: 14)
                     } else {
                         Image(systemName: style.symbol)

@@ -522,7 +522,7 @@ private struct ToolStateGlyph: View {
         case .pending:
             glyph("clock", Theme.secondaryText, "Pending")
         case .running:
-            LogoMark(tint: Theme.secondaryText)
+            EmberMark(working: true, tint: Theme.secondaryText)
                 .frame(width: 12, height: 12)
                 .frame(width: 18)
                 .help("Running")
@@ -853,7 +853,7 @@ struct WorkingRow: View {
                     .frame(width: 6, height: 6)
                     .frame(width: 16)
             } else {
-                LogoMark()
+                EmberMark(working: true)
                     .frame(width: 16, height: 16)
                     .accessibilityHidden(true)
             }

@@ -79,6 +79,7 @@ struct ComposerView: View {
         }
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Theme.input))
+        .emberEdge(conversation.busy, radius: 20)
         .onHover { hovering = $0 }
         .animation(Self.motion, value: resting)
         .frame(height: resting ? Self.textTop + min(max(height, lineHeight), 220) + Self.controlsBand : nil, alignment: .bottom)

@@ -130,6 +130,7 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub fn build(application: &adw::Application) -> Rc<Self> {
         theme::install();
+        crate::brand::install_icon();
         let app = Rc::new_cyclic(|weak: &Weak<App>| {
             let window = adw::ApplicationWindow::builder()
                 .application(application)
@@ -1208,6 +1209,10 @@ impl Hero {
         });
         actions.append(&add);
         actions.append(&without);
+        if let Some(mark) = crate::brand::mark(52) {
+            mark.set_margin_bottom(4);
+            root.append(&mark);
+        }
         root.append(&title);
         root.append(&subtitle);
         root.append(&project.button);

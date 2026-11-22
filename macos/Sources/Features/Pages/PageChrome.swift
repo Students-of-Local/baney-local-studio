@@ -70,7 +70,7 @@ struct PageEmptyState: View {
                     .icon(.display, .secondary)
                     .accessibilityHidden(true)
             } else {
-                LogoMark(style: .coin)
+                EmberMark(working: true)
                     .frame(width: 30, height: 30)
                     .accessibilityHidden(true)
             }

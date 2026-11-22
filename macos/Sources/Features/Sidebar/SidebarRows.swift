@@ -12,7 +12,7 @@ struct StatusBadge: View {
         if let glyph = Self.glyph(row.status) {
             HStack(spacing: 4) {
                 if row.status == .working {
-                    LogoMark()
+                    EmberMark(working: true)
                         .frame(width: 12, height: 12)
                         .accessibilityHidden(true)
                 } else {
