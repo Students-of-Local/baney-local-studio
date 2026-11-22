@@ -56,17 +56,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.updates.onRestart = {
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
-        store.start { [weak self] error in
-            guard let self else { return }
-            if let error {
-                NSAlert(error: error).runModal()
-                NSApp.terminate(nil)
-                return
-            }
-            self.started(arguments, stressFlag: stressFlag, keysFlag: keysFlag, logoFlag: logoFlag)
+        openStudio { [weak self] in
+            self?.started(arguments, stressFlag: stressFlag, keysFlag: keysFlag, logoFlag: logoFlag)
         }
         DispatchQueue.main.async { [weak self] in
             self?.presentMainWindowIfMissing()
+        }
+    }
+
+    private func openStudio(then opened: @escaping @MainActor @Sendable () -> Void) {
+        store.start { [weak self] error in
+            guard let self else { return }
+            guard let error else {
+                opened()
+                return
+            }
+            DataOwner.resolve(error) { [weak self] retry in
+                guard retry, let self else {
+                    NSApp.terminate(nil)
+                    return
+                }
+                self.openStudio(then: opened)
+            }
         }
     }
 

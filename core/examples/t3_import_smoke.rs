@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
-use local_studio_core::{ChatWidth, Studio, StudioConfig, T3Choices, T3ItemState, T3Report, Update, Waker};
+use local_studio_core::{
+    ChatWidth, Studio, StudioConfig, StudioError, T3Choices, T3ItemState, T3Report, Update, Waker,
+};
 use serde_json::{json, Value};
 
 const CANARY: &str = "t3-smoke-canary-9f2c41d7e8b3";
@@ -628,7 +630,17 @@ fn studio_stage(fixture: &Fixture, scratch: &Path) -> Result<()> {
         controller_main: None,
         take_over_serve: false,
     };
+    let second = StudioConfig { socket_path: Some(path_text(&scratch.join("second.sock"))), ..config.clone() };
     let studio = Studio::new(config, Arc::new(Nudge)).map_err(|error| anyhow::anyhow!("{error}"))?;
+    match Studio::new(second, Arc::new(Nudge)) {
+        Err(StudioError::Owned { pid, path, waited }) => {
+            ensure!(pid == Some(std::process::id()), "the refusal names process {pid:?}, not the owner");
+            ensure!(path == path_text(&data) && !waited, "the refusal names {path} (waited {waited})");
+            println!("app lock: a second app on the same data dir is refused and told which process owns it");
+        }
+        Err(error) => bail!("a second app on the same data dir failed with {error:?}, not Owned"),
+        Ok(_) => bail!("a second app opened the data dir the first one owns"),
+    }
     let mut app = App { studio, report: None, settings: None, projects: Vec::new() };
     app.wait("the first-run offer", |app| {
         app.report.as_ref().is_some_and(|report| report.found && !report.offered && !report.applied)
