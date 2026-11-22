@@ -13,7 +13,7 @@ pub const SOCKET_ENV: &str = "LOCAL_STUDIO_ASK";
 pub const TOKEN_ENV: &str = "LOCAL_STUDIO_ASK_TOKEN";
 pub const THREAD_ENV: &str = "LOCAL_STUDIO_THREAD";
 pub const PID_ENV: &str = "LOCAL_STUDIO_ASK_PID";
-pub const TOKENS_FILE: &str = "ask-tokens.json";
+pub const OLD_TOKENS_FILE: &str = "ask-tokens.json";
 pub const NOTE_TYPE: &str = "local-studio-ask";
 pub const MAX_LINE: usize = 16 * 1024;
 pub const MAX_TEXT: usize = 2000;
@@ -60,46 +60,21 @@ pub struct Tokens {
 
 #[derive(Default)]
 struct TokenTable {
-    file: Option<PathBuf>,
     issued: HashMap<(String, String), String>,
     holders: HashMap<String, (String, String)>,
 }
 
-#[derive(Deserialize)]
-struct Saved {
-    plugin: String,
-    thread: String,
-    token: String,
-}
-
-impl TokenTable {
-    fn insert(&mut self, key: (String, String), token: String) {
-        self.holders.insert(digest(&token), key.clone());
-        self.issued.insert(key, token);
-    }
-
-    fn save(&self) -> Result<(), String> {
-        let Some(file) = &self.file else { return Ok(()) };
-        let saved: Vec<Value> = self
-            .issued
-            .iter()
-            .map(|((plugin, thread), token)| json!({ "plugin": plugin, "thread": thread, "token": token }))
-            .collect();
-        crate::workspace::providers::write_private(file, &Value::Array(saved))
-    }
-}
-
 impl Tokens {
-    #[must_use]
-    pub fn load(data_dir: &Path) -> Self {
-        let file = data_dir.join(TOKENS_FILE);
-        let saved: Vec<Saved> =
-            std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-        let mut table = TokenTable { file: Some(file), ..TokenTable::default() };
-        for Saved { plugin, thread, token } in saved {
-            table.insert((plugin, thread), token);
+    /// Tokens live only in this process's memory. An older build kept them in plaintext in
+    /// `ask-tokens.json`, where the model's bash could read one; this removes that file.
+    pub fn remove_old_file(data_dir: &Path) -> Result<(), String> {
+        let file = data_dir.join(OLD_TOKENS_FILE);
+        match std::fs::remove_file(&file) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("Could not remove {}, which holds old plugin question tokens: {error}", file.display()))
+            }
+            _ => Ok(()),
         }
-        Self { inner: Arc::new(Mutex::new(table)) }
     }
 
     pub fn issue(&self, plugin: &str, thread: &str) -> Result<String, String> {
@@ -111,12 +86,8 @@ impl Tokens {
         let mut bytes = [0_u8; 32];
         getrandom::getrandom(&mut bytes).map_err(|error| format!("no random token: {error}"))?;
         let token = super::install::hex(&bytes);
-        table.insert(key.clone(), token.clone());
-        if let Err(error) = table.save() {
-            table.issued.remove(&key);
-            table.holders.remove(&digest(&token));
-            return Err(error);
-        }
+        table.holders.insert(digest(&token), key.clone());
+        table.issued.insert(key, token.clone());
         Ok(token)
     }
 
@@ -128,12 +99,8 @@ impl Tokens {
 
     pub fn retain(&self, keep: impl Fn(&str, &str) -> bool) {
         let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let before = table.issued.len();
         table.issued.retain(|(plugin, thread), _| keep(plugin, thread));
         table.holders.retain(|_, (plugin, thread)| keep(plugin, thread));
-        if table.issued.len() != before {
-            let _ = table.save();
-        }
     }
 }
 
