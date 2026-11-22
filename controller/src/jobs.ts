@@ -165,13 +165,13 @@ export const makeJobs = (deps: Deps) => {
         const id = randomBytes(5).toString("hex");
         const p = yield* plan(recipeId, req, id);
         if (req.dryRun) return { job: null, argv: p.argv };
-        const job: LocalJob = { id, recipeId, gpus: p.gpus, port: p.port, container: p.name, phase: "pending", progress: null, message: null, startedAt: now(), updatedAt: now() };
+        const job: LocalJob = { id, recipeId, gpus: p.gpus, port: p.port, container: p.name, phase: "pending", progress: null, message: null, startedAt: now(), updatedAt: now(), ...(req.lend ? { lent: true } : {}) };
         jobs.set(id, job);
         save();
         track(id, (signal) => drive(id, p, signal));
         return { job, argv: p.argv };
       })),
-    stop: (id: string) =>
+    stop: (id: string, reason: string | null = null) =>
       lock.withPermit(Effect.gen(function* () {
         const j = jobs.get(id);
         if (!j) return yield* fail(404, "JOB_NOT_FOUND", `no owned job ${id}`);
@@ -181,9 +181,10 @@ export const makeJobs = (deps: Deps) => {
           const r = yield* exec(["docker", "rm", "-f", j.container], 120_000);
           if (r.code !== 0) return yield* fail(500, "STOP_FAILED", r.stderr.trim().slice(0, 300));
         }
-        update(id, { phase: "stopped", message: null });
+        update(id, reason ? { phase: "failed", message: reason } : { phase: "stopped", message: null });
         return jobs.get(id) ?? j;
       })),
+    active,
     reconcile: Effect.gen(function* () {
       for (const j of active()) {
         if (aborts.has(j.id)) continue;

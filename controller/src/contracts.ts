@@ -17,16 +17,68 @@ export const LocalGpuTelemetry = Schema.Struct({
 });
 export type LocalGpuTelemetry = typeof LocalGpuTelemetry.Type;
 
-export const LocalGpu = Schema.Struct({ ...LocalGpuTelemetry.fields, card: OptionalString, busy: Schema.Boolean });
+export const LocalPcieLink = Schema.Struct({
+  gen: OptionalNumber,
+  width: OptionalNumber,
+  maxGen: OptionalNumber,
+  maxWidth: OptionalNumber,
+  gbps: OptionalNumber,
+  note: Schema.String,
+});
+export type LocalPcieLink = typeof LocalPcieLink.Type;
+
+export const LocalGpu = Schema.Struct({
+  ...LocalGpuTelemetry.fields,
+  card: OptionalString,
+  busy: Schema.Boolean,
+  external: Schema.optionalKey(Schema.Boolean),
+  busId: Schema.optionalKey(OptionalString),
+  link: Schema.optionalKey(Schema.NullOr(LocalPcieLink)),
+});
 export type LocalGpu = typeof LocalGpu.Type;
+
+export const LocalThunderbolt = Schema.Struct({
+  uuid: Schema.String,
+  name: Schema.String,
+  vendor: OptionalString,
+  generation: OptionalString,
+  state: Schema.Literals(["pending", "authorizing", "authorized", "failed"]),
+  message: OptionalString,
+});
+export type LocalThunderbolt = typeof LocalThunderbolt.Type;
+
+export const LocalHotplug = Schema.Struct({
+  at: Schema.String,
+  change: Schema.Literals(["added", "removed"]),
+  gpu: Schema.String,
+  memoryTotalMiB: Schema.Number,
+  external: Schema.Boolean,
+  message: Schema.String,
+  suggestions: Schema.Array(Schema.String),
+});
+export type LocalHotplug = typeof LocalHotplug.Type;
 
 export const LocalHardware = Schema.Struct({
   cpus: Schema.Number,
   memTotalBytes: Schema.Number,
   memFreeBytes: Schema.Number,
   gpus: Schema.Array(LocalGpu),
+  os: Schema.optionalKey(Schema.String),
+  arch: Schema.optionalKey(Schema.String),
+  egpuNote: Schema.optionalKey(OptionalString),
+  thunderbolt: Schema.optionalKey(Schema.Array(LocalThunderbolt)),
+  hotplug: Schema.optionalKey(Schema.Array(LocalHotplug)),
 });
 export type LocalHardware = typeof LocalHardware.Type;
+
+export const LocalLoad = Schema.Struct({
+  inFlight: Schema.Number,
+  running: OptionalNumber,
+  waiting: OptionalNumber,
+  kvPercent: OptionalNumber,
+  decodeTps: OptionalNumber,
+});
+export type LocalLoad = typeof LocalLoad.Type;
 
 export const LocalEndpoint = Schema.Struct({
   id: Schema.String,
@@ -42,6 +94,8 @@ export const LocalEndpoint = Schema.Struct({
   failures: Schema.optionalKey(Schema.Number),
   error: Schema.optionalKey(OptionalString),
   latencyMs: Schema.optionalKey(OptionalNumber),
+  lent: Schema.optionalKey(Schema.Boolean),
+  load: Schema.optionalKey(Schema.NullOr(LocalLoad)),
 });
 export type LocalEndpoint = typeof LocalEndpoint.Type;
 
@@ -85,6 +139,7 @@ export const LocalJob = Schema.Struct({
   message: OptionalString,
   startedAt: Schema.String,
   updatedAt: Schema.String,
+  lent: Schema.optionalKey(Schema.Boolean),
 });
 export type LocalJob = typeof LocalJob.Type;
 
@@ -94,6 +149,68 @@ const LocalControllerInfo = Schema.Struct({
   url: Schema.String,
   version: Schema.String,
 });
+
+export const LocalLendMode = Schema.Literals(["never", "idle", "always"]);
+export type LocalLendMode = typeof LocalLendMode.Type;
+
+export const LocalLendState = Schema.Literals(["off", "lent", "reclaimed"]);
+export type LocalLendState = typeof LocalLendState.Type;
+
+export const LocalPool = Schema.Struct({
+  id: Schema.String,
+  model: Schema.String,
+  alias: Schema.String,
+  port: Schema.Number,
+  members: Schema.Array(Schema.Struct({ controllerId: Schema.String, name: Schema.String, endpoint: Schema.String })),
+  phase: Schema.Literals(["starting", "ready", "failed", "stopped"]),
+  message: OptionalString,
+  argv: Schema.Array(Schema.String),
+  startedAt: Schema.String,
+});
+export type LocalPool = typeof LocalPool.Type;
+
+export const LocalNodeCluster = Schema.Struct({
+  discover: Schema.Boolean,
+  lend: LocalLendMode,
+  state: LocalLendState,
+  reason: Schema.String,
+  since: Schema.String,
+  rpc: Schema.Boolean,
+  rpcEndpoint: OptionalString,
+  gpus: Schema.Number,
+  freeMiB: Schema.Number,
+});
+export type LocalNodeCluster = typeof LocalNodeCluster.Type;
+
+export const LocalCluster = Schema.Struct({
+  ...LocalNodeCluster.fields,
+  draining: Schema.Boolean,
+  checks: Schema.Array(Schema.Struct({ name: Schema.String, ok: Schema.Boolean, detail: Schema.String })),
+  discovered: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, url: Schema.String, at: Schema.String })),
+  listen: Schema.Array(Schema.String),
+  rpcServers: Schema.Array(Schema.Struct({ id: Schema.String, endpoint: Schema.String, forId: Schema.String, forName: Schema.String, startedAt: Schema.String, gpus: Schema.Array(Schema.Number) })),
+  pools: Schema.Array(LocalPool),
+  models: Schema.Array(Schema.Struct({ path: Schema.String, name: Schema.String, sizeBytes: Schema.Number, fitsOne: Schema.Boolean, fitsPool: Schema.Boolean })),
+  machines: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, url: Schema.String, ...LocalNodeCluster.fields })),
+});
+export type LocalCluster = typeof LocalCluster.Type;
+
+export const LocalClusterRequest = Schema.Struct({
+  discover: Schema.optionalKey(Schema.Boolean),
+  lend: Schema.optionalKey(LocalLendMode),
+});
+export const LocalHelloRequest = Schema.Struct({ id: Schema.String, nonce: Schema.String, target: Schema.String });
+export const LocalRpcRequest = Schema.Struct({ id: Schema.String, name: Schema.String, url: Schema.String });
+export const LocalReleaseRequest = Schema.Struct({ controllerId: Schema.String, reason: Schema.String });
+export const LocalPoolRequest = Schema.Struct({
+  model: Schema.String,
+  alias: Schema.optionalKey(Schema.String),
+  members: Schema.optionalKey(Schema.Array(Schema.String)),
+  ctx: Schema.optionalKey(Schema.Number),
+  dryRun: Schema.optionalKey(Schema.Boolean),
+});
+export type LocalPoolRequest = typeof LocalPoolRequest.Type;
+export const LocalAuthorizeRequest = Schema.Struct({ uuid: Schema.String });
 
 export const LocalSnapshot = Schema.Struct({
   controller: LocalControllerInfo,
@@ -107,6 +224,7 @@ export const LocalSnapshot = Schema.Struct({
   controllers: Schema.Array(LocalControllerLink),
   jobs: Schema.Array(LocalJob),
   usage: Schema.Array(LocalUsage),
+  cluster: Schema.optionalKey(LocalCluster),
 });
 export type LocalSnapshot = typeof LocalSnapshot.Type;
 
@@ -130,6 +248,7 @@ export const LocalRunRequest = Schema.Struct({
   gpus: Schema.optionalKey(Schema.Array(Schema.Number)),
   dryRun: Schema.optionalKey(Schema.Boolean),
   replace: Schema.optionalKey(Schema.Boolean),
+  lend: Schema.optionalKey(Schema.Boolean),
 });
 export type LocalRunRequest = typeof LocalRunRequest.Type;
 
@@ -167,6 +286,7 @@ export const LocalNode = Schema.Struct({
   endpoints: Schema.Array(LocalEndpoint),
   usage: Schema.Array(LocalUsage),
   peers: Schema.Array(Schema.String),
+  cluster: Schema.optionalKey(LocalNodeCluster),
 });
 export type LocalNode = typeof LocalNode.Type;
 

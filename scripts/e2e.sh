@@ -79,6 +79,8 @@ eukhe=$(realpath "$("${NU:-nu}" -c 'use eukhe.nu; eukhe binary . target/eukhe')"
 # then run copies from scratch.
 CARGO_TARGET_DIR=$target cargo build -j3 -p local-studio-core --examples --bin local-studio
 (cd controller && bun install --frozen-lockfile > /dev/null)
+echo "== cluster_smoke"
+(cd controller && E2E_REMOTE_IP=$remote_ip node test/cluster_smoke.mjs) || { status failure "cluster_smoke failed on $(hostname -s)"; exit 1; }
 bin=$scratch/bin
 mkdir -p "$bin"
 for example in "${examples[@]}" "${helpers[@]}"; do

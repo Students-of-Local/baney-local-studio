@@ -9,16 +9,30 @@ const Peer = Schema.Struct({ HostName: Schema.String, OS: Schema.String, Online:
 const Status = Schema.Struct({ Peer: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Peer))) });
 const decodeHealth = Schema.decodeUnknownOption(Schema.Struct({ id: Schema.String, name: Schema.String }));
 
+const BINS = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+
+export const onlinePeers: Effect.Effect<(typeof Peer.Type)[] | null> = Effect.gen(function* () {
+  for (const bin of BINS) {
+    const r = yield* exec([bin, "status", "--json"], 5_000);
+    const status = r.code === 0 ? decodeJson(Status, r.stdout) : undefined;
+    if (status) return Object.values(status.Peer ?? {}).filter((p) => p.Online && p.TailscaleIPs[0]);
+  }
+  return null;
+});
+
+export const tailnetIPv4: Effect.Effect<string | null> = Effect.gen(function* () {
+  for (const bin of BINS) {
+    const r = yield* exec([bin, "ip", "-4"], 5_000);
+    const ip = r.code === 0 ? r.stdout.trim().split("\n")[0]?.trim() : "";
+    if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip;
+  }
+  return null;
+});
+
 export const scanTailnet = (linked: Set<string>): Effect.Effect<LocalTailnet> =>
   Effect.gen(function* () {
-    let status: typeof Status.Type | undefined;
-    for (const bin of ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
-      if (status) break;
-      const r = yield* exec([bin, "status", "--json"], 5_000);
-      status = r.code === 0 ? decodeJson(Status, r.stdout) : undefined;
-    }
-    if (!status) return { available: false, devices: [] };
-    const peers = Object.values(status.Peer ?? {}).filter((p) => p.Online && p.TailscaleIPs[0]);
+    const peers = yield* onlinePeers;
+    if (!peers) return { available: false, devices: [] };
     const devices = yield* Effect.forEach(
       peers,
       (p) =>
