@@ -531,6 +531,18 @@ fn describe_settings(config: &Effective) -> String {
     )
 }
 
+fn owner_ports(listening: Option<&lock::Listening>, config: &Effective) -> (u16, Option<u16>) {
+    match listening {
+        Some(listening) => (
+            listening.port,
+            listening
+                .tunnel_port
+                .or_else(|| config.tunnel_port.map(|port| listening.pinned_tunnel_port.unwrap_or(port))),
+        ),
+        None => (config.port, config.tunnel_port),
+    }
+}
+
 pub fn status(mut args: Args) -> anyhow::Result<()> {
     let out = Out::new(&mut args);
     let no_load = args.switch("--no-load");
@@ -568,8 +580,13 @@ pub fn status(mut args: Args) -> anyhow::Result<()> {
             out.say(format_args!("serve.json: none at {} (defaults: {})", path.display(), describe_settings(&config)));
         }
     }
-    let mut listeners = vec![listener("local", config.port, &format!("127.0.0.1:{}", config.port))];
-    if let Some(port) = config.tunnel_port {
+    let listening = match &holder {
+        lock::Owner::Held(pid) => lock::listening(&data_dir, *pid),
+        lock::Owner::Free => None,
+    };
+    let (local_port, tunnel_port) = owner_ports(listening.as_ref(), &config);
+    let mut listeners = vec![listener("local", local_port, &format!("127.0.0.1:{local_port}"))];
+    if let Some(port) = tunnel_port {
         let host = config.allow_tunnel_hosts.first().cloned().unwrap_or_else(|| format!("127.0.0.1:{port}"));
         listeners.push(listener("tunnel", port, &host));
     }
@@ -601,6 +618,7 @@ pub fn status(mut args: Args) -> anyhow::Result<()> {
         "version": VERSION,
         "dataDir": data_dir,
         "owner": owner,
+        "ownerPorts": listening,
         "listeners": listeners.into_iter().map(|line| line.0).collect::<Vec<_>>(),
         "settingsPath": path,
         "serveJson": stored,

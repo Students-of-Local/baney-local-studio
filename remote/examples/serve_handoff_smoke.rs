@@ -711,6 +711,158 @@ async fn tunnel_removed(run: &Run) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn health_becomes(port: u16, host: &str, wanted: Option<u16>, bound: Duration) -> anyhow::Result<Duration> {
+    let started = Instant::now();
+    loop {
+        let now = health(port, host).await;
+        if now == wanted {
+            return Ok(started.elapsed());
+        }
+        ensure!(started.elapsed() < bound, "{host} on 127.0.0.1:{port} still answers {now:?}, expected {wanted:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn tunnel_teardown(run: &Run) -> anyhow::Result<()> {
+    const STOPPED: &str = "the last tunnel host was removed: stopped the tunnel listener";
+    const FAILED: &str = "could not start the tunnel listener";
+    let removed = tokio::task::block_in_place(|| run.json(&["allow-tunnel-host", "--remove", SECOND]))?;
+    expect(&removed, "/state", &json!("removed"), "removing the last tunnel host")?;
+    expect(&removed, "/allowTunnelHosts", &json!([]), "removing the last tunnel host")?;
+    expect(&removed, "/live", &json!(true), "removing the last tunnel host")?;
+    let took = health_becomes(run.tunnel, SECOND, None, QUICK).await?;
+    ensure!(run.serve_log().contains(STOPPED), "serve did not log the tunnel listener's stop:\n{}", run.serve_log());
+    let status = tokio::task::block_in_place(|| run.json(&["status", "--no-load"]))?;
+    let listeners = status.get("listeners").and_then(Value::as_array).map_or(0, Vec::len);
+    ensure!(listeners == 1, "status lists {listeners} listeners after the last tunnel host left: {status}");
+    expect(&status, "/ownerPorts/tunnelPort", &Value::Null, "status --json after the last tunnel host left")?;
+    println!(
+        "ok   F5: removing the last tunnel host closed 127.0.0.1:{} within {:.2} s; status lists only the local listener",
+        run.tunnel,
+        took.as_secs_f64()
+    );
+    let held = std::net::TcpListener::bind(("127.0.0.1", run.tunnel)).context("hold the tunnel port")?;
+    let before = run.serve_log().matches(FAILED).count();
+    let added = tokio::task::block_in_place(|| run.json(&["allow-tunnel-host", SECOND]))?;
+    expect(&added, "/state", &json!("added"), "allow-tunnel-host while another process holds the port")?;
+    expect(&added, "/live", &json!(false), "allow-tunnel-host while another process holds the port")?;
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let failures = run.serve_log().matches(FAILED).count() - before;
+    ensure!(failures == 1, "serve logged the held tunnel port {failures} times in 12 s:\n{}", run.serve_log());
+    println!(
+        "ok   F5: with 127.0.0.1:{} held by another process, serve logged the bind failure once in 12 s",
+        run.tunnel
+    );
+    let mark = run.serve_log().len();
+    drop(held);
+    let took = health_becomes(run.tunnel, SECOND, Some(200), QUICK).await?;
+    let wanted = format!("tunnel on http://127.0.0.1:{}", run.tunnel);
+    let since = run.serve_log().get(mark..).unwrap_or_default().to_string();
+    ensure!(since.contains(&wanted), "serve did not log {wanted} once the port was free:\n{since}");
+    println!("ok   F5: once the port was free serve bound it within {:.2} s and logged it", took.as_secs_f64());
+    Ok(())
+}
+
+async fn flagged_ports(run: &Run) -> anyhow::Result<()> {
+    let data = run.root.join("flag-data");
+    std::fs::create_dir_all(&data)?;
+    let port = free_port()?;
+    let tunnel = loop {
+        let tunnel = free_port()?;
+        if tunnel != port && tunnel != 18094 {
+            break tunnel;
+        }
+    };
+    let log = std::fs::File::create(run.root.join("flag-serve.log"))?;
+    let mut child = Command::new(&run.bin)
+        .args(["serve", "--port", &port.to_string(), "--tunnel-port", &tunnel.to_string(), "--name", "flag-box"])
+        .arg("--eukhe")
+        .arg(&run.eukhe)
+        .arg("--data-dir")
+        .arg(&data)
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .context("start a serve with port flags")?;
+    let pid = child.id();
+    println!("     flagged serve pid {pid} on 127.0.0.1:{port}, tunnel port {tunnel} from flags only");
+    let outcome = async {
+        health_becomes(port, &format!("127.0.0.1:{port}"), Some(200), SETUP).await?;
+        let json = |args: &[&str]| -> anyhow::Result<Value> {
+            tokio::task::block_in_place(|| {
+                json_of(Command::new(&run.bin).args(args).arg("--json").arg("--data-dir").arg(&data), args)
+            })
+        };
+        let local = json(&["allow-host", "flag-box.handoff.test"])?;
+        expect(&local, "/port", &json!(port), "allow-host under a serve started with --port")?;
+        expect(&local, "/live", &json!(true), "allow-host under a serve started with --port")?;
+        let added = json(&["allow-tunnel-host", "flag-tunnel.handoff.test"])?;
+        expect(&added, "/tunnelPort", &json!(tunnel), "allow-tunnel-host under a serve started with --tunnel-port")?;
+        expect(&added, "/live", &json!(true), "allow-tunnel-host under a serve started with --tunnel-port")?;
+        let answer = health(tunnel, "flag-tunnel.handoff.test").await;
+        ensure!(answer == Some(200), "the flagged tunnel port answered {answer:?}");
+        let written: Value = serde_json::from_str(&read(&data.join("remote").join("serve.json")))?;
+        ensure!(written.get("tunnelPort").is_none(), "allow-tunnel-host wrote a tunnelPort over the flag: {written}");
+        let status = json(&["status", "--no-load"])?;
+        expect(&status, "/listeners/0/port", &json!(port), "status --json under port flags")?;
+        expect(&status, "/listeners/1/port", &json!(tunnel), "status --json under port flags")?;
+        expect(&status, "/ownerPorts/pid", &json!(pid), "status --json under port flags")?;
+        println!("ok   F6: under --port {port} --tunnel-port {tunnel} allow-host and allow-tunnel-host probe those ports and say live, serve.json gets no tunnelPort: {added}");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    Command::new("kill").args(["-TERM", &pid.to_string()]).status()?;
+    let deadline = Instant::now() + QUICK;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            Command::new("kill").args(["-KILL", &pid.to_string()]).status()?;
+            child.wait()?;
+            bail!("flagged serve {pid} ignored SIGTERM and was killed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if outcome.is_err() {
+        println!("     flagged serve log:\n{}", read(&run.root.join("flag-serve.log")));
+    }
+    outcome?;
+    ensure!(!data.join("remote").join("listening.json").exists(), "the flagged serve left listening.json behind");
+    println!("ok   flagged serve {pid} stopped by PID and removed its listening.json");
+    Ok(())
+}
+
+fn pair_json(run: &Run) -> anyhow::Result<()> {
+    let data = run.root.join("pair-data");
+    write_settings(&data, &json!({ "name": "pair-box", "allowHosts": [TAILNET] }))?;
+    let mint = |host: &str| -> anyhow::Result<(Value, String)> {
+        let url = format!("wss://{host}/v1/ws");
+        let output = Command::new(&run.bin)
+            .args(["pair", "--json", "--url", &url, "--name", "pair-box", "--data-dir"])
+            .arg(&data)
+            .stdin(Stdio::null())
+            .output()?;
+        let printed = String::from_utf8_lossy(&output.stdout);
+        ensure!(output.status.success(), "pair --json failed: {printed}{}", String::from_utf8_lossy(&output.stderr));
+        ensure!(printed.trim().lines().count() == 1, "pair --json printed more than one line:\n{printed}");
+        let value: Value = serde_json::from_str(printed.trim())?;
+        expect(&value, "/state", &json!("minted"), "pair --json")?;
+        expect(&value, "/url", &json!(url), "pair --json")?;
+        let link = value.get("link").and_then(Value::as_str).unwrap_or_default();
+        ensure!(link.contains("://pair?") && link.contains('#'), "pair --json link {link}");
+        let expires = value.get("expiresAt").and_then(Value::as_i64).unwrap_or_default();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+        let now = i64::try_from(now)?;
+        ensure!((now + 500_000..=now + 601_000).contains(&expires), "pair --json expiresAt {expires} ms, now {now} ms");
+        Ok((value, String::from_utf8_lossy(&output.stderr).into_owned()))
+    };
+    let (known, quiet) = mint(TAILNET)?;
+    ensure!(!quiet.contains("allow-host"), "pair asked for allow-host on a host serve.json allows: {quiet}");
+    let other = "other.tail1234.ts.net";
+    let (_, hint) = mint(other)?;
+    ensure!(hint.contains(&format!("allow-host {other}")), "pair gave no allow-host hint for {other}: {hint}");
+    println!("ok   pair --json prints one minted object ({known}); the allow-host hint shows only for a host serve.json does not list");
+    Ok(())
+}
+
 async fn allow_host_live(run: &Run, host: &str, owner: u32, label: &str) -> anyhow::Result<()> {
     let before = health(run.port, host).await;
     ensure!(before == Some(403), "{host} got {before:?} on the local listener before allow-host");
@@ -754,6 +906,18 @@ fn default_tunnel_port(run: &Run) -> anyhow::Result<()> {
     );
     println!("ok   allow-tunnel-host --json on a fresh data dir: {added} (nothing listens on 18094 for it)");
     let args = ["allow-host", "fresh-box.handoff.test", "--json"];
+    let absent = run.root.join("absent");
+    let gone = ["allow-host", "--remove", "gone.handoff.test", "--json"];
+    let unchanged = json_of(Command::new(&run.bin).args(gone).arg("--data-dir").arg(&absent), &gone)?;
+    expect(&unchanged, "/state", &json!("unchanged"), "allow-host --remove with no serve.json")?;
+    let gone = ["allow-tunnel-host", "--remove", "gone.handoff.test", "--json"];
+    let unchanged = json_of(Command::new(&run.bin).args(gone).arg("--data-dir").arg(&absent), &gone)?;
+    expect(&unchanged, "/state", &json!("unchanged"), "allow-tunnel-host --remove with no serve.json")?;
+    ensure!(
+        !absent.join("remote").join("serve.json").exists(),
+        "--remove on a data dir with no serve.json created one"
+    );
+    println!("ok   allow-host and allow-tunnel-host --remove with no serve.json say unchanged and write nothing");
     let local = json_of(Command::new(&run.bin).args(args).arg("--data-dir").arg(&data), &args)?;
     expect(&local, "/state", &json!("added"), "allow-host --json on a fresh data dir")?;
     expect(&local, "/port", &json!(18093), "allow-host --json on a fresh data dir")?;
@@ -1131,12 +1295,15 @@ async fn drive(run: &mut Run) -> anyhow::Result<()> {
     let link = Box::pin(takeover(run, &phone, link)).await?;
     let mut link = Box::pin(hand_back(run, &phone, link)).await?;
     tunnel_removed(run).await?;
+    tunnel_teardown(run).await?;
     Command::new("kill").args(["-TERM", &run.serve_pid()?.to_string()]).status()?;
     let code = link.closed(QUICK).await?;
     run.stop_serve()?;
     ensure!(code == Some(1001), "serve's stop closed the phone with {code:?}, expected 1001");
     println!("ok   serve's stop closed the phone with 1001");
     default_tunnel_port(run)?;
+    flagged_ports(run).await?;
+    pair_json(run)?;
     service_files(run)?;
     Ok(())
 }

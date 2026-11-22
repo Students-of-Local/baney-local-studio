@@ -27,7 +27,7 @@ const ANSWER_POLL: Duration = Duration::from_millis(100);
 
 const USAGE: &str = "usage:
   local-studio-serve serve [--port 18093] [--tunnel-port 18094] [--allow-host <name>]... [--allow-tunnel-host <name>]... [--url <wss url>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
-  local-studio-serve pair [--url <wss url>] [--port 18093] [--name <name>] [--data-dir <dir>]
+  local-studio-serve pair [--url <wss url>] [--port 18093] [--name <name>] [--json] [--data-dir <dir>]
   local-studio-serve devices [--data-dir <dir>]
   local-studio-serve revoke (<device id, key fingerprint prefix (8+ hex) or name> | --all) [--data-dir <dir>]
   local-studio-serve allow-host [--remove] [--json] <name> [--data-dir <dir>]
@@ -432,13 +432,25 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
     args.0.remove(0);
     args.done()?;
     settings::check_host(&name)?;
-    let mut settings = settings::load(&data_dir)?.unwrap_or_default();
-    if matches!(which, Allow::Tunnel) && !remove && settings.tunnel_port.is_none() {
+    let owner = match lock::holder(&data_dir) {
+        lock::Owner::Held(pid) => Some(pid),
+        lock::Owner::Free => None,
+    };
+    let listening = owner.and_then(|pid| lock::listening(&data_dir, pid));
+    let pinned = listening.as_ref().and_then(|listening| listening.pinned_tunnel_port);
+    let stored = settings::load(&data_dir)?;
+    let mut settings = stored.clone().unwrap_or_default();
+    if matches!(which, Allow::Tunnel) && !remove && settings.tunnel_port.is_none() && pinned.is_none() {
         settings.tunnel_port = Some(settings::DEFAULT_TUNNEL_PORT);
     }
-    let port = match which {
-        Allow::Local => settings.port.unwrap_or(settings::DEFAULT_PORT),
-        Allow::Tunnel => settings.tunnel_port.unwrap_or(settings::DEFAULT_TUNNEL_PORT),
+    let port = match (which, &listening) {
+        (Allow::Local, Some(listening)) => listening.port,
+        (Allow::Local, None) => settings.port.unwrap_or(settings::DEFAULT_PORT),
+        (Allow::Tunnel, _) => listening
+            .as_ref()
+            .and_then(|listening| listening.tunnel_port)
+            .or(pinned)
+            .unwrap_or(settings.tunnel_port.unwrap_or(settings::DEFAULT_TUNNEL_PORT)),
     };
     let hosts = match which {
         Allow::Local => &mut settings.allow_hosts,
@@ -451,7 +463,13 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
         hosts.push(name.clone());
     }
     let hosts = hosts.clone();
-    settings::save(&data_dir, &settings)?;
+    let changed = match &stored {
+        Some(stored) => stored != &settings,
+        None => settings != Settings::default(),
+    };
+    if changed {
+        settings::save(&data_dir, &settings)?;
+    }
     let path = settings::path(&data_dir);
     let list = which.list();
     let state = match (remove, present) {
@@ -469,15 +487,14 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
             which.listener()
         )),
     }
-    let owner = match lock::holder(&data_dir) {
-        lock::Owner::Held(pid) => Some(pid),
-        lock::Owner::Free => None,
-    };
     let process = owner.flatten().and_then(local_studio_core::process_name);
     if let (Some(Some(pid)), Some("local-studio-serve")) = (owner, process.as_deref()) {
         std::process::Command::new("kill").args(["-HUP", &pid.to_string()]).status().ok();
     }
-    let live = owner.is_some() && picked_up(port, &name, !remove);
+    let (live, port) = match owner {
+        Some(pid) => picked_up(&data_dir, pid, which, port, &name, !remove),
+        None => (false, port),
+    };
     if live {
         out.say(format_args!(
             "{} picked it up: 127.0.0.1:{port} answers accordingly.",
@@ -485,7 +502,7 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
         ));
     } else if owner.is_some() {
         out.say(format_args!(
-            "{} did not pick it up within {} s; check its log.",
+            "{} did not pick it up on 127.0.0.1:{port} within {} s; check its log.",
             lock::describe(owner.flatten()),
             PICK_UP_WITHIN.as_secs()
         ));
@@ -510,42 +527,67 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn picked_up(port: u16, host: &str, allowed: bool) -> bool {
+fn picked_up(
+    data_dir: &Path,
+    owner: Option<u32>,
+    which: Allow,
+    planned: u16,
+    host: &str,
+    allowed: bool,
+) -> (bool, u16) {
     let since = Instant::now();
     loop {
-        if service::probe(port, host) == Some(if allowed { 200 } else { 403 }) {
-            return true;
+        let port = match (which, lock::listening(data_dir, owner)) {
+            (_, None) => Some(planned),
+            (Allow::Local, Some(listening)) => Some(listening.port),
+            (Allow::Tunnel, Some(listening)) => listening.tunnel_port,
+        };
+        match port {
+            Some(port) if service::probe(port, host) == Some(if allowed { 200 } else { 403 }) => return (true, port),
+            None if !allowed => return (true, planned),
+            _ => {}
         }
         if since.elapsed() >= PICK_UP_WITHIN {
-            return false;
+            return (false, port.unwrap_or(planned));
         }
         std::thread::sleep(HAND_OVER_POLL);
     }
 }
 
 fn pair(mut args: Args) -> anyhow::Result<()> {
+    let out = Out::new(&mut args);
     let port = args.port()?;
     let url = args.take("--url")?;
     let name = args.take("--name")?.unwrap_or_else(pairing::host_name);
     let data_dir = args.data_dir()?;
     args.done()?;
     let url = url.or_else(pairing::tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{port}/v1/ws"));
-    let pairing::Minted { link, url, .. } = pairing::mint(&data_dir, CHANNEL, Some(url), Some(name))?;
-    let code = qrcode::QrCode::new(link.as_bytes())?;
-    let picture = code
-        .render::<qrcode::render::unicode::Dense1x2>()
-        .dark_color(qrcode::render::unicode::Dense1x2::Light)
-        .light_color(qrcode::render::unicode::Dense1x2::Dark)
-        .quiet_zone(true)
-        .build();
-    println!("{picture}");
-    println!("{link}");
-    eprintln!(
-        "Scan this with Local Studio on the phone within 10 minutes. It works once; a new code cancels this one."
-    );
-    if url.starts_with("wss://") {
-        if let Some(host) = url.trim_start_matches("wss://").split('/').next() {
-            eprintln!("Run serve with --allow-host {host} so the phone's connection is accepted.");
+    let pairing::Minted { link, url, expires_at } = pairing::mint(&data_dir, CHANNEL, Some(url), Some(name))?;
+    if out.json {
+        out.object(&json!({ "state": "minted", "link": link, "url": url, "expiresAt": expires_at }));
+    } else {
+        let code = qrcode::QrCode::new(link.as_bytes())?;
+        let picture = code
+            .render::<qrcode::render::unicode::Dense1x2>()
+            .dark_color(qrcode::render::unicode::Dense1x2::Light)
+            .light_color(qrcode::render::unicode::Dense1x2::Dark)
+            .quiet_zone(true)
+            .build();
+        println!("{picture}");
+        println!("{link}");
+        eprintln!(
+            "Scan this with Local Studio on the phone within 10 minutes. It works once; a new code cancels this one."
+        );
+    }
+    let host = url.strip_prefix("wss://").and_then(|rest| rest.split('/').next()).filter(|host| !host.is_empty());
+    if let Some(host) = host {
+        let stored = settings::load(&data_dir)?.unwrap_or_default();
+        let known = stored.allow_hosts.iter().chain(&stored.allow_tunnel_hosts).any(|allowed| allowed == host);
+        if !known {
+            eprintln!(
+                "{host} is not in {}: run `local-studio-serve allow-host {host}` so the phone's connection is accepted.",
+                settings::path(&data_dir).display()
+            );
         }
     }
     Ok(())
