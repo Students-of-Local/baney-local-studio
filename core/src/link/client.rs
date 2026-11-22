@@ -226,7 +226,7 @@ impl Links {
         prompt: Option<PromptDraft>,
         request: Option<String>,
     ) {
-        if prompt.as_ref().is_some_and(|prompt| prompt.files.iter().any(|file| !file.trim().is_empty())) {
+        if prompt.as_ref().is_some_and(|prompt| !prompt.files.is_empty()) {
             let message = format!(
                 "{} cannot open files attached here: they are paths on this machine. Paste their text or attach images instead",
                 self.0.name(machine)
@@ -611,8 +611,11 @@ fn tls() -> Result<Arc<rustls::ClientConfig>, String> {
 }
 
 async fn open_socket(url: &str) -> Result<(Sink, Stream), Failure> {
-    let connector =
-        if url.starts_with("wss://") { Connector::Rustls(tls().map_err(Failure::Broken)?) } else { Connector::Plain };
+    let connector = if url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss://")) {
+        Connector::Rustls(tls().map_err(Failure::Broken)?)
+    } else {
+        Connector::Plain
+    };
     let connect = tokio_tungstenite::connect_async_tls_with_config(url, None, false, Some(connector));
     let (socket, _) = tokio::time::timeout(CONNECT, connect)
         .await
@@ -848,6 +851,14 @@ struct Session<'a> {
     seq: u64,
 }
 
+struct Abort(tokio::task::AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn write(
     mut sink: Sink,
     channel: Arc<Channel>,
@@ -876,6 +887,7 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
     let (writes, queued) = mpsc::unbounded_channel();
     let (pings, pinging) = mpsc::unbounded_channel();
     let mut outbound = tokio::spawn(write(sink, Arc::clone(&channel), queued, pinging));
+    let _writer = Abort(outbound.abort_handle());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let Some(name) = inner.connected(machine, tx, &url, &hello) else {
         outbound.abort();
