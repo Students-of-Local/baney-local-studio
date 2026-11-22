@@ -57,6 +57,7 @@ pub enum Target {
     TerminalCopy,
     TerminalChat,
     Provider,
+    Plugin,
     Pairing,
 }
 
@@ -598,6 +599,16 @@ impl App {
                 dirty.settings = true;
                 dirty.header = true;
             }
+            Update::Plugins { plugins, catalog, channel, checked } => {
+                let mut state = self.state.borrow_mut();
+                state.plugins = plugins;
+                state.catalog = catalog;
+                state.plugin_channel = channel;
+                state.plugins_checked = checked;
+                state.plugins_loaded = true;
+                drop(state);
+                dirty.settings = true;
+            }
             Update::Settings { settings } => {
                 self.apply_settings(&settings);
                 let onboard =
@@ -668,6 +679,7 @@ impl App {
             }
             Update::RequestDone { request, message } => match self.take_request(&request) {
                 Some(Target::Provider) => crate::providers::done(self, &request, &message),
+                Some(Target::Plugin) => crate::plugins::done(self, &request, &message),
                 _ => self.toast(&message),
             },
             Update::RequestFailed { request, message } => {
@@ -687,6 +699,7 @@ impl App {
                     Some(Target::Files | Target::Preview) => self.panel.files.failed(&message),
                     Some(Target::Devices) => self.panel.devices.failed(&message),
                     Some(Target::Provider) => crate::providers::failed(self, &request, &message),
+                    Some(Target::Plugin) => crate::plugins::failed(self, &request, &message),
                     Some(Target::Pairing) => crate::machines::pairing_failed(self, &request, &message),
                     _ => self.toast(&message),
                 }
@@ -1011,6 +1024,7 @@ impl App {
         self.settings.replace(Some(dialog));
         self.core.run(|studio| {
             studio.load_providers();
+            studio.load_plugins();
             studio.list_paired_devices();
         });
         let request = self.core.request();

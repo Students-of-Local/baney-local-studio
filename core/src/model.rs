@@ -176,6 +176,7 @@ pub struct SlashCommand {
     pub source: String,
     pub kind: CommandKind,
     #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = ""))]
     pub origin: String,
 }
 

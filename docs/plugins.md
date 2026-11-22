@@ -1,6 +1,6 @@
 # Plugin consent
 
-What a capability grant covers, when it carries over to an update, and which `mcpServers` entries Local Studio owns. The code is `core/src/plugins/grants.rs`, `core/src/plugins/install.rs` and `sync_mcp_servers` in `core/src/plugins.rs`.
+What a capability grant covers, when it carries over to an update, how the app finds, installs and updates plugins, and which `mcpServers` entries Local Studio owns. The code is `core/src/plugins/grants.rs`, `core/src/plugins/install.rs`, `core/src/plugins/hub.rs` and `sync_mcp_servers` in `core/src/plugins.rs`.
 
 ## Grants
 
@@ -47,7 +47,7 @@ Which rows a sheet lists:
 - An update whose grant carries over (same tree or same source, per the rules above): only the capabilities the new version asks for that the installed version did not. An update that asks for nothing new, including one that drops a capability, installs without a sheet.
 - A plugin that is already installed but lacks a needed capability (copied in by hand, changed in place, or installed by `plugin install` and never granted): Studio offers a sheet with its missing capabilities when it scans the plugins folder, at most once per plugin version while Studio runs. Its Install grants; Cancel leaves the plugin as it was. Studio hashes the folder when it offers the sheet and again before it grants, and refuses the grant if the folder changed in between.
 
-Needed capabilities (`mcp-server`, `native-host`, `ask-user`) have no switch: the plugin cannot work without them, so declining means Cancel. Sensitive capabilities (`screen-capture`, `synthetic-input`, `site-secrets`, `accessibility`) each have a switch that starts off. The grant rules above are unchanged: a plugin whose sensitive capability stays off counts as needing consent for it, so its MCP server stays off until that capability is granted with `local-studio plugin grant`. Studio does not offer the sheet again for a plugin that lacks only sensitive capabilities. The sheet says this plainly: when it lists a sensitive row, its footer says the plugin's tools stay off until every permission it asks for is on and names `local-studio plugin grant <id> <capability>`, and Install reads "Install with tools off" while a switch is off. The answer's `RequestDone` says the plugin is installed but off, with the grant command for what is missing.
+Needed capabilities (`mcp-server`, `native-host`, `ask-user`) have no switch: the plugin cannot work without them, so declining means Cancel. Sensitive capabilities (`screen-capture`, `synthetic-input`, `site-secrets`, `accessibility`) each have a switch that starts off, unless the sheet was opened from Settings, Plugins for that one capability (`ConsentRequest.preset`). For a plugin that is not told (see [Partial grants](#partial-grants)), a sensitive capability left off counts as needing consent, so its MCP server stays off until that capability is granted in Settings, Plugins or with `local-studio plugin grant`. Studio does not offer the sheet again for a plugin that lacks only sensitive capabilities. The sheet says this plainly: when it lists a sensitive row, its footer says the plugin's tools stay off until every permission it asks for is on and points to Settings, Plugins, and Install reads "Install with tools off" while a switch is off. For a told plugin the footer says a switch left off is turned off for the plugin, and Install counts only what is on. The answer's `RequestDone` names the version and how many permissions it got, and for a plugin that is installed but off says to turn the rest on in Settings, Plugins.
 
 Each row carries the capability id, `needed` or `sensitive`, a plain sentence of what it allows and one scope line, both fixed per capability in `Capability::sentence` and `Capability::scope` (`mcp-server`'s scope names the `[mcp]` command and its args). The sheet also carries the plugin's name, icon, description and version, the version it updates, the source (the Local Studio catalog with its commit, a git URL with its commit, or a local folder), the file count and the scan's findings: each executable the plugin ships besides its `[mcp]` command. Install stays off until the person opens the findings.
 
@@ -62,7 +62,45 @@ screen-capture = "page screenshots for the agent"
 synthetic-input = "clicking and typing in its own tabs"
 ```
 
-`name` is the display name (the id when absent). `icon` is a path inside the plugin to the image the sheet shows. `gates` names, for each sensitive capability, the features it turns on; a key that is not a sensitive capability the plugin asks for is an error. The sheet does not show it yet, because under the current grant rule a switch left off keeps the whole plugin off; it is kept for a later change to that rule.
+`name` is the display name (the id when absent). `icon` is a path inside the plugin to the image the sheet shows. `gates` names, for each sensitive capability, the features it turns on; a key that is not a sensitive capability the plugin asks for is an error. Settings, Plugins shows it under a told plugin's switch: "Off means no page screenshots for the agent."
+
+A sheet for a git URL that is not a catalog pin carries `unpinned`: its subtitle reads "at commit" instead of "pinned to", and it warns that the code is not pinned by the Local Studio catalog.
+
+## Partial grants
+
+A plugin opts into partial grants by putting `{granted}` in its `[mcp] args`:
+
+```toml
+[mcp]
+command = "bin/server"
+args = ["serve", "--granted={granted}"]
+```
+
+Such a plugin is told. On each sync Local Studio replaces `{granted}` with the sensitive capabilities the person granted, comma separated and sorted (`--granted=screen-capture`, or `--granted=` when none is on). A told plugin is ready once its needed capabilities are granted and its tree matches; each sensitive capability it asks for is on or off by itself, and turning one on or off rewrites the server entry at the next sync. The sheet shows `<allowed>` where the args hold `{granted}`.
+
+This is a promise the plugin keeps, not one Local Studio enforces: the server runs as the same user and could use a capability it was told it lacks. The sheet and Settings say so ("The plugin is told; Local Studio cannot block one that ignores it"). A plugin without `{granted}` keeps the rule above: every capability it asks for, or its server stays off.
+
+## Settings, Plugins
+
+Settings, Plugins is one page in both apps with three groups. Every action goes through Studio, so the CLI, macOS, Linux and a phone see the same state.
+
+- **Installed.** One row per plugin in the plugins folder, from `Update::Plugins`: name, version, state and a line of detail. The states are Running, Waiting for you (it needs consent; Allow opens the sheet), Off (its server name is held by a `settings.json` entry Local Studio did not write) and Failed (the manifest did not load or consent refused the folder, with the reason). Opening a row shows the description; each capability with a switch for a sensitive one (turning one on goes through the consent sheet with that row preset; turning one off revokes it at once); the commands and skills; the source, commit and channel; Open Folder; and Remove. Check for Updates looks up every git plugin's channel; a row with an update shows "Update to X" and, when the update asks for something new, names it.
+- **Catalog.** The entries in `examples/plugins/catalog.toml`, each pinned to a full commit and a `sha256` tree hash that install checks before anything runs. Install is one click, then the consent sheet when the plugin asks for anything, then it runs. An installed entry shows its version.
+- **Install from a Git URL or Folder.** A git URL with no commit follows the app's channel (below); `<url>@<sha>` pins that commit. Choose Folder copies a local folder. Both say the code is not pinned by the catalog.
+
+`Studio` methods: `load_plugins`, `check_plugin_updates`, `install_plugin`, `update_plugin`, `remove_plugin`, `grant_plugin(id, capabilities)` (empty capabilities means all missing ones) and `revoke_plugin(id, capability)`. Remove deletes the folder (or the symlink, never its target) under the grants lock, forgets the plugin's grant and origin, and the next sync drops its server entry.
+
+## Channels and updates
+
+`<data dir>/plugins/origins.json` records where each installed plugin came from: the git URL, the commit, the subdirectory and excluded paths for a catalog entry, or the folder, and whether a catalog pinned it. A plugin with no record (copied in by hand) has no update.
+
+A git plugin follows the app's channel, the one in Settings, General, Version (`local-studio-version`'s `CHANNEL`):
+
+- **stable**: the newest `vX.Y.Z` tag.
+- **nightly**: the `nightly` tag.
+- **dev**: `main`.
+
+A repo without the channel's ref falls back to `HEAD`. A catalog entry follows the same channel on its own repo and subdirectory. Check for Updates resolves the channel commit and reads only the new `plugin.toml` (a blob-less fetch), then offers an update when the commit differs and the new version is greater, or the version is the same and the plugin folder's git tree changed. A new commit that leaves the plugin folder alone is no update. Update installs the new commit as an update from the same source, so the grant rules above apply: an update that asks for nothing new installs with no sheet, and one that asks for more shows a sheet that lists only the new capabilities. After an update the origin records the new commit, and a catalog plugin counts as following its channel instead of the catalog pin.
 
 ## MCP server entries
 

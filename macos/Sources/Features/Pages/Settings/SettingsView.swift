@@ -109,6 +109,7 @@ struct SettingsView: View {
         case .storage: StorageSettings(pages: store.pages)
         case .local: LocalSettings(store: store)
         case .connections: ConnectionsSettings(store: store, open: { navigate(to: $0) })
+        case .plugins: PluginsSettings(store: store)
         case .archive: ArchivePage(store: store, embedded: true)
         }
     }

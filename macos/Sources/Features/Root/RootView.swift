@@ -144,7 +144,10 @@ struct RootView: View {
     }
 
     private var consentShown: Binding<ConsentRequest?> {
-        Binding { store.needsOnboarding || store.needsT3Import ? nil : store.consents.first } set: { _ in }
+        Binding {
+            store.needsOnboarding || store.needsT3Import
+                ? nil : store.consents.first { !(store.plugins.settingsVisible && store.plugins.owns($0.request)) }
+        } set: { _ in }
     }
 
     private var t3Shown: Binding<Bool> {
