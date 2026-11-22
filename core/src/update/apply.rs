@@ -28,6 +28,7 @@ pub fn apply(build: &Build, staged: &Staged, target: &Path) -> Result<Applied, R
         return Err(Refusal::Apply("the staged download does not match its ready.json".to_string()));
     }
     super::verify_file(build, &staged.artifact, &ready.sha256, &ready.signature, &ready.asset)?;
+    let _staging = super::hold_staging(staged)?;
     let unpacked = staged.dir.join("unpacked");
     let _ = std::fs::remove_dir_all(&unpacked);
     std::fs::create_dir_all(&unpacked)
@@ -51,6 +52,7 @@ fn install(build: &Build, staged: &Staged, target: &Path, unpacked: &Path) -> Re
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| Refusal::Apply(format!("{} names no install", target.display())))?;
+    let _install = super::hold(&parent.join(format!(".{name}.lock")))?;
     let incoming = parent.join(format!(".{name}.incoming"));
     let previous = parent.join(format!(".{name}.previous"));
     let _ = std::fs::remove_dir_all(&incoming);

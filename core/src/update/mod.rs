@@ -3,7 +3,7 @@ pub mod minisign;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -354,6 +354,35 @@ pub fn staging_dir(data_dir: &Path, channel: &str) -> PathBuf {
     data_dir.join("updates").join(channel)
 }
 
+pub(crate) fn hold(path: &Path) -> Result<File, Refusal> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| Refusal::Apply(format!("create {}: {error}", parent.display())))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| Refusal::Apply(format!("open {}: {error}", path.display())))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => {
+            Err(Refusal::Apply("another Local Studio is already downloading or installing this update".to_string()))
+        }
+        Err(TryLockError::Error(error)) => Err(Refusal::Apply(format!("lock {}: {error}", path.display()))),
+    }
+}
+
+fn staging_lock(root: &Path) -> PathBuf {
+    root.with_extension("lock")
+}
+
+pub(crate) fn hold_staging(staged: &Staged) -> Result<File, Refusal> {
+    let root = staged.dir.parent().unwrap_or(&staged.dir);
+    hold(&staging_lock(root))
+}
+
 fn slot(version: &str) -> String {
     version.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
 }
@@ -420,6 +449,7 @@ pub async fn download(
         return Err(Refusal::BadFeed(format!("{} is not this platform's build", offer.url)));
     }
     let root = staging_dir(data_dir, &build.channel);
+    let _lock = hold(&staging_lock(&root))?;
     let dir = root.join(slot(&offer.version));
     std::fs::create_dir_all(&dir).map_err(|error| Refusal::Apply(format!("create {}: {error}", dir.display())))?;
     let _ = std::fs::remove_file(dir.join(READY_FILE));
@@ -519,6 +549,7 @@ pub fn staged(build: &Build, data_dir: &Path) -> Option<Staged> {
         return None;
     }
     let root = staging_dir(data_dir, &build.channel);
+    let lock = hold(&staging_lock(&root)).ok();
     let mut found = None;
     for entry in std::fs::read_dir(&root).ok()?.flatten() {
         let dir = entry.path();
@@ -532,7 +563,7 @@ pub fn staged(build: &Build, data_dir: &Path) -> Option<Staged> {
             && verify_file(build, &artifact, &ready.sha256, &ready.signature, &ready.asset).is_ok();
         if usable && found.is_none() {
             found = Some(Staged { version: ready.version, notes: ready.notes, artifact, dir });
-        } else {
+        } else if lock.is_some() {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

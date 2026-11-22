@@ -150,6 +150,10 @@ fn run(scratch: &Path) -> Outcome {
     step("scripts/install.sh installs only a verified build", smoke.install_script())?;
     step("the Tauri signer's own output verifies", smoke.tauri_signer())?;
     let target = smoke.install(V0)?;
+    step(
+        "a second apply while one holds the update is refused and touches nothing",
+        smoke.apply_busy(&staged, &target),
+    )?;
     step("apply swaps in the new build and keeps the previous one", smoke.apply_good(&staged, &target))?;
     if cfg!(target_os = "macos") {
         step("a build signed by another identity is refused", smoke.other_identity(&target))?;
@@ -691,6 +695,34 @@ impl Smoke {
             let path = parent.join(format!(".{name}.{suffix}"));
             if path.exists() {
                 return Err(format!("{} was left behind", path.display()));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_busy(&self, staged: &Staged, target: &Path) -> Outcome {
+        let before = Self::reports(target)?;
+        let name = target.file_name().and_then(|name| name.to_str()).ok_or("the install has no name")?;
+        let parent = target.parent().ok_or("the install has no parent")?;
+        let root = staged.dir.parent().ok_or("the staged download has no channel folder")?;
+        for lock in [root.with_extension("lock"), parent.join(format!(".{name}.lock"))] {
+            let held = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock)
+                .map_err(|error| format!("open {}: {error}", lock.display()))?;
+            held.try_lock().map_err(|error| format!("lock {}: {error}", lock.display()))?;
+            expect(
+                update::apply(&self.build(V0), staged, target),
+                |refusal| matches!(refusal, Refusal::Apply(reason) if reason.contains("already downloading or installing")),
+            )?;
+            drop(held);
+            if update::staged(&self.build(V0), &self.data_dir()).is_none_or(|again| again.dir != staged.dir) {
+                return Err(format!("the staged download is gone after a refused apply under {}", lock.display()));
+            }
+            if Self::reports(target)? != before || parent.join(format!(".{name}.previous")).exists() {
+                return Err(format!("a refused apply under {} changed the install", lock.display()));
             }
         }
         Ok(())
