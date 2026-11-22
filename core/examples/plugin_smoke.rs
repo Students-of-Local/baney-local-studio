@@ -1308,6 +1308,22 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             ledger.len()
         );
 
+        let refusals = harness.view.refusals.len();
+        let ledgers = |view: &View| user_text(view.items(&cloud)).iter().filter(|text| text.contains(MARK)).count();
+        let before = ledgers(&harness.view);
+        studio.send("again".to_string(), cloud.clone(), prompt(ASK), Delivery::Queue);
+        harness.pump_until("the second /ledger in the same thread ran or was refused", STEP * 5, |view| {
+            view.refusals.len() > refusals || (ledgers(view) > before && view.idle(&cloud))
+        })?;
+        let refused: Vec<&String> = harness.view.refusals[refusals..]
+            .iter()
+            .filter(|(id, _, _)| *id == cloud)
+            .map(|(_, text, _)| text)
+            .collect();
+        ensure!(refused.is_empty(), "a second /ledger after plugin-ledger connected was refused: {refused:?}");
+        harness.pump_until("the second /ledger finished", STEP * 5, |view| view.idle(&cloud))?;
+        println!("ok   check 4c: a second /ledger in the same thread ran after plugin-ledger connected");
+
         studio.start_thread(
             "control".to_string(),
             Some(project),
