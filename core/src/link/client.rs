@@ -266,7 +266,7 @@ impl Links {
                 inner.lock().settle(&request);
                 return;
             }
-            let minted = pairing::mint(&data_dir, crate::CHANNEL, None, None);
+            let minted = pairing::mint(&data_dir, crate::CHANNEL, None, None, &[]);
             let mut state = inner.lock();
             let current = state.minting(&request);
             let update = match minted {

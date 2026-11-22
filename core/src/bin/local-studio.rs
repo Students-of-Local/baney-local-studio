@@ -29,6 +29,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel byo
        local-studio fleet status [--json]
        local-studio fleet join [--json]
+       local-studio fleet invite [--json]
        local-studio fleet share [--active <watts|off>] [--away <watts|max>] [--json]
        local-studio fleet stop-sharing [--json]
        local-studio fleet power-helper [--yes]
@@ -107,6 +108,7 @@ fn main() -> ExitCode {
         ["tunnel", "byo"] => byo(),
         ["fleet", "status"] => fleet_status(json),
         ["fleet", "join"] => fleet_set(&serde_json::json!({ "discover": true }), json),
+        ["fleet", "invite"] => fleet_invite(json).map_err(|message| fleet_failed(message, json)),
         ["fleet", "share", flags @ ..] => share_body(flags).and_then(|body| fleet_set(&body, json)),
         ["fleet", "stop-sharing"] => fleet_set(&serde_json::json!({ "lend": "never" }), json),
         ["fleet", "power-helper"] => power_helper(false),
@@ -704,31 +706,9 @@ fn json_text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_string)
 }
 
-fn read_value(path: &Path) -> Value {
-    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null)
-}
-
 fn fleet_open() -> Result<Fleet, String> {
     let data = local_studio_core::data_dir(None)?;
-    let settings = read_value(&data.join("settings.json"));
-    let base = std::env::var("LOCAL_STUDIO_CONTROLLER_URL")
-        .ok()
-        .map(|url| url.trim().to_string())
-        .filter(|url| !url.is_empty())
-        .or_else(|| json_text(&settings, "localControllerUrl"))
-        .unwrap_or_else(|| "http://127.0.0.1:18091".to_string())
-        .trim_end_matches('/')
-        .to_string();
-    let homes = [
-        std::env::var_os("LOCAL_STUDIO_CONTROLLER_HOME").filter(|home| !home.is_empty()).map(PathBuf::from),
-        Some(data.join("controller")),
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local-studio-controller")),
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local-studio-t3")),
-    ];
-    let key = json_text(&settings, "fleetKey").or_else(|| {
-        homes.into_iter().flatten().find_map(|home| json_text(&read_value(&home.join("config.json")), "fleetKey"))
-    });
-    Ok(Fleet { base, key })
+    Ok(Fleet { base: local_studio_core::fleet::controller_url(&data), key: local_studio_core::fleet::key(&data) })
 }
 
 fn fleet_call(body: Option<&Value>) -> Result<Value, String> {
@@ -789,6 +769,37 @@ fn fleet_failed(message: String, as_json: bool) -> String {
     }
     println!("{}", serde_json::json!({ "state": "error", "message": message }));
     String::new()
+}
+
+#[cfg(feature = "link")]
+fn fleet_invite(as_json: bool) -> Result<(), String> {
+    use local_studio_core::link::{devices, pairing};
+    let data = local_studio_core::data_dir(None)?;
+    let minted = pairing::mint(&data, local_studio_core::CHANNEL, None, None, &[devices::FLEET])
+        .map_err(|error| format!("Could not mint a fleet pairing: {error:#}"))?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "state": "minted",
+                "link": minted.link,
+                "url": minted.url,
+                "expiresAt": minted.expires_at,
+                "scopes": minted.scopes,
+            })
+        );
+    } else {
+        println!("{}", minted.link);
+        println!(
+            "Run `local-studio fleet join <link>` on the other machine within 10 minutes. The link works once and lets that machine use this one's models through the fleet."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "link"))]
+fn fleet_invite(_as_json: bool) -> Result<(), String> {
+    Err("This local-studio was built without desktop links (the core's link feature), so it cannot mint a fleet pairing. Use `local-studio-serve pair --fleet`.".to_string())
 }
 
 fn fleet_status(as_json: bool) -> Result<(), String> {
