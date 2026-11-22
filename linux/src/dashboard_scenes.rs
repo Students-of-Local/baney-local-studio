@@ -33,7 +33,8 @@ const SPIKES: [f64; 48] = [
 ];
 
 pub fn stage(app: &Rc<App>, scene: &str) {
-    if !SCENES.contains(&scene) {
+    let cluster = crate::cluster_scenes::SCENES.contains(&scene);
+    if !SCENES.contains(&scene) && !cluster {
         crate::keyboard::stage(app, scene);
         return;
     }
@@ -49,6 +50,11 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         app.apply(vec![Update::Settings { settings }]);
     }
     app.open_page(Page::Local);
+    app.local.root.vadjustment().set_value(0.0);
+    if cluster {
+        crate::cluster_scenes::stage(app, scene);
+        return;
+    }
     match scene {
         "local-offline" => {
             app.apply(vec![local(snapshot(pod()))]);
@@ -147,6 +153,7 @@ fn engine_machine() -> LocalController {
         requests: 0,
         tokens: 0,
         measured_requests: 0,
+        cluster: None,
     }
 }
 
@@ -179,6 +186,8 @@ fn rtx_gpu(index: u32, used: f64) -> LocalGpu {
         memory_used_mib: mib(used),
         memory_total_mib: 96 * 1024,
         busy: true,
+        external: false,
+        link: None,
     }
 }
 
@@ -224,6 +233,9 @@ fn pod() -> LocalController {
             memory_capacity_bytes: 192 * GIB,
             memory_label: "VRAM".to_string(),
             gpu_summary: "2× RTX PRO 6000".to_string(),
+            egpu_note: None,
+            thunderbolt: Vec::new(),
+            hotplug: Vec::new(),
         }),
         endpoints: vec![LocalEndpoint {
             id: "ctl-rtx6000:8000".to_string(),
@@ -249,6 +261,7 @@ fn pod() -> LocalController {
         requests: 48_210,
         tokens: 3_400_000_000,
         measured_requests: 48_100,
+        cluster: None,
     }
 }
 
@@ -277,6 +290,7 @@ fn offline(name: &str, url: &str) -> LocalController {
         requests: 0,
         tokens: 0,
         measured_requests: 0,
+        cluster: None,
     }
 }
 

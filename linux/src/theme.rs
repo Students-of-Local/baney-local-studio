@@ -110,6 +110,7 @@ window, dialog { font-size: 13px; }
 .ls-sidebar-handle { background: transparent; }
 .ls-sidebar-handle:hover { background: alpha(var(--accent-bg-color), 0.35); }
 .ls-pr-badge { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 0 6px; }
+.ls-egpu-badge { font-size: 11px; font-weight: 600; border-radius: 999px; padding: 0 6px; background: var(--card-bg-color); box-shadow: inset 0 0 0 1px var(--border-color); }
 .ls-pr-badge.open { color: #34d399; background: alpha(#34d399, 0.12); }
 .ls-pr-badge.merged { color: #a78bfa; background: alpha(#a78bfa, 0.12); }
 .ls-pr-badge.closed { color: #f87171; background: alpha(#f87171, 0.12); }

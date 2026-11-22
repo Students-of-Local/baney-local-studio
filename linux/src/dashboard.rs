@@ -11,6 +11,7 @@ use local_studio_core::{
 
 use crate::app::App;
 use crate::dashboard_charts::{Heatmap, Sparkline};
+use crate::dashboard_cluster::ClusterView;
 use crate::dashboard_engines::{self as engines, ElsewhereLink, EngineView};
 use crate::dashboard_parts::{self as parts, label, Figure, FigureView, Hero, TokenSummary, Tone};
 use crate::format;
@@ -44,6 +45,8 @@ struct View {
     figures: [FigureView; 6],
     summary: TokenSummary,
     heatmap: Heatmap,
+    cluster: ClusterView,
+    cluster_rule: gtk::Separator,
 }
 
 impl View {
@@ -113,9 +116,13 @@ impl View {
         let summary = TokenSummary::build(&[]);
         summary.move_since();
         let heatmap = Heatmap::build();
+        let cluster = ClusterView::build(app);
+        let cluster_rule = parts::hairline(44, 44);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&parts::columns(&left, &summary));
         root.append(&parts::hairline(36, 44));
+        root.append(&cluster.root);
+        root.append(&cluster_rule);
         root.append(&heatmap.root);
         Self {
             root,
@@ -133,6 +140,8 @@ impl View {
             figures,
             summary,
             heatmap,
+            cluster,
+            cluster_rule,
         }
     }
 
@@ -485,7 +494,7 @@ impl LocalPage {
         }
     }
 
-    fn act(&self, app: &Rc<App>, action: LocalAction, key: String) {
+    pub fn act(&self, app: &Rc<App>, action: LocalAction, key: String) {
         let request = app.core.request();
         self.pending.borrow_mut().insert(request.clone(), key);
         app.core.run(|studio| studio.local_action(request, action));
@@ -522,6 +531,8 @@ impl LocalPage {
                     self.is_pending(&format!("unload:{}:{}", controller.target, endpoint.port))
                 });
                 self.view.fill(controller, dashboard, loading, unloading);
+                self.view.cluster.fill(controller, &|key| self.is_pending(key));
+                self.view.cluster_rule.set_visible(self.view.cluster.root.is_visible());
                 self.stack.set_visible_child_name("dashboard");
             }
             Some(controller) => {
@@ -624,6 +635,19 @@ impl LocalPage {
             self.empty.set_description(None);
         }
         self.stack.set_visible_child_name("empty");
+    }
+
+    pub fn reveal_cluster(&self) {
+        let root = self.root.clone();
+        let target = self.view.cluster.root.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+            let content = root.child().and_downcast::<gtk::Viewport>().and_then(|viewport| viewport.child());
+            let point =
+                content.and_then(|content| target.compute_point(&content, &gtk::graphene::Point::new(0.0, 0.0)));
+            if let Some(point) = point {
+                root.vadjustment().set_value(f64::from(point.y()) - 24.0);
+            }
+        });
     }
 
     fn open_switch(&self, app: &Rc<App>) {

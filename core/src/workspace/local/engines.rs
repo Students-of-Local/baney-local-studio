@@ -350,6 +350,7 @@ impl Engines {
                     requests: 0,
                     tokens: 0,
                     measured_requests: 0,
+                    cluster: None,
                 });
                 controllers.len() - 1
             });

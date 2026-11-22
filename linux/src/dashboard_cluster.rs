@@ -1,0 +1,512 @@
+use std::cell::RefCell;
+use std::rc::Weak;
+
+use adw::prelude::*;
+use gtk::pango;
+use local_studio_core::{
+    LocalAction, LocalCluster, LocalController, LocalGpu, LocalHotplug, LocalLendMode, LocalLendState, LocalPool,
+    LocalPoolModel, LocalPoolPhase, LocalThunderbolt, LocalThunderboltState,
+};
+
+use crate::app::App;
+use crate::dashboard_parts::{self as parts, label};
+use crate::icons;
+use crate::numbers::gigabytes;
+
+const MIB: u64 = 1_048_576;
+
+fn row(spacing: i32) -> gtk::Box {
+    gtk::Box::new(gtk::Orientation::Horizontal, spacing)
+}
+
+fn column(spacing: i32) -> gtk::Box {
+    gtk::Box::new(gtk::Orientation::Vertical, spacing)
+}
+
+fn wrapped(text: &str, classes: &[&str]) -> gtk::Label {
+    let label = label(text, classes);
+    label.set_wrap(true);
+    label.set_wrap_mode(pango::WrapMode::WordChar);
+    label
+}
+
+fn title(text: &str, detail: Option<&str>) -> gtk::Box {
+    let line = row(8);
+    line.set_margin_bottom(4);
+    let heading = label(text, &["ls-dash-label", "heading"]);
+    line.append(&heading);
+    if let Some(detail) = detail {
+        line.append(&label(detail, &["dim-label", "ls-dash-label"]));
+    }
+    line
+}
+
+fn mark(ok: bool, warn: bool) -> gtk::Image {
+    let (icon, class) = if ok {
+        (icons::DONE, "success")
+    } else if warn {
+        (icons::WARNING, "warning")
+    } else {
+        (icons::ERROR, "error")
+    };
+    let image = icons::styled(icon, class);
+    image.set_valign(gtk::Align::Start);
+    icons::describe(&image, if ok { "Passes" } else { "Fails" });
+    image
+}
+
+fn lend_dot(state: LocalLendState) -> gtk::Box {
+    let dot = row(0);
+    dot.add_css_class("ls-machine-dot");
+    dot.add_css_class(match state {
+        LocalLendState::Lent => "serving",
+        LocalLendState::Reclaimed => "loading",
+        LocalLendState::Off => "idle",
+    });
+    dot.set_valign(gtk::Align::Center);
+    dot
+}
+
+pub fn lend_title(state: LocalLendState) -> &'static str {
+    match state {
+        LocalLendState::Lent => "Lending its GPUs",
+        LocalLendState::Reclaimed => "Took its GPUs back",
+        LocalLendState::Off => "Not lending",
+    }
+}
+
+fn act(app: &Weak<App>, action: LocalAction, key: String) {
+    if let Some(app) = app.upgrade() {
+        app.local.act(&app, action, key);
+    }
+}
+
+pub struct ClusterView {
+    pub root: gtk::Box,
+    app: Weak<App>,
+    shown: RefCell<String>,
+}
+
+impl ClusterView {
+    pub fn build(app: &Weak<App>) -> Self {
+        let root = column(36);
+        Self { root, app: app.clone(), shown: RefCell::new(String::new()) }
+    }
+
+    pub fn fill(&self, controller: &LocalController, pending: &dyn Fn(&str) -> bool) {
+        let target = controller.target.as_str();
+        let keys: Vec<String> = [
+            controller
+                .hardware
+                .iter()
+                .flat_map(|hardware| &hardware.thunderbolt)
+                .map(|device| format!("authorize:{target}:{}", device.uuid))
+                .collect::<Vec<_>>(),
+            vec![format!("lending:{target}"), format!("discovery:{target}"), format!("pool:{target}")],
+            controller
+                .cluster
+                .iter()
+                .flat_map(|cluster| &cluster.pools)
+                .map(|pool| format!("stop-pool:{target}:{}", pool.id))
+                .collect(),
+        ]
+        .concat();
+        let busy: Vec<bool> = keys.iter().map(|key| pending(key)).collect();
+        let key = format!("{target}{:?}{:?}{busy:?}{}", controller.hardware, controller.cluster, controller.local);
+        if *self.shown.borrow() == key {
+            return;
+        }
+        self.shown.replace(key);
+        while let Some(child) = self.root.first_child() {
+            self.root.remove(&child);
+        }
+        self.root.set_visible(controller.hardware.is_some() || controller.cluster.is_some());
+        if controller.hardware.is_some() {
+            let top = row(44);
+            top.set_homogeneous(controller.cluster.is_some());
+            top.append(&self.gpus(controller, pending));
+            if let Some(cluster) = &controller.cluster {
+                top.append(&self.lending(controller, cluster, pending));
+            }
+            self.root.append(&top);
+        }
+        if let Some(cluster) = controller
+            .cluster
+            .as_ref()
+            .filter(|cluster| !cluster.machines.is_empty() || !cluster.pools.is_empty() || !cluster.models.is_empty())
+        {
+            let bottom = row(44);
+            bottom.set_homogeneous(true);
+            bottom.append(&machines(cluster));
+            bottom.append(&self.pools(controller, cluster, pending));
+            self.root.append(&bottom);
+        }
+    }
+
+    fn gpus(&self, controller: &LocalController, pending: &dyn Fn(&str) -> bool) -> gtk::Box {
+        let list = column(10);
+        list.set_hexpand(true);
+        let gpus = controller.hardware.as_ref().map_or(&[][..], |hardware| hardware.gpus.as_slice());
+        let external = gpus.iter().any(|gpu| gpu.external).then_some("one connected by cable");
+        list.append(&title(&format!("GPUs on {}", controller.name), external));
+        if let Some(note) = controller.hardware.as_ref().and_then(|hardware| hardware.egpu_note.as_deref()) {
+            let line = row(6);
+            line.append(&icons::styled(icons::INFO, "dim-label"));
+            line.append(&wrapped(note, &["dim-label", "ls-dash-label"]));
+            list.append(&line);
+        }
+        if gpus.is_empty() {
+            list.append(&label("No NVIDIA GPU reported.", &["dim-label", "ls-dash-label"]));
+        }
+        for gpu in gpus {
+            list.append(&gpu_row(gpu));
+        }
+        let devices = controller.hardware.iter().flat_map(|hardware| &hardware.thunderbolt);
+        for device in devices.filter(|device| device.state != LocalThunderboltState::Authorized) {
+            list.append(&self.device_row(controller, device, pending));
+        }
+        let events = controller.hardware.iter().flat_map(|hardware| hardware.hotplug.iter().rev().take(3));
+        for event in events {
+            list.append(&hotplug_row(event));
+        }
+        list
+    }
+
+    fn device_row(
+        &self,
+        controller: &LocalController,
+        device: &LocalThunderbolt,
+        pending: &dyn Fn(&str) -> bool,
+    ) -> gtk::Box {
+        let line = row(10);
+        line.append(&mark(false, device.state != LocalThunderboltState::Failed));
+        let text = column(2);
+        text.set_hexpand(true);
+        let name = [Some(device.name.as_str()), device.vendor.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        text.append(&label(&name, &["ls-dash-label"]));
+        let status = match device.state {
+            LocalThunderboltState::Pending if controller.local => {
+                "Waiting for approval before its GPU can be used.".to_string()
+            }
+            LocalThunderboltState::Pending => {
+                format!("Waiting for approval. Approve it on {} itself.", controller.name)
+            }
+            LocalThunderboltState::Authorizing => "Approving…".to_string(),
+            LocalThunderboltState::Failed => "Approving this device failed.".to_string(),
+            LocalThunderboltState::Authorized => "Approved".to_string(),
+        };
+        let message = wrapped(device.message.as_deref().unwrap_or(&status), &["ls-dash-small"]);
+        message.add_css_class(if device.state == LocalThunderboltState::Failed { "error" } else { "dim-label" });
+        text.append(&message);
+        line.append(&text);
+        if controller.local && device.state != LocalThunderboltState::Authorizing {
+            let key = format!("authorize:{}:{}", controller.target, device.uuid);
+            let busy = pending(&key);
+            let caption = if busy {
+                "Authorizing…"
+            } else if device.state == LocalThunderboltState::Failed {
+                "Try Again"
+            } else {
+                "Authorize"
+            };
+            let button = parts::button(&gtk::Label::new(Some(caption)), true);
+            button.set_sensitive(!busy);
+            button.set_tooltip_text(Some("Approve this Thunderbolt device so its GPU can be used"));
+            let weak = self.app.clone();
+            let (target, uuid) = (controller.target.clone(), device.uuid.clone());
+            button.connect_clicked(move |_| {
+                act(&weak, LocalAction::Authorize { controller: target.clone(), uuid: uuid.clone() }, key.clone());
+            });
+            line.append(&button);
+        }
+        line
+    }
+
+    fn lending(
+        &self,
+        controller: &LocalController,
+        cluster: &LocalCluster,
+        pending: &dyn Fn(&str) -> bool,
+    ) -> gtk::Box {
+        let block = column(10);
+        block.set_hexpand(true);
+        block.append(&title("Lending", None));
+        let status = row(8);
+        status.append(&lend_dot(cluster.state));
+        status.append(&label(lend_title(cluster.state), &["ls-dash-label", "heading"]));
+        if cluster.draining {
+            status.append(&label("finishing requests", &["dim-label", "ls-dash-small"]));
+        }
+        block.append(&status);
+        let reason = wrapped(&cluster.reason, &["ls-dash-label"]);
+        reason.set_selectable(true);
+        reason.add_css_class(if cluster.state == LocalLendState::Reclaimed { "warning" } else { "dim-label" });
+        block.append(&reason);
+        let modes = row(0);
+        modes.add_css_class("linked");
+        modes.set_halign(gtk::Align::Start);
+        let lending = pending(&format!("lending:{}", controller.target));
+        let mut leader: Option<gtk::ToggleButton> = None;
+        for (mode, caption) in
+            [(LocalLendMode::Never, "Never"), (LocalLendMode::Idle, "When idle"), (LocalLendMode::Always, "Always")]
+        {
+            let button = gtk::ToggleButton::with_label(caption);
+            button.add_css_class("ls-small-toggle");
+            button.set_active(cluster.lend == mode);
+            button.set_sensitive(!lending);
+            if let Some(leader) = &leader {
+                button.set_group(Some(leader));
+            } else {
+                leader = Some(button.clone());
+            }
+            let weak = self.app.clone();
+            let target = controller.target.clone();
+            let current = cluster.lend;
+            button.connect_toggled(move |button| {
+                if button.is_active() && mode != current {
+                    act(
+                        &weak,
+                        LocalAction::SetLending { controller: target.clone(), lend: mode },
+                        format!("lending:{target}"),
+                    );
+                }
+            });
+            modes.append(&button);
+        }
+        let lend_line = row(10);
+        lend_line.append(&label("Lend GPUs", &["ls-dash-label"]));
+        lend_line.append(&modes);
+        block.append(&lend_line);
+        let discover = gtk::CheckButton::with_label("Find machines on the tailnet");
+        discover.set_active(cluster.discover);
+        discover.set_sensitive(!pending(&format!("discovery:{}", controller.target)));
+        let weak = self.app.clone();
+        let target = controller.target.clone();
+        discover.connect_toggled(move |button| {
+            let on = button.is_active();
+            act(
+                &weak,
+                LocalAction::SetDiscovery { controller: target.clone(), discover: on },
+                format!("discovery:{target}"),
+            );
+        });
+        block.append(&discover);
+        if cluster.lend != LocalLendMode::Never {
+            for check in &cluster.checks {
+                let line = row(6);
+                line.append(&mark(check.ok, false));
+                line.append(&label(&check.name, &["ls-dash-small"]));
+                let detail = label(&check.detail, &["dim-label", "ls-dash-small"]);
+                detail.set_ellipsize(pango::EllipsizeMode::End);
+                line.append(&detail);
+                block.append(&line);
+            }
+        }
+        for server in &cluster.lent {
+            let gpus = server.gpus.iter().map(|gpu| format!("G{gpu}")).collect::<Vec<_>>().join(", ");
+            block.append(&label(&format!("Lent to {}, {gpus}", server.for_name), &["ls-dash-label"]));
+        }
+        block
+    }
+
+    fn pools(&self, controller: &LocalController, cluster: &LocalCluster, pending: &dyn Fn(&str) -> bool) -> gtk::Box {
+        let block = column(10);
+        block.set_hexpand(true);
+        let own = if cluster.state == LocalLendState::Lent { cluster.free_mib } else { 0 };
+        let pooled = cluster
+            .machines
+            .iter()
+            .filter(|machine| machine.state == LocalLendState::Lent)
+            .fold(own, |sum, machine| sum + machine.free_mib);
+        block.append(&title("Pooled models", Some(&format!("{} GB lent across the fleet", gigabytes(pooled * MIB)))));
+        for pool in &cluster.pools {
+            block.append(&self.pool_row(controller, pool, pending));
+        }
+        if cluster.models.is_empty() {
+            block.append(&wrapped(
+                &format!(
+                    "No GGUF models found on {}. Pooled models run with llama.cpp across every lending machine.",
+                    controller.name
+                ),
+                &["dim-label", "ls-dash-label"],
+            ));
+        }
+        let starting = pending(&format!("pool:{}", controller.target));
+        for model in &cluster.models {
+            block.append(&self.model_row(controller, model, starting));
+        }
+        block
+    }
+
+    fn pool_row(&self, controller: &LocalController, pool: &LocalPool, pending: &dyn Fn(&str) -> bool) -> gtk::Box {
+        let line = row(10);
+        line.append(&mark(pool.phase == LocalPoolPhase::Ready, pool.phase == LocalPoolPhase::Starting));
+        let text = column(2);
+        text.set_hexpand(true);
+        let head = row(8);
+        let alias = label(&pool.alias, &["ls-dash-label", "heading"]);
+        alias.set_ellipsize(pango::EllipsizeMode::Middle);
+        head.append(&alias);
+        let phase = match pool.phase {
+            LocalPoolPhase::Starting => "starting",
+            LocalPoolPhase::Ready => "serving",
+            LocalPoolPhase::Failed | LocalPoolPhase::Stopped => "stopped",
+        };
+        head.append(&label(phase, &["dim-label", "ls-dash-small"]));
+        text.append(&head);
+        let detail =
+            pool.message.clone().unwrap_or_else(|| format!("On {} · port {}", pool.members.join(", "), pool.port));
+        let detail = wrapped(&detail, &["ls-dash-small"]);
+        detail.add_css_class(if pool.phase == LocalPoolPhase::Failed { "error" } else { "dim-label" });
+        text.append(&detail);
+        line.append(&text);
+        if matches!(pool.phase, LocalPoolPhase::Starting | LocalPoolPhase::Ready) {
+            let key = format!("stop-pool:{}:{}", controller.target, pool.id);
+            let busy = pending(&key);
+            let button = parts::button(&gtk::Label::new(Some(if busy { "Stopping…" } else { "Stop" })), false);
+            button.set_sensitive(!busy);
+            let weak = self.app.clone();
+            let (target, id) = (controller.target.clone(), pool.id.clone());
+            button.connect_clicked(move |_| {
+                act(&weak, LocalAction::StopPool { controller: target.clone(), pool: id.clone() }, key.clone());
+            });
+            line.append(&button);
+        }
+        line
+    }
+
+    fn model_row(&self, controller: &LocalController, model: &LocalPoolModel, starting: bool) -> gtk::Box {
+        let line = row(10);
+        let text = column(2);
+        text.set_hexpand(true);
+        let name = label(&model.name, &["ls-dash-label"]);
+        name.set_ellipsize(pango::EllipsizeMode::Middle);
+        text.append(&name);
+        let size = format!("{} GB", gigabytes(model.size_bytes));
+        let fit = if model.fits_one {
+            format!("{size}, fits on one machine")
+        } else if model.fits_pool {
+            format!("{size}, needs the pool")
+        } else {
+            format!("{size}, too large for the GPUs lent now")
+        };
+        text.append(&label(&fit, &["dim-label", "ls-dash-small"]));
+        line.append(&text);
+        let button =
+            parts::button(&gtk::Label::new(Some(if starting { "Starting…" } else { "Run on the Pool" })), true);
+        button.set_sensitive(model.fits_pool && !starting);
+        button.set_tooltip_text(Some(if model.fits_pool {
+            "Split this model across every lending machine"
+        } else {
+            "The lending machines do not have enough free GPU memory"
+        }));
+        let weak = self.app.clone();
+        let (target, path) = (controller.target.clone(), model.path.clone());
+        button.connect_clicked(move |_| {
+            act(
+                &weak,
+                LocalAction::LaunchPool { controller: target.clone(), model: path.clone() },
+                format!("pool:{target}"),
+            );
+        });
+        line.append(&button);
+        line
+    }
+}
+
+fn gpu_row(gpu: &LocalGpu) -> gtk::Box {
+    let line = row(10);
+    let index = label(&format!("G{}", gpu.index), &["dim-label", "ls-dash-small", "ls-dash-num"]);
+    index.set_width_chars(3);
+    index.set_valign(gtk::Align::Start);
+    line.append(&index);
+    let text = column(3);
+    text.set_hexpand(true);
+    let head = row(8);
+    let name = label(&gpu.name, &["ls-dash-label"]);
+    name.set_ellipsize(pango::EllipsizeMode::End);
+    head.append(&name);
+    if gpu.external {
+        let badge = label("eGPU", &["ls-egpu-badge"]);
+        badge.set_valign(gtk::Align::Center);
+        badge.set_tooltip_text(Some("Connected over Thunderbolt or USB4"));
+        badge.update_property(&[gtk::accessible::Property::Label("External GPU")]);
+        head.append(&badge);
+    }
+    text.append(&head);
+    if let Some(link) = &gpu.link {
+        text.append(&wrapped(link, &["dim-label", "ls-dash-small"]));
+    }
+    line.append(&text);
+    let memory = label(
+        &format!("{} / {} GB", gigabytes(gpu.memory_used_mib * MIB), gigabytes(gpu.memory_total_mib * MIB)),
+        &["dim-label", "ls-dash-small", "ls-dash-num"],
+    );
+    memory.set_valign(gtk::Align::Start);
+    line.append(&memory);
+    line
+}
+
+fn hotplug_row(event: &LocalHotplug) -> gtk::Box {
+    let block = column(2);
+    let line = row(6);
+    line.append(&icons::styled(
+        if event.added { icons::ADD } else { icons::NONE },
+        if event.added { "dim-label" } else { "warning" },
+    ));
+    let message = wrapped(&event.message, &["ls-dash-label"]);
+    if !event.added {
+        message.add_css_class("warning");
+    }
+    line.append(&message);
+    block.append(&line);
+    if !event.suggestions.is_empty() {
+        let ideas =
+            wrapped(&format!("Fits this card: {}", event.suggestions.join(", ")), &["dim-label", "ls-dash-small"]);
+        ideas.set_margin_start(22);
+        block.append(&ideas);
+    }
+    block
+}
+
+fn machines(cluster: &LocalCluster) -> gtk::Box {
+    let block = column(10);
+    block.set_hexpand(true);
+    let lending = cluster.machines.iter().filter(|machine| machine.state == LocalLendState::Lent).count();
+    block.append(&title("Machines in the fleet", Some(&format!("{lending} lending"))));
+    if cluster.machines.is_empty() {
+        block.append(&wrapped(
+            "No other machine is linked yet. Turn on Find machines on the tailnet, or add one in Settings, Local.",
+            &["dim-label", "ls-dash-label"],
+        ));
+    }
+    for machine in &cluster.machines {
+        let line = row(10);
+        line.append(&lend_dot(machine.state));
+        let text = column(2);
+        text.set_hexpand(true);
+        let head = row(8);
+        head.append(&label(&machine.name, &["ls-dash-label", "heading"]));
+        head.append(&label(lend_title(machine.state), &["dim-label", "ls-dash-small"]));
+        text.append(&head);
+        let reason = wrapped(&machine.reason, &["ls-dash-small"]);
+        reason.add_css_class(if machine.state == LocalLendState::Reclaimed { "warning" } else { "dim-label" });
+        text.append(&reason);
+        line.append(&text);
+        let gpus = if machine.gpus == 0 {
+            "no GPU".to_string()
+        } else {
+            let plural = if machine.gpus == 1 { "" } else { "s" };
+            format!("{} GPU{plural}, {} GB free", machine.gpus, gigabytes(machine.free_mib * MIB))
+        };
+        let figure = label(&gpus, &["dim-label", "ls-dash-small", "ls-dash-num"]);
+        figure.set_valign(gtk::Align::Start);
+        line.append(&figure);
+        block.append(&line);
+    }
+    block
+}

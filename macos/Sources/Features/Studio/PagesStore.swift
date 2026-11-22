@@ -16,6 +16,11 @@ enum LocalPendingKey: Hashable {
     case download(String)
     case previewShare(String, UInt16)
     case share(String, UInt16)
+    case authorize(String, String)
+    case lending(String)
+    case discovery(String)
+    case pool(String)
+    case stopPool(String, String)
 }
 
 struct KeybindingIndex {
