@@ -76,6 +76,7 @@ pub struct State {
     pub setup: HashMap<String, Setup>,
     pub daemon: Option<DaemonInfo>,
     pub kernel: Option<KernelState>,
+    pub t3: Option<local_studio_core::T3Report>,
     pub subagents: HashMap<String, Vec<Subagent>>,
     pub effective: HashMap<String, Settings>,
     pub providers: Vec<ProviderStatus>,

@@ -140,6 +140,9 @@ struct ProvidersSettings: View {
                     }
                 }
             }
+            if let settings = pages.settings {
+                HarnessAccountsSection(settings: settings)
+            }
             SettingsSection(.providerSignIn) {
                 SettingRow(.signIn) {
                     SettingsNote(

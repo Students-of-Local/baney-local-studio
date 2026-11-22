@@ -13,8 +13,13 @@ enum OnboardingStep: Int, CaseIterable {
 extension StudioStore {
     var needsOnboarding: Bool {
         if shell.onboardingActive { return true }
-        guard let settings = pages.settings, inbox.receivedProjects else { return false }
+        guard let settings = pages.settings, inbox.receivedProjects, pages.t3 != nil, !needsT3Import else { return false }
         return !settings.onboardingCompleted && inbox.projects.isEmpty && !shell.onboardingDismissed
+    }
+
+    var needsT3Import: Bool {
+        guard !shell.onboardingActive, let report = pages.t3 else { return false }
+        return report.found && !report.offered && T3Summary.pending(report) > 0
     }
 
     func completeOnboarding() {

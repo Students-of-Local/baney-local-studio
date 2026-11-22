@@ -286,6 +286,8 @@ final class StudioStore {
             pages.setSettings(settings)
         case .keybindings(let bindings):
             pages.setKeybindings(bindings)
+        case .t3Sync(let report):
+            pages.setT3(report)
         case .projectScripts(let project, let scripts):
             inbox.setProjectScripts(project: project, scripts: scripts)
         case .projectSettings(let project, let settings, let effective):

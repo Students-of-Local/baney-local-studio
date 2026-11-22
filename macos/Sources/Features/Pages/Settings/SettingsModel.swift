@@ -90,6 +90,7 @@ enum SettingsGroup: Hashable {
     case confirmations
     case textGeneration
     case about
+    case t3Code
     case diagnostics
     case legacy
     case theme
@@ -103,6 +104,7 @@ enum SettingsGroup: Hashable {
     case localEngines
     case providerList
     case providerSignIn
+    case harnessAccounts
     case hiddenModels
     case git
     case writing
@@ -124,6 +126,7 @@ enum SettingsGroup: Hashable {
         case .confirmations: "Confirmations"
         case .textGeneration: "Text Generation"
         case .about: "About"
+        case .t3Code: "T3 Code"
         case .diagnostics: "Diagnostics"
         case .legacy: "Legacy"
         case .theme: "Theme"
@@ -137,6 +140,7 @@ enum SettingsGroup: Hashable {
         case .localEngines: "Local Fleet"
         case .providerList: "Models"
         case .providerSignIn: "Signing In"
+        case .harnessAccounts: "Claude Code and Codex Accounts"
         case .hiddenModels: "Hidden Models"
         case .git: "Git"
         case .writing: "Commit and Pull Request Writing"
@@ -153,11 +157,11 @@ enum SettingsGroup: Hashable {
 
     var pane: SettingsPane {
         switch self {
-        case .projectDefaults, .organization, .behavior, .keyboard, .confirmations, .textGeneration, .about, .diagnostics, .legacy: .general
+        case .projectDefaults, .organization, .behavior, .keyboard, .confirmations, .textGeneration, .about, .t3Code, .diagnostics, .legacy: .general
         case .theme, .interface, .typography: .appearance
         case .shortcuts: .keybindings
         case .snapshotCapture, .snapshotFeedback: .snapshots
-        case .providerKeys, .customEndpoints, .localEngines, .providerList, .providerSignIn, .hiddenModels: .providers
+        case .providerKeys, .customEndpoints, .localEngines, .providerList, .providerSignIn, .harnessAccounts, .hiddenModels: .providers
         case .git, .writing: .sourceControl
         case .worktrees, .data: .storage
         case .controller, .fleet: .local
@@ -180,12 +184,13 @@ enum SettingKey: CaseIterable {
     case confirmUnpin, confirmArchive, confirmDelete, quitShortcut
     case textGenerationModel
     case version
+    case t3Sync
     case dataFolder, pythonKernel
     case contextMeter
     case colorScheme, themes
     case contrast, glassOpacity, diffColors, chatWidth, openLinks
     case interfaceFont, promptFont, codeFont, terminalFont, terminalScrollback, terminalCursorBlink, fontSmoothing, wordWrap
-    case apiKeys, customEndpoints, localEngines, providers, favorites, signIn, hiddenModels
+    case apiKeys, customEndpoints, localEngines, providers, favorites, signIn, accounts, hiddenModels
     case autoPull, fetchInterval, mergeMethod
     case writingStyle, customInstructions, followTemplates, writerModel
     case cleanupAfter, cleanupOnMerge, cleanupOnDelete, cleanupUnchanged
@@ -207,6 +212,7 @@ enum SettingKey: CaseIterable {
         case .confirmUnpin, .confirmArchive, .confirmDelete, .quitShortcut: .confirmations
         case .textGenerationModel: .textGeneration
         case .version: .about
+        case .t3Sync: .t3Code
         case .dataFolder, .pythonKernel: .diagnostics
         case .contextMeter: .legacy
         case .colorScheme, .themes: .theme
@@ -217,6 +223,7 @@ enum SettingKey: CaseIterable {
         case .localEngines: .localEngines
         case .providers, .favorites: .providerList
         case .signIn: .providerSignIn
+        case .accounts: .harnessAccounts
         case .hiddenModels: .hiddenModels
         case .autoPull, .fetchInterval, .mergeMethod: .git
         case .writingStyle, .customInstructions, .followTemplates, .writerModel: .writing
@@ -266,6 +273,7 @@ enum SettingKey: CaseIterable {
         case .quitShortcut: "Quit shortcut"
         case .textGenerationModel: "Text generation model"
         case .version: "Version"
+        case .t3Sync: "T3 Code sync"
         case .dataFolder: "Data folder"
         case .pythonKernel: "Python kernel"
         case .contextMeter: "Context window indicator"
@@ -290,6 +298,7 @@ enum SettingKey: CaseIterable {
         case .providers: "Provider models"
         case .favorites: "Favorite models"
         case .signIn: "Sign in to a provider"
+        case .accounts: "Signed-in accounts"
         case .hiddenModels: "Hidden models"
         case .autoPull: "Automatically pull"
         case .fetchInterval: "Git fetch interval"
@@ -352,6 +361,7 @@ enum SettingKey: CaseIterable {
         case .quitShortcut: "cmd q hold"
         case .textGenerationModel: "titles commit messages"
         case .version: "about update"
+        case .t3Sync: "t3 import bring over migrate sync settings projects favorites keybindings"
         case .dataFolder, .dataLocation: "logs finder reveal storage"
         case .pythonKernel: "python ipython runtime install fetch eukhe"
         case .contextMeter: "legacy tokens"
@@ -373,6 +383,7 @@ enum SettingKey: CaseIterable {
         case .providers: "auth configured catalog"
         case .favorites: "models star"
         case .signIn: "login auth eukhe claude subscription"
+        case .accounts: "claude code codex config folder login switch limit t3"
         case .hiddenModels: "hide unhide picker models"
         case .autoPull: "fast-forward"
         case .fetchInterval: "background refresh"

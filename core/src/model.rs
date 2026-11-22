@@ -1,7 +1,7 @@
 use crate::workspace::model::{
     Branch, Device, FileContent, FileDiff, FileEntry, GitStatus, KernelState, Keybinding, LocalDashboard, LocalEngine,
     LocalSnapshot, ProjectScript, ProjectSettings, ProviderModel, ProviderStatus, PullRequest, PullRequestDetail,
-    SearchHit, Settings, SetupStage, TerminalFrame, UsageReport,
+    SearchHit, Settings, SetupStage, T3Report, TerminalFrame, UsageReport,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -835,5 +835,8 @@ pub enum Update {
     },
     PairedDevices {
         devices: Vec<PairedDevice>,
+    },
+    T3Sync {
+        report: T3Report,
     },
 }

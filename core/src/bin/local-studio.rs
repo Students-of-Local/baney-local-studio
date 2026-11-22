@@ -7,6 +7,7 @@ use local_studio_core::tunnel::{self, Cloudflared, Failure, Ports, Status, Tunne
 use serde_json::Value;
 
 const USAGE: &str = "usage: local-studio --version
+       local-studio import t3 [--dry-run] [--json]
        local-studio plugin validate <dir>
        local-studio plugin list
        local-studio plugin install <dir | catalog id | git url@full sha>
@@ -37,6 +38,9 @@ fn main() -> ExitCode {
         ["--version"] => {
             println!("local-studio {} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL);
             Ok(())
+        }
+        ["import", "t3", flags @ ..] if flags.iter().all(|flag| matches!(*flag, "--dry-run" | "--json")) => {
+            import_t3(flags.contains(&"--dry-run"), flags.contains(&"--json"))
         }
         ["plugin", "validate", dir] => validate(Path::new(dir)),
         ["plugin", "list"] => list(),
@@ -107,6 +111,53 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn import_t3(dry_run: bool, json: bool) -> Result<(), String> {
+    use local_studio_core::T3ItemState;
+    let report = local_studio_core::import_from_t3(None, dry_run)?;
+    if json {
+        let text = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+        println!("{text}");
+        return Ok(());
+    }
+    if !report.found {
+        for problem in &report.problems {
+            println!("{problem}");
+        }
+        return Ok(());
+    }
+    let verb = if dry_run { "would import" } else { "imported" };
+    println!("T3 Code data: {}", report.source);
+    for group in &report.groups {
+        let count = |state: T3ItemState| group.items.iter().filter(|item| item.state == state).count();
+        let skipped = if group.chosen { "" } else { " (not chosen)" };
+        println!(
+            "{}{skipped}: {} {verb}, {} already in sync, {} kept as changed in Local Studio, {} not supported",
+            group.title,
+            count(T3ItemState::Import),
+            count(T3ItemState::Synced),
+            count(T3ItemState::Kept),
+            count(T3ItemState::Unsupported)
+        );
+        for item in group.items.iter().filter(|item| item.state != T3ItemState::Synced) {
+            let mark = match item.state {
+                T3ItemState::Import => "+",
+                T3ItemState::Kept => "=",
+                T3ItemState::Unsupported => "-",
+                T3ItemState::Synced => " ",
+            };
+            if item.detail.is_empty() {
+                println!("  {mark} {}", item.label);
+            } else {
+                println!("  {mark} {}: {}", item.label, item.detail);
+            }
+        }
+    }
+    for problem in &report.problems {
+        println!("note: {problem}");
+    }
+    Ok(())
 }
 
 fn root() -> Result<PathBuf, String> {

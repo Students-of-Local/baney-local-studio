@@ -57,6 +57,7 @@ mod snapshot;
 mod sound;
 mod state;
 mod surfaces;
+mod t3;
 mod terminal;
 mod theme;
 mod themes;

@@ -46,6 +46,7 @@ private struct GeneralSettingsForm: View {
                     LabeledContent(SettingKey.version.title, value: StudioPaths.version)
                 }
             }
+            T3SyncSection(pages: pages)
             SettingsSection(.diagnostics) {
                 SettingRow(.dataFolder) {
                     LabeledContent(SettingKey.dataFolder.title) {
