@@ -61,12 +61,17 @@ impl Grants {
 
     #[must_use]
     pub fn consent(&self, plugin: &Plugin) -> Consent {
+        self.standing(plugin).0
+    }
+
+    #[must_use]
+    pub fn standing(&self, plugin: &Plugin) -> (Consent, Vec<Capability>) {
         if plugin.capabilities.is_empty() {
-            return Consent::Ready;
+            return (Consent::Ready, Vec::new());
         }
         let live = match Live::check(&plugin.dir) {
             Ok(live) => live,
-            Err(reason) => return Consent::Refused { reason },
+            Err(reason) => return (Consent::Refused { reason }, Vec::new()),
         };
         let record = self.plugins.get(&plugin.id).filter(|grant| {
             !grant.tree.is_empty() && plugin.capabilities.iter().any(|asked| grant.capabilities.contains(asked.name()))
@@ -75,19 +80,22 @@ impl Grants {
             None => None,
             Some(grant) => match live.hash() {
                 Ok(tree) => (tree == grant.tree).then_some(&grant.capabilities),
-                Err(reason) => return Consent::Refused { reason },
+                Err(reason) => return (Consent::Refused { reason }, Vec::new()),
             },
         };
+        let holds = |capability: &Capability| granted.is_some_and(|granted| granted.contains(capability.name()));
+        let told = plugin.told();
+        let held: Vec<Capability> = plugin.capabilities.iter().copied().filter(holds).collect();
         let missing: Vec<Capability> = plugin
             .capabilities
             .iter()
             .copied()
-            .filter(|capability| !granted.is_some_and(|granted| granted.contains(capability.name())))
+            .filter(|capability| !(holds(capability) || told && capability.sensitive()))
             .collect();
         if missing.is_empty() {
-            Consent::Ready
+            (Consent::Ready, held)
         } else {
-            Consent::NeedsConsent { missing }
+            (Consent::NeedsConsent { missing }, held)
         }
     }
 
@@ -168,6 +176,10 @@ impl Grants {
         self.plugins
             .insert(plugin.id.clone(), Grant { version: plugin.version.clone(), capabilities: kept, tree, source });
         Ok(())
+    }
+
+    pub fn forget(&mut self, id: &str) -> bool {
+        self.plugins.remove(id).is_some()
     }
 
     pub fn revoke(&mut self, id: &str, capabilities: &[Capability]) -> bool {

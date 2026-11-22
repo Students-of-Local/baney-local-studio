@@ -288,6 +288,7 @@ fn commands() -> Vec<SlashCommand> {
             "plugin:smoothstone" => local_studio_core::CommandKind::Plugin,
             _ => local_studio_core::CommandKind::Command,
         },
+        origin: if source == "plugin:smoothstone" { "Smoothstone".to_string() } else { String::new() },
     })
     .collect()
 }

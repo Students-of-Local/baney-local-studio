@@ -154,19 +154,7 @@ impl Harness {
                 self.view.started.insert(draft, thread);
             }
             Update::Transcript { thread, op } => self.transcript(&thread, op)?,
-            Update::Approvals { thread, approvals } => {
-                for approval in approvals {
-                    if self.view.answered.insert(format!("{thread}/{}", approval.request_id)) {
-                        println!("     approval {} {:?}", approval.command, approval.effects);
-                        self.view.approvals += 1;
-                        *self.view.approvals_by_thread.entry(thread.clone()).or_default() += 1;
-                        let always =
-                            self.view.always.iter().any(|draft| self.view.thread(draft).as_ref() == Some(&thread));
-                        let answer = if always { ApprovalAnswer::AlwaysAllowSession } else { ApprovalAnswer::Approve };
-                        self.studio.answer_approval(thread.clone(), approval.request_id, answer);
-                    }
-                }
-            }
+            Update::Approvals { thread, approvals } => self.approve(&thread, approvals),
             Update::ComposerText { thread, text } => self.view.composer.push((thread, text)),
             Update::Models { models, hidden, .. } => {
                 self.view.models = Some(models);
@@ -217,6 +205,7 @@ impl Harness {
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
             | Update::Consents { .. }
+            | Update::Plugins { .. }
             | Update::LocalDashboard { .. }
             | Update::Providers { .. }
             | Update::ProviderModels { .. }
@@ -231,6 +220,19 @@ impl Harness {
             | Update::Daemon { .. } => {}
         }
         Ok(())
+    }
+
+    fn approve(&mut self, thread: &str, approvals: Vec<local_studio_core::Approval>) {
+        for approval in approvals {
+            if self.view.answered.insert(format!("{thread}/{}", approval.request_id)) {
+                println!("     approval {} {:?}", approval.command, approval.effects);
+                self.view.approvals += 1;
+                *self.view.approvals_by_thread.entry(thread.to_string()).or_default() += 1;
+                let always = self.view.always.iter().any(|draft| self.view.thread(draft).as_deref() == Some(thread));
+                let answer = if always { ApprovalAnswer::AlwaysAllowSession } else { ApprovalAnswer::Approve };
+                self.studio.answer_approval(thread.to_string(), approval.request_id, answer);
+            }
+        }
     }
 
     fn transcript(&mut self, thread: &str, op: TranscriptOp) -> anyhow::Result<()> {

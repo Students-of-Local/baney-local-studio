@@ -294,6 +294,10 @@ fn main() -> anyhow::Result<()> {
         let [_, daemon, root] = args.as_slice() else { bail!(LOCAL_USAGE) };
         return local_only::run(daemon, root);
     }
+    if args.first().is_some_and(|arg| arg.as_os_str() == "--hub") {
+        let [_, root] = args.as_slice() else { bail!(hub::USAGE) };
+        return hub::run(root);
+    }
     let [daemon, root, models, plugin] = args.as_slice() else { bail!(usage) };
     let target = Target::from_env()?;
     ensure!(
@@ -1020,6 +1024,400 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         println!(
             "ok   control: a plain prompt on {CLOUD} reached the endpoint ({} connections), so the refusal's 0 means nothing was sent",
             hits.load(Ordering::SeqCst)
+        );
+        Ok(())
+    }
+}
+
+mod hub {
+    use super::{
+        ensure, plugin_store, Arc, Command, Context, Duration, Instant, Path, Signal, Studio, StudioConfig, Update,
+        Value, Waker,
+    };
+    use local_studio_core::{CatalogPlugin, ConsentAnswer, ConsentRequest, PluginRow, PluginState};
+
+    pub const USAGE: &str =
+        "usage: plugin_smoke --hub <scratch dir> (needs git and network access to github.com; no daemon or model)";
+    const ID: &str = "beacon";
+    const CATALOG: &str = "smoothstone";
+    const PLAIN: &str = "plainfolder";
+    const STEP: Duration = Duration::from_secs(180);
+
+    #[derive(Default)]
+    struct Seen {
+        plugins: Vec<PluginRow>,
+        catalog: Vec<CatalogPlugin>,
+        channel: String,
+        checked: Option<i64>,
+        consents: Vec<ConsentRequest>,
+        sheets: usize,
+        done: Vec<(String, Result<String, String>)>,
+    }
+
+    impl Seen {
+        fn row(&self, id: &str) -> Option<&PluginRow> {
+            self.plugins.iter().find(|row| row.id == id)
+        }
+
+        fn outcome(&self, request: &str) -> Option<&Result<String, String>> {
+            self.done.iter().find(|(key, _)| key == request).map(|(_, outcome)| outcome)
+        }
+
+        fn sheet(&self, request: &str) -> Option<&ConsentRequest> {
+            self.consents.iter().find(|consent| consent.request == request)
+        }
+    }
+
+    struct Hub {
+        studio: Arc<Studio>,
+        signal: Arc<Signal>,
+        seen: Seen,
+    }
+
+    impl Hub {
+        fn pump(&mut self, step: &str, done: impl Fn(&Seen) -> bool) -> anyhow::Result<()> {
+            let deadline = Instant::now() + STEP;
+            loop {
+                for update in self.studio.tick() {
+                    match update {
+                        Update::Plugins { plugins, catalog, channel, checked } => {
+                            self.seen.plugins = plugins;
+                            self.seen.catalog = catalog;
+                            self.seen.channel = channel;
+                            self.seen.checked = checked;
+                        }
+                        Update::Consents { consents } => {
+                            if consents.len() > self.seen.consents.len() {
+                                self.seen.sheets += 1;
+                            }
+                            self.seen.consents = consents;
+                        }
+                        Update::RequestDone { request, message } => {
+                            println!("     {request}: {message}");
+                            self.seen.done.push((request, Ok(message)));
+                        }
+                        Update::RequestFailed { request, message } => {
+                            println!("     {request} failed: {message}");
+                            self.seen.done.push((request, Err(message)));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((request, Err(message))) = self.seen.done.last() {
+                    anyhow::bail!("{step}: {request} failed: {message}");
+                }
+                if done(&self.seen) {
+                    println!("ok   {step}");
+                    return Ok(());
+                }
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    anyhow::bail!("timed out waiting for: {step}");
+                };
+                self.signal.wait(left.min(Duration::from_millis(500)));
+            }
+        }
+
+        fn sheet(&mut self, step: &str, request: &str) -> anyhow::Result<ConsentRequest> {
+            self.pump(step, |seen| seen.sheet(request).is_some())?;
+            self.seen.sheet(request).cloned().context("sheet")
+        }
+
+        fn answer(&mut self, step: &str, request: &str, sensitive: &[&str]) -> anyhow::Result<()> {
+            let sensitive = sensitive.iter().map(|name| (*name).to_string()).collect();
+            self.studio.answer_consent(request.to_string(), ConsentAnswer::Install { sensitive });
+            self.pump(step, |seen| seen.outcome(request).is_some())
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> anyhow::Result<()> {
+        let status = Command::new("git")
+            .args(["-c", "user.name=Plugin Smoke", "-c", "user.email=smoke@localhost", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(repo)
+            .status()?;
+        ensure!(status.success(), "git {} failed", args.join(" "));
+        Ok(())
+    }
+
+    fn release(repo: &Path, version: &str, capabilities: &[&str]) -> anyhow::Result<()> {
+        let listed: Vec<String> = capabilities.iter().map(|name| format!("{name:?}")).collect();
+        let gates: Vec<String> = capabilities
+            .iter()
+            .filter(|name| plugin_store::Capability::parse(name).is_some_and(plugin_store::Capability::sensitive))
+            .map(|name| format!("{name} = \"{name} for the fixture\"\n"))
+            .collect();
+        let gates = gates.join("");
+        std::fs::write(
+            repo.join("plugin.toml"),
+            format!(
+                "id = \"{ID}\"\nversion = \"{version}\"\ndescription = \"Fixture plugin for the hub smoke\"\ncapabilities = [{}]\n\n[mcp]\ncommand = \"bin/server.sh\"\nargs = [\"serve\", \"--granted={}\"]\n\n[gates]\n{gates}",
+                listed.join(", "),
+                plugin_store::GRANTED
+            ),
+        )?;
+        git(repo, &["add", "-A"])?;
+        git(repo, &["commit", "-q", "-m", version])
+    }
+
+    fn args(agent: &Path) -> anyhow::Result<Option<Vec<String>>> {
+        let settings: Value = serde_json::from_slice(&std::fs::read(agent.join("settings.json"))?)?;
+        Ok(settings
+            .pointer(&format!("/mcpServers/{}{ID}/args", plugin_store::MCP_PREFIX))
+            .and_then(Value::as_array)
+            .map(|args| args.iter().filter_map(Value::as_str).map(str::to_string).collect()))
+    }
+
+    pub fn run(root: &Path) -> anyhow::Result<()> {
+        ensure!(!root.exists(), "{} exists; give a fresh scratch dir", root.display());
+        let (data, agent, repo) = (root.join("data"), root.join("agent"), root.join(ID));
+        for dir in [&data, &agent, &repo] {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(agent.join("settings.json"), "{}\n")?;
+        std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
+        std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
+        git(&repo, &["init", "-q", "-b", "main"])?;
+        git(&repo, &["config", "uploadpack.allowFilter", "true"])?;
+        git(&repo, &["config", "uploadpack.allowAnySHA1InWant", "true"])?;
+        std::fs::create_dir_all(repo.join("bin"))?;
+        std::fs::write(repo.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
+        Command::new("chmod").arg("755").arg(repo.join("bin").join("server.sh")).status()?;
+        release(&repo, "1.0.0", &["mcp-server", "screen-capture"])?;
+        let url = format!("file://{}", repo.canonicalize()?.display());
+        let config = StudioConfig {
+            socket_path: Some(root.join("absent.sock").to_string_lossy().into_owned()),
+            session_dir: Some(agent.join("sessions").to_string_lossy().into_owned()),
+            data_dir: Some(data.to_string_lossy().into_owned()),
+            controller_main: None,
+            take_over_serve: false,
+            launch: None,
+        };
+        let signal = Arc::new(Signal::default());
+        let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+        let mut hub = Hub { studio, signal, seen: Seen::default() };
+        let outcome = drive(&mut hub, &data.join("plugins"), &agent, &repo, &url);
+        hub.studio.shutdown();
+        outcome?;
+        println!("PASS plugin smoke: hub");
+        Ok(())
+    }
+
+    fn catalog_pin(hub: &mut Hub, plugins: &Path) -> anyhow::Result<()> {
+        let catalog = plugin_store::Catalog::bundled().map_err(anyhow::Error::msg)?;
+        let pin = catalog.entry(CATALOG).context("catalog entry")?.rev.clone();
+        let path = plugins.join(plugin_store::ORIGINS);
+        let recorded = std::fs::read_to_string(&path)?;
+        ensure!(recorded.contains(&pin), "origins.json does not hold the catalog pin {pin}");
+        std::fs::write(&path, recorded.replace(&pin, &"0".repeat(40)))?;
+        let sheets = hub.seen.sheets;
+        hub.studio.check_plugin_updates("hub-check-catalog".into());
+        hub.pump("a catalog plugin behind the catalog's pin is offered the pin", |seen| {
+            seen.outcome("hub-check-catalog").is_some() && seen.row(CATALOG).is_some_and(|row| row.update.is_some())
+        })?;
+        let update = hub.seen.row(CATALOG).and_then(|row| row.update.clone()).context("catalog update")?;
+        ensure!(pin.starts_with(&update.revision) && update.asks.is_empty(), "catalog update: {update:?}");
+        hub.studio.update_plugin("hub-update-catalog".into(), CATALOG.into());
+        hub.pump("the catalog update reinstalls through the pinned catalog entry", |seen| {
+            seen.outcome("hub-update-catalog").is_some()
+                && seen.row(CATALOG).is_some_and(|row| row.update.is_none() && row.pinned)
+        })?;
+        ensure!(
+            matches!(hub.seen.outcome("hub-update-catalog"), Some(Ok(_))),
+            "catalog update: {:?}",
+            hub.seen.outcome("hub-update-catalog")
+        );
+        ensure!(hub.seen.sheets == sheets, "a catalog update with nothing new opened a sheet");
+        ensure!(std::fs::read_to_string(&path)?.contains(&pin), "origins.json did not record the catalog pin again");
+        Ok(())
+    }
+
+    fn whole_catalog(hub: &mut Hub, plugins: &Path) -> anyhow::Result<()> {
+        let entries: Vec<CatalogPlugin> =
+            hub.seen.catalog.iter().filter(|entry| entry.id != CATALOG).cloned().collect();
+        ensure!(!entries.is_empty(), "the bundled catalog lists only {CATALOG}");
+        for entry in entries {
+            let id = entry.id.clone();
+            let request = format!("hub-catalog-{id}");
+            let listed: Vec<String> = entry.grants.iter().map(|grant| grant.id.clone()).collect();
+            hub.studio.install_plugin(request.clone(), id.clone());
+            hub.pump(&format!("{id} installs from its pinned catalog tree"), |seen| {
+                seen.outcome(&request).is_some() || seen.sheet(&request).is_some()
+            })?;
+            if let Some(sheet) = hub.seen.sheet(&request).cloned() {
+                let ids: Vec<String> = sheet.rows.iter().map(|row| row.id.clone()).collect();
+                ensure!(ids == listed, "{id} sheet asks for {ids:?}, the catalog lists {listed:?}");
+                hub.answer(&format!("{id} installs with what the catalog lists"), &request, &[])?;
+            } else {
+                ensure!(listed.is_empty(), "{id} lists {listed:?} in the catalog but opened no sheet");
+            }
+            ensure!(
+                matches!(hub.seen.outcome(&request), Some(Ok(_))),
+                "{id} catalog install: {:?}",
+                hub.seen.outcome(&request)
+            );
+            let row = hub.seen.row(&id).context("catalog row")?.clone();
+            let granted: Vec<String> = row.grants.iter().map(|grant| grant.id.clone()).collect();
+            ensure!(
+                row.pinned && row.state != PluginState::Failed && granted == listed,
+                "{id} does not match its catalog entry: {row:?}"
+            );
+            let remove = format!("hub-remove-{id}");
+            hub.studio.remove_plugin(remove.clone(), id.clone());
+            hub.pump(&format!("remove {id}"), |seen| seen.outcome(&remove).is_some() && seen.row(&id).is_none())?;
+            ensure!(!plugins.join(&id).exists(), "{id} folder is still there");
+        }
+        Ok(())
+    }
+
+    fn untold(hub: &mut Hub, dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dir.join("bin"))?;
+        std::fs::write(dir.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
+        Command::new("chmod").arg("755").arg(dir.join("bin").join("server.sh")).status()?;
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "id = \"{PLAIN}\"\nversion = \"1.0.0\"\ndescription = \"Fixture plugin that is not told\"\ncapabilities = [\"mcp-server\", \"screen-capture\"]\n\n[mcp]\ncommand = \"bin/server.sh\"\nargs = [\"serve\"]\n"
+            ),
+        )?;
+        hub.studio.install_plugin("hub-plain".into(), dir.to_string_lossy().into_owned());
+        hub.sheet("a folder install asks for consent", "hub-plain")?;
+        hub.answer("install it with the sensitive switch off", "hub-plain", &[])?;
+        hub.pump("a plugin that is not told waits for its sensitive permission", |seen| {
+            seen.row(PLAIN).is_some_and(|row| row.state == PluginState::Waiting && !row.told)
+        })?;
+        hub.studio.grant_plugin("hub-plain-allow".into(), PLAIN.into(), Vec::new());
+        let sheet = hub.sheet("Allow opens a sheet with what it still needs", "hub-plain-allow")?;
+        let ids: Vec<&str> = sheet.rows.iter().map(|row| row.id.as_str()).collect();
+        ensure!(ids == ["screen-capture"] && sheet.preset.is_empty(), "allow sheet: {sheet:?}");
+        hub.answer("allow screen capture", "hub-plain-allow", &["screen-capture"])?;
+        hub.pump("then it runs", |seen| seen.row(PLAIN).is_some_and(|row| row.state == PluginState::Running))
+    }
+
+    fn updates(hub: &mut Hub, repo: &Path) -> anyhow::Result<()> {
+        release(repo, "1.1.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
+        hub.studio.check_plugin_updates("hub-check".into());
+        hub.pump("the update check finds 1.1.0 on the channel", |seen| {
+            seen.outcome("hub-check").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
+        })?;
+        let update = hub.seen.row(ID).and_then(|row| row.update.clone()).context("update")?;
+        ensure!(update.version == "1.1.0" && update.asks == ["synthetic-input"], "update: {update:?}");
+        ensure!(hub.seen.checked.is_some(), "no check time");
+        ensure!(
+            hub.seen.row(CATALOG).is_some_and(|row| row.update.is_none()),
+            "the pinned catalog plugin shows an update"
+        );
+
+        hub.studio.update_plugin("hub-update".into(), ID.into());
+        let sheet = hub.sheet("an update that asks for more asks consent again", "hub-update")?;
+        let ids: Vec<&str> = sheet.rows.iter().map(|row| row.id.as_str()).collect();
+        ensure!(ids == ["synthetic-input"] && sheet.update_from.as_deref() == Some("1.0.0"), "update sheet: {sheet:?}");
+        hub.answer("update with the new switch off", "hub-update", &[])?;
+        hub.pump("the plugin runs 1.1.0 and the update badge clears", |seen| {
+            seen.row(ID)
+                .is_some_and(|row| row.version == "1.1.0" && row.update.is_none() && row.state == PluginState::Running)
+        })?;
+
+        release(repo, "1.2.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
+        let sheets = hub.seen.sheets;
+        hub.studio.check_plugin_updates("hub-check-2".into());
+        hub.pump("the next check finds 1.2.0", |seen| {
+            seen.outcome("hub-check-2").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
+        })?;
+        hub.studio.update_plugin("hub-update-2".into(), ID.into());
+        hub.pump("an update that asks for nothing new installs without a sheet", |seen| {
+            seen.outcome("hub-update-2").is_some() && seen.row(ID).is_some_and(|row| row.version == "1.2.0")
+        })?;
+        ensure!(hub.seen.sheets == sheets, "an update with the same capabilities opened a sheet");
+        Ok(())
+    }
+
+    fn drive(hub: &mut Hub, plugins: &Path, agent: &Path, repo: &Path, url: &str) -> anyhow::Result<()> {
+        hub.studio.load_plugins();
+        hub.pump("settings lists the bundled catalog", |seen| seen.catalog.iter().any(|entry| entry.id == CATALOG))?;
+        let entry = hub.seen.catalog.iter().find(|entry| entry.id == CATALOG).context("catalog")?.clone();
+        ensure!(entry.installed.is_none() && !entry.description.is_empty(), "catalog row: {entry:?}");
+        ensure!(hub.seen.channel == local_studio_core::CHANNEL, "channel {}", hub.seen.channel);
+
+        hub.studio.install_plugin("hub-catalog".into(), CATALOG.into());
+        hub.pump("catalog install in one click", |seen| {
+            seen.outcome("hub-catalog").is_some()
+                && seen.row(CATALOG).is_some_and(|row| row.state == PluginState::Running)
+        })?;
+        let row = hub.seen.row(CATALOG).context("row")?.clone();
+        ensure!(row.pinned && row.source == "Local Studio catalog", "catalog plugin row: {row:?}");
+        ensure!(!row.commands.is_empty() && row.revision.is_some(), "catalog plugin row: {row:?}");
+        ensure!(
+            hub.seen
+                .catalog
+                .iter()
+                .any(|entry| entry.id == CATALOG && entry.installed.as_deref() == Some(&row.version)),
+            "the catalog does not mark {CATALOG} installed"
+        );
+        ensure!(hub.seen.sheets == 0, "a plugin that asks for nothing opened a sheet");
+
+        hub.studio.install_plugin("hub-git".into(), url.to_string());
+        let sheet = hub.sheet("install from a git URL asks for consent", "hub-git")?;
+        ensure!(sheet.unpinned && sheet.told && sheet.install, "git sheet flags: {sheet:?}");
+        ensure!(
+            sheet.rows.len() == 2 && sheet.pin.as_deref().is_some_and(|pin| pin.len() == 7),
+            "git sheet: {sheet:?}"
+        );
+        hub.answer("install with the sensitive switch off", "hub-git", &[])?;
+        hub.pump("a told plugin runs with its sensitive capability off", |seen| {
+            seen.row(ID).is_some_and(|row| {
+                row.state == PluginState::Running
+                    && row.told
+                    && !row.pinned
+                    && row.grants.iter().any(|grant| grant.id == "screen-capture" && !grant.granted)
+            })
+        })?;
+        ensure!(
+            args(agent)?.as_deref() == Some(&["serve".to_string(), "--granted=".to_string()][..]),
+            "args {:?}",
+            args(agent)?
+        );
+        println!("ok   its server starts with --granted= (nothing sensitive)");
+
+        hub.studio.grant_plugin("hub-grant".into(), ID.into(), vec!["screen-capture".into()]);
+        let sheet = hub.sheet("a Settings switch opens the consent sheet", "hub-grant")?;
+        ensure!(sheet.preset == ["screen-capture"] && !sheet.install, "grant sheet: {sheet:?}");
+        hub.answer("allow screen capture", "hub-grant", &["screen-capture"])?;
+        hub.pump("the grant shows in Settings", |seen| {
+            seen.row(ID).is_some_and(|row| row.grants.iter().any(|grant| grant.id == "screen-capture" && grant.granted))
+        })?;
+        ensure!(args(agent)?.is_some_and(|args| args[1] == "--granted=screen-capture"), "args {:?}", args(agent)?);
+        println!("ok   its server now starts with --granted=screen-capture");
+
+        hub.studio.revoke_plugin("hub-revoke".into(), ID.into(), "screen-capture".into());
+        hub.pump("turning the switch off revokes at once", |seen| {
+            seen.outcome("hub-revoke").is_some()
+                && seen
+                    .row(ID)
+                    .is_some_and(|row| row.grants.iter().any(|grant| grant.id == "screen-capture" && !grant.granted))
+        })?;
+        ensure!(args(agent)?.is_some_and(|args| args[1] == "--granted="), "args {:?}", args(agent)?);
+
+        updates(hub, repo)?;
+        catalog_pin(hub, plugins)?;
+        let plain = repo.parent().context("scratch root")?.join(PLAIN);
+        untold(hub, &plain)?;
+        whole_catalog(hub, plugins)?;
+
+        for (request, id) in [("hub-remove", ID), ("hub-remove-catalog", CATALOG), ("hub-remove-plain", PLAIN)] {
+            hub.studio.remove_plugin(request.into(), id.into());
+            hub.pump(&format!("remove {id}"), |seen| seen.outcome(request).is_some() && seen.row(id).is_none())?;
+            ensure!(!plugins.join(id).exists(), "{id} folder is still there");
+        }
+        ensure!(args(agent)?.is_none(), "the removed plugin's server is still in settings.json");
+        let grants = std::fs::read_to_string(plugins.join("grants.json")).unwrap_or_default();
+        let origins = std::fs::read_to_string(plugins.join(plugin_store::ORIGINS)).unwrap_or_default();
+        ensure!(
+            !grants.contains(ID) && !origins.contains(ID) && !origins.contains(CATALOG),
+            "grants or origins remember a removed plugin"
+        );
+        ensure!(
+            hub.seen.catalog.iter().all(|entry| entry.installed.is_none()),
+            "the catalog still marks a removed plugin installed"
         );
         Ok(())
     }

@@ -8,7 +8,8 @@ use crate::app::App;
 use crate::format;
 use crate::icons;
 
-pub const SCENES: [&str; 4] = ["consent-install", "consent-install-light", "consent-findings", "consent-update-light"];
+pub const SCENES: [&str; 5] =
+    ["consent-install", "consent-install-light", "consent-findings", "consent-update-light", "consent-git"];
 
 thread_local! {
     static SHOWN: RefCell<Option<(String, adw::Dialog)>> = const { RefCell::new(None) };
@@ -47,7 +48,11 @@ fn subtitle(consent: &ConsentRequest) -> String {
         format::escape(&consent.source)
     );
     match &consent.pin {
-        Some(pin) => format!("{version}, pinned to <tt>{}</tt>.", format::escape(pin)),
+        Some(pin) => format!(
+            "{version}, {} <tt>{}</tt>.",
+            if consent.unpinned { "at commit" } else { "pinned to" },
+            format::escape(pin)
+        ),
         None => format!("{version}."),
     }
 }
@@ -71,7 +76,7 @@ fn title(consent: &ConsentRequest) -> String {
 
 fn confirm(consent: &ConsentRequest, count: usize) -> String {
     let noun = if count == 1 { "permission" } else { "permissions" };
-    let off = count < consent.rows.len();
+    let off = count < consent.rows.len() && !consent.told;
     if !consent.install {
         return if off { format!("Allow {count} {noun}, tools off") } else { format!("Allow {count} {noun}") };
     }
@@ -91,10 +96,11 @@ fn row_subtitle(row: &ConsentRow) -> String {
 
 fn stays_off(consent: &ConsentRequest) -> Option<String> {
     consent.rows.iter().any(|row| row.need == ConsentNeed::Sensitive).then(|| {
-        format!(
-            "The plugin's tools stay off until every permission it asks for is on. To grant one later, run local-studio plugin grant {} <capability>.",
-            consent.plugin
-        )
+        if consent.told {
+            "A switch left off is turned off for the plugin: Local Studio tells it, and cannot block a plugin that ignores it. Change any switch later in Settings, Plugins.".to_string()
+        } else {
+            "The plugin's tools stay off until every permission it asks for is on. Turn one on later in Settings, Plugins.".to_string()
+        }
     })
 }
 
@@ -153,6 +159,17 @@ fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
         scan.append(&toggle);
         top.append(&revealer);
     }
+    if consent.unpinned {
+        let warning = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let mark = gtk::Image::from_icon_name(icons::WARNING);
+        mark.add_css_class("ls-consent-finding");
+        warning.append(&mark);
+        warning.append(&label(
+            "Not pinned by the Local Studio catalog. Read its code first if you do not know who wrote it.",
+            "ls-consent-scan",
+        ));
+        top.append(&warning);
+    }
     column.append(&top);
     column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let asks = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -169,7 +186,11 @@ fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
     for row in &consent.rows {
         let subtitle = row_subtitle(row);
         if row.need == ConsentNeed::Sensitive {
-            let switch = adw::SwitchRow::builder().title(format::escape(&row.sentence)).subtitle(subtitle).build();
+            let switch = adw::SwitchRow::builder()
+                .title(format::escape(&row.sentence))
+                .subtitle(subtitle)
+                .active(consent.preset.contains(&row.id))
+                .build();
             let tag = gtk::Label::new(Some("Sensitive"));
             tag.add_css_class("ls-consent-tag");
             tag.set_valign(gtk::Align::Center);
@@ -195,7 +216,8 @@ fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
-    let install = gtk::Button::with_label(&confirm(consent, needed));
+    let preset = switches.borrow().iter().filter(|(_, switch)| switch.is_active()).count();
+    let install = gtk::Button::with_label(&confirm(consent, needed + preset));
     install.add_css_class("suggested-action");
     install.set_sensitive(clean || findings_open);
     buttons.append(&cancel);
@@ -290,6 +312,9 @@ fn fixture(rows: Vec<ConsentRow>, findings: Vec<String>, update_from: Option<&st
         files: 14,
         findings,
         rows,
+        unpinned: false,
+        told: false,
+        preset: Vec::new(),
     }
 }
 
@@ -360,6 +385,14 @@ pub fn stage(app: &Rc<App>, scene: &str) -> bool {
             ),
             false,
         ),
+        "consent-git" => {
+            let mut consent = fixture(fixture_rows().into_iter().take(3).collect(), Vec::new(), None);
+            consent.source = "https://github.com/example/field-notes.git".to_string();
+            consent.unpinned = true;
+            consent.told = true;
+            consent.preset = vec!["screen-capture".to_string()];
+            present(app, &consent, false);
+        }
         _ => present(app, &fixture(fixture_rows(), Vec::new(), None), false),
     }
     true
