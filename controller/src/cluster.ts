@@ -213,6 +213,7 @@ export const makeCluster = (d: ClusterDeps) => {
   const listen = new Set<string>();
   const rpcs = new Map<string, Rpc>();
   const pools = new Map<string, Pool>();
+  const claims = new Set<{ ids: string[]; port: number }>();
   const set = () => clusterSettings(d.config());
 
   const ip = async (): Promise<string | null> => {
@@ -280,6 +281,8 @@ export const makeCluster = (d: ClusterDeps) => {
       { name: "GPU use", ok: !busy.length, detail: busy.length ? `${busy[0]!.name} is ${busy[0]!.utilization}% busy with work outside the fleet.` : "The GPU is not busy with other work." },
       { name: "Power", ok: power !== "battery", detail: power === "battery" ? "Running on battery." : "Plugged in." },
     ];
+    const stale = gpus.find((g) => g.stale);
+    if (stale) out.push({ name: "GPU readings", ok: false, detail: `A GPU fell off the bus, so nvidia-smi no longer reports ${stale.name}. This machine can't tell whether its owner is using it until it restarts.` });
     for (const extra of await Promise.all([media(fleet), macIdle()])) if (extra) out.push(extra);
     return out;
   };
@@ -477,17 +480,27 @@ export const makeCluster = (d: ClusterDeps) => {
       const bin = Bun.which(s.llamaServer);
       if (!bin) return yield* fail(409, "LLAMA_MISSING", `llama-server from llama.cpp is not installed on ${me.name}.`);
       const all = yield* Effect.promise(machines);
-      const busy = new Set([...pools.values()].filter((p) => p.info.phase === "starting" || p.info.phase === "ready").flatMap((p) => p.info.members.map((m) => m.controllerId)));
+      const busy = new Set([...[...pools.values()].filter((p) => p.info.phase === "starting" || p.info.phase === "ready").flatMap((p) => p.info.members.map((m) => m.controllerId)), ...[...claims].flatMap((c) => c.ids)]);
       const lenders = all.filter((m) => m.state === "lent" && m.rpc && m.rpcEndpoint && (m.gpus === 0 || m.freeMiB > 0) && !busy.has(m.id) && (!req.members?.length || req.members.includes(m.id)));
       if (!lenders.length) {
         const why = all.map((m) => `${m.name}: ${busy.has(m.id) ? "already serves a pooled model from this machine; stop that one first" : m.reason}`).join("; ");
         return yield* fail(409, "NO_LENDERS", `No machine in the fleet is lending its GPU right now${why ? ` (${why})` : ""}.`);
       }
+      const claim = { ids: lenders.map((m) => m.id), port: 0 };
+      claims.add(claim);
+      return yield* grant(req, bin, lenders, claim).pipe(Effect.ensuring(Effect.sync(() => claims.delete(claim))));
+    });
+
+  const grant = (req: LocalPoolRequest, bin: string, lenders: Awaited<ReturnType<typeof machines>>, claim: { ids: string[]; port: number }) =>
+    Effect.gen(function* () {
+      const me = d.config();
       const taken = yield* d.takenPorts();
       for (const p of pools.values()) if (p.info.phase === "starting" || p.info.phase === "ready") taken.add(p.info.port);
+      for (const c of claims) taken.add(c.port);
       let port = POOL_PORTS[0];
       while (port <= POOL_PORTS[1] && taken.has(port)) port++;
       if (port > POOL_PORTS[1]) return yield* fail(503, "NO_PORT", "no free port in 18100-18299");
+      claim.port = port;
       const alias = req.alias?.trim() || basename(req.model).replace(/(-00001-of-\d{5})?\.gguf$/i, "");
       const argvFor = (eps: string[]) => [bin, "-m", req.model, "--rpc", eps.join(","), "--host", "127.0.0.1", "--port", String(port), "-ngl", "999", "--metrics", "--alias", alias, ...(req.ctx ? ["-c", String(req.ctx)] : [])];
       if (req.dryRun) return { pool: null, argv: argvFor(lenders.map((m) => m.rpcEndpoint!)), members: lenders.map((m) => m.name) };

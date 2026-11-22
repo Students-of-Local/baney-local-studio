@@ -30,7 +30,7 @@ const telemetry = makeTelemetry();
 
 const gpus = (): LocalGpu[] => {
   const reserved = jobs.reserved();
-  return rawGpus.map(({ uuid: _uuid, pids: _pids, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
+  return rawGpus.map(({ uuid: _uuid, pids: _pids, stale: _stale, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
 };
 
 const byCard = (all: boolean): Map<string, number[]> => {

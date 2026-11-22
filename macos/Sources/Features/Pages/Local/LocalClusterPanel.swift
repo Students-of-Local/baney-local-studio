@@ -7,7 +7,7 @@ struct LocalClusterPanel: View {
 
     private var hardware: LocalHardware? { controller.hardware }
     private var devices: [LocalThunderbolt] { (hardware?.thunderbolt ?? []).filter { $0.state != .authorized } }
-    private var hotplug: [LocalHotplug] { Array((hardware?.hotplug ?? []).suffix(3).reversed()) }
+    private var hotplug: [LocalHotplug] { Array((hardware?.hotplug ?? []).prefix(3)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 36) {

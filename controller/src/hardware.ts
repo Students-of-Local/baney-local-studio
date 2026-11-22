@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import type { LocalGpu, LocalHardware, LocalHotplug, LocalPcieLink, LocalThunderbolt } from "./contracts.ts";
 import { exec, fail, lastLine } from "./core.ts";
 
-export type RawGpu = Omit<LocalGpu, "card"> & { uuid: string; pids: number[] };
+export type RawGpu = Omit<LocalGpu, "card"> & { uuid: string; pids: number[]; stale?: true };
 
 const QUERY = "index,uuid,name,memory.used,memory.total,power.draw,power.limit,temperature.gpu,utilization.gpu,pci.bus_id,pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max";
 const LANE_GBPS: Record<number, number> = { 1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563 };
@@ -91,7 +91,7 @@ export const readGpuList: Effect.Effect<RawGpu[] | null> = Effect.gen(function* 
   if (q.code !== 0 && !rows.length && !lost) return /no devices were found/i.test(said) ? [] : null;
   if (!rows.length && lost) {
     const gone = new Set([...said.matchAll(LOST_BUS)].flatMap((m) => pciId(m[1] ?? "") ?? []));
-    return gone.size ? lastGood.filter((g) => !g.busId || !gone.has(pciId(g.busId) ?? "")) : null;
+    return gone.size ? lastGood.filter((g) => !g.busId || !gone.has(pciId(g.busId) ?? "")).map((g) => ({ ...g, pids: [], utilization: null, stale: true as const })) : null;
   }
   const apps = (yield* exec(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"], 8_000)).stdout
     .split("\n")

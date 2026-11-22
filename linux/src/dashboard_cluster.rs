@@ -165,7 +165,7 @@ impl ClusterView {
         for device in devices.filter(|device| device.state != LocalThunderboltState::Authorized) {
             list.append(&self.device_row(controller, device, pending));
         }
-        let events = controller.hardware.iter().flat_map(|hardware| hardware.hotplug.iter().rev().take(3));
+        let events = controller.hardware.iter().flat_map(|hardware| hardware.hotplug.iter().take(3));
         for event in events {
             list.append(&hotplug_row(event));
         }
