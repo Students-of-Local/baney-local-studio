@@ -316,3 +316,38 @@ pub(crate) fn fill_random(bytes: &mut [u8]) -> bool {
 pub(crate) fn fill_random(bytes: &mut [u8]) -> bool {
     getrandom::getrandom(bytes).is_ok()
 }
+
+pub(crate) fn clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    #[cfg(unix)]
+    for args in [["-d".to_string(), format!("@{seconds}")], ["-r".to_string(), seconds.to_string()]] {
+        let output = std::process::Command::new("date")
+            .args(&args)
+            .arg("+%b %-d %H:%M")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Some(output) = output.ok().filter(|output| output.status.success()) {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    utc_clock(seconds)
+}
+
+fn utc_clock(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let rest = seconds % 86_400;
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    format!("{year}-{month:02}-{day:02} {:02}:{:02} UTC", rest / 3600, rest % 3600 / 60)
+}

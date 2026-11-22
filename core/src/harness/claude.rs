@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use eukhe_types::daemon::{SessionEvent, StreamUpdate};
@@ -11,9 +11,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Agent,
-    Event, Image, Launch, Sink, Spend, CLAUDE_PROVIDER,
+    Event, Image, Launch, Sink, Spend, Stop, CLAUDE_PROVIDER,
 };
-use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
+use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption};
 
 const MODELS: [(&str, &str, &str); 8] = [
     ("opus", "Opus (Claude Code)", "claude-opus-5-5"),
@@ -90,6 +90,9 @@ impl Claude {
             command.args(["--effort", effort]);
         }
         command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
+        if let Some(account) = &launch.account {
+            command.env("CLAUDE_CONFIG_DIR", account);
+        }
         let mut agent = Agent::new(
             command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?,
             &binary,
@@ -308,7 +311,15 @@ impl Translator {
             "rate_limit_event" => {
                 let info = frame.get("rate_limit_info");
                 if info.and_then(|info| info.get("status")).and_then(Value::as_str) == Some("rejected") {
-                    self.stop("Claude Code reports the usage limit is reached.".to_string());
+                    let resets = info
+                        .and_then(|info| info.get("resetsAt"))
+                        .and_then(Value::as_u64)
+                        .map(|seconds| seconds.saturating_mul(1000));
+                    self.halt(Stop {
+                        reason: "Claude Code reports the usage limit is reached.".to_string(),
+                        limit: true,
+                        resets,
+                    });
                 }
             }
             _ => {}
@@ -605,16 +616,20 @@ impl Translator {
     }
 
     fn stop(&mut self, reason: String) {
+        self.halt(Stop::from_reason(reason));
+    }
+
+    fn halt(&mut self, stop: Stop) {
         if self.stopped {
             return;
         }
         self.stopped = true;
         self.close(Some("error"));
-        if let Some(message) = notice(&reason, now_ms()) {
+        if let Some(message) = notice(&stop.reason, now_ms()) {
             emit_message(&self.sink, message);
         }
-        self.end(Some(reason.clone()));
-        self.sink.send(Event::Stopped(reason));
+        self.end((!stop.limit).then(|| stop.reason.clone()));
+        self.sink.send(Event::Stopped(stop));
     }
 
     fn finish(&mut self) {
@@ -806,11 +821,8 @@ fn effect(tool: &str) -> &'static str {
     }
 }
 
-fn session_file(cwd: &str, session: &str) -> Option<PathBuf> {
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::platform::home().map(|home| PathBuf::from(home).join(".claude")))?;
+pub(crate) fn session_file(account: Option<&Path>, cwd: &str, session: &str) -> Option<PathBuf> {
+    let root = account.map(Path::to_path_buf).or_else(|| super::accounts::default_dir(Harness::ClaudeCode))?;
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let direct = root.join("projects").join(&escaped).join(format!("{session}.jsonl"));
     if direct.is_file() {
@@ -821,12 +833,12 @@ fn session_file(cwd: &str, session: &str) -> Option<PathBuf> {
     Some(root.join("projects").join(escaped).join(format!("{session}.jsonl"))).filter(|path| path.is_file())
 }
 
-pub(crate) fn session_exists(cwd: &str, session: &str) -> bool {
-    session_file(cwd, session).is_some()
+pub(crate) fn session_exists(account: Option<&Path>, cwd: &str, session: &str) -> bool {
+    session_file(account, cwd, session).is_some()
 }
 
-pub(crate) fn history(cwd: &str, session: &str) -> Vec<AgentMessage> {
-    let Some(path) = session_file(cwd, session) else { return Vec::new() };
+pub(crate) fn history(account: Option<&Path>, cwd: &str, session: &str) -> Vec<AgentMessage> {
+    let Some(path) = session_file(account, cwd, session) else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     let mut messages = Vec::new();
     let mut names: HashMap<String, String> = HashMap::new();

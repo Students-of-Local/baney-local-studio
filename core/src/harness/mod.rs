@@ -1,3 +1,4 @@
+pub(crate) mod accounts;
 mod claude;
 mod codex;
 
@@ -21,6 +22,7 @@ pub(crate) const CLAUDE_PROVIDER: &str = "claude-code";
 pub(crate) const CODEX_PROVIDER: &str = "codex";
 const STRIPPED_ENV: [&str; 5] =
     ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"];
+const LIMIT_WORDS: [&str; 3] = ["usage limit", "hit your limit", "out of extra usage"];
 const STOP_WORDS: [&str; 16] = [
     "please run /login",
     "/login",
@@ -48,11 +50,25 @@ pub(crate) enum Event {
     Model(String),
     Usage(Spend),
     Idle,
-    Stopped(String),
+    Stopped(Stop),
     Exited(Option<String>),
     Failed(Failure, String),
     Opened(Box<OpenReport>),
     Loaded(Result<Vec<AgentMessage>, String>),
+}
+
+pub(crate) struct Stop {
+    pub(crate) reason: String,
+    pub(crate) limit: bool,
+    pub(crate) resets: Option<u64>,
+}
+
+impl Stop {
+    fn from_reason(reason: String) -> Self {
+        let lower = reason.to_ascii_lowercase();
+        let limit = LIMIT_WORDS.iter().any(|word| lower.contains(word));
+        Self { reason, limit, resets: None }
+    }
 }
 
 pub(crate) enum Failure {
@@ -113,8 +129,10 @@ pub(crate) struct Launch {
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<String>,
     pub(crate) access: AccessMode,
+    pub(crate) account: Option<PathBuf>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Image {
     pub(crate) mime_type: String,
     pub(crate) data: String,
@@ -137,8 +155,10 @@ impl Driver {
             Harness::ClaudeCode => {
                 let native = launch.native.clone();
                 let history = if launch.resume {
-                    let (cwd, session) = (launch.cwd.clone(), native.clone());
-                    tokio::task::spawn_blocking(move || claude::history(&cwd, &session)).await.unwrap_or_default()
+                    let (cwd, session, account) = (launch.cwd.clone(), native.clone(), launch.account.clone());
+                    tokio::task::spawn_blocking(move || claude::history(account.as_deref(), &cwd, &session))
+                        .await
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -245,11 +265,16 @@ pub(crate) async fn codex_models() -> Result<Vec<ModelOption>, String> {
     codex::models().await
 }
 
-pub(crate) async fn history(harness: Harness, cwd: String, native: String) -> Result<Vec<AgentMessage>, String> {
+pub(crate) async fn history(
+    harness: Harness,
+    account: Option<PathBuf>,
+    cwd: String,
+    native: String,
+) -> Result<Vec<AgentMessage>, String> {
     match harness {
         Harness::ClaudeCode => tokio::task::spawn_blocking(move || {
-            if claude::session_exists(&cwd, &native) {
-                claude::history(&cwd, &native)
+            if claude::session_exists(account.as_deref(), &cwd, &native) {
+                claude::history(account.as_deref(), &cwd, &native)
             } else {
                 Vec::new()
             }
@@ -257,7 +282,7 @@ pub(crate) async fn history(harness: Harness, cwd: String, native: String) -> Re
         .await
         .map_err(|error| error.to_string()),
         Harness::Codex if native.is_empty() => Ok(Vec::new()),
-        Harness::Codex => codex::read(&cwd, &native).await,
+        Harness::Codex => codex::read(account.as_deref(), &cwd, &native).await,
         Harness::Eukhe => Ok(Vec::new()),
     }
 }

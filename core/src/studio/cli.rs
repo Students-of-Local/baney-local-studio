@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use eukhe_types::daemon::SessionEvent;
@@ -7,7 +8,8 @@ use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
 use super::{now_ms, Actor, Command, Live, Thread, BODY_LIMIT, STOP_GRACE};
-use crate::harness::{self, Driver, Envelope, Event, Failure, Image, Launch, OpenReport, Sink};
+use crate::harness::accounts::{self, Parks};
+use crate::harness::{self, Driver, Envelope, Event, Failure, Image, Launch, OpenReport, Sink, Stop};
 use crate::images;
 use crate::model::{
     AccessMode, Approval, ApprovalAnswer, Harness, ModelOption, ModelRef, NoticeLevel, NotificationKind, Update,
@@ -26,6 +28,35 @@ pub(super) struct Cli {
     restart: bool,
     unanswered: usize,
     epoch: u64,
+    asked: VecDeque<Option<Asked>>,
+    ended: Option<Asked>,
+    just_ended: bool,
+}
+
+struct Asked {
+    text: String,
+    images: Vec<Image>,
+}
+
+impl Cli {
+    fn turn_ended(&mut self) {
+        self.ended = self.asked.pop_front().flatten();
+        self.just_ended = true;
+    }
+
+    fn limited_turn(&mut self) -> Option<Asked> {
+        if self.just_ended {
+            self.ended.take()
+        } else {
+            self.asked.pop_front().flatten()
+        }
+    }
+}
+
+enum Limited {
+    Switched(String),
+    Exhausted(Option<u64>),
+    Off,
 }
 
 pub(super) struct Opening {
@@ -35,6 +66,7 @@ pub(super) struct Opening {
     waiting: Vec<Waiting>,
     early: Vec<(u64, Event)>,
     draft: Option<String>,
+    note: Option<String>,
 }
 
 enum Waiting {
@@ -118,7 +150,9 @@ impl Actor {
     ) -> Result<String, String> {
         let id = harness::new_session_id();
         let now = now_ms();
+        let account = self.cli_first_account(harness);
         self.store.update(&id, |flags| {
+            flags.account = account;
             flags.harness = harness;
             flags.native_session = (harness == Harness::ClaudeCode).then(|| id.clone());
             flags.cwd = Some(cwd.clone());
@@ -184,13 +218,15 @@ impl Actor {
         if !has_live && !busy {
             if let Some(harness) = self.harness(id) {
                 let cwd = self.cli_cwd(id);
-                let native = self.store.flags(id).native_session.unwrap_or_default();
+                let flags = self.store.flags(id);
+                let native = flags.native_session.unwrap_or_default();
+                let account = flags.account.map(PathBuf::from);
                 self.generation += 1;
                 let token = self.generation;
                 self.loading.insert(id.to_string(), token);
                 let (sender, thread) = (self.cli.clone(), id.to_string());
                 tokio::spawn(async move {
-                    let event = Event::Loaded(harness::history(harness, cwd, native).await);
+                    let event = Event::Loaded(harness::history(harness, account, cwd, native).await);
                     sender.send(Envelope { thread, generation: token, event }).ok();
                 });
             }
@@ -219,6 +255,16 @@ impl Actor {
     }
 
     fn cli_begin_open(&mut self, id: &str, waiting: Vec<Waiting>, draft: Option<String>) -> Result<(), String> {
+        self.cli_open_noted(id, waiting, draft, None)
+    }
+
+    fn cli_open_noted(
+        &mut self,
+        id: &str,
+        waiting: Vec<Waiting>,
+        draft: Option<String>,
+        note: Option<String>,
+    ) -> Result<(), String> {
         let harness = self.harness(id).ok_or_else(|| format!("Unknown thread {id}."))?;
         if let Some(mut stale) = self.drivers.remove(id) {
             stale.driver.kill();
@@ -226,8 +272,9 @@ impl Actor {
         let flags = self.store.flags(id);
         let cwd = self.cli_cwd(id);
         let native = flags.native_session.clone().unwrap_or_default();
+        let account = flags.account.as_deref().map(PathBuf::from);
         let resume = match harness {
-            Harness::ClaudeCode => harness::claude_session_exists(&cwd, &native),
+            Harness::ClaudeCode => harness::claude_session_exists(account.as_deref(), &cwd, &native),
             Harness::Codex => !native.is_empty(),
             Harness::Eukhe => false,
         };
@@ -239,6 +286,7 @@ impl Actor {
             model: flags.model.clone(),
             effort: flags.thinking_level.clone(),
             access: flags.access.unwrap_or(AccessMode::FullAccess),
+            account,
         };
         self.generation += 2;
         let generation = self.generation - 1;
@@ -258,7 +306,7 @@ impl Actor {
         });
         self.opening.insert(
             id.to_string(),
-            Opening { generation, launch, task: task.abort_handle(), waiting, early: Vec::new(), draft },
+            Opening { generation, launch, task: task.abort_handle(), waiting, early: Vec::new(), draft, note },
         );
         Ok(())
     }
@@ -286,7 +334,7 @@ impl Actor {
                 format!("Codex could not resume this thread ({lost}); it continues in a new Codex session."),
             );
         }
-        let Opening { launch, waiting, early, draft, .. } = opening;
+        let Opening { launch, waiting, early, draft, note, .. } = opening;
         let flags = self.store.flags(id);
         if flags.native_session.as_deref() != Some(opened.native.as_str()) {
             let native = opened.native.clone();
@@ -296,8 +344,20 @@ impl Actor {
         if self.threads.get(id).is_none_or(|thread| thread.live.is_none()) || launch.resume {
             self.cli_live(id, &opened.history);
         }
-        let mut cli =
-            Cli { driver: opened.driver, generation, used: Instant::now(), restart: false, unanswered: 0, epoch: 0 };
+        if let Some(note) = note {
+            self.cli_note(id, &note).await;
+        }
+        let mut cli = Cli {
+            driver: opened.driver,
+            generation,
+            used: Instant::now(),
+            restart: false,
+            unanswered: 0,
+            epoch: 0,
+            asked: VecDeque::new(),
+            ended: None,
+            just_ended: false,
+        };
         let access = flags.access.unwrap_or(AccessMode::FullAccess);
         if access != launch.access {
             if let Err(error) = cli.driver.set_access(access) {
@@ -422,6 +482,10 @@ impl Actor {
         cli.unanswered += 1;
         cli.epoch += 1;
         let sent = cli.driver.send(text, images, steer, request);
+        if sent.is_ok() && !steer {
+            cli.asked.push_back(Some(Asked { text: text.to_string(), images: images.to_vec() }));
+            cli.just_ended = false;
+        }
         if sent.is_err() {
             self.answered(id);
         }
@@ -567,6 +631,9 @@ impl Actor {
         if let Err(error) = cli.driver.compact() {
             self.answered(id);
             self.mailbox.notice(NoticeLevel::Error, error);
+        } else {
+            cli.asked.push_back(None);
+            cli.just_ended = false;
         }
     }
 
@@ -727,6 +794,9 @@ impl Actor {
         match event {
             Event::Session(event) => self.cli_session(&id, &event).await,
             Event::Idle => {
+                if let Some(cli) = self.drivers.get_mut(&id) {
+                    cli.turn_ended();
+                }
                 self.answered(&id);
                 let busy =
                     self.threads.get(&id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy);
@@ -762,28 +832,7 @@ impl Actor {
             }
             Event::Usage(_) | Event::Opened(_) | Event::Loaded(_) => {}
             Event::Failed(failure, error) => self.cli_failed(&id, failure, error),
-            Event::Stopped(reason) => {
-                if current {
-                    if let Some(mut cli) = self.drivers.remove(&id) {
-                        cli.driver.kill();
-                    }
-                }
-                if !self.drivers.contains_key(&id) {
-                    self.cli_halt(&id).await;
-                }
-                let title = self.title(&id);
-                let body = format!(
-                    "{} stopped on an account problem: {reason}. Local Studio will not retry; check the sign-in or plan in a terminal, then send again.",
-                    name(harness)
-                );
-                self.mailbox.notice(NoticeLevel::Error, format!("“{title}”: {body}"));
-                self.mailbox.push(Update::Notification {
-                    thread: id,
-                    kind: NotificationKind::Failed,
-                    title,
-                    body: super::truncate(&body, BODY_LIMIT),
-                });
-            }
+            Event::Stopped(stop) => self.cli_stopped(id, harness, current, stop).await,
             Event::Exited(failure) => {
                 self.drivers.remove(&id);
                 let was = self.running(&id);
@@ -794,6 +843,49 @@ impl Actor {
                 }
             }
         }
+    }
+
+    async fn cli_stopped(&mut self, id: String, harness: Harness, current: bool, stop: Stop) {
+        let mut resend = None;
+        if current {
+            if let Some(mut cli) = self.drivers.remove(&id) {
+                resend = cli.limited_turn();
+                cli.driver.kill();
+            }
+        }
+        if !self.drivers.contains_key(&id) {
+            self.cli_halt(&id).await;
+        }
+        let limited = if stop.limit { self.cli_limited(&id, harness, &stop) } else { Limited::Off };
+        let reason = stop.reason.trim_end_matches('.').to_string();
+        let detail = match limited {
+            Limited::Switched(note) => return self.cli_switched(&id, resend, note),
+            Limited::Exhausted(Some(at)) => format!(
+                "every signed-in {} account is at its usage limit until {} ({reason})",
+                name(harness),
+                crate::platform::clock(at)
+            ),
+            Limited::Exhausted(None) | Limited::Off => reason,
+        };
+        if stop.limit {
+            if let Some(thread) = self.threads.get_mut(&id) {
+                thread.failed_at = Some(super::now_ms());
+            }
+            self.emit_info(&id);
+            self.dirty = true;
+        }
+        let title = self.title(&id);
+        let body = format!(
+            "{} stopped on an account problem: {detail}. Local Studio will not retry; check the sign-in or plan in a terminal, then send again.",
+            name(harness)
+        );
+        self.mailbox.notice(NoticeLevel::Error, format!("“{title}”: {body}"));
+        self.mailbox.push(Update::Notification {
+            thread: id,
+            kind: NotificationKind::Failed,
+            title,
+            body: super::truncate(&body, BODY_LIMIT),
+        });
     }
 
     fn cli_failed(&mut self, id: &str, failure: Failure, error: String) {
@@ -818,6 +910,13 @@ impl Actor {
     }
 
     async fn cli_session(&mut self, id: &str, event: &SessionEvent) {
+        if let Some(cli) = self.drivers.get_mut(id) {
+            match event {
+                SessionEvent::TurnEnd { .. } => cli.turn_ended(),
+                SessionEvent::AgentEnd { .. } => {}
+                _ => cli.just_ended = false,
+            }
+        }
         self.apply_event(id, event, 0).await;
         let ended = matches!(event, SessionEvent::AgentEnd { .. });
         if let Some(cli) = self.drivers.get_mut(id).filter(|_| ended || matches!(event, SessionEvent::AgentStart)) {
@@ -884,6 +983,89 @@ impl Actor {
         }
         self.emit_info(id);
         self.dirty = true;
+    }
+
+    fn cli_overrides(&self, harness: Harness) -> (Vec<String>, bool) {
+        let settings = self.settings.borrow();
+        let listed = match harness {
+            Harness::ClaudeCode => settings.harness_accounts.claude.clone(),
+            Harness::Codex => settings.harness_accounts.codex.clone(),
+            Harness::Eukhe => Vec::new(),
+        };
+        (listed, settings.switch_accounts_on_limit)
+    }
+
+    fn cli_first_account(&self, harness: Harness) -> Option<String> {
+        let (listed, switching) = self.cli_overrides(harness);
+        let list = accounts::list(harness, &listed);
+        let parks = Parks::load(&self.data_dir);
+        let dir = list.iter().find(|dir| !switching || parks.until(dir).is_none()).or_else(|| list.first())?;
+        accounts::stored(harness, dir)
+    }
+
+    fn cli_limited(&mut self, id: &str, harness: Harness, stop: &Stop) -> Limited {
+        let (listed, switching) = self.cli_overrides(harness);
+        let flags = self.store.flags(id);
+        let Some(from) = accounts::dir_of(harness, flags.account.as_deref()) else { return Limited::Off };
+        if !switching {
+            return Limited::Off;
+        }
+        let now = u64::try_from(now_ms()).unwrap_or(0);
+        let until = stop.resets.filter(|at| *at > now).unwrap_or(now + accounts::FALLBACK_PARK_MS);
+        let mut parks = Parks::load(&self.data_dir);
+        if let Err(error) = parks.park(&from, until) {
+            self.mailbox.notice(NoticeLevel::Warning, format!("Could not record the account's usage limit: {error}"));
+        }
+        let list = accounts::list(harness, &listed);
+        let Some(to) = list.iter().find(|dir| **dir != from && parks.until(dir).is_none()).cloned() else {
+            let first = list.iter().chain([&from]).filter_map(|dir| parks.until(dir)).min();
+            return Limited::Exhausted(first);
+        };
+        let cwd = self.cli_cwd(id);
+        let native = flags.native_session.unwrap_or_default();
+        if let Err(error) = accounts::carry(harness, &from, &to, &cwd, &native) {
+            self.mailbox.notice(
+                NoticeLevel::Warning,
+                format!("Could not copy the {} session to {}: {error}", name(harness), accounts::label(&to)),
+            );
+        }
+        let account = accounts::stored(harness, &to);
+        self.store.update(id, |flags| flags.account = account);
+        self.save();
+        Limited::Switched(format!(
+            "{} reached its usage limit until {}; continuing on {}.",
+            accounts::label(&from),
+            crate::platform::clock(until),
+            accounts::label(&to)
+        ))
+    }
+
+    fn cli_switched(&mut self, id: &str, resend: Option<Asked>, note: String) {
+        let mut waiting: Vec<Waiting> = resend
+            .into_iter()
+            .map(|asked| Waiting::Send { request: None, text: asked.text, images: asked.images, steer: false })
+            .collect();
+        let mut draft = None;
+        if let Some(opening) = self.opening.remove(id) {
+            opening.cancel();
+            waiting.extend(opening.waiting);
+            draft = opening.draft;
+        }
+        if let Err(error) = self.cli_open_noted(id, waiting, draft, Some(note)) {
+            self.mailbox.notice(NoticeLevel::Error, error);
+        }
+        self.dirty = true;
+    }
+
+    async fn cli_note(&mut self, id: &str, text: &str) {
+        let Some(message) = harness::notice(text, u64::try_from(now_ms()).unwrap_or(0)) else { return };
+        self.apply_event(
+            id,
+            &SessionEvent::MessageStart { message: message.clone(), assistant_message_event: None },
+            0,
+        )
+        .await;
+        self.apply_event(id, &SessionEvent::MessageEnd { message }, 0).await;
     }
 
     pub(super) fn add_approval(&mut self, id: String, approval: Approval) {

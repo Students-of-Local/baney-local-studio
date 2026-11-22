@@ -2,11 +2,13 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 const SLOW: Duration = Duration::from_millis(1500);
+const LIMITED: &str = "limited";
+const RESET_SECONDS: u64 = 2 * 60 * 60;
 
 fn emit(frame: &Value) {
     let mut out = std::io::stdout().lock();
@@ -25,11 +27,20 @@ fn interrupt(frame: &Value) -> bool {
     frame["type"] == "control_request" && frame["request"]["subtype"] == "interrupt"
 }
 
+fn account() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+}
+
+fn limited() -> bool {
+    account().is_some_and(|dir| dir.join(LIMITED).is_file())
+}
+
 fn session_file(args: &[String]) -> Option<PathBuf> {
     let session = args.windows(2).find(|pair| pair[0] == "--session-id" || pair[0] == "--resume")?[1].clone();
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
+    let root = account()?;
     let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     Some(root.join("projects").join(escaped).join(format!("{session}.jsonl")))
@@ -79,6 +90,17 @@ fn run(
     if aborted {
         emit(
             &json!({ "type": "result", "subtype": "error_during_execution", "is_error": false, "terminal_reason": "aborted_streaming" }),
+        );
+        return;
+    }
+    if text.contains("limit") && limited() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+        emit(&json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": { "status": "rejected", "resetsAt": now + RESET_SECONDS, "rateLimitType": "five_hour" },
+        }));
+        emit(
+            &json!({ "type": "result", "subtype": "success", "is_error": true, "result": "You've hit your limit, resets later" }),
         );
         return;
     }
