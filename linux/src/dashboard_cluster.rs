@@ -18,6 +18,8 @@ const MIB: u64 = 1_048_576;
 const HELPER_COMMAND: &str = "local-studio fleet power-helper --yes";
 const COMMIT_DELAY: Duration = Duration::from_millis(400);
 const AWAY_LOW: f64 = 5.0;
+// The controller refuses budgets above this (contracts.ts `Watts`, `AwayWatts`).
+const MAX_WATTS: f64 = 2000.0;
 const PRESENCE_UNKNOWN: &str = "This desktop doesn't report when you're at it, so the away limit applies.";
 
 fn row(spacing: i32) -> gtk::Box {
@@ -97,18 +99,24 @@ struct PowerDraft {
     app: Weak<App>,
     target: String,
     top: f64,
-    active: Cell<f64>,
-    away: Cell<f64>,
+    // Only a slider the user moved is sent; the other keeps the controller's value as stored.
+    active: Cell<Option<f64>>,
+    away: Cell<Option<f64>>,
     current: (u32, Option<u32>),
     timer: RefCell<Option<glib::SourceId>>,
+    held: Cell<bool>,
     dragging: Rc<Cell<bool>>,
 }
 
 impl PowerDraft {
+    // A pointer drag commits on release; keyboard steps commit after a short pause.
     fn schedule(self: &Rc<Self>) {
         self.dragging.set(true);
         if let Some(timer) = self.timer.borrow_mut().take() {
             timer.remove();
+        }
+        if self.held.get() {
+            return;
         }
         let draft = self.clone();
         let source = glib::timeout_add_local_once(COMMIT_DELAY, move || {
@@ -118,10 +126,23 @@ impl PowerDraft {
         self.timer.replace(Some(source));
     }
 
+    fn press(&self) {
+        self.held.set(true);
+        if let Some(timer) = self.timer.borrow_mut().take() {
+            timer.remove();
+        }
+    }
+
+    fn release(self: &Rc<Self>) {
+        self.held.set(false);
+        if self.dragging.get() {
+            self.commit();
+        }
+    }
+
     fn commit(&self) {
         self.dragging.set(false);
-        let active = whole(self.active.get());
-        let away = (self.away.get() < self.top).then(|| whole(self.away.get()));
+        let (active, away) = budget(self.active.get(), self.away.get(), self.top, self.current);
         if (active, away) == self.current {
             return;
         }
@@ -135,7 +156,7 @@ impl PowerDraft {
 
 fn whole(watts: f64) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let whole = watts.round().clamp(0.0, 10_000.0) as u32;
+    let whole = watts.round().clamp(0.0, MAX_WATTS) as u32;
     whole
 }
 
@@ -143,12 +164,27 @@ fn snap(watts: f64) -> f64 {
     (watts / 5.0).round() * 5.0
 }
 
+// The top stop: the GPUs' max limit (or a guess without one), raised to fit what is stored so a
+// saved cap never reads as "No limit", and never past what the controller accepts.
 fn power_top(controller: &LocalController, cluster: &LocalCluster) -> f64 {
-    match cluster.power.max_w.filter(|max| *max > 0.0) {
-        Some(max) => (max / 5.0).ceil() * 5.0,
-        None if controller.hardware.as_ref().is_some_and(|hardware| !hardware.gpus.is_empty()) => 150.0,
+    let power = &cluster.power;
+    let has_gpu = controller.hardware.as_ref().is_some_and(|hardware| !hardware.gpus.is_empty());
+    top_for(power.max_w, has_gpu, power.active_watts, power.away_watts)
+}
+
+fn top_for(max_w: Option<f64>, has_gpu: bool, active: u32, away: Option<u32>) -> f64 {
+    let base = match max_w.filter(|max| *max > 0.0) {
+        Some(max) => max,
+        None if has_gpu => 150.0,
         None => 30.0,
-    }
+    };
+    let stored = f64::from(active).max(away.map_or(0.0, |watts| f64::from(watts) + 5.0));
+    ((base.max(stored) / 5.0).ceil() * 5.0).min(MAX_WATTS)
+}
+
+// What a commit sends: moved sliders as drawn (the away slider's top stop is no limit), the rest as stored.
+fn budget(active: Option<f64>, away: Option<f64>, top: f64, current: (u32, Option<u32>)) -> (u32, Option<u32>) {
+    (active.map_or(current.0, whole), away.map_or(current.1, |watts| (watts < top).then(|| whole(watts))))
 }
 
 fn active_caption(watts: f64) -> String {
@@ -195,10 +231,10 @@ fn power_lever(cluster: &LocalCluster) -> Option<String> {
 fn power_slider(
     title: &str,
     value: f64,
-    low: f64,
-    top: f64,
+    (low, top): (f64, f64),
     caption: impl Fn(f64) -> String + 'static,
     busy: bool,
+    draft: &Rc<PowerDraft>,
     changed: impl Fn(f64) + 'static,
 ) -> gtk::Box {
     let block = column(4);
@@ -215,6 +251,22 @@ fn power_slider(
     scale.set_hexpand(true);
     scale.set_value(value);
     scale.set_sensitive(!busy);
+    // Watch raw presses in the capture phase: the scale's own drag gesture claims the sequence,
+    // which would cancel a click gesture before its release.
+    let pointer = gtk::EventControllerLegacy::new();
+    pointer.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let grip = draft.clone();
+    pointer.connect_event(move |_, event| {
+        match event.event_type() {
+            gtk::gdk::EventType::ButtonPress | gtk::gdk::EventType::TouchBegin => grip.press(),
+            gtk::gdk::EventType::ButtonRelease | gtk::gdk::EventType::TouchEnd | gtk::gdk::EventType::TouchCancel => {
+                grip.release();
+            }
+            _ => {}
+        }
+        glib::Propagation::Proceed
+    });
+    scale.add_controller(pointer);
     scale.update_property(&[
         gtk::accessible::Property::Label(title),
         gtk::accessible::Property::ValueText(&caption(value)),
@@ -485,22 +537,23 @@ impl ClusterView {
             app: self.app.clone(),
             target: controller.target.clone(),
             top,
-            active: Cell::new(active),
-            away: Cell::new(away),
+            active: Cell::new(None),
+            away: Cell::new(None),
             current: (power.active_watts, power.away_watts),
             timer: RefCell::new(None),
+            held: Cell::new(false),
             dragging: self.dragging.clone(),
         });
         let using = draft.clone();
         block.append(&power_slider(
             "While you're using this computer",
             active,
-            0.0,
-            top,
+            (0.0, top),
             active_caption,
             busy,
+            &draft,
             move |watts| {
-                using.active.set(watts);
+                using.active.set(Some(watts));
                 using.schedule();
             },
         ));
@@ -508,16 +561,16 @@ impl ClusterView {
             "Fleet work stops the moment you start a game or any GPU program.",
             &["dim-label", "ls-dash-small"],
         ));
-        let leaving = draft;
+        let leaving = draft.clone();
         block.append(&power_slider(
             "While you're away",
             away,
-            AWAY_LOW,
-            top,
+            (AWAY_LOW, top),
             move |watts| away_caption(watts, top),
             busy,
+            &draft,
             move |watts| {
-                leaving.away.set(watts);
+                leaving.away.set(Some(watts));
                 leaving.schedule();
             },
         ));
@@ -746,4 +799,32 @@ fn machines(cluster: &LocalCluster) -> gtk::Box {
         block.append(&line);
     }
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{budget, top_for};
+
+    #[test]
+    fn top_fits_a_stored_cap_above_the_guess() {
+        // No maxW, one GPU: the guess is 150 W, but a stored 300 W away cap must not read as "No limit".
+        let top = top_for(None, true, 60, Some(300));
+        assert!((top - 305.0).abs() < f64::EPSILON, "top {top}");
+    }
+
+    #[test]
+    fn top_never_passes_what_the_controller_accepts() {
+        assert!((top_for(Some(2400.0), true, 0, None) - 2000.0).abs() < f64::EPSILON);
+        assert!((top_for(Some(495.0), true, 60, None) - 495.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn moving_one_slider_keeps_the_other_as_stored() {
+        // Stored: 60 W in use, 300 W away, on a 150 W top. Moving only the in-use slider keeps 300 W.
+        assert_eq!(budget(Some(40.0), None, 150.0, (60, Some(300))), (40, Some(300)));
+        // Moving only the away slider keeps the in-use watts even when they sit above the top.
+        assert_eq!(budget(None, Some(100.0), 150.0, (200, None)), (200, Some(100)));
+        // The away slider's top stop is no limit.
+        assert_eq!(budget(None, Some(150.0), 150.0, (60, Some(100))), (60, None));
+    }
 }

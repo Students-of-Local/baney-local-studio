@@ -283,9 +283,20 @@ private struct LocalPowerBlock: View {
     private var power: LocalClusterPower { cluster.power }
     private var pending: Bool { pages.isPending(.power(controller.target)) }
 
+    // The controller refuses budgets above this (contracts.ts `Watts`, `AwayWatts`).
+    static let maxWatts: Double = 2000
+
+    // The top stop: the GPUs' max limit (or a guess without one), raised to fit what is stored so a
+    // saved cap never reads as "No limit", and never past what the controller accepts.
     private var top: Double {
-        if let max = power.maxW, max > 0 { return (max / 5).rounded(.up) * 5 }
-        return (controller.hardware?.gpus.isEmpty ?? true) ? 30 : 150
+        let base: Double
+        if let max = power.maxW, max > 0 {
+            base = max
+        } else {
+            base = (controller.hardware?.gpus.isEmpty ?? true) ? 30 : 150
+        }
+        let stored = Swift.max(Double(power.activeWatts), power.awayWatts.map { Double($0) + 5 } ?? 0)
+        return Swift.min((Swift.max(base, stored) / 5).rounded(.up) * 5, Self.maxWatts)
     }
 
     private var activeValue: Double { activeDraft ?? min(Double(power.activeWatts), top) }
@@ -366,8 +377,14 @@ private struct LocalPowerBlock: View {
     static let helperCommand = "local-studio fleet power-helper --yes"
 
     private func commit() {
-        let active = UInt32(activeValue.rounded())
-        let away: UInt32? = awayValue >= top ? nil : UInt32(awayValue.rounded())
+        // Only a slider the user moved is sent; the other keeps the controller's value as stored.
+        let active = activeDraft.map { UInt32($0.rounded()) } ?? power.activeWatts
+        let away: UInt32?
+        if let awayDraft {
+            away = awayDraft >= top ? nil : UInt32(awayDraft.rounded())
+        } else {
+            away = power.awayWatts
+        }
         guard active != power.activeWatts || away != power.awayWatts else {
             activeDraft = nil
             awayDraft = nil
