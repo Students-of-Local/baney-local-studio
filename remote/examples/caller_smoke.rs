@@ -25,8 +25,8 @@ mod real_model;
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 const QUICK: Duration = Duration::from_secs(30);
 const SETUP: Duration = Duration::from_secs(120);
-const TURN: Duration = Duration::from_secs(300);
-const TRIES: usize = 4;
+const TURN: Duration = Duration::from_secs(600);
+const TRIES: usize = 3;
 const NAME: &str = "caller-a";
 const PLUGIN: &str = "callerprobe";
 const FORGED_DEVICE: &str = "device:intruder-phone";
@@ -76,7 +76,7 @@ fn draft(text: &str) -> PromptDraft {
 
 fn ask(claimed: &str) -> String {
     format!(
-        "Use the python tool to run exactly this code, then reply with the single word done.\n\nr = await mcp.call_tool(\"plugin-{PLUGIN}\", \"whoami\", {{\"claimed_caller\": \"{claimed}\"}})\nprint(r)"
+        "Call the tool named python (not codemode, not dyn) with exactly this code, then reply with the single word done.\n\nr = await mcp.call_tool(\"plugin-{PLUGIN}\", \"whoami\", {{\"claimed_caller\": \"{claimed}\"}})\nprint(r)"
     )
 }
 
