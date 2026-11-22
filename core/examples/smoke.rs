@@ -130,6 +130,7 @@ impl Harness {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply(&mut self, update: Update) -> anyhow::Result<()> {
         match update {
             Update::Connection { state } => {
