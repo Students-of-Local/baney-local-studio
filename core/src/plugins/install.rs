@@ -4,12 +4,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{inside, load, valid_id, Capability, Consent, Grants, Plugin, MANIFEST};
 
 pub const MAX_FILE: u64 = 10 * 1024 * 1024;
+pub const ORIGINS: &str = "origins.json";
 const BUNDLED_CATALOG: &str = include_str!("../../../examples/plugins/catalog.toml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,12 +21,20 @@ pub enum Source {
     Dir(PathBuf),
     Git { url: String, rev: String },
     Catalog(String),
+    Follow { origin: String, url: String, rev: String, subdir: Option<String>, exclude: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub local_only: bool,
     pub git: String,
     pub rev: String,
     #[serde(default)]
@@ -30,6 +42,54 @@ pub struct CatalogEntry {
     pub tree: String,
     #[serde(default)]
     pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origins {
+    #[serde(default)]
+    plugins: BTreeMap<String, Origin>,
+}
+
+impl Origins {
+    pub fn load(root: &Path) -> Result<Self, String> {
+        let path = root.join(ORIGINS);
+        let object = crate::workspace::providers::read_object(&path)?;
+        serde_json::from_value(Value::Object(object)).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
+    pub fn save(&self, root: &Path) -> Result<(), String> {
+        let value = serde_json::to_value(self).map_err(|error| error.to_string())?;
+        crate::workspace::providers::write_private(&root.join(ORIGINS), &value)
+    }
+
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<&Origin> {
+        self.plugins.get(id)
+    }
+
+    pub fn set(&mut self, id: &str, origin: Origin) {
+        self.plugins.insert(id.to_string(), origin);
+    }
+
+    pub fn forget(&mut self, id: &str) -> bool {
+        self.plugins.remove(id).is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -81,8 +141,144 @@ impl Source {
             Source::Dir(dir) => format!("folder {}", super::absolute(dir).display()),
             Source::Git { url, .. } => format!("git {url}"),
             Source::Catalog(id) => format!("catalog {id}"),
+            Source::Follow { origin, .. } => origin.clone(),
         }
     }
+
+    pub fn resolve(arg: &str, channel: &str) -> Result<(Self, Option<String>), String> {
+        let parsed = Self::parse(arg);
+        let url = arg.trim();
+        let git_like = url.contains("://")
+            || url.starts_with("git@")
+            || Path::new(url).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("git"));
+        match parsed {
+            Err(_) if git_like && !url.rsplit_once('@').is_some_and(|(_, rev)| full_sha(rev)) => {
+                let (name, rev) = match resolve_channel(url, channel)? {
+                    Some(found) => found,
+                    None => ("HEAD".to_string(), head(url)?),
+                };
+                Ok((Source::Git { url: url.to_string(), rev }, Some(name)))
+            }
+            other => other.map(|source| (source, None)),
+        }
+    }
+
+    #[must_use]
+    pub fn pinned(&self) -> bool {
+        matches!(self, Source::Catalog(_))
+    }
+}
+
+fn remote(url: &str, args: &[&str]) -> Result<Vec<(String, String)>, String> {
+    let output = Command::new("git")
+        .arg("ls-remote")
+        .args(args)
+        .arg("--")
+        .arg(url)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|error| format!("cannot run git: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("git ls-remote {url}: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(sha, name)| (name.to_string(), sha.to_string())))
+        .collect())
+}
+
+fn head(url: &str) -> Result<String, String> {
+    remote(url, &[])?
+        .into_iter()
+        .find(|(name, _)| name == "HEAD")
+        .map(|(_, sha)| sha)
+        .ok_or_else(|| format!("{url} has no default branch"))
+}
+
+fn release(name: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = name.strip_prefix("refs/tags/v")?.split('.');
+    let number = |part: Option<&str>| {
+        part.filter(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+            .and_then(|part| part.parse().ok())
+    };
+    let version = (number(parts.next())?, number(parts.next())?, number(parts.next())?);
+    parts.next().is_none().then_some(version)
+}
+
+pub fn resolve_channel(url: &str, channel: &str) -> Result<Option<(String, String)>, String> {
+    let refs = remote(url, &["--heads", "--tags"])?;
+    let peeled = |name: &str| {
+        let wanted = format!("{name}^{{}}");
+        refs.iter()
+            .find(|(other, _)| *other == wanted)
+            .or_else(|| refs.iter().find(|(other, _)| other == name))
+            .map(|(_, sha)| sha.clone())
+    };
+    let name = match channel {
+        "stable" => refs
+            .iter()
+            .filter_map(|(name, _)| release(name).map(|version| (version, name.clone())))
+            .max()
+            .map(|(_, name)| name),
+        "nightly" => Some("refs/tags/nightly".to_string()),
+        _ => Some("refs/heads/main".to_string()),
+    };
+    Ok(name.and_then(|name| {
+        let sha = peeled(&name)?;
+        Some((name.trim_start_matches("refs/tags/").trim_start_matches("refs/heads/").to_string(), sha))
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peeked {
+    pub id: String,
+    pub version: String,
+    pub capabilities: Vec<String>,
+    pub changed: bool,
+}
+
+pub fn peek(url: &str, rev: &str, subdir: Option<&str>, since: Option<&str>) -> Result<Peeked, String> {
+    #[derive(Deserialize)]
+    struct Head {
+        id: String,
+        version: String,
+        #[serde(default)]
+        capabilities: Vec<String>,
+    }
+    let root = std::env::temp_dir();
+    let scratch = Scratch::new(&root, "ls-plugin-peek").map_err(|errors| errors.join("; "))?;
+    let git = |args: &[&str]| -> Result<String, String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&scratch.0)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|error| format!("cannot run git: {error}"))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()))
+        }
+    };
+    git(&["init", "-q"])?;
+    git(&["remote", "add", "origin", url])?;
+    git(&["config", "remote.origin.promisor", "true"])?;
+    git(&["config", "remote.origin.partialclonefilter", "blob:none"])?;
+    git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", rev])?;
+    let folder = subdir.map(|subdir| subdir.trim_end_matches('/'));
+    let path = folder.map_or_else(|| MANIFEST.to_string(), |folder| format!("{folder}/{MANIFEST}"));
+    let text = git(&["show", &format!("{rev}:{path}")]).map_err(|_| format!("{rev} has no {path}"))?;
+    let head: Head =
+        toml::from_str(&text).map_err(|error| format!("invalid {MANIFEST} at {rev}: {}", error.message()))?;
+    let tree = |rev: &str| git(&["rev-parse", &format!("{rev}:{}", folder.unwrap_or_default())]);
+    let changed = match since {
+        Some(since) => git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", since])
+            .and_then(|_| Ok(tree(rev)? != tree(since)?))
+            .unwrap_or(true),
+        None => true,
+    };
+    Ok(Peeked { id: head.id, version: head.version, capabilities: head.capabilities, changed })
 }
 
 impl Catalog {
@@ -97,6 +293,9 @@ impl Catalog {
             }
             if !entry.tree.strip_prefix("sha256:").is_some_and(|hex| hex.len() == 64 && is_hex(hex)) {
                 return Err(format!("catalog {}: tree must be sha256:<64 hex>", entry.id));
+            }
+            if let Some(name) = entry.capabilities.iter().find(|name| Capability::parse(name).is_none()) {
+                return Err(format!("catalog {}: unknown capability {name}", entry.id));
             }
         }
         Ok(catalog)
@@ -120,7 +319,7 @@ fn full_sha(rev: &str) -> bool {
     rev.len() == 40 && is_hex(rev)
 }
 
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(root: &Path, what: &str) -> Result<Self, Vec<String>> {
@@ -148,17 +347,39 @@ pub struct Staged {
     tree: String,
     origin: String,
     pin: Option<String>,
+    record: Box<Origin>,
 }
 
 pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, Vec<String>> {
     std::fs::create_dir_all(root).map_err(|error| vec![format!("cannot create {}: {error}", root.display())])?;
     let origin = source.origin();
-    match source {
-        Source::Dir(dir) => place(root, dir, &[], None, &[], origin),
+    let git = |url: &str, rev: &str, subdir: Option<&String>, exclude: &[String], pinned: bool| Origin {
+        git: Some(url.to_string()),
+        rev: Some(rev.to_string()),
+        subdir: subdir.cloned(),
+        exclude: exclude.to_vec(),
+        folder: None,
+        pinned,
+    };
+    let mut staged = match source {
+        Source::Dir(dir) => place(root, dir, &[], None, &[], origin)?,
         Source::Git { url, rev } => {
             let fetched = Scratch::new(root, "fetch")?;
             let flattened = fetch(url, rev, &fetched.0)?;
-            place(root, &fetched.0, &[], None, &flattened, origin)
+            let mut staged = place(root, &fetched.0, &[], None, &flattened, origin)?;
+            staged.record = Box::new(git(url, rev, None, &[], false));
+            staged
+        }
+        Source::Follow { url, rev, subdir, exclude, .. } => {
+            let fetched = Scratch::new(root, "fetch")?;
+            let flattened = fetch(url, rev, &fetched.0)?;
+            let dir = match subdir {
+                Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
+                None => fetched.0.clone(),
+            };
+            let mut staged = place(root, &dir, exclude, None, &flattened, origin)?;
+            staged.record = Box::new(git(url, rev, subdir.as_ref(), exclude, false));
+            staged
         }
         Source::Catalog(id) => {
             let entry = catalog
@@ -170,9 +391,24 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
                 Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
                 None => fetched.0.clone(),
             };
-            place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, origin)
+            let mut staged = place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, origin)?;
+            let asked: Vec<&str> = staged.plugin.capabilities.iter().map(|capability| capability.name()).collect();
+            let listed: Vec<&str> = entry.capabilities.iter().map(String::as_str).collect();
+            if asked.len() != listed.len() || asked.iter().any(|name| !listed.contains(name)) {
+                return Err(vec![format!(
+                    "the catalog lists {id} as asking for [{}], but its plugin.toml asks for [{}], so nothing was installed",
+                    listed.join(", "),
+                    asked.join(", ")
+                )]);
+            }
+            staged.record = Box::new(git(&entry.git, &entry.rev, entry.subdir.as_ref(), &entry.exclude, true));
+            staged
         }
+    };
+    if let Source::Dir(dir) = source {
+        staged.record.folder = Some(super::absolute(dir).to_string_lossy().into_owned());
     }
+    Ok(staged)
 }
 
 fn place(
@@ -215,7 +451,7 @@ fn place(
     }
     let plugin = load(&staged)?;
     let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
-    Ok(Staged { staging, plugin, files, tree, origin, pin: expected.map(str::to_string) })
+    Ok(Staged { staging, plugin, files, tree, origin, pin: expected.map(str::to_string), record: Box::default() })
 }
 
 impl Staged {
@@ -237,6 +473,11 @@ impl Staged {
     #[must_use]
     pub fn files(&self) -> usize {
         self.files
+    }
+
+    #[must_use]
+    pub fn record(&self) -> &Origin {
+        &self.record
     }
 
     fn verify(&self, staged: &Path) -> Result<(), Vec<String>> {
@@ -301,6 +542,9 @@ impl Staged {
                 grants.grant(&plugin, chosen, Some(&self.tree)).map_err(|error| vec![error])?;
             }
             grants.save(root).map_err(|error| vec![error])?;
+            let mut origins = Origins::load(root).map_err(|error| vec![error])?;
+            origins.set(&plugin.id, (*self.record).clone());
+            origins.save(root).map_err(|error| vec![error])?;
             Ok((plugin, note))
         })();
         let (plugin, note) = recorded.inspect_err(|_| {

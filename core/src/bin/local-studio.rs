@@ -235,7 +235,7 @@ fn list() -> Result<(), String> {
     let scan = plugins::scan(&root);
     let grants = Grants::load(&root)?;
     let ready = plugins::ready(&scan.plugins, &grants);
-    for (plugin, consent) in &ready {
+    for (plugin, consent, _) in &ready {
         println!("{} {}: {}", plugin.id, plugin.version, plugin.description);
         if plugin.local_only {
             println!("  {}", plugins::LOCAL_ONLY_LABEL);

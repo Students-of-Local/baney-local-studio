@@ -217,6 +217,7 @@ impl Harness {
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
             | Update::Consents { .. }
+            | Update::Plugins { .. }
             | Update::LocalDashboard { .. }
             | Update::Providers { .. }
             | Update::ProviderModels { .. }
