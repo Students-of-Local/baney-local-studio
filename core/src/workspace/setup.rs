@@ -17,10 +17,32 @@ const TAIL_CHARS: usize = 4000;
 const PUSH_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedWorktree {
     Worktree(PathBuf),
+    Local,
+}
+
+/// A worktree `add_worktree` made whose setup scripts have not started yet.
+pub(crate) struct NewWorktree {
+    draft: String,
+    project: PathBuf,
+    path: PathBuf,
+    scripts: Vec<ProjectScript>,
+    progress: Progress,
+    signal: watch::Receiver<Signal>,
+}
+
+impl NewWorktree {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) enum AddedWorktree {
+    New(Box<NewWorktree>),
     Local,
 }
 
@@ -53,6 +75,14 @@ impl Setups {
         let (sender, receiver) = watch::channel(Signal::Running);
         self.controls.lock().unwrap_or_else(PoisonError::into_inner).insert(draft.to_string(), sender);
         receiver
+    }
+
+    fn take(&self, draft: &str) -> Option<watch::Sender<Signal>> {
+        self.controls.lock().unwrap_or_else(PoisonError::into_inner).remove(draft)
+    }
+
+    fn tracked(&self, draft: &str) -> Option<u32> {
+        self.pids.lock().unwrap_or_else(PoisonError::into_inner).get(draft).copied()
     }
 
     fn finish(&self, draft: &str) {
@@ -190,20 +220,21 @@ fn script_command(script: &str) -> tokio::process::Command {
 }
 
 #[cfg(unix)]
-fn stop_script(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
-    process::signal_pid_group("-TERM", pid);
-    tokio::spawn(async move {
-        tokio::time::sleep(KILL_GRACE).await;
+async fn stop_script(pid: Option<u32>, child: &mut tokio::process::Child) {
+    if let Some(pid) = pid {
+        process::signal_pid_group("-TERM", pid);
+        let _ = tokio::time::timeout(KILL_GRACE, child.wait()).await;
         process::signal_pid_group("-KILL", pid);
-    });
+    }
+    let _ = child.wait().await;
 }
 
 #[cfg(windows)]
-fn stop_script(pid: Option<u32>) {
+async fn stop_script(pid: Option<u32>, child: &mut tokio::process::Child) {
     if let Some(pid) = pid {
         process::signal_pid_group("-KILL", pid);
     }
+    let _ = child.wait().await;
 }
 
 async fn run_script(
@@ -252,8 +283,7 @@ async fn run_script(
             changed = signal.changed() => {
                 let current = *signal.borrow();
                 if changed.is_err() || current == Signal::Cancel || current == Signal::Local {
-                    stop_script(pid);
-                    let _ = child.wait().await;
+                    stop_script(pid, &mut child).await;
                     break ScriptEnd::Interrupted(if changed.is_err() { Signal::Cancel } else { current });
                 }
             }
@@ -278,13 +308,15 @@ impl Workspace {
         }
     }
 
-    pub(crate) async fn prepare_worktree(
+    /// Makes the worktree for a new thread and stops before its setup scripts, so a start can still be refused
+    /// with no script run.
+    pub(crate) async fn add_worktree(
         &self,
         draft: &str,
         project: &Path,
         branch: &str,
         base: Option<&str>,
-    ) -> Result<PreparedWorktree, String> {
+    ) -> Result<AddedWorktree, String> {
         let project_key = project.to_string_lossy().into_owned();
         let scripts: Vec<ProjectScript> = self
             .project_entry(&project_key)
@@ -323,15 +355,28 @@ impl Workspace {
             self.inner.setups.finish(draft);
             return if early == Signal::Local {
                 progress.push(true, None);
-                Ok(PreparedWorktree::Local)
+                Ok(AddedWorktree::Local)
             } else {
                 progress.push(true, Some("Worktree setup was cancelled.".to_string()));
                 Err("Worktree setup was cancelled.".to_string())
             };
         }
+        Ok(AddedWorktree::New(Box::new(NewWorktree {
+            draft: draft.to_string(),
+            project: project.to_path_buf(),
+            path: worktree,
+            scripts,
+            progress,
+            signal,
+        })))
+    }
+
+    /// Runs the setup scripts of a worktree `add_worktree` made.
+    pub(crate) async fn setup_worktree(&self, new: Box<NewWorktree>) -> Result<PreparedWorktree, String> {
+        let NewWorktree { draft, project, path: worktree, scripts, mut progress, signal } = *new;
         if scripts.is_empty() {
             progress.push(true, None);
-            self.inner.setups.finish(draft);
+            self.inner.setups.finish(&draft);
             return Ok(PreparedWorktree::Worktree(worktree));
         }
         let (ready, outcome) = oneshot::channel();
@@ -341,8 +386,8 @@ impl Workspace {
             scripts,
             progress,
             signal,
-            draft: draft.to_string(),
-            project: project.to_path_buf(),
+            draft,
+            project,
             worktree: worktree.clone(),
         };
         self.inner.runtime.spawn(run.run(ready));
@@ -352,6 +397,16 @@ impl Workspace {
             Ok(Outcome::Cancelled) => Err("Worktree setup was cancelled.".to_string()),
         }
     }
+
+    /// Undoes a worktree `add_worktree` made for a start refused before its scripts: no script runs, the
+    /// worktree goes, and `branch` is deleted when this start created it.
+    pub(crate) async fn refuse_worktree(&self, new: Box<NewWorktree>, branch: Option<&str>, error: &str) {
+        let NewWorktree { draft, project, path, mut progress, .. } = *new;
+        progress.skip_from(1);
+        progress.push(true, Some(error.to_string()));
+        self.inner.setups.finish(&draft);
+        self.discard_worktree(&draft, &project, Some(&path), branch).await;
+    }
 }
 
 impl Workspace {
@@ -359,18 +414,40 @@ impl Workspace {
         git::branch_exists(project, branch).await
     }
 
-    /// Undoes the worktree `prepare_worktree` made for a thread that will not start: stops its setup scripts,
-    /// removes the worktree, and deletes `branch` when this start created it.
-    pub(crate) async fn discard_worktree(&self, draft: &str, project: &Path, worktree: &Path, branch: Option<&str>) {
-        self.inner.setups.signal(draft, Signal::Cancel);
-        if let Err(error) = git::remove_worktree(project, worktree).await {
-            self.inner.mailbox.notice(NoticeLevel::Warning, format!("Worktree kept: {error}"));
-            return;
+    /// Undoes the worktree made for a thread that will not start: stops its setup scripts and waits for them
+    /// to end, removes the worktree, and deletes `branch` when this start created it.
+    pub(crate) async fn discard_worktree(
+        &self,
+        draft: &str,
+        project: &Path,
+        worktree: Option<&Path>,
+        branch: Option<&str>,
+    ) {
+        self.stop_setup(draft).await;
+        if let Some(worktree) = worktree {
+            if let Err(error) = git::remove_worktree(project, worktree).await {
+                self.inner.mailbox.notice(NoticeLevel::Warning, format!("Worktree kept: {error}"));
+                return;
+            }
         }
         if let Some(branch) = branch {
             if let Err(error) = git::delete_branch(project, branch).await {
                 self.inner.mailbox.notice(NoticeLevel::Warning, format!("Branch {branch} kept: {error}"));
             }
+        }
+    }
+}
+
+impl Workspace {
+    async fn stop_setup(&self, draft: &str) {
+        let setups = &self.inner.setups;
+        let Some(control) = setups.take(draft) else { return };
+        let _ = control.send(Signal::Cancel);
+        if tokio::time::timeout(STOP_WAIT, control.closed()).await.is_err() {
+            if let Some(pid) = setups.tracked(draft) {
+                process::signal_pid_group("-KILL", pid);
+            }
+            self.inner.mailbox.notice(NoticeLevel::Warning, format!("The setup of {draft} did not stop in time."));
         }
     }
 }
@@ -398,10 +475,14 @@ impl SetupRun {
         let mut error = None;
         for (offset, script) in self.scripts.iter().enumerate() {
             let index = offset + 1;
-            self.progress.set(index, SetupStageState::Running);
-            let end =
+            let current = *self.signal.borrow();
+            let end = if current == Signal::Running && self.signal.has_changed().is_ok() {
+                self.progress.set(index, SetupStageState::Running);
                 run_script(setups, &mut self.progress, index, script, &self.project, &self.worktree, &mut self.signal)
-                    .await;
+                    .await
+            } else {
+                Ok(ScriptEnd::Interrupted(if current == Signal::Local { Signal::Local } else { Signal::Cancel }))
+            };
             match end {
                 Ok(ScriptEnd::Exited(Some(0))) => self.progress.set(index, SetupStageState::Done),
                 Ok(ScriptEnd::Exited(code)) => {

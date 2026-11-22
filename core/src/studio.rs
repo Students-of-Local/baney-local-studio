@@ -37,7 +37,7 @@ use crate::transcript::Transcript;
 use crate::workspace::model::{
     FollowUpBehavior, NewThreadWorkspace, ResponseStreaming, Settings, T3Choices, TerminalFrame,
 };
-use crate::workspace::{PreparedWorktree, Workspace};
+use crate::workspace::{AddedWorktree, PreparedWorktree, Workspace};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1189,10 +1189,11 @@ struct Live {
     shown: HashMap<u64, Vec<Block>>,
 }
 
-/// A worktree `create_thread` made, with the branch it created (`None` when the branch already existed).
+/// A worktree `create_thread` made (`None` when setup was skipped and it was removed), with the branch it
+/// created (`None` when the branch already existed).
 struct MadeWorktree {
     project: PathBuf,
-    path: PathBuf,
+    path: Option<PathBuf>,
     branch: Option<String>,
 }
 
@@ -2442,19 +2443,12 @@ impl Actor {
         let cwd = match (&choice, &project_path) {
             (WorktreeChoice::Existing { path }, _) => path.clone(),
             (WorktreeChoice::NewWorktree { branch, base }, Some(project)) => {
-                let existed = self.workspace.branch_exists(Path::new(project), branch).await;
-                match self.workspace.prepare_worktree(draft, Path::new(project), branch, base.as_deref()).await? {
-                    PreparedWorktree::Worktree(path) => {
-                        let cwd = path.to_string_lossy().into_owned();
-                        made = Some(MadeWorktree {
-                            project: PathBuf::from(project),
-                            path,
-                            branch: (!existed).then(|| branch.clone()),
-                        });
-                        cwd
-                    }
-                    PreparedWorktree::Local => project.clone(),
-                }
+                let pinned = settings.provider.as_ref().or(effective.default_provider.as_ref()).is_some()
+                    && settings.model.as_ref().or(effective.default_model.as_ref()).is_some();
+                let probe = harness == Harness::Eukhe && !pinned;
+                let (cwd, worktree) = self.new_worktree(draft, project, branch, base.as_deref(), probe).await?;
+                made = Some(worktree);
+                cwd
             }
             (WorktreeChoice::NewWorktree { .. }, None) => return Err("A new worktree needs a project.".to_string()),
             (WorktreeChoice::Local | WorktreeChoice::Default, Some(project)) => project.clone(),
@@ -2503,6 +2497,48 @@ impl Actor {
         Ok(id)
     }
 
+    /// Makes a new worktree of `project` on `branch` and runs its setup scripts. While the Claude sign-in holds and
+    /// `probe` asks for it, the model a session would get in the worktree is read first, so an `anthropic` start
+    /// is refused, its worktree and branch removed, before any setup script runs.
+    async fn new_worktree(
+        &mut self,
+        draft: &str,
+        project: &str,
+        branch: &str,
+        base: Option<&str>,
+        probe: bool,
+    ) -> Result<(String, MadeWorktree), String> {
+        let root = Path::new(project);
+        let made_branch = (!self.workspace.branch_exists(root, branch).await).then(|| branch.to_string());
+        let mut made = MadeWorktree { project: PathBuf::from(project), path: None, branch: made_branch };
+        let prepared = match self.workspace.add_worktree(draft, root, branch, base).await {
+            Ok(AddedWorktree::New(new)) => {
+                if probe && self.workspace.claude_signed_in() {
+                    let cwd = new.path().to_string_lossy().into_owned();
+                    let refused = match self.default_at(&cwd).await {
+                        Ok((model, _)) => self.workspace.eukhe_refuses(model.map(|key| key.provider).as_deref()),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(refused) = refused {
+                        self.workspace.refuse_worktree(new, made.branch.as_deref(), &refused).await;
+                        return Err(refused);
+                    }
+                }
+                self.workspace.setup_worktree(new).await?
+            }
+            Ok(AddedWorktree::Local) => PreparedWorktree::Local,
+            Err(error) => return Err(error),
+        };
+        Ok(match prepared {
+            PreparedWorktree::Worktree(path) => {
+                let cwd = path.to_string_lossy().into_owned();
+                made.path = Some(path);
+                (cwd, made)
+            }
+            PreparedWorktree::Local => (project.to_string(), made),
+        })
+    }
+
     /// While the Claude sign-in holds, reads the model a new thread's session actually runs on (its real cwd's
     /// settings and any model just applied) and, when it is `anthropic`, undoes the thread before any prompt.
     async fn refuse_new(
@@ -2517,7 +2553,15 @@ impl Actor {
             return Ok(());
         }
         let active = self.live_active(id).unwrap_or_else(|| created.to_string());
-        let refused = match self.session_provider(&active).await {
+        let mut read = self.session_provider(&active).await;
+        for _ in 0..2 {
+            if read.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            read = self.session_provider(&active).await;
+        }
+        let refused = match read {
             Ok(provider) => self.workspace.eukhe_refuses(provider.as_deref()),
             Err(error) => Err(error),
         };
@@ -2531,16 +2575,21 @@ impl Actor {
     /// Undoes a thread `create_thread` made but will not start: its session, its saved file, its rows, and the
     /// worktree and branch made for it, so a refused start leaves nothing behind.
     async fn abandon_thread(&mut self, draft: &str, id: &str, active: &str, file: &str, made: Option<MadeWorktree>) {
-        let _ = self
+        let killed = self
             .call(DaemonCommand::Kill { id: None, active_session_id: active.to_string(), rest: Map::default() })
             .await;
+        if let Err(error) = killed {
+            self.mailbox.notice(NoticeLevel::Warning, format!("The refused session was not stopped: {error}"));
+        }
         let delete = DaemonCommand::DeleteSavedSession {
             id: None,
             active_session_id: None,
             session_path: file.to_string(),
             rest: Map::default(),
         };
-        let _ = self.call(delete).await;
+        if let Err(error) = self.call(delete).await {
+            self.mailbox.notice(NoticeLevel::Warning, format!("The refused session file was kept: {error}"));
+        }
         if let Some(thread) = self.threads.remove(id) {
             if let Some(live) = thread.live {
                 self.by_active.remove(&live.active);
@@ -2551,7 +2600,7 @@ impl Actor {
         self.store.threads.remove(id);
         self.save();
         if let Some(made) = made {
-            self.workspace.discard_worktree(draft, &made.project, &made.path, made.branch.as_deref()).await;
+            self.workspace.discard_worktree(draft, &made.project, made.path.as_deref(), made.branch.as_deref()).await;
         }
         self.dirty = true;
     }
@@ -3509,6 +3558,11 @@ impl Actor {
     }
 
     async fn daemon_default(&self) -> Result<(Option<ModelKey>, Option<String>), String> {
+        self.default_at(&self.home).await
+    }
+
+    /// The model and thinking level Eukhe gives a new session in `cwd`, read from a throwaway session.
+    async fn default_at(&self, cwd: &str) -> Result<(Option<ModelKey>, Option<String>), String> {
         let created = self
             .call(DaemonCommand::Create {
                 id: None,
@@ -3516,7 +3570,7 @@ impl Actor {
                 continue_recent: None,
                 no_session: Some(true),
                 name: None,
-                config: Some(self.create_config(&self.home)),
+                config: Some(self.create_config(cwd)),
                 runtime_metadata: None,
                 lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
                 env: None,
