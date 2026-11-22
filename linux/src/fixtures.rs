@@ -28,6 +28,7 @@ pub fn scenes() -> Vec<&'static str> {
     all.extend(crate::keyboard::SCENES);
     all.extend(crate::usage_scenes::scenes());
     all.extend(crate::link_scenes::scenes());
+    all.extend(crate::scenes_updates::SCENES);
     all
 }
 
@@ -106,6 +107,7 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         || crate::scenes_machines::stage(app, scene)
         || crate::consent::stage(app, scene)
         || crate::t3::stage(app, scene)
+        || crate::scenes_updates::stage(app, scene)
         || crate::scenes_plugins::stage(app, scene)
     {
         return;

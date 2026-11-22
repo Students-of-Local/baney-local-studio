@@ -292,6 +292,7 @@ impl Harness {
             | Update::Plugins { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
+            | Update::AppUpdate { .. }
             | Update::LocalDashboard { .. } => {}
         }
         Ok(())

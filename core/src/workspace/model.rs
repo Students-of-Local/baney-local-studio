@@ -343,6 +343,36 @@ pub enum KernelState {
     Unavailable { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")
+)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum AppUpdateState {
+    Unavailable { reason: String },
+    Idle,
+    Checking,
+    UpToDate { latest: String },
+    Available { version: String, notes: String },
+    Downloading { version: String, notes: String, received: u64, total: Option<u64> },
+    Ready { version: String, notes: String },
+    Applying { version: String },
+    Restarting { version: String },
+    Failed { reason: String, version: Option<String>, notes: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct ChannelInstall {
+    pub channel: String,
+    pub name: String,
+    pub installed: bool,
+    pub current: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -705,6 +735,7 @@ pub struct Settings {
     pub snapshot_animations: bool,
     pub harness_accounts: HarnessAccounts,
     pub switch_accounts_on_limit: bool,
+    pub automatic_updates: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -884,6 +915,7 @@ impl Default for Settings {
             snapshot_animations: true,
             harness_accounts: HarnessAccounts::default(),
             switch_accounts_on_limit: true,
+            automatic_updates: local_studio_version::CHANNEL != "dev",
         }
     }
 }

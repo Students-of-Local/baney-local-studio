@@ -116,6 +116,20 @@ The format is Tauri v2's updater manifest (Silas already serves it), with extra 
 - iPhone: dev builds install from Xcode; nightly goes to a TestFlight internal group; stable goes to TestFlight external testing and later the App Store, under the Apple team that signs Silas.
 - Plugins and skill packs that ship as git trees (Gantrel, UntoCaesar, Corunis, Fonsviva) need no binary feed: their channel is a git ref. stable = the newest `vX.Y.Z` tag, nightly = the `nightly` tag, dev = `main`. A Local Studio install on channel C installs plugins from channel C by default. How the plugin catalog records this belongs to the plugin system lead.
 
+## Installing and updating
+
+**First install** is one command, `scripts/install.sh --channel nightly|stable|dev` (curl-able; README Install). It reads the channel's `latest.json`, downloads this machine's platform entry, checks its sha256 and its minisign signature against the channel key built into the script, and only then installs: macOS to `/Applications/<name>.app`, clearing quarantine on that verified app only, and Linux to `~/.local/lib/<slug>` with a `~/.local/bin` link and a desktop entry. Then it opens the app.
+
+**In-app updates** live in the core (`core/src/update/`), so both apps share one implementation:
+
+- The build checks its own channel's feed 20 seconds after launch and every 6 hours, and on Check now in Settings → General → Updates. A local build, or a build that is not running from an install, shows why and never checks.
+- An offer must name this build's channel, carry a newer version on that channel, list this platform with an https URL, a sha256 and a signature, and the signature's trusted comment must name the expected asset. Any other feed is refused with the reason.
+- With Automatic updates on (the default for nightly and stable, off for dev) the build downloads at once into `<data dir>/updates/<channel>/`, checks sha256 and the minisign signature against the key compiled into it, and shows "Update ready" in the window chrome and in Settings. Nothing restarts on its own: Restart to update installs it.
+- Install checks the unpacked build before touching the current one: its channel and version must match the offer (macOS `LocalStudioChannel` and `LocalStudioVersion`, Linux `local-studio --version`), and on macOS `codesign --verify --deep --strict` must pass against the running app's own designated requirement. It then swaps the new build in and keeps the old one beside it as `.<name>.previous`, and checks that the installed build reports the new version; if that fails it restores the previous build. Then it quits and relaunches.
+- `local-studio update check|download|status|apply` runs the same steps from the core CLI, and `cargo run -p local-studio-core --example update_smoke <dir>` exercises them end to end against a local feed with a throwaway key (part of `scripts/e2e.sh`).
+
+**macOS signing**: an ad-hoc signature is a new app to macOS each time, so no unsigned macOS build ships. Stable is signed with the Apple Developer ID identity and notarized, and `build.yml` skips the macOS build when those secrets are missing. Nightly and dev are signed with the self-issued `Local Studio Code Signing` identity (`MAC_SIGNING_P12`), hardened runtime on and entitlements kept, and are not notarized. Every build of a channel therefore keeps one designated requirement, which is what the updater checks the next build against. `scripts/check-channels.sh` fails a workflow that signs with `MAC_SIGNING_P12` without keeping stable on notarization.
+
 ## Promotion rule
 
 **Dev** publishes on every merge to `main` with CI green.
@@ -159,7 +173,7 @@ Set up once by hand, before the first stable release: the `stable` branch, start
 
 | Product | Mode | Today | Changes to adopt this scheme |
 | --- | --- | --- | --- |
-| Local Studio desktop (`baney75/local-studio`) | side by side | No releases; bundle version 0.0.0 | Add `stable` branch, nightly and dev workflows, version stamping, the core update check |
+| Local Studio desktop (`baney75/local-studio`) | side by side | Nightly and dev workflows, version stamping, signed in-app updates and `scripts/install.sh`; no release published yet | Publish the first nightly; add the `stable` branch at the first stable release |
 | Local Studio iPhone (`ios/` in this repo) | side by side | In progress (PR #4) | Same version and tags as the desktop app, so the protocol always matches |
 | Silas | replace | `vX.Y.Z` tags from the Mac, rolling `nightly` (`-nightly.YYYYMMDDHHMM`) | Add `stable` branch and `dev`; add `+<sha7>` to nightly versions |
 | Polycarp | replace | Rolling `preview` pre-release | Move `preview` to `nightly` through a bridge build (Renaming a feed); add `stable` and `dev` |

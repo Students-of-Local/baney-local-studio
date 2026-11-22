@@ -135,7 +135,13 @@ notes() {
   if [ -n "$previous" ] && git merge-base --is-ancestor "$previous" "$commit" 2> /dev/null; then
     git log --no-merges -n 50 --format='- %s' "$previous..$commit"
   fi
-  [ "${MAC_SIGNED:-}" = true ] || echo "No macOS build: the Apple signing secrets are not set."
+  if [ "${MAC_SIGNED:-}" = true ]; then
+    [ "$channel" = stable ] || echo "The macOS build is signed with the self-issued Local Studio Code Signing identity and is not notarized; install it with scripts/install.sh, which checks its signature first."
+  elif [ "$channel" = stable ]; then
+    echo "No macOS build: the Apple signing and notarization secrets are not set."
+  else
+    echo "No macOS build: MAC_SIGNING_P12 is not set."
+  fi
 }
 
 feed_json() {
@@ -146,15 +152,13 @@ feed_json() {
       local-studio-linux-x86_64.tar.gz) key=linux-x86_64 ;;
       *) continue ;;
     esac
-    signature=
-    if [ -n "${UPDATER_SIGNING_KEY:-}" ]; then
-      TAURI_SIGNING_PRIVATE_KEY=$UPDATER_SIGNING_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${UPDATER_SIGNING_KEY_PASSWORD:-} \
-        npx -y "$tauri" signer sign "$file" > /dev/null
-      signature=$(cat "$file.sig")
-      rm "$file.sig"
-    fi
+    [ -n "${UPDATER_SIGNING_KEY:-}" ] || die "UPDATER_SIGNING_KEY is not set; updaters and install.sh refuse an unsigned feed, so nothing was published"
+    TAURI_SIGNING_PRIVATE_KEY=$UPDATER_SIGNING_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${UPDATER_SIGNING_KEY_PASSWORD:-} \
+      npx -y "$tauri" signer sign "$file" > /dev/null
+    signature=$(cat "$file.sig")
+    rm "$file.sig"
     platforms=$(jq --arg k "$key" --arg u "$base/$(basename "$file")" --arg s "$signature" --arg h "$(sha256sum "$file" | cut -d' ' -f1)" \
-      '. + {($k): ({url: $u, sha256: $h} + (if $s == "" then {} else {signature: $s} end))}' <<< "$platforms")
+      '. + {($k): ({url: $u, sha256: $h} + {signature: $s})}' <<< "$platforms")
   done
   jq -e 'has("linux-x86_64")' <<< "$platforms" > /dev/null || die "no Linux build in the draft"
   if [ "${MAC_SIGNED:-}" = true ]; then

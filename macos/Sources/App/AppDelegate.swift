@@ -18,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var logoLoad: LogoLoad?
 
     override init() {
+        if CommandLine.arguments.dropFirst().first == "--version" {
+            print("local-studio \(StudioPaths.version)")
+            exit(0)
+        }
         UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])
         store = StudioStore(launch: Self.bundledDaemon(), controllerMain: Self.bundledController())
         commandRefresh = CommandRefresh(store: store)
@@ -49,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         configureNotifier()
         installKeyMonitors()
+        store.updates.onRestart = {
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
         store.start { [weak self] error in
             guard let self else { return }
             if let error {
@@ -116,6 +123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             harness.start()
             logoLoad = harness
         }
+        if !arguments.contains(where: { $0.hasPrefix("+smoke") }), stressFlag == nil, !keysFlag, !logoFlag {
+            store.updates.startChecks()
+        }
     }
 
     private func presentMainWindowIfMissing() {
@@ -128,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !automated else { return .terminateNow }
+        guard !automated, !store.updates.restarting else { return .terminateNow }
         if store.pages.settings?.quitConfirmation == .hold, Self.quitShortcutPressed() {
             guard Self.quitShortcutHeld(for: 0.6) else {
                 store.post(.info, "Hold ⌘Q to quit Local Studio.")

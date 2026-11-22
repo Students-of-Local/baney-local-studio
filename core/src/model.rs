@@ -1,7 +1,7 @@
 use crate::workspace::model::{
-    Branch, Device, FileContent, FileDiff, FileEntry, GitStatus, KernelState, Keybinding, LocalDashboard, LocalEngine,
-    LocalSnapshot, ProjectScript, ProjectSettings, ProviderModel, ProviderStatus, PullRequest, PullRequestDetail,
-    SearchHit, Settings, SetupStage, T3Report, TerminalFrame, UsageReport,
+    AppUpdateState, Branch, Device, FileContent, FileDiff, FileEntry, GitStatus, KernelState, Keybinding,
+    LocalDashboard, LocalEngine, LocalSnapshot, ProjectScript, ProjectSettings, ProviderModel, ProviderStatus,
+    PullRequest, PullRequestDetail, SearchHit, Settings, SetupStage, T3Report, TerminalFrame, UsageReport,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,6 +899,9 @@ pub enum Update {
     },
     Kernel {
         state: KernelState,
+    },
+    AppUpdate {
+        state: AppUpdateState,
     },
     LocalOnly {
         thread: String,

@@ -227,6 +227,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::WorktreeSetup { .. }
         | Update::Daemon { .. }
         | Update::Kernel { .. }
+        | Update::AppUpdate { .. }
         | Update::RequestDone { .. } => {}
     }
 }

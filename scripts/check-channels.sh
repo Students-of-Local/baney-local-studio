@@ -24,6 +24,10 @@ for wf in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
   if [ -n "$(grep -E 'version\.nu .*--stamp' "$wf" | grep -v -- '--root' | grep -vE -- '--build-env.*(>>|tee -a) *"?\$GITHUB_ENV')" ]; then
     err "$name stamps a build without exporting its version: pipe version.nu --stamp --build-env into \$GITHUB_ENV"
   fi
+  if grep -q 'MAC_SIGNING_P12' "$wf" && ! { grep -qE '^ +stable\) mode=notarized ;; *$' "$wf" &&
+    grep -qF 'if [ "$MODE" = notarized ]; then' "$wf" && grep -qF 'xcrun stapler validate' "$wf"; }; then
+    err "$name signs macOS with MAC_SIGNING_P12 but does not keep stable on notarization"
+  fi
   if awk '/^ +environment: *["'"'"']?stable["'"'"']? *$/{f=1} /^ +environment: *$/{e=1;next} e&&/^ +name: *["'"'"']?stable["'"'"']? *$/{f=1} {e=0} END{exit !f}' "$wf"; then
     for t in $(triggers "$wf"); do
       case $t in workflow_call|workflow_dispatch) ;; *) err "$name uses the stable environment but also runs on $t" ;; esac

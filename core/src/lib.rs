@@ -19,6 +19,7 @@ mod studio;
 mod threads;
 mod transcript;
 pub mod tunnel;
+pub mod update;
 #[cfg(feature = "wire")]
 mod wire;
 mod workspace;

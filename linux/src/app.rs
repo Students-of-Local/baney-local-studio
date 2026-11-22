@@ -5,8 +5,8 @@ use std::rc::{Rc, Weak};
 use adw::prelude::*;
 use gtk::gio;
 use local_studio_core::{
-    ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind, NotificationMode,
-    PromptDraft, Shelf, StudioError, ThreadSettings, TranscriptOp, Update,
+    AppUpdateState, ChatWidth, Connection, Delivery, FollowUpBehavior, Item, ItemKind, LinkTarget, NotificationKind,
+    NotificationMode, PromptDraft, Shelf, StudioError, ThreadSettings, TranscriptOp, Update,
 };
 use webkit::prelude::*;
 
@@ -324,6 +324,12 @@ impl App {
                         app.tick();
                     }
                 });
+                let mut channels = Vec::new();
+                self.core.run(|studio| channels = studio.channel_installs());
+                self.state.borrow_mut().channels = channels;
+                if self.interactive.get() {
+                    self.core.run(local_studio_core::Studio::start_update_checks);
+                }
             }
             Err(error) => self.show_banner(&error.to_string()),
         }
@@ -677,6 +683,15 @@ impl App {
                 self.state.borrow_mut().kernel = Some(state);
                 dirty.settings = true;
             }
+            Update::AppUpdate { state } => {
+                if matches!(state, AppUpdateState::Restarting { .. }) {
+                    self.application.quit();
+                    return;
+                }
+                self.state.borrow_mut().update = Some(state);
+                dirty.settings = true;
+                dirty.header = true;
+            }
             Update::ProviderModels { request, base_url, models } => {
                 if self.take_request(&request) == Some(Target::Provider) {
                     crate::providers::discovered(&request, &base_url, &models);
@@ -1021,6 +1036,11 @@ impl App {
     }
 
     pub fn open_settings(self: &Rc<Self>, page: Option<&str>) {
+        if self.core.is_live() {
+            let mut channels = Vec::new();
+            self.core.run(|studio| channels = studio.channel_installs());
+            self.state.borrow_mut().channels = channels;
+        }
         let dialog = SettingsDialog::new(self);
         if let Some(page) = page {
             dialog.show_page(page);

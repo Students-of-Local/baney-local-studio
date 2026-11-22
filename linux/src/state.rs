@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use local_studio_core::{
-    AccessMode, Approval, Connection, DaemonMismatch, GitStatus, KernelState, Keybinding, LocalDashboard, LocalEngine,
-    LocalSnapshot, Machine, ModelKey, ModelOption, PairedDevice, Project, ProjectScript, ProjectSettings,
-    ProviderStatus, QueuedMessage, Settings, SetupStage, Subagent, ThreadInfo, ThreadRow, UsagePeriod, UsageReport,
+    AccessMode, AppUpdateState, Approval, ChannelInstall, Connection, DaemonMismatch, GitStatus, KernelState,
+    Keybinding, LocalDashboard, LocalEngine, LocalSnapshot, Machine, ModelKey, ModelOption, PairedDevice, Project,
+    ProjectScript, ProjectSettings, ProviderStatus, QueuedMessage, Settings, SetupStage, Subagent, ThreadInfo,
+    ThreadRow, UsagePeriod, UsageReport,
 };
 
 #[derive(Clone, Default)]
@@ -108,6 +109,9 @@ pub struct State {
     pub pairing: Option<String>,
     pub offer: Option<crate::machines::Offer>,
     pub offer_error: Option<String>,
+    pub update: Option<AppUpdateState>,
+    pub channels: Vec<ChannelInstall>,
+    pub build: Option<(String, String)>,
 }
 
 impl State {

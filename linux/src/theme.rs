@@ -200,6 +200,11 @@ popover.ls-picker > contents { padding: 0; }
 .ls-thread.ls-focus-ring { outline-offset: 0; }
 .ls-vim-mode { font-family: monospace; font-size: 10.5px; font-weight: 700; padding: 0 6px; color: alpha(currentColor, 0.5); }
 .ls-vim-mode.normal { color: var(--accent-color); }
+.ls-update-ready { min-height: 26px; padding: 0 10px; border-radius: 999px; font-weight: 500; background: alpha(var(--accent-bg-color), 0.14); color: var(--accent-color); }
+.ls-update-ready:hover { background: alpha(var(--accent-bg-color), 0.22); }
+.ls-update-ready:disabled { filter: none; opacity: 0.85; }
+.ls-update-notes-row { padding: 12px; }
+.ls-update-notes { border: 1px solid var(--border-color); border-radius: 8px; }
 ";
 
 const DARK: &str = r"

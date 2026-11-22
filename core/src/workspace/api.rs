@@ -1,6 +1,6 @@
 use super::model::{
-    CustomProvider, DiffScope, LocalAction, MergeMethod, ProjectScript, ProjectSettings, ProviderApi, Settings,
-    TerminalFrame, TerminalKey, TerminalMouse, TerminalScroll, TerminalSelect, TerminalSize, UsagePeriod,
+    ChannelInstall, CustomProvider, DiffScope, LocalAction, MergeMethod, ProjectScript, ProjectSettings, ProviderApi,
+    Settings, TerminalFrame, TerminalKey, TerminalMouse, TerminalScroll, TerminalSelect, TerminalSize, UsagePeriod,
 };
 use super::terminal::{self, Message};
 use crate::studio::Studio;
@@ -340,5 +340,31 @@ impl Studio {
 
     pub fn install_kernel(&self) {
         self.workspace.install_kernel();
+    }
+
+    pub fn start_update_checks(&self) {
+        self.workspace.start_updates();
+    }
+
+    pub fn check_for_update(&self) {
+        self.workspace.check_for_update();
+    }
+
+    pub fn download_update(&self) {
+        self.workspace.download_update();
+    }
+
+    pub fn apply_update(&self) {
+        self.workspace.apply_update();
+    }
+
+    #[must_use]
+    pub fn channel_installs(&self) -> Vec<ChannelInstall> {
+        super::updates::channel_installs()
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn open_channel(&self, channel: String) {
+        self.workspace.open_channel(&channel);
     }
 }

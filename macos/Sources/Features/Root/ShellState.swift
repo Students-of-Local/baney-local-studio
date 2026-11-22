@@ -41,6 +41,7 @@ final class ShellState {
     var sidebarVisible = true
     var sidebarWidth: CGFloat = 272
     var chromeTrailing = Theme.Metrics.trafficLightsWidth + Theme.Metrics.chromeButton
+    var chromeEnd = Theme.Metrics.trafficLightsWidth + 3 * (Theme.Metrics.chromeGlyph.width + 2 * Theme.Metrics.chromeGlyphInset)
     var palette: PalettePage?
     var commandHeld = false
     var confirmation: ShellConfirmation?

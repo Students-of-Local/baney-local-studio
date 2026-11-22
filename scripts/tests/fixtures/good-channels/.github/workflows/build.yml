@@ -6,3 +6,16 @@ jobs:
     steps:
       - run: nu scripts/version.nu "$CHANNEL" --stamp --build-env --at "$AT" --commit "$COMMIT" | tee -a "$GITHUB_ENV"
       - run: nu scripts/version.nu "$CHANNEL" --stamp --json --root "$RUNNER_TEMP/scratch"
+  macos:
+    runs-on: macos-26
+    steps:
+      - env:
+          MAC_SIGNING_P12: ${{ secrets.MAC_SIGNING_P12 }}
+        run: |
+          case $CHANNEL in
+            stable) mode=notarized ;;
+            *) mode=self ;;
+          esac
+          if [ "$MODE" = notarized ]; then
+            xcrun stapler validate "$app"
+          fi

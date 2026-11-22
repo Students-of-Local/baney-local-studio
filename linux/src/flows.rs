@@ -13,10 +13,13 @@ type AppAction = fn(&Rc<App>);
 type StringAction = fn(&Rc<App>, String);
 
 pub fn install(app: &Rc<App>) {
-    let plain: [(&str, AppAction); 5] = [
+    let plain: [(&str, AppAction); 8] = [
         ("clone-project", clone_project),
         ("provider-settings", |app| app.open_settings(Some("providers"))),
         ("install-kernel", |app| app.core.run(local_studio_core::Studio::install_kernel)),
+        ("check-update", |app| app.core.run(local_studio_core::Studio::check_for_update)),
+        ("download-update", |app| app.core.run(local_studio_core::Studio::download_update)),
+        ("apply-update", |app| app.core.run(local_studio_core::Studio::apply_update)),
         ("restart-daemon", restart_daemon),
         ("cleanup-worktrees", |app| {
             let request = app.core.request();

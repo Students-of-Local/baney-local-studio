@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use local_studio_core::plugins::{self, Capability, Catalog, Consent, Grants, Plugin, Source};
 use local_studio_core::tunnel::{self, Cloudflared, Failure, Ports, Status, Tunnel};
+use local_studio_core::update;
 use serde_json::Value;
 
 const USAGE: &str = "usage: local-studio --version
@@ -25,7 +26,9 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel down | release [--json]
        local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
        local-studio tunnel cloudflared [--yes] [--json]
-       local-studio tunnel byo";
+       local-studio tunnel byo
+       local-studio update check | download | status
+       local-studio update apply [--target <path>] [--no-relaunch]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -97,6 +100,10 @@ fn main() -> ExitCode {
         ["tunnel", "cloudflared"] => cloudflared(false, json),
         ["tunnel", "cloudflared", "--yes"] => cloudflared(true, json),
         ["tunnel", "byo"] => byo(),
+        ["update", "check"] => update_check(),
+        ["update", "download"] => update_download(),
+        ["update", "status"] => update_status(),
+        ["update", "apply", flags @ ..] => update_apply(flags),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -573,4 +580,106 @@ fn byo() -> Result<(), String> {
         Ok(status) => Err(format!("tychicus remote setup exited with {status}")),
         Err(_) => Err("Install the Tychicus plugin, then run: tychicus remote setup".to_string()),
     }
+}
+
+fn update_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())
+}
+
+fn update_data_dir() -> Result<PathBuf, String> {
+    local_studio_core::data_dir(None)
+}
+
+fn update_check() -> Result<(), String> {
+    let build = update::Build::current();
+    println!("{} {} ({}), feed {}", update::channel_name(&build.channel), build.version, build.channel, build.feed);
+    match update_runtime()?.block_on(update::check(&build)).map_err(|refusal| refusal.to_string())? {
+        update::Checked::UpToDate { feed } => println!("up to date (the feed holds {feed})"),
+        update::Checked::Available(offer) => {
+            println!("available: {} ({})", offer.version, offer.asset);
+            for line in offer.notes.lines() {
+                println!("  {line}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn update_download() -> Result<(), String> {
+    let build = update::Build::current();
+    let runtime = update_runtime()?;
+    let offer = match runtime.block_on(update::check(&build)).map_err(|refusal| refusal.to_string())? {
+        update::Checked::UpToDate { feed } => {
+            println!("up to date (the feed holds {feed})");
+            return Ok(());
+        }
+        update::Checked::Available(offer) => offer,
+    };
+    let data_dir = update_data_dir()?;
+    let mut shown = 0;
+    let staged = runtime
+        .block_on(update::download(&build, &offer, &data_dir, |received, total| {
+            let mib = received >> 20;
+            if mib >= shown + 16 || total == Some(received) {
+                shown = mib;
+                match total {
+                    Some(total) => eprintln!("downloaded {mib} of {} MiB", total >> 20),
+                    None => eprintln!("downloaded {mib} MiB"),
+                }
+            }
+        }))
+        .map_err(|refusal| refusal.to_string())?;
+    println!("ready: {} at {}", staged.version, staged.artifact.display());
+    Ok(())
+}
+
+fn update_status() -> Result<(), String> {
+    let build = update::Build::current();
+    println!("{} {} ({})", update::channel_name(&build.channel), build.version, build.channel);
+    if let Some(refusal) = build.refusal() {
+        println!("{refusal}");
+        return Ok(());
+    }
+    match update::staged(&build, &update_data_dir()?) {
+        Some(staged) => println!("ready: {} at {}", staged.version, staged.artifact.display()),
+        None => println!("nothing downloaded"),
+    }
+    Ok(())
+}
+
+fn update_apply(flags: &[&str]) -> Result<(), String> {
+    let mut target = None;
+    let mut relaunch = true;
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        match *flag {
+            "--target" => target = Some(PathBuf::from(rest.next().ok_or_else(|| USAGE.to_string())?)),
+            "--no-relaunch" => relaunch = false,
+            _ => return Err(USAGE.to_string()),
+        }
+    }
+    let build = update::Build::current();
+    if let Some(refusal) = build.refusal() {
+        return Err(refusal.to_string());
+    }
+    let staged = update::staged(&build, &update_data_dir()?)
+        .ok_or_else(|| "nothing is downloaded; run local-studio update download first".to_string())?;
+    let target = match target {
+        Some(target) => target,
+        None => update::current_install().or_else(|_| {
+            update::install_path(&build.channel).ok_or_else(|| "no install path on this platform".to_string())
+        })?,
+    };
+    let applied = update::apply(&build, &staged, &target).map_err(|refusal| refusal.to_string())?;
+    let _ = std::fs::remove_dir_all(&staged.dir);
+    println!(
+        "installed {} at {} (previous build kept at {})",
+        applied.version,
+        applied.target.display(),
+        applied.previous.display()
+    );
+    if relaunch {
+        update::relaunch(&applied.target)?;
+    }
+    Ok(())
 }
