@@ -153,10 +153,7 @@ impl Source {
             || Path::new(url).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("git"));
         match parsed {
             Err(_) if git_like && !url.rsplit_once('@').is_some_and(|(_, rev)| full_sha(rev)) => {
-                let (name, rev) = match resolve_channel(url, channel)? {
-                    Some(found) => found,
-                    None => ("HEAD".to_string(), head(url)?),
-                };
+                let (name, rev) = resolve_channel(url, channel)?;
                 Ok((Source::Git { url: url.to_string(), rev }, Some(name)))
             }
             other => other.map(|source| (source, None)),
@@ -205,7 +202,7 @@ fn release(name: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(version)
 }
 
-pub fn resolve_channel(url: &str, channel: &str) -> Result<Option<(String, String)>, String> {
+pub fn resolve_channel(url: &str, channel: &str) -> Result<(String, String), String> {
     let refs = remote(url, &["--heads", "--tags"])?;
     let peeled = |name: &str| {
         let wanted = format!("{name}^{{}}");
@@ -223,10 +220,14 @@ pub fn resolve_channel(url: &str, channel: &str) -> Result<Option<(String, Strin
         "nightly" => Some("refs/tags/nightly".to_string()),
         _ => Some("refs/heads/main".to_string()),
     };
-    Ok(name.and_then(|name| {
+    let found = name.and_then(|name| {
         let sha = peeled(&name)?;
         Some((name.trim_start_matches("refs/tags/").trim_start_matches("refs/heads/").to_string(), sha))
-    }))
+    });
+    match found {
+        Some(found) => Ok(found),
+        None => Ok(("HEAD".to_string(), head(url)?)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

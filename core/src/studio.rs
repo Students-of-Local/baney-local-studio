@@ -2929,7 +2929,8 @@ impl Actor {
                 .iter()
                 .copied()
                 .filter(|capability| {
-                    !held.contains(capability) && (asked.contains(capability) || !capability.sensitive())
+                    !held.contains(capability)
+                        && (asked.is_empty() || asked.contains(capability) || !capability.sensitive())
                 })
                 .chain(asked.iter().copied().filter(|capability| !plugin.asks(*capability)))
                 .collect();

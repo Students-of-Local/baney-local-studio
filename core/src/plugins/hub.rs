@@ -227,10 +227,15 @@ pub fn check(root: &Path, plugins: &[Plugin], channel: &str) -> (BTreeMap<String
     let mut errors: Vec<String> = Vec::new();
     for plugin in plugins {
         let Some(origin) = origins.get(&plugin.id) else { continue };
+        if origin.pinned {
+            if let Some(available) = catalog_update(plugin, origin.rev.as_deref(), &mut errors) {
+                found.insert(plugin.id.clone(), available);
+            }
+            continue;
+        }
         let Some(url) = origin.git.as_deref() else { continue };
         let resolved = match resolve_channel(url, channel) {
-            Ok(Some(resolved)) => resolved,
-            Ok(None) => continue,
+            Ok(resolved) => resolved,
             Err(error) => {
                 errors.push(format!("{}: {error}", plugin.name));
                 continue;
@@ -267,12 +272,47 @@ pub fn check(root: &Path, plugins: &[Plugin], channel: &str) -> (BTreeMap<String
     (found, errors)
 }
 
+fn catalog_update(plugin: &Plugin, installed: Option<&str>, errors: &mut Vec<String>) -> Option<Available> {
+    let catalog = match Catalog::bundled() {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            errors.push(error);
+            return None;
+        }
+    };
+    let entry = catalog.entry(&plugin.id)?;
+    if installed == Some(entry.rev.as_str()) {
+        return None;
+    }
+    let peeked = match peek(&entry.git, &entry.rev, entry.subdir.as_deref(), None) {
+        Ok(peeked) => peeked,
+        Err(error) => {
+            errors.push(format!("{} in the catalog: {error}", plugin.name));
+            return None;
+        }
+    };
+    let asks = peeked
+        .capabilities
+        .iter()
+        .filter(|name| Capability::parse(name).is_none_or(|capability| !plugin.asks(capability)))
+        .cloned()
+        .collect();
+    Some(Available { rev: entry.rev.clone(), version: peeked.version, asks, reference: "catalog".to_string() })
+}
+
 pub fn follow(root: &Path, id: &str, channel: &str) -> Result<Source, String> {
     let origins = Origins::load(root)?;
     let origin = origins.get(id).ok_or_else(|| format!("{id} was not installed from git, so it has no updates"))?;
+    if origin.pinned {
+        let catalog = Catalog::bundled()?;
+        let entry = catalog.entry(id).ok_or_else(|| format!("{id} is no longer in the catalog"))?;
+        if origin.rev.as_deref() == Some(entry.rev.as_str()) {
+            return Err(format!("{id} is already at the catalog's pin ({})", short(&entry.rev)));
+        }
+        return Ok(Source::Catalog(id.to_string()));
+    }
     let url = origin.git.clone().ok_or_else(|| format!("{id} was installed from a folder, so it has no updates"))?;
-    let (reference, rev) =
-        resolve_channel(&url, channel)?.ok_or_else(|| format!("{url} has no {channel} release for {id}"))?;
+    let (reference, rev) = resolve_channel(&url, channel)?;
     if origin.rev.as_deref() == Some(rev.as_str()) {
         return Err(format!("{id} is already at {reference} ({})", short(&rev)));
     }

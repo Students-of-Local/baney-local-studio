@@ -1040,6 +1040,7 @@ mod hub {
         "usage: plugin_smoke --hub <scratch dir> (needs git and network access to github.com; no daemon or model)";
     const ID: &str = "beacon";
     const CATALOG: &str = "smoothstone";
+    const PLAIN: &str = "plainfolder";
     const STEP: Duration = Duration::from_secs(180);
 
     #[derive(Default)]
@@ -1201,6 +1202,59 @@ mod hub {
         Ok(())
     }
 
+    fn catalog_pin(hub: &mut Hub, plugins: &Path) -> anyhow::Result<()> {
+        let catalog = plugin_store::Catalog::bundled().map_err(anyhow::Error::msg)?;
+        let pin = catalog.entry(CATALOG).context("catalog entry")?.rev.clone();
+        let path = plugins.join(plugin_store::ORIGINS);
+        let recorded = std::fs::read_to_string(&path)?;
+        ensure!(recorded.contains(&pin), "origins.json does not hold the catalog pin {pin}");
+        std::fs::write(&path, recorded.replace(&pin, &"0".repeat(40)))?;
+        let sheets = hub.seen.sheets;
+        hub.studio.check_plugin_updates("hub-check-catalog".into());
+        hub.pump("a catalog plugin behind the catalog's pin is offered the pin", |seen| {
+            seen.outcome("hub-check-catalog").is_some() && seen.row(CATALOG).is_some_and(|row| row.update.is_some())
+        })?;
+        let update = hub.seen.row(CATALOG).and_then(|row| row.update.clone()).context("catalog update")?;
+        ensure!(pin.starts_with(&update.revision) && update.asks.is_empty(), "catalog update: {update:?}");
+        hub.studio.update_plugin("hub-update-catalog".into(), CATALOG.into());
+        hub.pump("the catalog update reinstalls through the pinned catalog entry", |seen| {
+            seen.outcome("hub-update-catalog").is_some()
+                && seen.row(CATALOG).is_some_and(|row| row.update.is_none() && row.pinned)
+        })?;
+        ensure!(
+            matches!(hub.seen.outcome("hub-update-catalog"), Some(Ok(_))),
+            "catalog update: {:?}",
+            hub.seen.outcome("hub-update-catalog")
+        );
+        ensure!(hub.seen.sheets == sheets, "a catalog update with nothing new opened a sheet");
+        ensure!(std::fs::read_to_string(&path)?.contains(&pin), "origins.json did not record the catalog pin again");
+        Ok(())
+    }
+
+    fn untold(hub: &mut Hub, dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dir.join("bin"))?;
+        std::fs::write(dir.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
+        Command::new("chmod").arg("755").arg(dir.join("bin").join("server.sh")).status()?;
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "id = \"{PLAIN}\"\nversion = \"1.0.0\"\ndescription = \"Fixture plugin that is not told\"\ncapabilities = [\"mcp-server\", \"screen-capture\"]\n\n[mcp]\ncommand = \"bin/server.sh\"\nargs = [\"serve\"]\n"
+            ),
+        )?;
+        hub.studio.install_plugin("hub-plain".into(), dir.to_string_lossy().into_owned());
+        hub.sheet("a folder install asks for consent", "hub-plain")?;
+        hub.answer("install it with the sensitive switch off", "hub-plain", &[])?;
+        hub.pump("a plugin that is not told waits for its sensitive permission", |seen| {
+            seen.row(PLAIN).is_some_and(|row| row.state == PluginState::Waiting && !row.told)
+        })?;
+        hub.studio.grant_plugin("hub-plain-allow".into(), PLAIN.into(), Vec::new());
+        let sheet = hub.sheet("Allow opens a sheet with what it still needs", "hub-plain-allow")?;
+        let ids: Vec<&str> = sheet.rows.iter().map(|row| row.id.as_str()).collect();
+        ensure!(ids == ["screen-capture"] && sheet.preset.is_empty(), "allow sheet: {sheet:?}");
+        hub.answer("allow screen capture", "hub-plain-allow", &["screen-capture"])?;
+        hub.pump("then it runs", |seen| seen.row(PLAIN).is_some_and(|row| row.state == PluginState::Running))
+    }
+
     fn updates(hub: &mut Hub, repo: &Path) -> anyhow::Result<()> {
         release(repo, "1.1.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
         hub.studio.check_plugin_updates("hub-check".into());
@@ -1306,8 +1360,11 @@ mod hub {
         ensure!(args(agent)?.is_some_and(|args| args[1] == "--granted="), "args {:?}", args(agent)?);
 
         updates(hub, repo)?;
+        catalog_pin(hub, plugins)?;
+        let plain = repo.parent().context("scratch root")?.join(PLAIN);
+        untold(hub, &plain)?;
 
-        for (request, id) in [("hub-remove", ID), ("hub-remove-catalog", CATALOG)] {
+        for (request, id) in [("hub-remove", ID), ("hub-remove-catalog", CATALOG), ("hub-remove-plain", PLAIN)] {
             hub.studio.remove_plugin(request.into(), id.into());
             hub.pump(&format!("remove {id}"), |seen| seen.outcome(request).is_some() && seen.row(id).is_none())?;
             ensure!(!plugins.join(id).exists(), "{id} folder is still there");
