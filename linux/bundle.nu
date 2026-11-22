@@ -24,6 +24,9 @@ def main [--profile (-p): string = "debug"] {
     for sidecar in $sidecars {
         eukhe copy-sidecar $sidecar $bundle
     }
+    let icons = ($bundle | path join "share" "icons" "hicolor" "scalable" "apps")
+    mkdir $icons
+    cp ($linux | path join "assets" "mark.svg") ($icons | path join "dev.localstudio.LocalStudio.svg")
     let controller = ($repo | path join "controller")
     if ($controller | path join "src" "main.ts" | path exists) {
         let target = ($bundle | path join "share" "local-studio" "controller")

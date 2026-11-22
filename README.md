@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/brand/mark.svg" width="112" alt=""></p>
+
 # Local Studio
 
 **The native studio for coding agents and local AI.** Run every agent thread you have, across every project, on your own GPUs or any cloud model, in one fast Mac and Linux app that never stops working when you close the window.

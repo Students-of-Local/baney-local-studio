@@ -53,6 +53,9 @@ private struct DraftHero: View {
         VStack(spacing: 0) {
             Spacer(minLength: 24)
             VStack(spacing: 14) {
+                EmberMark()
+                    .frame(width: 52, height: 52)
+                    .padding(.bottom, 4)
                 Text(project.map { "What should we build in \($0.name)?" } ?? "What should we build?")
                     .font(.system(size: 26, weight: .semibold))
                     .multilineTextAlignment(.center)
@@ -199,7 +202,7 @@ private struct LoadingPlaceholder: View {
     var body: some View {
         if live, conversation.showsLoading {
             VStack(spacing: 10) {
-                LogoMark(style: .coin)
+                EmberMark(working: true)
                     .frame(width: 28, height: 28)
                     .accessibilityHidden(true)
                 Text("Loading thread…")

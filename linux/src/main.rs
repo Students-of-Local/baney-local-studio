@@ -3,6 +3,7 @@ mod app;
 mod banners;
 mod bindings;
 mod branches;
+mod brand;
 mod colors;
 mod commands;
 mod commit;
