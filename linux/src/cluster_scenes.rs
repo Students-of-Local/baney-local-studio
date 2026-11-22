@@ -182,12 +182,16 @@ fn parish(reclaimed: bool) -> LocalController {
         }],
         hotplug: vec![hotplug],
     };
+    controller("parish", "http://127.0.0.1:18091", true, hardware, parish_cluster(reclaimed))
+}
+
+fn parish_cluster(reclaimed: bool) -> LocalCluster {
     let models = vec![
         model(SCOUT, 65, false, true),
         model("qwen3-32b-q8_0", 34, true, true),
         model("DeepSeek-V4.1-Q2_K", 210, false, false),
     ];
-    let cluster = if reclaimed {
+    if reclaimed {
         LocalCluster {
             discover: true,
             lend: LocalLendMode::Idle,
@@ -233,8 +237,7 @@ fn parish(reclaimed: bool) -> LocalController {
             models,
             machines: fleet(),
         }
-    };
-    controller("parish", "http://127.0.0.1:18091", true, hardware, cluster)
+    }
 }
 
 fn apple() -> LocalController {
