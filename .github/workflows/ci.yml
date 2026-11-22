@@ -34,6 +34,10 @@ jobs:
         run: |
           cargo build -p local-studio-core --example plugin_smoke
           scripts/tests/plugin-hub-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/plugin_smoke" "$RUNNER_TEMP/ph"
+      - name: Updates download, apply and lock end to end
+        run: |
+          cargo build -p local-studio-core --example update_smoke
+          scripts/tests/update-lock-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/update_smoke" "$RUNNER_TEMP/up"
       - name: e2e examples replace a stale credential link, never write through it
         run: cargo build -p local-studio-core --example smoke && scripts/tests/e2e-credential-link-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/smoke"
 
