@@ -94,6 +94,7 @@ pub struct StudioConfig {
 pub enum StudioError {
     Runtime { message: String },
     Config { message: String },
+    Owned { pid: Option<u32>, path: String, waited: bool },
 }
 
 impl fmt::Display for StudioError {
@@ -101,6 +102,18 @@ impl fmt::Display for StudioError {
         match self {
             Self::Runtime { message } => write!(formatter, "could not start the Local Studio core: {message}"),
             Self::Config { message } => write!(formatter, "invalid Local Studio configuration: {message}"),
+            Self::Owned { pid, path, waited } => {
+                let by = pid.map(|pid| format!(" (process {pid})")).unwrap_or_default();
+                let waited = if *waited {
+                    format!(" and did not hand it over within {} s", TAKEOVER_WAIT.as_secs())
+                } else {
+                    String::new()
+                };
+                write!(
+                    formatter,
+                    "another Local Studio{by} already has {path} open{waited}: quit it, or give this one its own data dir"
+                )
+            }
         }
     }
 }
@@ -1060,17 +1073,10 @@ fn lock_data_dir(data_dir: &Path, take_over_serve: bool) -> Result<std::fs::File
                         }
                     }
                 }
-                let by = if holder.is_empty() { String::new() } else { format!(" (process {holder})") };
-                let waited = if asked.is_some() {
-                    format!(" and did not hand it over within {} s", TAKEOVER_WAIT.as_secs())
-                } else {
-                    String::new()
-                };
-                return Err(StudioError::Config {
-                    message: format!(
-                        "another Local Studio{by} already owns {}{waited}: quit it, or give this one its own data dir",
-                        data_dir.display()
-                    ),
+                return Err(StudioError::Owned {
+                    pid: holder.parse().ok(),
+                    path: data_dir.display().to_string(),
+                    waited: asked.is_some(),
                 });
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(failed(error)),
