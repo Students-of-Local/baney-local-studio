@@ -1384,6 +1384,7 @@ dependencies = [
  "notify",
  "portable-pty",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -1394,6 +1395,7 @@ dependencies = [
  "toml 1.2.1+spec-1.1.0",
  "two-face",
  "uniffi",
+ "webpki-roots 1.0.11",
  "x25519-dalek",
 ]
 
