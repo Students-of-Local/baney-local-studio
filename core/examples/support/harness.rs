@@ -638,14 +638,18 @@ fn long_turn_aborts(
     watch: &mut Watch,
     (target, thread): (&Target, &str),
 ) -> anyhow::Result<()> {
-    let finished = watch.begin();
+    watch.begin();
     studio.send("send-long".to_string(), thread.to_string(), prompt(LONG), Delivery::Queue);
-    pump(studio, signal, watch, "long turn is working", |watch| watch.busy)?;
+    pump(studio, signal, watch, "long turn is working", |watch| {
+        watch.busy && watch.users.values().any(|text| text.contains(LONG))
+    })?;
+    let finished = watch.finished;
     pump(studio, signal, watch, "long turn is streaming text", |watch| watch.streamed || watch.finished > finished)?;
     ensure!(
         watch.finished == finished,
-        "the long turn ended before the abort: {:?} (approvals denied: {:?})",
+        "the long turn ended before the abort: {:?}, last reply {:?} (approvals denied: {:?})",
         watch.failure,
+        watch.latest.as_deref().map(|text| text.chars().take(120).collect::<String>()),
         watch.denied.iter().map(|(approval, _)| approval.command.clone()).collect::<Vec<_>>()
     );
     let old = target.thinking.unwrap_or("none");
