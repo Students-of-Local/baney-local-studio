@@ -73,6 +73,56 @@ Local Studio writes each ready plugin's server into `<agent dir>/settings.json` 
 
 Every other entry stays, whatever its name, including `plugin-manager`, an untagged `plugin-<name>` that runs code from outside the plugins folder even with its `cwd` inside it, and a tagged entry copied to a name without the `plugin-` prefix. If a ready plugin's name is already taken by an entry Local Studio did not write, the user's entry stays, that plugin's server is off, and sync reports the name as an error (a notice in the app, an `error:` line in the CLI).
 
+## Questions from plugins
+
+A ready plugin that asks for both `mcp-server` and `ask-user` can ask the person a question and get the person's answer, never the model's. The code is `core/src/plugins/ask.rs` (socket, tokens, server entries) and `core/src/studio/ask.rs` (cards, answers, Stop).
+
+- **Delivery.** The `settings.json` entry above never carries the ask variables. When a thread starts or reopens, and before Local Studio sends a prompt to an idle session, it registers each asking plugin's server with that session as an ACP MCP server (`ReplaceAcpMcpServers`, owner `local-studio-ask`) under the same name `plugin-<id>`, with the same command, args and cwd and these variables: `LOCAL_STUDIO_ASK` (the socket path), `LOCAL_STUDIO_ASK_TOKEN` (32 random bytes as hex, one per plugin and thread), `LOCAL_STUDIO_THREAD` and `LOCAL_STUDIO_ASK_PID` (the process id of the Local Studio that owns the socket). Eukhe also gives the server the kernel's own `HOME`, `PATH` and `TMPDIR`, so a server that starts with `#!/usr/bin/env node` or `python3` finds the interpreter on the daemon's `PATH`. Eukhe looks up ACP servers before `settings.json`, so this entry wins in Local Studio threads. Other Eukhe frontends get the plain entry, so there the plugin has no `LOCAL_STUDIO_ASK` and must treat that as not confirmed. A plugin without the `ask-user` grant never gets these variables, and neither does the model's bash.
+- **Taken away.** A session the daemon keeps across a Local Studio restart still holds the list an earlier Local Studio gave it. So until this Local Studio has sent a session its list, it always replaces the session's list, with an empty one when no plugin may ask any more (its grant was revoked or the plugin removed). Eukhe refuses a non-empty list while the session runs but takes an empty one, so a prompt sent during a run clears the list when it holds a server that may no longer ask, and the session gets its list again with its next idle prompt.
+- **Not registered.** Eukhe takes ACP server env values only as literal strings and resolves host variable references only in `settings.json` entries. A plugin whose `[mcp] env` names host variables therefore keeps its `settings.json` entry, where Eukhe resolves them, and cannot ask; sync reports `<id> cannot ask you questions`. Local Studio also registers nothing under a `plugin-<id>` name that a `settings.json` entry it did not write holds.
+- **Check the socket first (required).** The model's bash can unlink `ask.sock` and listen there itself. Before a plugin sends its token, it must check that the process at the other end is `LOCAL_STUDIO_ASK_PID`: `LOCAL_PEERPID` (`getsockopt` level 0, option 2) on macOS, `SO_PEERCRED` on Linux. On a mismatch it closes the connection without sending anything and treats the question as not confirmed, or retries. A plugin that skips this hands its token to the impostor and takes the impostor's answer. A client:
+
+  ```python
+  import json, os, socket, struct, sys
+
+  def ask(text, choices):
+      path, token, pid = (os.environ.get(name) for name in ("LOCAL_STUDIO_ASK", "LOCAL_STUDIO_ASK_TOKEN", "LOCAL_STUDIO_ASK_PID"))
+      if not (path and token and pid):
+          return {"status": "refused", "error": "not running under Local Studio"}
+      conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+      try:
+          conn.connect(path)
+          if sys.platform == "darwin":
+              peer = struct.unpack("i", conn.getsockopt(0, 2, 4))[0]
+          else:
+              peer = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+          if peer != int(pid):
+              return {"status": "refused", "error": "ask.sock is not served by Local Studio"}
+          request = {"token": token, "thread": os.environ.get("LOCAL_STUDIO_THREAD"), "text": text, "choices": choices}
+          conn.sendall((json.dumps(request) + "\n").encode())
+          reply = b""
+          while not reply.endswith(b"\n"):
+              chunk = conn.recv(4096)
+              if not chunk:
+                  return {"status": "cancelled"}
+              reply += chunk
+          return json.loads(reply)
+      except OSError as error:
+          return {"status": "refused", "error": str(error)}
+      finally:
+          conn.close()
+  ```
+
+- **Socket.** `<data dir>/ask.sock`, or a short path in the temp folder when that one is too long for a Unix socket. Mode 0600; connections from another user are dropped. Send one JSON line within 5 s, under 16 KiB: `{"token": "...", "thread": "...", "text": "...", "choices": ["Yes", "No"]}`. `thread` is optional and must match the token's thread. `text` is 1 to 2000 characters, `choices` at most 8 unique labels of 1 to 120 characters, and any other field is refused. A question on an archived thread is refused. Keep the connection open, both ways, until the reply: closing it, or shutting down only the sending side, withdraws the question, and a half-closed connection gets `{"status": "refused", "error": "the plugin closed its sending side, ..."}`. The reply is one JSON line: `{"status": "answered", "answer": "..."}`, `{"status": "cancelled"}` or `{"status": "refused", "error": "..."}`.
+- **Replaced socket.** Every second, and on each new connection, Local Studio checks that `ask.sock` is still its own listener (device, inode and change time). When it is not, Local Studio makes it again and posts a warning in the app and in each thread whose session has asking plugins: "Another process replaced the plugin question socket ..., so Local Studio made it again. A plugin answer from the replaced socket did not come from you." It warns once per replacement, not once per second while something keeps taking the path.
+- **Tokens.** Local Studio keeps the tokens in memory only and never writes them to disk, where the model's bash could read them. At start it removes the `<data dir>/ask-tokens.json` an older build left. A token lasts as long as the plugin holds its `ask-user` grant, the thread exists and that Local Studio runs. A new Local Studio issues new tokens and has a new pid: a plugin server that is still running keeps the old token and `LOCAL_STUDIO_ASK_PID`, so it refuses the new socket, or the socket refuses its token, and its questions come back not confirmed until the session's next prompt registers it again and Eukhe restarts it with the new values. A session that was busy during the restart keeps the old values until its next idle prompt.
+- **Who answers.** The socket has no answer message. Only `Studio::answer_questions`, which the desktop apps call when the person clicks a choice, presses Return on one or sends typed text in the card, and which a phone reaches through the Remote op `answer_questions`, settles a question. The answer is a choice label or the typed text.
+- **Card.** The thread shows a question card labeled with the plugin's id and a plugin icon (manifests carry no icon of their own), counts as needing the person, and raises a `needs_answer` notification. A phone that starts watching the thread gets the open questions again. An open question blocks only the plugin's tool call.
+- **Stop and close.** Stop, archiving the thread or deleting it answers every open question in it `cancelled`. A plugin must treat `cancelled` as not confirmed.
+- **Transcript.** Once the run is idle, Local Studio appends a displayed note to the session (custom type `local-studio-ask`): `<plugin> asked: <text>. You answered: <answer>` (no extra period when the question ends in one), or, after Stop or archive, `<plugin> asked: <text>. You stopped the question (not confirmed).` The model sees it in its next request.
+- **What this guarantees.** The protocol gives the model no way to answer: the socket takes only questions, and only the person's click or typed text, in the app or on a paired phone, settles one. A server the model puts in place of `ask.sock` gets no token and gives no answer to a plugin that checks the peer pid, and Local Studio takes the path back and says so. Until per-session sandboxing ([#33](https://github.com/baney75/local-studio/issues/33)) lands, the model's bash runs as the same user as Local Studio and the plugin. A model that attacks the system itself is outside this guarantee: one that drives the desktop app, pairs a device, kills or traces processes, or reads a plugin's environment (`ps eww`, the kernel's view of the session's MCP config) to take its token and raise questions as that plugin.
+- **Timeouts.** Eukhe gives ACP stdio servers no `callTimeoutMs`, so the model's MCP call gives up after the kernel's default 60 s; the card stays until the person answers or the thread stops, and the plugin gets that answer on its open connection.
+
 ## Local-only plugins
 
 A plugin whose `plugin.toml` sets `local_only = true` runs only on local models. `plugin validate`, `plugin list` and the composer's command list show "Runs only on local models" for it.

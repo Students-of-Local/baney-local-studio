@@ -6,6 +6,7 @@ use serde_json::{json, Map, Value};
 
 use crate::model::{CommandKind, SlashCommand};
 
+pub mod ask;
 mod consent;
 mod grants;
 mod install;
@@ -507,6 +508,14 @@ fn written_by_us(root: &Path, name: &str, entry: &Value) -> bool {
                 command.starts_with(root) && !command.components().any(|part| part == std::path::Component::ParentDir)
             }),
         }
+}
+
+#[must_use]
+pub fn foreign_servers(root: &Path, agent: &Path) -> Vec<String> {
+    let root = absolute(root);
+    let settings = crate::workspace::providers::read_object(&agent.join("settings.json")).unwrap_or_default();
+    let servers = settings.get("mcpServers").and_then(Value::as_object).cloned().unwrap_or_default();
+    servers.into_iter().filter(|(name, entry)| !written_by_us(&root, name, entry)).map(|(name, _)| name).collect()
 }
 
 pub fn sync_mcp_servers(root: &Path, agent: &Path, ready: &[(&Plugin, Consent)]) -> Result<bool, String> {

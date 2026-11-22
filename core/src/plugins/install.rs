@@ -638,7 +638,7 @@ pub(crate) fn live_hash(root: &Path) -> Result<String, String> {
     Live::check(root)?.hash()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
         let _ = write!(text, "{byte:02x}");
         text

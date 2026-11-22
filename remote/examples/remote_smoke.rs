@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -12,13 +13,14 @@ use eukhe_types::daemon::DaemonCommand;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use local_studio_core::link::snow::{self, TransportState};
+use local_studio_core::plugins::{self, Capability, Grants};
 use local_studio_core::{
     AccessMode, Approval, Connection, DaemonLaunch, Delivery, Item, ItemKind, PromptDraft, Studio, StudioConfig,
     ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -194,6 +196,10 @@ struct View {
     git_status: u32,
     notifications: u32,
     needs_approval: HashMap<String, u32>,
+    needs_answer: HashMap<String, u32>,
+    questions: HashMap<String, (String, String)>,
+    question_counts: HashMap<String, u32>,
+    settled: HashSet<String>,
     blobs: HashMap<String, Received>,
     failed: HashMap<String, Value>,
     cuts: HashMap<String, u64>,
@@ -344,7 +350,17 @@ impl View {
                 self.notifications += 1;
                 if matches!(kind, local_studio_core::NotificationKind::NeedsApproval) {
                     *self.needs_approval.entry(thread).or_default() += 1;
+                } else if matches!(kind, local_studio_core::NotificationKind::NeedsAnswer) {
+                    *self.needs_answer.entry(thread).or_default() += 1;
                 }
+            }
+            Update::Questions { thread, request, questions, .. } => {
+                let text = questions.first().map(|question| question.question.clone()).unwrap_or_default();
+                *self.question_counts.entry(request.clone()).or_default() += 1;
+                self.questions.insert(request, (thread, text));
+            }
+            Update::QuestionsSettled { request, .. } => {
+                self.settled.insert(request);
             }
             Update::Notice { level, text } => println!("     notice {level:?}: {text}"),
             Update::RequestFailed { request, message } => println!("     request {request} failed: {message}"),
@@ -1182,8 +1198,10 @@ fn agent_dir(root: &Path) -> anyhow::Result<(Option<Target>, Option<Linked>)> {
         "apiKey": "absent",
         "models": [{ "id": "absent", "input": ["text", "image"], "contextWindow": 8192 }]
     });
+    let ask = ask_model()?;
     let Some(source) = source else {
-        write("models.json", &serde_json::to_vec(&json!({ "providers": { "remote-smoke-absent": absent } }))?)?;
+        let providers = json!({ "remote-smoke-absent": absent, "remote-smoke-ask": ask });
+        write("models.json", &serde_json::to_vec(&json!({ "providers": providers }))?)?;
         write("settings.json", br#"{"onboardingShown":true}"#)?;
         return Ok((None, linked));
     };
@@ -1194,7 +1212,7 @@ fn agent_dir(root: &Path) -> anyhow::Result<(Option<Target>, Option<Linked>)> {
         .get_mut("providers")
         .and_then(Value::as_object_mut)
         .context("models.json has no providers")?
-        .insert("remote-smoke-absent".to_string(), absent);
+        .extend([("remote-smoke-absent".to_string(), absent), ("remote-smoke-ask".to_string(), ask)]);
     write("models.json", &serde_json::to_vec(&scratch)?)?;
     write(
         "settings.json",
@@ -1502,7 +1520,7 @@ async fn op_checks(run: &mut Run, a: &mut Client) -> anyhow::Result<()> {
     a.refused("add_project", json!({ "path": "/tmp" }), "not_remote").await?;
     a.refused("load_usage", json!({ "request": "u", "period": "day" }), "not_remote").await?;
     a.refused("delete_thread", json!({ "thread": "x" }), "not_remote").await?;
-    a.refused("answer_questions", json!({ "thread": "x", "request": "q", "answers": {} }), "not_built").await?;
+    a.refused("answer_questions", json!({ "thread": "x", "request": "q", "answers": "yes" }), "bad_args").await?;
     a.refused("rename_thread", json!({ "thread": 7 }), "bad_args").await?;
     a.refused("hello", json!({}), "bad_state").await?;
     a.refused("load_earlier", json!({ "thread": "nope" }), "not_watched").await?;
@@ -2018,6 +2036,221 @@ async fn shared_ids(project: &str, a: &mut Client, c: &mut Client) -> anyhow::Re
         client.frame(&json!({ "id": 910 + id, "op": "unwatch", "args": { "thread": thread } }));
     }
     println!("ok   two phones sharing request ids: each send r1 runs in its own thread only, and each phone gets exactly its own request_failed r2 and list_commands q-shared");
+    Ok(())
+}
+
+const ASK_TEXT: &str = "Is the 1099-DIV dividend $87.00?";
+
+const ASK_SERVER: &str = r#"#!/usr/bin/env python3
+import json, os, socket, sys
+LOG = sys.argv[1]
+def ask(text):
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.connect(os.environ["LOCAL_STUDIO_ASK"])
+    request = {"token": os.environ["LOCAL_STUDIO_ASK_TOKEN"], "thread": os.environ["LOCAL_STUDIO_THREAD"], "text": text, "choices": ["Yes", "No"]}
+    conn.sendall((json.dumps(request) + "\n").encode())
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    reply = json.loads(data) if data.strip() else {"status": "closed"}
+    with open(LOG, "a") as out:
+        out.write(json.dumps({"reply": reply, "token": request["token"]}) + "\n")
+    return reply
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    message = json.loads(line)
+    method, ident = message.get("method"), message.get("id")
+    if ident is None:
+        continue
+    if method == "initialize":
+        result = {"protocolVersion": message["params"].get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}}, "serverInfo": {"name": "askfix", "version": "1.0.0"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "confirm", "description": "Ask the person", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+    elif method == "tools/call":
+        reply = ask((message["params"].get("arguments") or {}).get("text", ""))
+        result = {"content": [{"type": "text", "text": json.dumps(reply)}], "isError": False}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}) + "\n")
+    sys.stdout.flush()
+"#;
+
+fn ask_reply(mut stream: std::net::TcpStream, serial: usize) -> anyhow::Result<()> {
+    use std::io::{BufRead, Read, Write};
+    let mut reader = std::io::BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let models = line.split_whitespace().nth(1).unwrap_or_default().ends_with("/models");
+    let mut length = 0_usize;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = vec![0_u8; length];
+    reader.read_exact(&mut body)?;
+    let chunk = |delta: Value, finish: Option<&str>| {
+        let value = json!({ "id": "chatcmpl-ask", "object": "chat.completion.chunk", "model": "script",
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }] });
+        format!("data: {value}\n\n")
+    };
+    let (kind, text) = if models {
+        ("application/json", json!({ "object": "list", "data": [{ "id": "script", "object": "model" }] }).to_string())
+    } else {
+        let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let messages = request["messages"].as_array().cloned().unwrap_or_default();
+        let last_user = messages.iter().rposition(|message| message["role"] == "user").unwrap_or(0);
+        let results: Vec<String> =
+            messages[last_user..].iter().filter(|m| m["role"] == "tool").map(|m| m["content"].to_string()).collect();
+        let transient =
+            |text: &String| text.contains("TimeoutError") || text.contains("already has an active execution");
+        let call = results.last().is_none_or(transient) && results.len() < 4;
+        let mut events = chunk(json!({ "role": "assistant", "content": "" }), None);
+        if call {
+            let code = format!(
+                "r = await mcp.call_tool(\"plugin-askfix\", \"confirm\", {{\"text\": {ASK_TEXT:?}}})\nprint(r)"
+            );
+            let call = json!({ "index": 0, "id": format!("call_{serial}"), "type": "function",
+                "function": { "name": "python", "arguments": json!({ "code": code }).to_string() } });
+            events.push_str(&chunk(json!({ "tool_calls": [call] }), None));
+            events.push_str(&chunk(json!({}), Some("tool_calls")));
+        } else {
+            events.push_str(&chunk(json!({ "content": "Done." }), None));
+            events.push_str(&chunk(json!({}), Some("stop")));
+        }
+        events.push_str("data: [DONE]\n\n");
+        ("text/event-stream", events)
+    };
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+        text.len()
+    )?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// A scripted model for the `remote-smoke-ask` provider: on a prompt it calls askfix's `confirm`, which asks the
+/// person through ask.sock with the token only the plugin's own environment holds; after the call it says Done.
+fn ask_model() -> anyhow::Result<Value> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    std::thread::spawn(move || {
+        for (serial, stream) in listener.incoming().flatten().enumerate() {
+            std::thread::spawn(move || {
+                if let Err(error) = ask_reply(stream, serial) {
+                    eprintln!("remote_smoke ask model: {error:#}");
+                }
+            });
+        }
+    });
+    Ok(json!({
+        "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+        "api": "openai-completions",
+        "apiKey": "none",
+        "models": [{ "id": "script", "input": ["text"], "contextWindow": 32768 }]
+    }))
+}
+
+fn files_holding(dir: &Path, needle: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            found.extend(files_holding(&entry.path(), needle)?);
+        } else if kind.is_file() && String::from_utf8_lossy(&std::fs::read(entry.path())?).contains(needle) {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
+}
+
+fn ask_fixture(data: &Path, log: &Path) -> anyhow::Result<()> {
+    let plugins_dir = data.join("plugins");
+    let dir = plugins_dir.join("askfix");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("plugin.toml"),
+        format!(
+            "id = \"askfix\"\nversion = \"1.0.0\"\ndescription = \"remote smoke fixture\"\ncapabilities = [\"mcp-server\", \"ask-user\"]\n\n[mcp]\ncommand = \"server.py\"\nargs = [{:?}]\n",
+            log.to_string_lossy()
+        ),
+    )?;
+    std::fs::write(dir.join("server.py"), ASK_SERVER)?;
+    std::fs::set_permissions(dir.join("server.py"), std::fs::Permissions::from_mode(0o755))?;
+    let plugin = plugins::load(&dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+    let mut grants = Grants::load(&plugins_dir).map_err(anyhow::Error::msg)?;
+    grants.grant(&plugin, &[Capability::McpServer, Capability::AskUser], None).map_err(anyhow::Error::msg)?;
+    grants.save(&plugins_dir).map_err(anyhow::Error::msg)
+}
+
+async fn plugin_question(run: &Run, a: &mut Client, c: &mut Client) -> anyhow::Result<()> {
+    let log = run.serve.root.join("askfix.log");
+    ask_fixture(&run.serve.data, &log)?;
+    let settings = json!({ "provider": "remote-smoke-ask", "model": "script", "thinkingLevel": "off", "access": "fullAccess", "worktree": { "type": "local" } });
+    let args = json!({ "draft": "d-ask", "project": run.project, "prompt": prompt("ask start"), "settings": settings });
+    a.call("start_thread", args).await?;
+    a.until("a thread for the plugin question", SETUP, |view| view.started.contains_key("d-ask")).await?;
+    let thread = a.view().started["d-ask"].clone();
+    a.call("watch", json!({ "thread": thread })).await?;
+    let stream = UnixStream::connect(run.serve.data.join("ask.sock")).await?;
+    let serve = run.serve.child.as_ref().map(Child::id).context("serve is not running")?;
+    let peer = stream.peer_cred()?.pid();
+    ensure!(peer == i32::try_from(serve).ok(), "ask.sock is served by pid {peer:?}, not serve {serve}");
+    drop(stream);
+    let text = ASK_TEXT;
+    let asked = |view: &View| {
+        view.questions.iter().find(|(_, (on, said))| *on == thread && said == text).map(|(request, _)| request.clone())
+    };
+    a.until(
+        "the scripted model calls askfix, and phone A gets its question and a needs_answer notification",
+        SETUP,
+        |view| asked(view).is_some() && view.needs_answer.get(&thread).is_some_and(|count| *count > 0),
+    )
+    .await?;
+    let request = asked(&a.view()).context("phone A lost the question")?;
+    let before = c.view().question_counts.get(&request).copied().unwrap_or_default();
+    c.call("watch", json!({ "thread": thread })).await?;
+    c.until("phone C gets the pending question replayed on watch", QUICK, |view| {
+        view.question_counts.get(&request).copied().unwrap_or_default() > before
+    })
+    .await?;
+    let mut answers = Map::new();
+    answers.insert(text.to_string(), json!("Yes"));
+    c.call("answer_questions", json!({ "thread": thread, "request": request, "answers": answers })).await?;
+    for client in [&*a, &*c] {
+        client.until("questions_settled reaches the watcher", QUICK, |view| view.settled.contains(&request)).await?;
+    }
+    let deadline = Instant::now() + QUICK;
+    let logged: Value = loop {
+        let logged = std::fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = logged.lines().next() {
+            break serde_json::from_str(line).with_context(|| format!("askfix logged {line:?}"))?;
+        }
+        ensure!(Instant::now() < deadline, "askfix got no reply");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let reply = &logged["reply"];
+    ensure!(*reply == json!({ "status": "answered", "answer": "Yes" }), "the plugin got {reply}");
+    let token = logged["token"].as_str().filter(|token| token.len() == 64).context("askfix logged no token")?;
+    let stray = files_holding(&run.serve.data, token)?;
+    ensure!(stray.is_empty(), "serve keeps askfix's token on disk in {stray:?}");
+    a.until("the plugin question thread idle", SETUP, |view| view.idle(&thread)).await?;
+    for client in [&mut *a, &mut *c] {
+        client.call("unwatch", json!({ "thread": thread })).await?;
+    }
+    println!("ok   askfix's question on ask.sock (peer pid {serve}, serve's; no token on disk) reaches phone A with needs_answer, replays to phone C on watch, C answers, both get questions_settled and the plugin gets {reply}");
     Ok(())
 }
 
@@ -3268,6 +3501,7 @@ async fn drive(run: &mut Run, eukhe: &Path, model: Option<&Target>) -> anyhow::R
     let mut a = Box::pin(listener_checks(run, a, &a_phone)).await?;
     revoke_one(run).await?;
     shared_ids(&run.project.clone(), &mut a, &mut c).await?;
+    plugin_question(run, &mut a, &mut c).await?;
     duplicate_replay(&mut a).await?;
     worktree_route(run, &mut a).await?;
     let (mut a, mut c) = restart_watch(run, eukhe, &a_phone, &c_phone, &mut a).await?;
