@@ -255,10 +255,13 @@ impl Links {
     }
 
     pub(crate) fn open_pairing(&self, request: String, data_dir: PathBuf) {
-        self.0.lock().offer = Some((request.clone(), Offer::Minting));
+        let replaced = self.0.lock().offer.replace((request.clone(), Offer::Minting));
         let inner = Arc::clone(&self.0);
         self.0.handle.spawn_blocking(move || {
             let _serial = inner.minting.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, Offer::Minted(id))) = replaced {
+                expire(&inner.mailbox, &data_dir, &id);
+            }
             if !inner.lock().minting(&request) {
                 inner.lock().settle(&request);
                 return;

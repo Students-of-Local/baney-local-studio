@@ -1198,6 +1198,7 @@ fn devices_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<
             ensure!(minted.exists(), "open_pairing on desk A wrote no pairing.json");
             desk.studio.close_pairing("pair-a2".to_string());
             desk.until("close_pairing on desk A removes its pairing", QUICK, |_| !minted.exists())?;
+            offer_checks(&mut desk, &minted)?;
             anyhow::Ok(())
         })();
         host.stop();
@@ -1216,6 +1217,29 @@ fn devices_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<
     ensure!(lock_owner(&run.a.data) == Some(serve), "serve {serve} did not take studio.lock back");
     run.report.push(format!("desk A closed to B reconnected to serve: {} ms", closed.elapsed().as_millis()));
     println!("ok   serve {serve} took studio.lock back and serves B again");
+    Ok(())
+}
+
+fn offer_checks(desk: &mut Desk, minted: &Path) -> anyhow::Result<()> {
+    desk.view.pairing = None;
+    desk.studio.open_pairing("pair-c".to_string());
+    desk.studio.close_pairing("pair-c".to_string());
+    desk.hold(Duration::from_secs(2));
+    ensure!(!minted.exists(), "a sheet closed while its pairing was minting left pairing.json behind");
+    println!("ok   closing the sheet while its pairing mints leaves no pairing behind");
+    desk.studio.open_pairing("pair-d".to_string());
+    desk.studio.open_pairing("pair-e".to_string());
+    desk.until("the newer of two back to back open_pairing calls answers", QUICK, |view| {
+        view.pairing.as_ref().is_some_and(|(request, ..)| request == "pair-e")
+    })?;
+    desk.hold(Duration::from_secs(1));
+    let (_, link, _) = desk.view.pairing.clone().context("open_pairing gave no link")?;
+    let shown = pairing::parse(&link, CHANNEL).map_err(anyhow::Error::msg)?.id;
+    let saved: Value = serde_json::from_slice(&std::fs::read(minted).context("pairing.json is gone")?)?;
+    ensure!(saved["id"] == shown, "the sheet shows pairing {shown} but pairing.json holds {}", saved["id"]);
+    println!("ok   two back to back open_pairing calls leave the newer pairing {shown} on disk");
+    desk.studio.close_pairing("pair-e".to_string());
+    desk.until("closing the newer sheet removes its pairing", QUICK, |_| !minted.exists())?;
     Ok(())
 }
 
