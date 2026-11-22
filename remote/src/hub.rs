@@ -744,12 +744,19 @@ impl Hub {
     #[allow(clippy::too_many_lines)]
     fn on_update(&self, update: Update) {
         let update = match update {
-            Update::Threads { threads } => {
-                Update::Threads { threads: threads.into_iter().filter(|row| row.machine.is_none()).collect() }
-            }
-            Update::Projects { projects } => Update::Projects {
-                projects: projects.into_iter().filter(|project| project.machine.is_none()).collect(),
+            Update::Threads { threads } => Update::Threads {
+                threads: threads.into_iter().filter(|row| local(&row.id, row.machine.as_ref())).collect(),
             },
+            Update::Projects { projects } => Update::Projects {
+                projects: projects.into_iter().filter(|project| local(&project.id, project.machine.as_ref())).collect(),
+            },
+            Update::ArchivedThreads { request, threads } => Update::ArchivedThreads {
+                request,
+                threads: threads.into_iter().filter(|row| local(&row.id, row.machine.as_ref())).collect(),
+            },
+            Update::ThreadSearch { request, hits } => {
+                Update::ThreadSearch { request, hits: hits.into_iter().filter(|hit| !linked(&hit.thread)).collect() }
+            }
             update => update,
         };
         let value = match serde_json::to_value(&update) {
@@ -976,7 +983,8 @@ impl Hub {
         resume: &Resume,
     ) -> Option<ConnId> {
         let mut state = self.state();
-        let asked: HashSet<String> = resume.watch.iter().take(MAX_WATCH).cloned().collect();
+        let asked: HashSet<String> =
+            resume.watch.iter().filter(|thread| !linked(thread)).take(MAX_WATCH).cloned().collect();
         let changes = state.sessions.get(device).map_or(asked.len(), |session| {
             if session.key == key {
                 session.watching.symmetric_difference(&asked).count()
@@ -1029,7 +1037,8 @@ impl Hub {
         }
         session.conn = Some((conn, tx));
         session.left_at = None;
-        let wanted: Vec<String> = resume.watch.iter().take(MAX_WATCH).cloned().collect();
+        let wanted: Vec<String> =
+            resume.watch.iter().filter(|thread| !linked(thread)).take(MAX_WATCH).cloned().collect();
         let held: Vec<String> = session.watching.iter().cloned().collect();
         for thread in held.iter().filter(|thread| !wanted.contains(thread)) {
             if let Some(session) = state.sessions.get_mut(device) {
@@ -1084,9 +1093,7 @@ impl Hub {
     }
 
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
-        if linked(thread) {
-            return Err(OpError::new("not_remote", "this machine does not serve threads it reaches over a link"));
-        }
+        unknown("thread", thread)?;
         let mut state = self.state();
         let session = state.live(device, conn)?;
         if session.watching.contains(thread) {
@@ -1117,6 +1124,7 @@ impl Hub {
         let thread: String = ops::arg(args, "thread")?;
         let before: Option<u64> = ops::arg(args, "before")?;
         let limit: Option<u64> = ops::arg(args, "limit")?;
+        unknown("thread", &thread)?;
         let mut state = self.state();
         if !state.live(device, conn)?.watching.contains(&thread) {
             return Err(OpError::new("not_watched", format!("watch thread {thread} before loading its transcript")));
@@ -1144,8 +1152,10 @@ impl Hub {
 
     #[allow(clippy::too_many_lines)]
     pub fn request(&self, device: &str, conn: ConnId, op: &str, args: &Value) -> Result<bool, OpError> {
-        if ["thread", "project"].iter().any(|key| args.get(key).and_then(Value::as_str).is_some_and(linked)) {
-            return Err(OpError::new("not_remote", "this machine does not serve threads it reaches over a link"));
+        for key in ["thread", "project"] {
+            if let Some(id) = args.get(key).and_then(Value::as_str) {
+                unknown(key, id)?;
+            }
         }
         let mut state = self.state();
         state.live(device, conn)?;
@@ -1359,6 +1369,18 @@ impl Hub {
 
 fn linked(id: &str) -> bool {
     id.starts_with('@')
+}
+
+fn local(id: &str, machine: Option<&String>) -> bool {
+    machine.is_none() && !linked(id)
+}
+
+fn unknown(key: &str, id: &str) -> Result<(), OpError> {
+    if !linked(id) {
+        return Ok(());
+    }
+    let code = if key == "project" { "unknown_project" } else { "unknown_thread" };
+    Err(OpError::new(code, format!("this machine has no such {key}")))
 }
 
 fn kind_of_file(value: &Value) -> &str {
