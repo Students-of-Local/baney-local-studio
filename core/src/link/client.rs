@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use super::devices::{hex, now_ms, random, unhex, write_private};
 use super::noise::{self, Channel, Inbound, Joiner, BANNED, BLOB_ID, UNPAIRED};
@@ -34,6 +34,8 @@ const PING: Duration = Duration::from_secs(20);
 const SILENT: Duration = Duration::from_secs(50);
 const REFUSED_MS: i64 = 10 * 60 * 1000;
 const PAGE: u64 = 500;
+const HANG_UP: Duration = Duration::from_secs(2);
+pub const TEST_CA: &str = "LOCAL_STUDIO_LINK_TEST_CA";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,6 +226,17 @@ impl Links {
         prompt: Option<PromptDraft>,
         request: Option<String>,
     ) {
+        if prompt.as_ref().is_some_and(|prompt| !prompt.files.is_empty()) {
+            let message = format!(
+                "{} cannot open files attached here: they are paths on this machine. Paste their text or attach images instead",
+                self.0.name(machine)
+            );
+            match request {
+                Some(request) => self.0.mailbox.push(Update::RequestFailed { request, message }),
+                None => self.0.mailbox.notice(NoticeLevel::Warning, message),
+            }
+            return;
+        }
         let state = self.0.lock();
         let sent = state.machines.iter().find(|link| link.saved.id == machine).map(|link| {
             let out = Out::Request { op: op.to_string(), args, prompt, request: request.clone() };
@@ -242,10 +255,13 @@ impl Links {
     }
 
     pub(crate) fn open_pairing(&self, request: String, data_dir: PathBuf) {
-        self.0.lock().offer = Some((request.clone(), Offer::Minting));
+        let replaced = self.0.lock().offer.replace((request.clone(), Offer::Minting));
         let inner = Arc::clone(&self.0);
         self.0.handle.spawn_blocking(move || {
             let _serial = inner.minting.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, Offer::Minted(id))) = replaced {
+                expire(&inner.mailbox, &data_dir, &id);
+            }
             if !inner.lock().minting(&request) {
                 inner.lock().settle(&request);
                 return;
@@ -573,8 +589,35 @@ async fn send_records(sink: &mut Sink, channel: &Channel, records: Vec<Vec<u8>>)
     true
 }
 
+fn tls() -> Result<Arc<rustls::ClientConfig>, String> {
+    let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    if let Some(path) = std::env::var_os(TEST_CA) {
+        use rustls::pki_types::pem::PemObject;
+        let shown = Path::new(&path).display().to_string();
+        let certs = rustls::pki_types::CertificateDer::pem_file_iter(&path)
+            .map_err(|error| format!("{TEST_CA} {shown}: {error}"))?;
+        for cert in certs {
+            let cert = cert.map_err(|error| format!("{TEST_CA} {shown}: {error}"))?;
+            roots.add(cert).map_err(|error| format!("{TEST_CA} {shown}: {error}"))?;
+        }
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| format!("TLS setup failed: {error}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
 async fn open_socket(url: &str) -> Result<(Sink, Stream), Failure> {
-    let (socket, _) = tokio::time::timeout(CONNECT, tokio_tungstenite::connect_async(url))
+    let connector = if url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss://")) {
+        Connector::Rustls(tls().map_err(Failure::Broken)?)
+    } else {
+        Connector::Plain
+    };
+    let connect = tokio_tungstenite::connect_async_tls_with_config(url, None, false, Some(connector));
+    let (socket, _) = tokio::time::timeout(CONNECT, connect)
         .await
         .map_err(|_| Failure::Broken(format!("{url} did not answer within 10 s")))?
         .map_err(|error| Failure::Broken(format!("{url}: {error}")))?;
@@ -788,6 +831,7 @@ enum Pending {
 }
 
 struct Paging {
+    request: u64,
     items: Vec<Value>,
     start: u64,
     ops: Vec<Value>,
@@ -797,8 +841,8 @@ struct Session<'a> {
     inner: &'a Arc<Inner>,
     machine: &'a str,
     name: String,
-    sink: Sink,
-    channel: Channel,
+    writes: mpsc::UnboundedSender<Vec<Vec<u8>>>,
+    pings: mpsc::UnboundedSender<Vec<Vec<u8>>>,
     next: u64,
     pending: HashMap<u64, Pending>,
     paging: HashMap<String, Paging>,
@@ -807,16 +851,54 @@ struct Session<'a> {
     seq: u64,
 }
 
+struct Abort(tokio::task::AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn write(
+    mut sink: Sink,
+    channel: Arc<Channel>,
+    mut writes: mpsc::UnboundedReceiver<Vec<Vec<u8>>>,
+    mut pings: mpsc::UnboundedReceiver<Vec<Vec<u8>>>,
+) {
+    loop {
+        let records = tokio::select! {
+            biased;
+            Some(records) = pings.recv() => records,
+            records = writes.recv() => match records {
+                Some(records) => records,
+                None => break,
+            },
+        };
+        if !send_records(&mut sink, &channel, records).await {
+            return;
+        }
+    }
+    sink.close().await.ok();
+}
+
 async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
     let Opened { sink, mut stream, channel, mut joiner, hello, url } = opened;
+    let channel = Arc::new(channel);
+    let (writes, queued) = mpsc::unbounded_channel();
+    let (pings, pinging) = mpsc::unbounded_channel();
+    let mut outbound = tokio::spawn(write(sink, Arc::clone(&channel), queued, pinging));
+    let _writer = Abort(outbound.abort_handle());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let Some(name) = inner.connected(machine, tx, &url, &hello) else { return End::Forgotten };
+    let Some(name) = inner.connected(machine, tx, &url, &hello) else {
+        outbound.abort();
+        return End::Forgotten;
+    };
     let mut session = Session {
         inner,
         machine,
         name,
-        sink,
-        channel,
+        writes,
+        pings,
         next: 0,
         pending: HashMap::new(),
         paging: HashMap::new(),
@@ -825,14 +907,19 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
         seq: hello.get("seq").and_then(Value::as_u64).unwrap_or_default(),
     };
     for update in hello.get("snapshot").and_then(Value::as_array).cloned().unwrap_or_default() {
-        session.update(update).await;
+        session.update(update);
     }
     let mut ping = tokio::time::interval_at(Instant::now() + PING, PING);
     let silence = tokio::time::sleep(SILENT);
     tokio::pin!(silence);
     let mut unsent = None;
+    let mut written = false;
     let ended = loop {
         tokio::select! {
+            _ = &mut outbound => {
+                written = true;
+                break End::Lost;
+            }
             arrived = next(&mut stream) => {
                 silence.as_mut().reset(Instant::now() + SILENT);
                 let bytes = match arrived {
@@ -840,11 +927,11 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
                     Next::Closed(code) => break End::Closed(code),
                     Next::Binary(bytes) => bytes,
                 };
-                let Ok(record) = session.channel.open(&bytes) else { break End::Lost };
+                let Ok(record) = channel.open(&bytes) else { break End::Lost };
                 match joiner.feed(record) {
                     Err(_) => break End::Lost,
                     Ok(Some(Inbound::Json(text))) => {
-                        if !session.frame(&text).await {
+                        if !session.frame(&text) {
                             break End::Lost;
                         }
                     }
@@ -858,40 +945,29 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
                     Out::Request { request, .. } => request.clone(),
                     Out::Watch(_) | Out::Unwatch(_) => None,
                 };
-                if !session.out(out).await {
+                if !session.out(out) {
                     unsent = request;
                     break End::Lost;
                 }
             }
             _ = ping.tick() => {
                 session.pinged = Some(Instant::now());
-                if !session.send(&json!({ "op": "ping" })).await {
+                let ping = noise::json_records(&json!({ "op": "ping" }).to_string());
+                if session.pings.send(ping).is_err() {
                     break End::Lost;
                 }
             }
         }
     };
     let resume = session.epoch.clone().map(|epoch| (epoch, session.seq));
-    session.sink.close().await.ok();
+    session.hang_up();
+    if !written && !matches!(ended, End::Lost) {
+        tokio::time::timeout(HANG_UP, &mut outbound).await.ok();
+    }
+    outbound.abort();
     rx.close();
-    let mut failed: Vec<String> = unsent.into_iter().collect();
-    let pending = session.pending.drain().filter_map(|(_, pending)| match pending {
-        Pending::Request { request, .. } => request,
-        Pending::Earlier(_) | Pending::Blob | Pending::Watch(_) => None,
-    });
-    let queued = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|out| match out {
-        Out::Request { request, .. } => request,
-        Out::Watch(_) | Out::Unwatch(_) => None,
-    });
-    for request in pending.chain(queued).collect::<Vec<_>>() {
-        if !failed.contains(&request) {
-            failed.push(request);
-        }
-    }
     inner.disconnected(machine, resume);
-    for request in failed {
-        inner.mailbox.push(Update::RequestFailed { request, message: format!("{} disconnected", session.name) });
-    }
+    session.fail(unsent, &mut rx);
     ended
 }
 
@@ -933,23 +1009,59 @@ fn rewrite(update: &mut Value, machine: &str) {
 }
 
 impl Session<'_> {
-    async fn send(&mut self, frame: &Value) -> bool {
-        send_records(&mut self.sink, &self.channel, noise::json_records(&frame.to_string())).await
+    fn fail(&mut self, unsent: Option<String>, rx: &mut mpsc::UnboundedReceiver<Out>) {
+        let mut failed: Vec<String> = unsent.into_iter().collect();
+        let pending = self.pending.drain().filter_map(|(_, pending)| match pending {
+            Pending::Request { request, .. } => request,
+            Pending::Earlier(_) | Pending::Blob | Pending::Watch(_) => None,
+        });
+        let queued = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|out| match out {
+            Out::Request { request, .. } => request,
+            Out::Watch(_) | Out::Unwatch(_) => None,
+        });
+        for request in pending.chain(queued).collect::<Vec<_>>() {
+            if !failed.contains(&request) {
+                failed.push(request);
+            }
+        }
+        for request in failed {
+            let message = format!("{} disconnected", self.name);
+            self.inner.mailbox.push(Update::RequestFailed { request, message });
+        }
     }
 
-    async fn ask(&mut self, op: &str, args: Value, pending: Pending) -> bool {
+    fn hang_up(&mut self) {
+        self.writes = mpsc::unbounded_channel().0;
+        self.pings = mpsc::unbounded_channel().0;
+    }
+
+    fn send(&mut self, frame: &Value) -> bool {
+        self.writes.send(noise::json_records(&frame.to_string())).is_ok()
+    }
+
+    fn ask(&mut self, op: &str, args: Value, pending: Pending) -> bool {
         self.next += 1;
         self.pending.insert(self.next, pending);
-        let frame = json!({ "id": self.next, "op": op, "args": args });
-        self.send(&frame).await
+        let mut frame = json!({ "id": self.next, "op": op });
+        frame["args"] = args;
+        self.send(&frame)
     }
 
-    async fn out(&mut self, out: Out) -> bool {
+    fn load_earlier(&mut self, thread: &str, before: u64) -> bool {
+        let args = json!({ "thread": thread, "before": before, "limit": PAGE });
+        let sent = self.ask("load_earlier", args, Pending::Earlier(thread.to_string()));
+        if let Some(paging) = self.paging.get_mut(thread) {
+            paging.request = self.next;
+        }
+        sent
+    }
+
+    fn out(&mut self, out: Out) -> bool {
         match out {
-            Out::Watch(thread) => self.ask("watch", json!({ "thread": thread }), Pending::Watch(thread.clone())).await,
+            Out::Watch(thread) => self.ask("watch", json!({ "thread": thread }), Pending::Watch(thread.clone())),
             Out::Unwatch(thread) => {
                 self.paging.remove(&thread);
-                self.ask("unwatch", json!({ "thread": thread }), Pending::Watch(thread.clone())).await
+                self.ask("unwatch", json!({ "thread": thread }), Pending::Watch(thread.clone()))
             }
             Out::Request { op, mut args, prompt, request } => {
                 if let Some(prompt) = prompt {
@@ -957,25 +1069,27 @@ impl Session<'_> {
                     for image in prompt.images {
                         let Ok(blob) = random::<BLOB_ID>() else { return false };
                         let put = json!({ "blob": hex(&blob), "size": image.data.len(), "mime": image.mime_type });
-                        if !self.ask("blob_put", put, Pending::Blob).await
-                            || !send_records(&mut self.sink, &self.channel, noise::blob_records(&blob, &image.data))
-                                .await
-                        {
+                        if !self.ask("blob_put", put, Pending::Blob) {
                             return false;
+                        }
+                        for record in noise::blob_records(&blob, &image.data) {
+                            if self.writes.send(vec![record]).is_err() {
+                                return false;
+                            }
                         }
                         images.push(hex(&blob));
                     }
                     args["prompt"] = json!({ "text": prompt.text, "images": images, "files": prompt.files });
                 }
-                self.ask(&op.clone(), args, Pending::Request { op, request }).await
+                self.ask(&op.clone(), args, Pending::Request { op, request })
             }
         }
     }
 
-    async fn frame(&mut self, text: &str) -> bool {
+    fn frame(&mut self, text: &str) -> bool {
         let Ok(frame) = serde_json::from_str::<Value>(text) else { return true };
         if let Some(id) = frame.get("re").and_then(Value::as_u64) {
-            return self.answer(id, &frame).await;
+            return self.answer(id, &frame);
         }
         match frame.get("op").and_then(Value::as_str) {
             Some("update") => {
@@ -983,7 +1097,7 @@ impl Session<'_> {
                     self.seq = seq;
                 }
                 if let Some(update) = frame.get("update").cloned() {
-                    return self.update(update).await;
+                    return self.update(update);
                 }
             }
             Some("pong") => {
@@ -1001,11 +1115,14 @@ impl Session<'_> {
         true
     }
 
-    async fn answer(&mut self, id: u64, frame: &Value) -> bool {
+    fn answer(&mut self, id: u64, frame: &Value) -> bool {
         let Some(pending) = self.pending.remove(&id) else { return true };
         let error = frame.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
         match pending {
             Pending::Earlier(thread) => {
+                if self.paging.get(&thread).is_none_or(|paging| paging.request != id) {
+                    return true;
+                }
                 if let Some(message) = error {
                     self.inner.mailbox.notice(
                         NoticeLevel::Warning,
@@ -1020,13 +1137,7 @@ impl Session<'_> {
                 paging.items.splice(0..0, items);
                 paging.start = start;
                 if start > 0 && got {
-                    return self
-                        .ask(
-                            "load_earlier",
-                            json!({ "thread": thread, "before": start, "limit": PAGE }),
-                            Pending::Earlier(thread.clone()),
-                        )
-                        .await;
+                    return self.load_earlier(&thread, start);
                 }
                 self.finish_paging(&thread)
             }
@@ -1066,7 +1177,7 @@ impl Session<'_> {
         true
     }
 
-    async fn update(&mut self, update: Value) -> bool {
+    fn update(&mut self, update: Value) -> bool {
         let kind = update.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
         match kind.as_str() {
             "threads" => {
@@ -1100,9 +1211,9 @@ impl Session<'_> {
                     let earlier = update.pointer("/op/earlier").and_then(Value::as_u64).unwrap_or_default();
                     if earlier > 0 {
                         let items = update.pointer("/op/items").and_then(Value::as_array).cloned().unwrap_or_default();
-                        self.paging.insert(thread.clone(), Paging { items, start: earlier, ops: Vec::new() });
-                        let args = json!({ "thread": thread, "before": earlier, "limit": PAGE });
-                        return self.ask("load_earlier", args, Pending::Earlier(thread)).await;
+                        self.paging
+                            .insert(thread.clone(), Paging { request: 0, items, start: earlier, ops: Vec::new() });
+                        return self.load_earlier(&thread, earlier);
                     }
                 } else if let Some(paging) = self.paging.get_mut(&thread) {
                     paging.ops.push(update);
