@@ -745,7 +745,7 @@ impl Translator {
         let resets = ["primary", "secondary"]
             .iter()
             .filter_map(|window| limits.and_then(|limits| limits.get(*window)))
-            .filter(|window| window.get("usedPercent").and_then(Value::as_i64).is_some_and(|used| used >= 100))
+            .filter(|window| window.get("usedPercent").and_then(Value::as_f64).is_some_and(|used| used >= 100.0))
             .filter_map(|window| window.get("resetsAt").and_then(Value::as_u64))
             .max();
         if let Some(seconds) = resets {

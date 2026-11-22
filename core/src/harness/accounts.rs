@@ -9,6 +9,10 @@ use crate::model::Harness;
 use crate::platform::Mode;
 
 const FILE: &str = "accounts.json";
+#[cfg(target_os = "macos")]
+const CLAUDE_SIGNED_IN: &str = ".claude.json";
+#[cfg(not(target_os = "macos"))]
+const CLAUDE_SIGNED_IN: &str = ".credentials.json";
 pub(crate) const FALLBACK_PARK_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -76,7 +80,7 @@ fn key(dir: &Path) -> String {
 
 fn names(harness: Harness) -> Option<(&'static str, &'static str, &'static str)> {
     match harness {
-        Harness::ClaudeCode => Some(("CLAUDE_CONFIG_DIR", ".claude", ".credentials.json")),
+        Harness::ClaudeCode => Some(("CLAUDE_CONFIG_DIR", ".claude", CLAUDE_SIGNED_IN)),
         Harness::Codex => Some(("CODEX_HOME", ".codex", "auth.json")),
         Harness::Eukhe => None,
     }

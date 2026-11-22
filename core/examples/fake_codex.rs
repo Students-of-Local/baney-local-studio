@@ -182,7 +182,7 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
         shared.notify(
             "account/rateLimits/updated",
-            &json!({ "rateLimits": { "primary": { "usedPercent": 100, "windowDurationMins": 300, "resetsAt": now + RESET_SECONDS } } }),
+            &json!({ "rateLimits": { "primary": { "usedPercent": 100.0, "windowDurationMins": 300, "resetsAt": now + RESET_SECONDS } } }),
         );
         let error = json!({ "message": LIMIT_WORDS, "codexErrorInfo": "usageLimitExceeded" });
         shared.notify("error", &json!({ "error": error, "willRetry": false }));
