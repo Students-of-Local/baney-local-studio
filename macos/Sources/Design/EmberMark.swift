@@ -167,7 +167,6 @@ struct EmberMark: View {
                 canvas(time: nil)
             }
         }
-        .accessibilityHidden(true)
     }
 
     private func canvas(time: Double?) -> some View {

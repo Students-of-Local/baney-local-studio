@@ -4,15 +4,16 @@ use gtk::{gdk, glib};
 pub const ICON: &str = "dev.localstudio.LocalStudio";
 const MARK: &[u8] = include_bytes!("../assets/mark.svg");
 
-pub fn mark(size: i32) -> Option<gtk::Picture> {
+pub fn mark(size: i32) -> Option<gtk::Image> {
     let texture = gdk::Texture::from_bytes(&glib::Bytes::from_static(MARK)).ok()?;
-    let picture = gtk::Picture::for_paintable(&texture);
-    picture.set_can_shrink(true);
-    picture.set_content_fit(gtk::ContentFit::Contain);
-    picture.set_size_request(size, size);
-    picture.set_halign(gtk::Align::Center);
-    picture.set_accessible_role(gtk::AccessibleRole::Presentation);
-    Some(picture)
+    let image = gtk::Image::from_paintable(Some(&texture));
+    image.set_pixel_size(size);
+    image.set_halign(gtk::Align::Center);
+    image.set_valign(gtk::Align::Center);
+    image.set_hexpand(false);
+    image.set_vexpand(false);
+    image.set_accessible_role(gtk::AccessibleRole::Presentation);
+    Some(image)
 }
 
 pub fn install_icon() {

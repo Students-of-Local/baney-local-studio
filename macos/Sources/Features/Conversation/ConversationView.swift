@@ -55,6 +55,7 @@ private struct DraftHero: View {
             VStack(spacing: 14) {
                 EmberMark()
                     .frame(width: 52, height: 52)
+                    .accessibilityHidden(true)
                     .padding(.bottom, 4)
                 Text(project.map { "What should we build in \($0.name)?" } ?? "What should we build?")
                     .font(.system(size: 26, weight: .semibold))
