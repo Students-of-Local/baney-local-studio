@@ -9,10 +9,14 @@ use eukhe_types::daemon::{DaemonClientKind, DaemonCommand, DaemonSessionLifecycl
 use serde_json::{json, Map, Value};
 use tokio::sync::{oneshot, watch};
 
+use crate::session::model_ref;
+use crate::workspace::providers::{claude_signed_in, eukhe_refuses};
+
 #[derive(Clone)]
 pub(crate) struct TextGen {
     client: watch::Receiver<Option<DaemonClient>>,
     session_dir: Option<PathBuf>,
+    agent_dir: Option<PathBuf>,
     home: String,
     answers: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
 }
@@ -21,9 +25,10 @@ impl TextGen {
     pub(crate) fn new(
         client: watch::Receiver<Option<DaemonClient>>,
         session_dir: Option<PathBuf>,
+        agent_dir: Option<PathBuf>,
         home: String,
     ) -> Self {
-        Self { client, session_dir, home, answers: Arc::default() }
+        Self { client, session_dir, agent_dir, home, answers: Arc::default() }
     }
 
     pub(crate) fn answered(&self, event: &Value) {
@@ -43,7 +48,9 @@ impl TextGen {
         provider: Option<String>,
         model: Option<String>,
     ) -> Result<String, String> {
+        eukhe_refuses(self.agent_dir.as_deref(), provider.as_deref())?;
         let client = self.client.borrow().clone().ok_or_else(|| "Not connected to the Eukhe daemon.".to_string())?;
+        let unchecked = provider.is_none() && claude_signed_in(self.agent_dir.as_deref());
         let mut config = json!({ "cwd": self.home });
         if let Some(dir) = &self.session_dir {
             config["sessionDir"] = Value::String(dir.to_string_lossy().into_owned());
@@ -73,7 +80,17 @@ impl TextGen {
             .and_then(Value::as_str)
             .ok_or_else(|| "The daemon opened a session without an id.".to_string())?
             .to_string();
-        let answer = self.ask(&client, &active, prompt).await;
+        let answer = if unchecked {
+            match resolved_provider(&client, &active).await {
+                Ok(resolved) => match eukhe_refuses(self.agent_dir.as_deref(), resolved.as_deref()) {
+                    Ok(()) => self.ask(&client, &active, prompt).await,
+                    Err(refused) => Err(refused),
+                },
+                Err(error) => Err(error),
+            }
+        } else {
+            self.ask(&client, &active, prompt).await
+        };
         let killed =
             client.request_ok(DaemonCommand::Kill { id: None, active_session_id: active, rest: Map::default() }).await;
         let answer = answer?;
@@ -120,4 +137,12 @@ impl TextGen {
             .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| "The model returned no text.".to_string())
     }
+}
+
+async fn resolved_provider(client: &DaemonClient, active: &str) -> Result<Option<String>, String> {
+    let state = client
+        .request_ok(DaemonCommand::GetState { id: None, active_session_id: active.to_string(), rest: Map::default() })
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(state.get("model").and_then(model_ref).map(|model| model.provider))
 }

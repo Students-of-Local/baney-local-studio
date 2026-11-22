@@ -119,7 +119,7 @@ Every check drives the real binaries against a real model. See [AGENTS.md](AGENT
 
 - macOS 26+ on Apple Silicon and Linux. Windows builds the core only, for now.
 - Not sandboxed: agents run code with your user's permissions. Use Supervised mode to approve each step.
-- Subscription sign-in (ChatGPT, Claude, GitHub Copilot) happens in Eukhe: run `eukhe`, then `/login`.
+- Subscription sign-in for ChatGPT and GitHub Copilot happens in Eukhe (`eukhe`, then `/login`). Claude runs only through Claude Code and your `claude` sign-in ([docs/harness.md](docs/harness.md)); Local Studio hides Eukhe's Claude sign-in because it identifies as Claude Code and can get the account restricted. Anthropic API keys still work in Eukhe.
 
 ## Credits
 

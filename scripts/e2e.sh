@@ -21,7 +21,7 @@ remote_ip=${E2E_REMOTE_IP:-}
 [ -n "$remote_ip" ] || { echo "no non-loopback IPv4 address for local_smoke's remote stub; set E2E_REMOTE_IP" >&2; exit 2; }
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
-examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke stuck_smoke providers_smoke local_smoke plugin_smoke ask_smoke harness_queue_smoke tunnel_setup_smoke harness_claude_smoke harness_codex_smoke)
+examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke stuck_smoke providers_smoke local_smoke plugin_smoke ask_smoke claude_signin_smoke harness_queue_smoke tunnel_setup_smoke harness_claude_smoke harness_codex_smoke)
 helpers=(provider_stub fake_claude fake_codex consent_driver)
 post=
 [ "${1:-}" = --post ] && post=1 && shift
