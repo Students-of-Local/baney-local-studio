@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use adw::prelude::*;
 use local_studio_core::{
     ColorScheme, LocalController, LocalDashboard, LocalElsewhere, LocalEndpoint, LocalEngineState,
     LocalEngineTelemetry, LocalGpu, LocalGpuTelemetry, LocalHardware, LocalJob, LocalMachineStatus, LocalRecipe,

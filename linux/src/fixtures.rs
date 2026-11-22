@@ -1078,7 +1078,6 @@ fn local_snapshot() -> LocalSnapshot {
             all_tokens: 473_000_000,
             requests: 20_730,
             measured_requests: 20_300,
-            cluster: None,
             daily: days(30, 900_000),
             models: vec![
                 LocalModelUsage {

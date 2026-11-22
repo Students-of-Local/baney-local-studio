@@ -15,9 +15,9 @@ use tokio::task::JoinSet;
 
 use super::model::{
     LocalAction, LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalController, LocalDownload, LocalEndpoint,
-    LocalEngineState, LocalGpu, LocalHardware, LocalHotplug, LocalJob, LocalLendMode, LocalLendState,
-    LocalLentServer, LocalMachineStatus, LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase, LocalRecipe,
-    LocalRecord, LocalRegistry, LocalRegistryMatch, LocalShare, LocalSnapshot, LocalTailnet, LocalThunderbolt,
+    LocalEngineState, LocalGpu, LocalHardware, LocalHotplug, LocalJob, LocalLendMode, LocalLendState, LocalLentServer,
+    LocalMachineStatus, LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase, LocalRecipe, LocalRecord,
+    LocalRegistry, LocalRegistryMatch, LocalShare, LocalSnapshot, LocalTailnet, LocalThunderbolt,
     LocalThunderboltState, LocalUsage, RegistryModel, RegistryVariant, Settings, TailnetDevice, UsageDay,
 };
 use super::process;
@@ -243,7 +243,11 @@ fn cluster(value: &Value) -> LocalCluster {
             .map(|server| LocalLentServer {
                 endpoint: text(server, "endpoint"),
                 for_name: text(server, "forName"),
-                gpus: array(server, "gpus").iter().filter_map(Value::as_u64).map(|gpu| gpu as u32).collect(),
+                gpus: array(server, "gpus")
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .filter_map(|gpu| u32::try_from(gpu).ok())
+                    .collect(),
             })
             .collect(),
         pools: array(value, "pools")
@@ -1011,12 +1015,12 @@ impl Local {
             | LocalAction::Rename { .. }
             | LocalAction::RunRecipe { .. }
             | LocalAction::StopRun { .. }
-            | LocalAction::StopPort { .. }
-            | LocalAction::Authorize { .. }
+            | LocalAction::StopPort { .. } => self.fleet_action(&root, action).await?,
+            LocalAction::Authorize { .. }
             | LocalAction::SetLending { .. }
             | LocalAction::SetDiscovery { .. }
             | LocalAction::LaunchPool { .. }
-            | LocalAction::StopPool { .. } => self.fleet_action(&root, action).await?,
+            | LocalAction::StopPool { .. } => self.cluster_action(&root, action).await?,
         }
         self.assemble(&root).await
     }
@@ -1073,6 +1077,22 @@ impl Local {
                 let path = format!("/api/ports/{port}/stop");
                 self.request(&endpoint, Method::POST, &path, Some(json!({})), ACTION_TIMEOUT).await?;
             }
+            LocalAction::Authorize { .. }
+            | LocalAction::SetLending { .. }
+            | LocalAction::SetDiscovery { .. }
+            | LocalAction::LaunchPool { .. }
+            | LocalAction::StopPool { .. }
+            | LocalAction::Registry { .. }
+            | LocalAction::Inspect { .. }
+            | LocalAction::Download { .. }
+            | LocalAction::PreviewShare { .. }
+            | LocalAction::Share { .. } => {}
+        }
+        Ok(())
+    }
+
+    async fn cluster_action(&self, root: &Endpoint, action: LocalAction) -> Result<(), String> {
+        match action {
             LocalAction::Authorize { controller, uuid } => {
                 let endpoint = self.target(root, &controller).await?;
                 self.request(
@@ -1107,19 +1127,21 @@ impl Local {
             }
             LocalAction::LaunchPool { controller, model } => {
                 let endpoint = self.target(root, &controller).await?;
-                self.request(&endpoint, Method::POST, "/api/cluster/pool", Some(json!({ "model": model })), ACTION_TIMEOUT)
-                    .await?;
+                self.request(
+                    &endpoint,
+                    Method::POST,
+                    "/api/cluster/pool",
+                    Some(json!({ "model": model })),
+                    ACTION_TIMEOUT,
+                )
+                .await?;
             }
             LocalAction::StopPool { controller, pool } => {
                 let endpoint = self.target(root, &controller).await?;
                 let path = format!("/api/cluster/pool/{}/stop", encode_segment(&pool));
                 self.request(&endpoint, Method::POST, &path, Some(json!({})), ACTION_TIMEOUT).await?;
             }
-            LocalAction::Registry { .. }
-            | LocalAction::Inspect { .. }
-            | LocalAction::Download { .. }
-            | LocalAction::PreviewShare { .. }
-            | LocalAction::Share { .. } => {}
+            _ => {}
         }
         Ok(())
     }
