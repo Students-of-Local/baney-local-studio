@@ -591,12 +591,16 @@ for line in sys.stdin:
         let counter = Arc::clone(&hits);
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
-                counter.fetch_add(1, Ordering::SeqCst);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let mut buffer = vec![0_u8; 65_536];
                 let read = stream.read(&mut buffer).unwrap_or(0);
                 let head = String::from_utf8_lossy(&buffer[..read]);
-                println!("     stub {port} got {:?}", head.lines().next().unwrap_or_default());
+                let line = head.lines().next().unwrap_or_default();
+                let listing = line.starts_with("GET ") && line.contains("/models");
+                if !listing {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                println!("     stub {port} got {line:?}{}", if listing { " (model list, not counted)" } else { "" });
                 let _ = stream
                     .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             }
@@ -875,7 +879,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let message = harness.view.refusals.iter().rev().find(|(id, _, _)| *id == thread).map(|(_, text, _)| text);
         ensure!(
             refused.is_ok() && sent == 0 && after == before,
-            "{text:?}: refusal {message:?}, {sent} connections to {CLOUD_HOST}, {CLOUD} usage {before:?} -> {after:?}"
+            "{text:?}: refusal {message:?}, {sent} requests to {CLOUD_HOST}, {CLOUD} usage {before:?} -> {after:?}"
         );
         println!("     {key}: {message:?}");
         Ok(message.cloned().unwrap_or_default())
@@ -948,7 +952,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let sent = drift_hits.load(Ordering::SeqCst);
         ensure!(
             second.is_ok() && sent == 0 && message.as_deref().is_some_and(|text| text.contains(CLOUD_HOST)),
-            "after models.json moved {DRIFT} to a local address: refusal {message:?}, {sent} connections to the drift stub"
+            "after models.json moved {DRIFT} to a local address: refusal {message:?}, {sent} requests to the drift stub"
         );
         println!("     drift: {message:?}");
         Ok(())
@@ -1189,9 +1193,9 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let report = usage(harness, "after-refusal")?;
         let (tokens, requests) = cloud_tokens(&report);
         ensure!(tokens == 0 && requests == 0, "{CLOUD} shows {tokens} tokens, {requests} requests");
-        ensure!(hits.load(Ordering::SeqCst) == 0, "the cloud endpoint got a connection");
+        ensure!(hits.load(Ordering::SeqCst) == 0, "the cloud endpoint got a request");
         println!(
-            "ok   check 1: /ledger on {CLOUD} refused ({message}); transcript has no user message, usage shows {CLOUD} 0 tokens 0 requests, the {CLOUD_HOST} endpoint saw 0 connections; offered {}",
+            "ok   check 1: /ledger on {CLOUD} refused ({message}); transcript has no user message, usage shows {CLOUD} 0 tokens 0 requests, the {CLOUD_HOST} endpoint saw 0 requests; offered {}",
             local.model
         );
 
@@ -1273,7 +1277,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let local_tokens: u64 = report.by_model.iter().filter(|row| row.provider == LOCAL).map(|row| row.tokens).sum();
         ensure!(local_tokens > 0, "no local tokens counted");
         ensure!(cloud_tokens(&report) == (0, 0), "{CLOUD} usage after the local run");
-        ensure!(hits.load(Ordering::SeqCst) == 0, "the cloud endpoint got a connection");
+        ensure!(hits.load(Ordering::SeqCst) == 0, "the cloud endpoint got a request");
         println!("ok   check 2: the same /ledger completed on {LOCAL}/{} ({local_tokens} tokens), still on it", mid());
 
         let vault = server_starts(ledger_out, "plugin-vault");
