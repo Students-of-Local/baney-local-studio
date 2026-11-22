@@ -192,3 +192,56 @@ export const hardware = (gpus: LocalGpu[], thunderbolt: LocalThunderbolt[], hotp
   cpus: cpus().length, memTotalBytes: totalmem(), memFreeBytes: freemem(), gpus,
   os: platform(), arch: arch(), egpuNote: egpuNote(), thunderbolt, hotplug,
 });
+
+export interface Presence {
+  present: boolean | null;
+  source: string;
+  idleSeconds: number | null;
+}
+
+const PRESENT_IDLE_S = 60;
+const GRAPHICAL = new Set(["x11", "wayland", "mir"]);
+
+const testPresence = (): Presence | null => {
+  const v = process.env.LOCAL_STUDIO_TEST_PRESENT;
+  if (!v) return null;
+  const said = v === "0" || v === "1" ? v : (read(v) ?? "0");
+  return { present: said === "1", source: "test override", idleSeconds: null };
+};
+
+const logind: Effect.Effect<Presence> = Effect.gen(function* () {
+  if (!Bun.which("loginctl")) return { present: null, source: "loginctl is not installed, so it can't tell whether someone is at the screen", idleSeconds: null };
+  const list = yield* exec(["loginctl", "list-sessions", "--no-legend"], 5_000);
+  if (list.code !== 0) return { present: null, source: `loginctl failed: ${lastLine(list)}`, idleSeconds: null };
+  const ids = list.stdout.split("\n").map((l) => l.trim().split(/\s+/)[0] ?? "").filter((id) => /^[\w-]+$/.test(id));
+  if (!ids.length) return { present: false, source: "logind: no sessions", idleSeconds: null };
+  const show = yield* exec(["loginctl", "show-session", ...ids, "-p", "Id", "-p", "Type", "-p", "Active", "-p", "Remote", "-p", "IdleHint", "-p", "IdleSinceHint"], 5_000);
+  const sessions = show.stdout.split(/\n\s*\n/).map((block) => Object.fromEntries(block.split("\n").flatMap((l) => {
+    const i = l.indexOf("=");
+    return i > 0 ? [[l.slice(0, i), l.slice(i + 1).trim()]] : [];
+  })) as Record<string, string>);
+  const local = sessions.filter((s) => GRAPHICAL.has(s.Type ?? "") && s.Active === "yes" && s.Remote !== "yes");
+  if (!local.length) return { present: false, source: "logind: no active local graphical session", idleSeconds: null };
+  const idle = local.map((s) => {
+    if (s.IdleHint !== "yes") return 0;
+    const since = Number(s.IdleSinceHint);
+    return since > 0 ? Math.max(0, Math.floor((Date.now() - since / 1000) / 1000)) : PRESENT_IDLE_S;
+  });
+  const least = Math.min(...idle);
+  const s = local[idle.indexOf(least)]!;
+  return { present: least < PRESENT_IDLE_S, source: `logind session ${s.Id} (${s.Type})`, idleSeconds: least };
+});
+
+export const presence: Effect.Effect<Presence> = Effect.gen(function* () {
+  const test = testPresence();
+  if (test) return test;
+  if (platform() === "darwin" && !process.env.LOCAL_STUDIO_SYSFS) {
+    const r = yield* exec(["ioreg", "-c", "IOHIDSystem", "-d", "4", "-k", "HIDIdleTime"], 5_000);
+    const ns = Number(/"HIDIdleTime" = (\d+)/.exec(r.stdout)?.[1] ?? Number.NaN);
+    if (!Number.isFinite(ns)) return { present: null, source: "macOS did not report input idle time", idleSeconds: null };
+    const s = Math.floor(ns / 1e9);
+    return { present: s < PRESENT_IDLE_S, source: "macOS input idle time", idleSeconds: s };
+  }
+  if (platform() === "linux") return yield* logind;
+  return { present: null, source: `${platform()} has no presence check`, idleSeconds: null };
+});

@@ -5,13 +5,14 @@ import { arch, homedir, platform } from "node:os";
 import { basename, join } from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import type { LocalCluster, LocalLendMode, LocalLendState, LocalNodeCluster, LocalPool, LocalPoolRequest } from "./contracts.ts";
+import type { LocalCluster, LocalClusterRequest, LocalLendMode, LocalLendState, LocalNodeCluster, LocalPool, LocalPoolRequest } from "./contracts.ts";
 import { type Config, decodeJson, exec, fail, fetchJson, home, now } from "./core.ts";
 import type { Endpoint } from "./discovery.ts";
 import { lentInFlight } from "./gateway.ts";
 import { type Graph, normUrl } from "./graph.ts";
-import { powerSource, type RawGpu } from "./hardware.ts";
+import { type Presence, presence, powerSource, type RawGpu } from "./hardware.ts";
 import type { makeJobs } from "./jobs.ts";
+import { makePower } from "./power.ts";
 import { onlinePeers, tailnetIPv4 } from "./tailnet.ts";
 
 type Jobs = ReturnType<typeof makeJobs>;
@@ -83,6 +84,7 @@ export const clusterSettings = (c: Config) => ({
   rpcPort: c.cluster?.rpcPort ?? 50052,
   rpcServer: c.cluster?.rpcServer ?? "rpc-server",
   llamaServer: c.cluster?.llamaServer ?? "llama-server",
+  power: { activeWatts: c.cluster?.power?.activeWatts ?? 0, awayWatts: c.cluster?.power?.awayWatts ?? null },
 });
 
 const proof = (key: string, nonce: string, id: string, target: string): string => createHmac("sha256", key).update(`${nonce}|${id}|${normUrl(target)}`).digest("hex");
@@ -199,6 +201,9 @@ const ggufs = (dirs: string[]): { path: string; name: string; sizeBytes: number 
 export const makeCluster = (d: ClusterDeps) => {
   let state: LocalLendState = "off";
   let reason = "Lending is off for this machine.";
+  let base = reason;
+  const off: Presence = { present: null, source: "not checked while lending is off", idleSeconds: null };
+  let owner: Presence = off;
   let since = now();
   let checks: Check[] = [];
   let idleSince: number | null = null;
@@ -215,6 +220,13 @@ export const makeCluster = (d: ClusterDeps) => {
   const pools = new Map<string, Pool>();
   const claims = new Set<{ ids: string[]; port: number }>();
   const set = () => clusterSettings(d.config());
+  const lever = makePower({
+    gpus: d.gpus,
+    pids: () => [...rpcs.values()].flatMap((r) => (r.proc.exitCode === null && !r.proc.signalCode ? [r.proc.pid] : [])),
+    containers: () => d.jobs.active().filter((j) => j.lent).map((j) => j.container),
+  });
+  void lever.recover();
+  const fleetGpus = (): string[] => [...new Set([...[...rpcs.values()].flatMap((r) => r.gpuIds), ...d.jobs.active().filter((j) => j.lent).flatMap((j) => j.gpuUuids ?? [])])];
 
   const ip = async (): Promise<string | null> => {
     if (Date.now() - tailnetAt > 60_000) {
@@ -258,13 +270,21 @@ export const makeCluster = (d: ClusterDeps) => {
     return { name: "parish-media", ok, detail: ok ? "parish-media says the GPU is free." : `parish-media: ${s.not_ready}` };
   };
 
-  const macIdle = async (): Promise<Check | null> => {
-    if (platform() !== "darwin" || process.env.LOCAL_STUDIO_SYSFS) return null;
-    const r = await Effect.runPromise(exec(["ioreg", "-c", "IOHIDSystem", "-d", "4", "-k", "HIDIdleTime"], 5_000));
-    const ns = Number(/"HIDIdleTime" = (\d+)/.exec(r.stdout)?.[1] ?? Number.NaN);
-    if (!Number.isFinite(ns)) return null;
-    const s = Math.floor(ns / 1e9);
-    return { name: "Owner", ok: s >= 60, detail: s >= 60 ? `Nobody has used this Mac for ${Math.floor(s / 60)} min.` : "Someone is using this Mac." };
+  const ownerCheck = async (): Promise<Check | null> => {
+    owner = await Effect.runPromise(presence);
+    if (owner.present === null) return null;
+    const where = platform() === "darwin" && !process.env.LOCAL_STUDIO_SYSFS ? "this Mac" : "this machine";
+    if (!owner.present) return { name: "Owner", ok: true, detail: owner.idleSeconds === null ? `Nobody is at ${where}'s screen.` : `Nobody has used ${where} for ${Math.floor(owner.idleSeconds / 60)} min.` };
+    const w = set().power.activeWatts;
+    return w > 0 ? { name: "Owner", ok: true, detail: `Someone is using ${where}, so it lends at up to ${w} W.` } : { name: "Owner", ok: false, detail: `Someone is using ${where}.` };
+  };
+
+  const capFor = (s: ReturnType<typeof set>): number | null => (owner.present === true ? (s.power.activeWatts > 0 ? s.power.activeWatts : null) : s.power.awayWatts);
+
+  const lentReason = (s: ReturnType<typeof set>, head: string): string => {
+    const cap = capFor(s);
+    if (owner.present === true && cap !== null) return `In use, so it lends at up to ${cap} W.`;
+    return cap === null ? `${head}.` : `${head}, at up to ${cap} W.`;
   };
 
   const evaluate = async (): Promise<Check[]> => {
@@ -283,7 +303,7 @@ export const makeCluster = (d: ClusterDeps) => {
     ];
     const stale = gpus.find((g) => g.stale);
     if (stale) out.push({ name: "GPU readings", ok: false, detail: `A GPU fell off the bus, so nvidia-smi no longer reports ${stale.name}. This machine can't tell whether its owner is using it until it restarts.` });
-    for (const extra of await Promise.all([media(fleet), macIdle()])) if (extra) out.push(extra);
+    for (const extra of await Promise.all([media(fleet), ownerCheck()])) if (extra) out.push(extra);
     return out;
   };
 
@@ -294,10 +314,19 @@ export const makeCluster = (d: ClusterDeps) => {
     const was = state;
     state = next;
     reason = why;
+    base = why;
     if (was === "lent" && next !== "lent") void reclaim(why);
   };
 
   const tick = async () => {
+    await decide();
+    const s = set();
+    await lever.set(state === "lent" ? capFor(s) : null, fleetGpus());
+    const note = lever.note();
+    if (note && (state === "lent" || /restore/.test(note))) reason = `${base} ${note}`;
+  };
+
+  const decide = async () => {
     const s = set();
     for (const r of [...rpcs.values()]) {
       if (r.conns.size) r.quietSince = null;
@@ -310,6 +339,7 @@ export const makeCluster = (d: ClusterDeps) => {
     if (s.lend === "never") {
       checks = [];
       idleSince = null;
+      owner = off;
       return move("off", "Lending is off for this machine.");
     }
     if (!hasGpu()) {
@@ -318,7 +348,9 @@ export const makeCluster = (d: ClusterDeps) => {
     }
     if (s.lend === "always") {
       checks = await evaluate();
-      return move("lent", "Lent to the fleet all the time.");
+      const battery = checks.find((c) => c.name === "Power" && !c.ok);
+      if (battery) return move("reclaimed", battery.detail);
+      return move("lent", lentReason(s, "Lent to the fleet all the time"));
     }
     checks = await evaluate();
     const bad = checks.find((c) => !c.ok);
@@ -328,8 +360,8 @@ export const makeCluster = (d: ClusterDeps) => {
     }
     idleSince ??= Date.now();
     const idle = Math.floor((Date.now() - idleSince) / 1000);
-    if (idle >= s.idleSeconds) return move("lent", "Idle, so its GPU is lent to the fleet.");
-    return move(state === "lent" ? "lent" : "reclaimed", state === "lent" ? reason : `Idle for ${idle} s; it lends its GPU after ${s.idleSeconds} s idle.`);
+    if (idle >= s.idleSeconds || state === "lent") return move("lent", lentReason(s, "Idle, so its GPU is lent to the fleet"));
+    return move("reclaimed", `Idle for ${idle} s; it lends its GPU after ${s.idleSeconds} s idle.`);
   };
 
   const post = (url: string, path: string, body: unknown, timeoutMs: number) =>
@@ -339,6 +371,7 @@ export const makeCluster = (d: ClusterDeps) => {
     const r = rpcs.get(id);
     if (!r) return;
     rpcs.delete(id);
+    lever.resume(r.proc.pid);
     for (const c of r.conns) c.destroy();
     r.gate.close();
     await kill(r.proc);
@@ -348,6 +381,7 @@ export const makeCluster = (d: ClusterDeps) => {
     reclaiming ??= (async () => {
       draining = true;
       try {
+        await lever.set(null, []);
         await Promise.all([...rpcs.values()].map((r) => post(r.forUrl, "/api/cluster/release", { controllerId: d.config().id, reason: `${d.config().name} took its GPU back: ${why}` }, 3_000).catch(() => undefined)));
         const end = Date.now() + set().drainSeconds * 1000;
         while (Date.now() < end && (lentInFlight() > 0 || [...rpcs.values()].some((r) => r.conns.size > 0))) await Bun.sleep(200);
@@ -600,8 +634,22 @@ export const makeCluster = (d: ClusterDeps) => {
     const ms = await machines();
     const one = Math.max(node().freeMiB, ...ms.map((m) => m.freeMiB)) * 2 ** 20;
     const pooled = (node().freeMiB + ms.filter((m) => m.state === "lent").reduce((n, m) => n + m.freeMiB, 0)) * 2 ** 20;
+    const s = set();
+    const p = lever.view(fleetGpus());
     return {
       ...node(),
+      power: {
+        activeWatts: s.power.activeWatts,
+        awayWatts: s.power.awayWatts,
+        present: owner.present,
+        presenceSource: owner.source,
+        capW: state === "lent" ? p.capW : null,
+        lever: state === "lent" ? p.lever : "none",
+        measured: p.measured,
+        measuredW: state === "lent" ? p.measuredW : null,
+        helper: lever.helper(),
+        gpus: p.gpus,
+      },
       draining,
       checks,
       discovered: [...discovered.values()],
@@ -613,10 +661,12 @@ export const makeCluster = (d: ClusterDeps) => {
     };
   };
 
-  const configure = (req: { discover?: boolean; lend?: LocalLendMode }) => {
+  const configure = (req: typeof LocalClusterRequest.Type) => {
     const c = d.config();
-    d.save({ ...c, cluster: { ...c.cluster, ...(req.discover === undefined ? {} : { discover: req.discover }), ...(req.lend ? { lend: req.lend } : {}) } });
-    idleSince = null;
+    const power = req.power ? { ...c.cluster?.power, ...req.power } : undefined;
+    d.save({ ...c, cluster: { ...c.cluster, ...(req.discover === undefined ? {} : { discover: req.discover }), ...(req.lend ? { lend: req.lend } : {}), ...(power ? { power } : {}) } });
+    if (req.power) lever.retry();
+    if (req.lend) idleSince = null;
     return tick().then(() => node());
   };
 
@@ -644,6 +694,7 @@ export const makeCluster = (d: ClusterDeps) => {
     watchPools,
     rpcPorts: () => [set().rpcPort, ...[...rpcs.values()].map((r) => r.internal)],
     shutdown: async () => {
+      await lever.stop();
       await Promise.all([...pools.keys()].map((id) => teardown(id, null)));
       await Promise.all([...rpcs.keys()].map(stopRpc));
     },

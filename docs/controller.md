@@ -69,7 +69,7 @@ All routes except `/api/health` require the fleet key.
 | `POST /api/name`, `/api/peers`                                                                    | Rename, link and unlink                                               |
 | `GET /api/registry`, `/api/registry/records/<id>`, `POST /api/registry/download`                  | Registry models matched to this machine's hardware, records, weights  |
 | `GET /api/registry/share?port=<port>`, `POST /api/registry/share`                                 | Preview and share a running server's config to local-ai-registry      |
-| `GET /api/cluster`, `POST /api/cluster`                                                           | Lending state, checks, machines and pools; set `discover` and `lend`  |
+| `GET /api/cluster`, `POST /api/cluster`                                                           | Lending state, checks, power budget, machines and pools; set `discover`, `lend` and `power` |
 | `POST /api/cluster/pool`, `/api/cluster/pool/<id>/stop`                                           | Launch (or `dryRun`) and stop a pooled model                          |
 | `POST /api/cluster/rpc`, `/api/cluster/rpc/stop`, `/api/cluster/release`                          | Controller to controller: lend an `rpc-server`, stop it, take it back |
 | `POST /api/cluster/hello`                                                                         | Discovery handshake; needs no key, answers only with a keyed proof    |
@@ -128,7 +128,8 @@ Clustering is off until a machine opts in with a `cluster` block in `config.json
 | Field         | Default        | Meaning                                                                                   |
 | ------------- | -------------- | ----------------------------------------------------------------------------------------- |
 | `discover`    | `false`        | Find other controllers on the tailnet and link those that share the fleet key             |
-| `lend`        | `"never"`      | `never`, `idle` (lend only while the owner is away) or `always`                           |
+| `lend`        | `"never"`      | `never`, `idle` (lend when every check passes; see [Power budget](#power-budget) for lending while the owner is present) or `always` |
+| `power`       | `{ "activeWatts": 0, "awayWatts": null }` | Watt caps for fleet GPU work while the owner is present and while away; see [Power budget](#power-budget) |
 | `ports`       | `[18091]`      | Controller ports to probe on each online tailnet device                                   |
 | `idleSeconds` | `120`          | How long every check must pass before an `idle` machine lends                             |
 | `drainSeconds`| `5`            | How long a reclaim waits for requests in flight before it stops lent work                 |
@@ -150,9 +151,42 @@ Every 2 seconds a lending machine runs its checks:
 | GPU use        | No GPU is 10% or more busy without a fleet process on it                                     |
 | Power          | The machine is on AC power                                                                   |
 | parish-media   | Where `~/.local/bin/parish-media` exists, its `status` is ready, or the only programs it lists are fleet processes and the machine is on AC with no media jobs |
-| Owner          | On a Mac, nobody has touched the keyboard or mouse for a minute                              |
+| Owner          | Nobody is present (below), or someone is and `power.activeWatts` is above 0                  |
 
-`idle` lends once every check has passed for `idleSeconds` and reclaims the moment one fails. `always` lends whenever the machine has a GPU. On a reclaim the controller marks itself draining, tells the machines it lends to, waits up to `drainSeconds` for requests in flight, then stops only what it started for the fleet: lent `rpc-server` processes and jobs launched with `lend: true`. A lent job is failed with "<machine> took its GPU back: <reason>". The `reason` field says in plain words why a machine is or is not lending.
+The Owner check reads presence. On a Mac, someone is present when the keyboard or mouse was touched in the last minute (`HIDIdleTime`). On Linux, someone is present when logind has an active local graphical session (`x11`, `wayland` or `mir`, not remote) whose idle hint is off or turned on less than a minute ago; a machine with no graphical session counts as away. Where presence can't be read the check is left out.
+
+`idle` lends once every check has passed for `idleSeconds` and reclaims the moment one fails. `always` lends whenever the machine has a GPU and is on AC power. On a reclaim the controller marks itself draining, tells the machines it lends to, waits up to `drainSeconds` for requests in flight, then stops only what it started for the fleet: lent `rpc-server` processes and jobs launched with `lend: true`. A lent job is failed with "<machine> took its GPU back: <reason>". The `reason` field says in plain words why a machine is or is not lending.
+
+### Power budget
+
+`cluster.power` caps how many watts fleet work may draw:
+
+| Field         | Default | Meaning                                                                                      |
+| ------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `activeWatts` | `0`     | Cap while the owner is present. `0` means the machine does not lend while someone is using it |
+| `awayWatts`   | `null`  | Cap while the owner is away; `null` means no cap                                             |
+
+Both are whole watts from 0 to 2000. Set them with `POST /api/cluster` and `{ "power": { "activeWatts": 60, "awayWatts": null } }`; fields left out keep their value. With `lend: "idle"` and `activeWatts` above 0, the Owner check passes while someone is present and the machine lends under `activeWatts`; GPU programs, GPU use, parish-media and battery still block and still reclaim at once. `always` uses `awayWatts` while the owner is away, `activeWatts` while present when it is above 0, and otherwise no cap. A machine on battery never lends.
+
+The controller caps fleet work with one of two levers, chosen per GPU:
+
+- `nvidia-limit`: on an NVIDIA GPU it runs `sudo -n nvidia-smi -i <index> -pl <watts>`, the cap split evenly across the GPUs in use and clamped to `power.min_limit` and `power.max_limit`. Before the first change it records the GPU's limit by uuid in `<data root>/power-restore.json` (mode 0600). It puts the original back when the machine reclaims, when the cap goes away, on SIGTERM or SIGINT, and at start (after a crash), then drops the record. `sudo` needs a rule that allows `nvidia-smi` without a password: `local-studio fleet power-helper --yes` writes `/etc/sudoers.d/local-studio-power`, which allows only `<nvidia-smi path> -i <GPU index> -pl <watts>` for the user who ran it, checked with `visudo -cf` before it is installed. When `sudo -n` fails, or a GPU reports no adjustable limit, that GPU falls back to the duty cycle and `reason` says why. Changing the budget tries `sudo` again.
+- `duty-cycle`: needs no root. Every 200 ms the controller lets the processes it started for lending run for part of the period and stops them (`SIGSTOP`, then `SIGCONT`) for the rest: lent `rpc-server` processes, by the PIDs it spawned. Lent jobs, which are containers, are paused with `docker pause` and `docker unpause` on a 2 second period. It never signals a process it did not start. On NVIDIA it reads `power.draw` from `nvidia-smi -lms 200` and steers the share of time that fleet work runs so the draw stays at or under the cap. On Apple Silicon it reads `gpu_power` from `macmon pipe` when `macmon` is on `PATH`; without it there is no watt reading, so it runs fleet work `cap / 30 W` of the time (10% to 100%), reports `measured: false`, and says so in `reason`. Every stopped process is continued on reclaim, when the cap goes away, and on exit.
+
+`GET /api/cluster` reports the budget under `power`:
+
+| Field            | Meaning                                                                                  |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| `activeWatts`, `awayWatts` | The configured caps                                                            |
+| `present`        | `true`, `false`, or `null` when presence can't be read or lending is off                 |
+| `presenceSource` | How presence was read, such as `macOS input idle time` or `logind session 2 (wayland)`   |
+| `capW`           | The cap in force now, or `null`                                                          |
+| `lever`          | `nvidia-limit`, `duty-cycle` or `none`                                                   |
+| `measured`, `measuredW` | Whether draw is measured, and the fleet GPUs' draw now in watts (or `null`)       |
+| `helper`         | `installed` when `sudo -n` may run `nvidia-smi -pl`, `missing`, or `unsupported` (not Linux with NVIDIA) |
+| `gpus`           | Per GPU: `uuid`, `index`, `lever`, `limitW` and `originalW`                              |
+
+`reason` stays plain, for example "In use, so it lends at up to 60 W." `LOCAL_STUDIO_TEST_PRESENT` is for checks only: `1` or `0`, or the path of a file holding `1` or `0`, replaces the presence reading.
 
 ### Routing
 

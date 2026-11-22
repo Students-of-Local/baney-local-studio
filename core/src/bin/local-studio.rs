@@ -27,13 +27,18 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
        local-studio tunnel cloudflared [--yes] [--json]
        local-studio tunnel byo
+       local-studio fleet status [--json]
+       local-studio fleet join [--json]
+       local-studio fleet share [--active <watts|off>] [--away <watts|max>] [--json]
+       local-studio fleet stop-sharing [--json]
+       local-studio fleet power-helper [--yes]
        local-studio update check | download | status
        local-studio update apply [--target <path>] [--no-relaunch]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let json = args.first() == Some(&"tunnel") && args.contains(&"--json");
+    let json = matches!(args.first(), Some(&("tunnel" | "fleet"))) && args.contains(&"--json");
     if json {
         args.retain(|arg| *arg != "--json");
     }
@@ -100,6 +105,12 @@ fn main() -> ExitCode {
         ["tunnel", "cloudflared"] => cloudflared(false, json),
         ["tunnel", "cloudflared", "--yes"] => cloudflared(true, json),
         ["tunnel", "byo"] => byo(),
+        ["fleet", "status"] => fleet_status(json),
+        ["fleet", "join"] => fleet_set(&serde_json::json!({ "discover": true }), json),
+        ["fleet", "share", flags @ ..] => share_body(flags).and_then(|body| fleet_set(&body, json)),
+        ["fleet", "stop-sharing"] => fleet_set(&serde_json::json!({ "lend": "never" }), json),
+        ["fleet", "power-helper"] => power_helper(false),
+        ["fleet", "power-helper", "--yes"] => power_helper(true),
         ["update", "check"] => update_check(),
         ["update", "download"] => update_download(),
         ["update", "status"] => update_status(),
@@ -681,5 +692,305 @@ fn update_apply(flags: &[&str]) -> Result<(), String> {
     if relaunch {
         update::relaunch(&applied.target)?;
     }
+    Ok(())
+}
+
+struct Fleet {
+    base: String,
+    key: Option<String>,
+}
+
+fn json_text(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_string)
+}
+
+fn read_value(path: &Path) -> Value {
+    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null)
+}
+
+fn fleet_open() -> Result<Fleet, String> {
+    let data = local_studio_core::data_dir(None)?;
+    let settings = read_value(&data.join("settings.json"));
+    let base = std::env::var("LOCAL_STUDIO_CONTROLLER_URL")
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| json_text(&settings, "localControllerUrl"))
+        .unwrap_or_else(|| "http://127.0.0.1:18091".to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let homes = [
+        std::env::var_os("LOCAL_STUDIO_CONTROLLER_HOME").filter(|home| !home.is_empty()).map(PathBuf::from),
+        Some(data.join("controller")),
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local-studio-controller")),
+    ];
+    let key = json_text(&settings, "fleetKey").or_else(|| {
+        homes.into_iter().flatten().find_map(|home| json_text(&read_value(&home.join("config.json")), "fleetKey"))
+    });
+    Ok(Fleet { base, key })
+}
+
+fn fleet_call(body: Option<&Value>) -> Result<Value, String> {
+    let fleet = fleet_open()?;
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| error.to_string())?;
+        let url = format!("{}/api/cluster", fleet.base);
+        let mut request = match body {
+            Some(body) => http.post(&url).json(body),
+            None => http.get(&url),
+        };
+        if let Some(key) = &fleet.key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await.map_err(|error| {
+            if error.is_connect() {
+                format!(
+                    "No Local controller answers at {}. Open Local Studio (it starts the controller) or start the controller, then try again.",
+                    fleet.base
+                )
+            } else {
+                format!("The Local controller at {} did not answer: {error}", fleet.base)
+            }
+        })?;
+        let status = response.status();
+        let value: Value = response.json().await.unwrap_or(Value::Null);
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(match fleet.key {
+                Some(_) => format!("The controller at {} refused this machine's fleet key.", fleet.base),
+                None => format!(
+                    "The controller at {} needs the fleet key, and none was found in Local Studio's settings or the controller's config.json.",
+                    fleet.base
+                ),
+            });
+        }
+        if !status.is_success() {
+            let message = value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("controller error {status}"), str::to_string);
+            return Err(message);
+        }
+        Ok(value)
+    })
+}
+
+fn fleet_failed(message: String, as_json: bool) -> String {
+    if !as_json {
+        return message;
+    }
+    println!("{}", serde_json::json!({ "state": "error", "message": message }));
+    String::new()
+}
+
+fn fleet_status(as_json: bool) -> Result<(), String> {
+    let value = fleet_call(None).map_err(|message| fleet_failed(message, as_json))?;
+    fleet_show(&value, as_json);
+    Ok(())
+}
+
+fn fleet_set(body: &Value, as_json: bool) -> Result<(), String> {
+    let value = fleet_call(Some(body)).map_err(|message| fleet_failed(message, as_json))?;
+    fleet_show(&value, as_json);
+    Ok(())
+}
+
+fn watts_flag(raw: &str, word: &str, none: Value) -> Result<Value, String> {
+    if raw == word {
+        return Ok(none);
+    }
+    match raw.parse::<u32>() {
+        Ok(watts) if watts <= 2000 => Ok(Value::from(watts)),
+        _ => Err(format!("{raw} is not a wattage: use a whole number from 0 to 2000, or {word}")),
+    }
+}
+
+fn share_body(flags: &[&str]) -> Result<Value, String> {
+    let mut power = serde_json::Map::new();
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let value = rest.next().ok_or_else(|| USAGE.to_string())?;
+        match *flag {
+            "--active" => power.insert("activeWatts".into(), watts_flag(value, "off", Value::from(0))?),
+            "--away" => power.insert("awayWatts".into(), watts_flag(value, "max", Value::Null)?),
+            _ => return Err(USAGE.to_string()),
+        };
+    }
+    let mut body = serde_json::json!({ "lend": "idle" });
+    if !power.is_empty() {
+        body["power"] = Value::Object(power);
+    }
+    Ok(body)
+}
+
+fn watts_text(value: Option<&Value>, zero: &str, null: &str) -> String {
+    match value.and_then(Value::as_f64) {
+        None => null.to_string(),
+        Some(_) if value.and_then(Value::as_u64) == Some(0) => zero.to_string(),
+        Some(watts) => format!("up to {watts} W"),
+    }
+}
+
+fn fleet_show(value: &Value, as_json: bool) {
+    let power = value.get("power").cloned().unwrap_or(Value::Null);
+    let machines = value.get("machines").and_then(Value::as_array).cloned().unwrap_or_default();
+    if as_json {
+        let peers: Vec<Value> = machines
+            .iter()
+            .map(|machine| {
+                serde_json::json!({
+                    "id": machine.get("id"), "name": machine.get("name"), "url": machine.get("url"),
+                    "state": machine.get("state"), "lend": machine.get("lend"), "reason": machine.get("reason"),
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "state": value.get("state"), "lend": value.get("lend"), "discover": value.get("discover"),
+            "reason": value.get("reason"), "since": value.get("since"), "checks": value.get("checks"),
+            "power": power, "peers": peers,
+        });
+        println!("{out}");
+        return;
+    }
+    let text = |from: &Value, key: &str| json_text(from, key).unwrap_or_default();
+    println!("{}: {}", text(value, "state"), text(value, "reason"));
+    println!(
+        "  sharing: {}, finding other machines: {}",
+        text(value, "lend"),
+        if value.get("discover").and_then(Value::as_bool) == Some(true) { "on" } else { "off" }
+    );
+    println!(
+        "  power while in use: {}; while away: {}",
+        watts_text(power.get("activeWatts"), "does not lend", "no cap"),
+        watts_text(power.get("awayWatts"), "0 W", "no cap")
+    );
+    let owner = match power.get("present").and_then(Value::as_bool) {
+        Some(true) => "present",
+        Some(false) => "away",
+        None => "unknown",
+    };
+    println!("  owner: {owner} ({})", text(&power, "presenceSource"));
+    match power.get("capW").and_then(Value::as_f64) {
+        Some(cap) => println!("  cap now: {cap} W through {}", text(&power, "lever")),
+        None => println!("  cap now: none"),
+    }
+    match power.get("measuredW").and_then(Value::as_f64) {
+        Some(draw) => println!("  fleet draw: {draw} W"),
+        None => println!("  fleet draw: not measured"),
+    }
+    println!("  power helper: {}", text(&power, "helper"));
+    for check in value.get("checks").and_then(Value::as_array).into_iter().flatten() {
+        let ok = check.get("ok").and_then(Value::as_bool) == Some(true);
+        println!("  {} {}: {}", if ok { "pass" } else { "fail" }, text(check, "name"), text(check, "detail"));
+    }
+    if machines.is_empty() {
+        println!("  peers: none yet");
+    }
+    for machine in &machines {
+        println!(
+            "  peer {} ({}): {}, {}",
+            text(machine, "name"),
+            text(machine, "url"),
+            text(machine, "state"),
+            text(machine, "reason")
+        );
+    }
+}
+
+const SUDOERS_PATH: &str = "/etc/sudoers.d/local-studio-power";
+
+fn on_path(program: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(program)).find(|path| path.is_file())
+}
+
+fn sudoers_text(user: &str, nvidia_smi: &Path) -> String {
+    let digits = |count: usize| "[0-9]".repeat(count);
+    let mut watts: Vec<String> = (1..=4).map(digits).collect();
+    watts.extend((1..=4).map(|count| format!("{}.{}", digits(count), digits(2))));
+    let lines: Vec<String> = [digits(1), digits(2)]
+        .iter()
+        .flat_map(|index| watts.iter().map(move |watt| format!("{} -i {index} -pl {watt}", nvidia_smi.display())))
+        .collect();
+    format!(
+        "Cmnd_Alias LOCAL_STUDIO_POWER = \\\n    {}\n{user} ALL=(root) NOPASSWD: LOCAL_STUDIO_POWER\n",
+        lines.join(", \\\n    ")
+    )
+}
+
+fn power_helper(yes: bool) -> Result<(), String> {
+    if !cfg!(target_os = "linux") {
+        return Err("The power helper is only for Linux machines with an NVIDIA GPU. On this machine the controller caps fleet work by pausing it in short bursts, which needs no setup.".to_string());
+    }
+    let nvidia_smi = on_path("nvidia-smi").ok_or(
+        "This machine has no NVIDIA GPU (nvidia-smi is not installed), so there is no power limit to set. The controller caps fleet work by pausing it instead.",
+    )?;
+    let listed = std::process::Command::new(&nvidia_smi).arg("-L").output().map_err(|error| error.to_string())?;
+    if !listed.status.success() || !String::from_utf8_lossy(&listed.stdout).contains("GPU ") {
+        return Err("nvidia-smi lists no GPU on this machine, so there is no power limit to set.".to_string());
+    }
+    let user = std::env::var("USER").unwrap_or_default();
+    let valid = user.chars().next().is_some_and(|first| first.is_ascii_lowercase() || first == '_')
+        && user.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !valid {
+        return Err(format!("USER is {user:?}, which is not a plain account name, so no sudoers rule is written."));
+    }
+    let text = sudoers_text(&user, &nvidia_smi);
+    println!("This writes {SUDOERS_PATH}:\n\n{text}");
+    println!(
+        "It lets {user} run only `{} -i <GPU index> -pl <watts>` as root without a password, so the Local controller can cap fleet GPU work and put the original limit back.",
+        nvidia_smi.display()
+    );
+    let staged = std::env::temp_dir().join(format!("local-studio-power.{}", std::process::id()));
+    println!("It runs: visudo -cf {}", staged.display());
+    println!("         sudo install -m 0440 -o root -g root {} {SUDOERS_PATH}", staged.display());
+    if !yes {
+        println!("Nothing was changed. Run `local-studio fleet power-helper --yes` to install it.");
+        return Ok(());
+    }
+    std::fs::write(&staged, &text).map_err(|error| format!("could not write {}: {error}", staged.display()))?;
+    let result = install_sudoers(&staged, &nvidia_smi);
+    let _ = std::fs::remove_file(&staged);
+    result
+}
+
+fn install_sudoers(staged: &Path, nvidia_smi: &Path) -> Result<(), String> {
+    let visudo = on_path("visudo").or_else(|| Some(PathBuf::from("/usr/sbin/visudo")).filter(|path| path.is_file()));
+    let visudo = visudo.ok_or("visudo is not installed, so the rule can't be checked before it is installed.")?;
+    let checked =
+        std::process::Command::new(visudo).arg("-cf").arg(staged).output().map_err(|error| error.to_string())?;
+    if !checked.status.success() {
+        return Err(format!(
+            "visudo refused the rule, so nothing was installed: {}{}",
+            String::from_utf8_lossy(&checked.stdout).trim(),
+            String::from_utf8_lossy(&checked.stderr).trim()
+        ));
+    }
+    let installed = std::process::Command::new("sudo")
+        .args(["install", "-m", "0440", "-o", "root", "-g", "root"])
+        .arg(staged)
+        .arg(SUDOERS_PATH)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if !installed.success() {
+        return Err(format!("sudo install failed, so {SUDOERS_PATH} was not written."));
+    }
+    let allowed = std::process::Command::new("sudo")
+        .args(["-n", "-l"])
+        .arg(nvidia_smi)
+        .args(["-i", "0", "-pl", "100"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    if !allowed.success() {
+        return Err(format!("{SUDOERS_PATH} is installed, but sudo still asks for a password for nvidia-smi."));
+    }
+    println!("installed: the controller can now set the NVIDIA power limit for fleet work.");
     Ok(())
 }

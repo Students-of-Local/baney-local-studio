@@ -30,6 +30,12 @@ export const Config = Schema.Struct({
       rpcServer: Schema.optionalKey(Schema.String),
       llamaServer: Schema.optionalKey(Schema.String),
       ignored: Schema.optionalKey(Schema.Array(Schema.String)),
+      power: Schema.optionalKey(
+        Schema.Struct({
+          activeWatts: Schema.optionalKey(Schema.Number),
+          awayWatts: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+        }),
+      ),
     }),
   ),
 });

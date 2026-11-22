@@ -183,8 +183,26 @@ export const LocalNodeCluster = Schema.Struct({
 });
 export type LocalNodeCluster = typeof LocalNodeCluster.Type;
 
+export const LocalPowerLever = Schema.Literals(["none", "nvidia-limit", "duty-cycle"]);
+export type LocalPowerLever = typeof LocalPowerLever.Type;
+
+export const LocalPower = Schema.Struct({
+  activeWatts: Schema.Number,
+  awayWatts: OptionalNumber,
+  present: Schema.NullOr(Schema.Boolean),
+  presenceSource: Schema.String,
+  capW: OptionalNumber,
+  lever: LocalPowerLever,
+  measured: Schema.Boolean,
+  measuredW: OptionalNumber,
+  helper: Schema.Literals(["installed", "missing", "unsupported"]),
+  gpus: Schema.Array(Schema.Struct({ uuid: Schema.String, index: Schema.Number, lever: LocalPowerLever, limitW: OptionalNumber, originalW: OptionalNumber })),
+});
+export type LocalPower = typeof LocalPower.Type;
+
 export const LocalCluster = Schema.Struct({
   ...LocalNodeCluster.fields,
+  power: LocalPower,
   draining: Schema.Boolean,
   checks: Schema.Array(Schema.Struct({ name: Schema.String, ok: Schema.Boolean, detail: Schema.String })),
   discovered: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, url: Schema.String, at: Schema.String })),
@@ -196,9 +214,17 @@ export const LocalCluster = Schema.Struct({
 });
 export type LocalCluster = typeof LocalCluster.Type;
 
+const Watts = Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 0, maximum: 2000 }));
+export const LocalPowerRequest = Schema.Struct({
+  activeWatts: Schema.optionalKey(Watts),
+  awayWatts: Schema.optionalKey(Schema.NullOr(Watts)),
+});
+export type LocalPowerRequest = typeof LocalPowerRequest.Type;
+
 export const LocalClusterRequest = Schema.Struct({
   discover: Schema.optionalKey(Schema.Boolean),
   lend: Schema.optionalKey(LocalLendMode),
+  power: Schema.optionalKey(LocalPowerRequest),
 });
 export const LocalHelloRequest = Schema.Struct({ id: Schema.String, nonce: Schema.String, target: Schema.String });
 export const LocalRpcRequest = Schema.Struct({ id: Schema.String, name: Schema.String, url: Schema.String });
