@@ -30,6 +30,10 @@ jobs:
           scripts/tests/plugin-grants-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/pg"
       - name: Every bundled catalog plugin installs from its pin
         run: scripts/tests/plugin-catalog-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/pc"
+      - name: Plugins hub end to end
+        run: |
+          cargo build -p local-studio-core --example plugin_smoke
+          scripts/tests/plugin-hub-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/plugin_smoke" "$RUNNER_TEMP/ph"
       - name: e2e examples replace a stale credential link, never write through it
         run: cargo build -p local-studio-core --example smoke && scripts/tests/e2e-credential-link-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/smoke"
 
