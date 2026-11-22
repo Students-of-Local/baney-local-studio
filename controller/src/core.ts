@@ -18,6 +18,20 @@ export const Config = Schema.Struct({
   engineKeys: Schema.Record(Schema.String, Schema.String),
   registry: Schema.Struct({ url: Schema.String, dir: Schema.String, ref: Schema.String }),
   modelsDir: Schema.String,
+  cluster: Schema.optionalKey(
+    Schema.Struct({
+      discover: Schema.optionalKey(Schema.Boolean),
+      lend: Schema.optionalKey(Schema.Literals(["never", "idle", "always"])),
+      ports: Schema.optionalKey(Schema.Array(Schema.Number)),
+      idleSeconds: Schema.optionalKey(Schema.Number),
+      drainSeconds: Schema.optionalKey(Schema.Number),
+      failoverMs: Schema.optionalKey(Schema.Number),
+      rpcPort: Schema.optionalKey(Schema.Number),
+      rpcServer: Schema.optionalKey(Schema.String),
+      llamaServer: Schema.optionalKey(Schema.String),
+      ignored: Schema.optionalKey(Schema.Array(Schema.String)),
+    }),
+  ),
 });
 export type Config = typeof Config.Type;
 

@@ -23,6 +23,7 @@ The controller is a small Bun service (`controller/`). It watches the inference 
 | `excludePorts`          | Local ports never treated as inference servers                                   |
 | `engineKeys`            | API keys for local engines, by port                                              |
 | `registry`, `modelsDir` | Recipe registry checkout and weights directory                                   |
+| `cluster`               | Optional. Tailnet discovery, GPU lending and pooled models; see [Clustering](#clustering) |
 
 The following environment variables change the defaults:
 
@@ -68,8 +69,13 @@ All routes except `/api/health` require the fleet key.
 | `POST /api/name`, `/api/peers`                                                                    | Rename, link and unlink                                               |
 | `GET /api/registry`, `/api/registry/records/<id>`, `POST /api/registry/download`                  | Registry models matched to this machine's hardware, records, weights  |
 | `GET /api/registry/share?port=<port>`, `POST /api/registry/share`                                 | Preview and share a running server's config to local-ai-registry      |
+| `GET /api/cluster`, `POST /api/cluster`                                                           | Lending state, checks, machines and pools; set `discover` and `lend`  |
+| `POST /api/cluster/pool`, `/api/cluster/pool/<id>/stop`                                           | Launch (or `dryRun`) and stop a pooled model                          |
+| `POST /api/cluster/rpc`, `/api/cluster/rpc/stop`, `/api/cluster/release`                          | Controller to controller: lend an `rpc-server`, stop it, take it back |
+| `POST /api/cluster/hello`                                                                         | Discovery handshake; needs no key, answers only with a keyed proof    |
+| `POST /api/thunderbolt/authorize`                                                                 | Approve a pending Thunderbolt or USB4 device with `boltctl`           |
 
-Registry launches use pinned container images and weight revisions on free matching NVIDIA GPUs, on ports 18100–18299. They never evict running engines.
+Registry launches use pinned container images and weight revisions on free matching NVIDIA GPUs, on ports 18100 to 18299. They never evict running engines.
 
 The registry backs captured fleet configurations up next to the catalog. They are listed but stay read-only, as do host-specific, privileged and multi-machine launches; the API says why instead of quietly rewriting them. Missing weights or scripts are reported, never invented. Cancelling a request is forwarded to the engine, but an engine that ignores client disconnects (the tested SGLang build, for example) may keep generating. `auto` ranks successful requests these controllers have observed, not an engine's earlier traffic.
 
@@ -104,4 +110,57 @@ Every 5 seconds the controller reads `nvidia-smi` (memory, power draw and limit,
 | Tokens per day | `prompt_tokens_total` (read) and `generation_tokens_total` (written), per UTC day                |
 
 `telemetry.json` in the controller's data directory keeps per-minute figures for 24 hours, per-day token counts for 800 days, and the last counter values per engine process, so a controller restart counts what the engine produced meanwhile and an engine restart is not counted twice. Engines without `/metrics` (Ollama, LM Studio, ExLlama) show their GPUs but no engine figures.
+
+## External GPUs
+
+On Linux the controller marks a GPU as external when its PCI device sits behind a port the kernel calls `removable`, or under the upstream bridge of a discrete Thunderbolt or USB4 controller. Each GPU reports its PCIe link (`gen`, `width` and their maximums) with a plain bandwidth note. A PCIe 3.0 x4 enclosure moves about 3.9 GB/s, so loading a model takes longer than on an internal slot, while decoding speed is nearly the same.
+
+`hardware.thunderbolt` lists Thunderbolt and USB4 devices from `boltctl list --all` (or sysfs when bolt is missing). A device the system has not approved shows as `pending`. `POST /api/thunderbolt/authorize` with its `uuid` runs `boltctl enroll --policy auto <uuid>`. If polkit wants an administrator password the call returns 403 `NEEDS_PASSWORD` and says how to approve it by hand.
+
+The controller reads the GPU list every 2 seconds, so a GPU that is plugged in or pulled shows within about 2 seconds. A removed GPU fails every job on it with "<GPU> was unplugged." and stops any `rpc-server` lent from it. `hardware.hotplug` keeps the last eight changes for an hour; an added GPU lists up to five recipes and models that fit its memory.
+
+Apple Silicon Macs cannot use an external GPU, so `hardware.egpuNote` points the user to a GPU on another machine in the fleet.
+
+## Clustering
+
+Clustering is off until a machine opts in with a `cluster` block in `config.json`:
+
+| Field         | Default        | Meaning                                                                                   |
+| ------------- | -------------- | ----------------------------------------------------------------------------------------- |
+| `discover`    | `false`        | Find other controllers on the tailnet and link those that share the fleet key             |
+| `lend`        | `"never"`      | `never`, `idle` (lend only while the owner is away) or `always`                           |
+| `ports`       | `[18091]`      | Controller ports to probe on each online tailnet device                                   |
+| `idleSeconds` | `120`          | How long every check must pass before an `idle` machine lends                             |
+| `drainSeconds`| `5`            | How long a reclaim waits for requests in flight before it stops lent work                 |
+| `failoverMs`  | `60000`        | How long a streaming request waits for headers before it moves to the next machine        |
+| `rpcPort`     | `50052`        | Tailnet port for the lent `rpc-server`                                                    |
+| `rpcServer`, `llamaServer` | `rpc-server`, `llama-server` | llama.cpp binaries                                                 |
+
+### Discovery
+
+Every 15 seconds a discovering controller asks `tailscale status --json` for online devices and probes `GET /api/health` on each of `ports`. When a controller answers with `cluster: true`, the prober sends `POST /api/cluster/hello` with a random nonce and the address it called. The other side answers only if that address is its own, with an HMAC of the nonce, its id and that address under the fleet key. A controller with another key fails the proof and is never linked, and the address check stops one controller from relaying another's proof. Found controllers are added to `peers`. A controller you unlink with `POST /api/peers` is remembered in `cluster.ignored` and is not linked again by discovery until you add it back. When the controller listens on loopback, discovery also opens a listener on the machine's tailnet IPv4 address.
+
+### Lending
+
+Every 2 seconds a lending machine runs its checks:
+
+| Check          | Passes when                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------- |
+| GPU programs   | No GPU compute process outside the fleet (the controller's engines, jobs and lent servers, found by process tree, container id or the `LOCAL_STUDIO_FLEET_OWNER` tag) |
+| GPU use        | No GPU is 10% or more busy without a fleet process on it                                     |
+| Power          | The machine is on AC power                                                                   |
+| parish-media   | Where `~/.local/bin/parish-media` exists, its `status` is ready, or the only programs it lists are fleet processes and the machine is on AC with no media jobs |
+| Owner          | On a Mac, nobody has touched the keyboard or mouse for a minute                              |
+
+`idle` lends once every check has passed for `idleSeconds` and reclaims the moment one fails. `always` lends whenever the machine has a GPU. On a reclaim the controller marks itself draining, tells the machines it lends to, waits up to `drainSeconds` for requests in flight, then stops only what it started for the fleet: lent `rpc-server` processes and jobs launched with `lend: true`. A lent job is failed with "<machine> took its GPU back: <reason>". The `reason` field says in plain words why a machine is or is not lending.
+
+### Routing
+
+The gateway ranks every live copy of a model by load: lent machines that took their GPU back last, then requests queued or running (from the engine's metrics or the controller's own count), KV cache use, decode speed, local before remote, and fewer hops. A streaming request moves to the next copy on any error, on a 502, 503 or 504, or when no headers arrive within `failoverMs`. A non-streaming request moves only when no engine could have started it: a connection that was refused or never opened, a 503 from a local engine, or a peer answer marked `x-local-studio-retry: 1`. Any other error or timeout returns 502 or 504 at once, so a generation never runs twice. A response that moved carries `x-local-studio-failover`.
+
+### Pooled models
+
+`GET /api/cluster` lists the GGUF models in `modelsDir` and the Hugging Face cache, with `fitsOne` (fits the largest single machine's free GPU memory) and `fitsPool` (fits the pooled free memory of lending machines). `POST /api/cluster/pool` with a GGUF `model` asks every lending machine (or `members`) for an `rpc-server`, then runs `llama-server -m <model> --rpc <endpoints> -ngl 999 --metrics` on a port in 18100 to 18299. `"dryRun": true` returns the argv without starting anything. The pooled model is served through the gateway like any local engine.
+
+Each lent `rpc-server` listens on loopback only. A gate on the tailnet IP at `rpcPort` forwards connections only from the address of the controller that asked for that server and drops every other address, because `rpc-server` has no authentication of its own. Programs run by other users on the lending machine can still reach the loopback port, so lend only from machines whose local accounts you trust. When a member reclaims, becomes unreachable or stops lending, the pool is torn down and shows why. When the controller gets SIGTERM or SIGINT it stops the `rpc-server` and pooled `llama-server` processes it started before it exits.
 

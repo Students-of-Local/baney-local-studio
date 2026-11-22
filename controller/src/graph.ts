@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { type LocalControllerLink, type LocalEndpoint, LocalNode, LocalUsage } from "./contracts.ts";
+import { type LocalControllerLink, type LocalEndpoint, LocalNode, type LocalNodeCluster, LocalUsage } from "./contracts.ts";
 import { type Config, fetchJson, home, now, readJson, writeJson } from "./core.ts";
 import { MISSES } from "./discovery.ts";
 
@@ -103,16 +103,18 @@ export interface Route {
   endpoint: LocalEndpoint;
   base: string;
   peer: string | null;
+  depth: number;
+  cluster: LocalNodeCluster | null;
 }
 
-export const liveModels = (local: (LocalEndpoint & { base: string })[], g: Graph): Map<string, Route[]> => {
+export const liveModels = (local: (LocalEndpoint & { base: string })[], g: Graph, own: LocalNodeCluster | null = null): Map<string, Route[]> => {
   const out = new Map<string, Route[]>();
-  const add = (ep: LocalEndpoint, base: string, peer: string | null) => {
-    if (ep.live) for (const m of ep.models) out.set(m, [...(out.get(m) ?? []), { endpoint: ep, base, peer }]);
+  const add = (ep: LocalEndpoint, base: string, peer: string | null, depth: number, cluster: LocalNodeCluster | null) => {
+    if (ep.live) for (const m of ep.models) out.set(m, [...(out.get(m) ?? []), { endpoint: ep, base, peer, depth, cluster }]);
   };
-  for (const ep of local) add(ep, ep.base, null);
+  for (const ep of local) add(ep, ep.base, null, 0, own);
   for (const n of [...g.nodes].sort((a, b) => a.depth - b.depth || a.node.controller.id.localeCompare(b.node.controller.id)))
-    for (const ep of n.node.endpoints) add(ep, n.url, n.url);
+    for (const ep of n.node.endpoints) add(ep, n.url, n.url, n.depth, n.node.cluster ?? null);
   return out;
 };
 

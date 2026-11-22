@@ -101,7 +101,7 @@ export const makeTelemetry = () => {
   const recent = new Map<string, { at: number; generation: number }[]>();
   const loaded = new Map<string, string | null>();
   let current: Minute | null = null;
-  let live: { engines: { ep: Endpoint; reading: Reading | null }[]; decode: number | null } = { engines: [], decode: null };
+  let live: { engines: { ep: Endpoint; reading: Reading | null; decode: number | null }[]; decode: number | null } = { engines: [], decode: null };
 
   const persist = () => {
     try {
@@ -144,6 +144,7 @@ export const makeTelemetry = () => {
       const minute = roll(at);
       const day = new Date(at).toISOString().slice(0, 10);
       let decode: number | null = null;
+      const rates = new Map<number, number>();
       const seen = new Set<string>();
       for (const [i, ep] of eps.entries()) {
         const r = readings[i];
@@ -171,13 +172,15 @@ export const makeTelemetry = () => {
         const history = [...(recent.get(key) ?? []), { at, generation: r.counters.generation }].filter((s) => at - s.at <= RATE_WINDOW_MS);
         recent.set(key, history);
         const first = history[0];
-        decode = (decode ?? 0) + (first && at > first.at && r.counters.generation >= first.generation ? ((r.counters.generation - first.generation) * 1000) / (at - first.at) : 0);
+        const rate = first && at > first.at && r.counters.generation >= first.generation ? ((r.counters.generation - first.generation) * 1000) / (at - first.at) : 0;
+        rates.set(ep.port, rate);
+        decode = (decode ?? 0) + rate;
       }
       const running = readings.reduce<number | null>((sum, r) => (r?.running == null ? sum : (sum ?? 0) + r.running), null);
       if (running !== null) minute.running = Math.max(minute.running, running);
       for (const key of counters.keys()) if (!seen.has(key) && !eps.some((e) => key.startsWith(`${e.port}:`))) counters.delete(key);
       for (const key of recent.keys()) if (!seen.has(key)) recent.delete(key);
-      live = { engines: eps.map((ep, i) => ({ ep, reading: readings[i] ?? null })), decode };
+      live = { engines: eps.map((ep, i) => ({ ep, reading: readings[i] ?? null, decode: rates.get(ep.port) ?? null })), decode };
     });
 
   const view = (gpus: readonly RawGpu[], jobs: readonly LocalJob[], history: boolean) =>
@@ -211,7 +214,7 @@ export const makeTelemetry = () => {
           kvPercent: metrics ? Math.max(0, ...window.map((m) => m.kv)) : null,
           ttftBestMs: best.length ? Math.min(...best) : null,
         },
-        gpus: gpus.map(({ uuid: _uuid, busy: _busy, ...g }) => g),
+        gpus: gpus.map((g) => ({ index: g.index, name: g.name, memoryUsedMiB: g.memoryUsedMiB, memoryTotalMiB: g.memoryTotalMiB, powerW: g.powerW, powerLimitW: g.powerLimitW, temperatureC: g.temperatureC, utilization: g.utilization })),
         memory: { totalBytes: totalmem(), freeBytes: freemem() },
       };
       if (!history) return out;
@@ -232,5 +235,8 @@ export const makeTelemetry = () => {
       };
     });
 
-  return { sample, view };
+  const loads = (): Map<number, { running: number | null; waiting: number | null; kvPercent: number | null; decodeTps: number | null }> =>
+    new Map(live.engines.map(({ ep, reading: r, decode }) => [ep.port, { running: r?.running ?? null, waiting: r?.waiting ?? null, kvPercent: r?.kv ?? null, decodeTps: decode }]));
+
+  return { sample, view, loads };
 };

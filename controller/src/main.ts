@@ -2,12 +2,13 @@ import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { LOCAL_STUDIO_CONTROLLER_HEADER, type LocalGpu, LocalDeployRequest, LocalDownloadRequest, type LocalSharePreview, LocalShareRequest, LocalNameRequest, type LocalNode, LocalPeerRequest, type LocalRecipes, LocalRunRequest, type LocalSnapshot } from "./contracts.ts";
+import { clusterSettings, makeCluster } from "./cluster.ts";
+import { LOCAL_STUDIO_CONTROLLER_HEADER, LocalAuthorizeRequest, LocalClusterRequest, LocalDeployRequest, LocalDownloadRequest, type LocalGpu, LocalHelloRequest, type LocalHotplug, type LocalNode, LocalPeerRequest, LocalPoolRequest, type LocalRecipes, LocalReleaseRequest, LocalRpcRequest, LocalRunRequest, type LocalSharePreview, LocalShareRequest, LocalNameRequest, type LocalSnapshot, type LocalThunderbolt } from "./contracts.ts";
 import { decodeJson, errorResponse, exec, fail, type HttpError, httpError, json, loadConfig, now, port, saveConfig, VERSION } from "./core.ts";
-import { listeners, makeScanner } from "./discovery.ts";
-import { autoModel, HOP_HEADER, listModels, passthrough, routes } from "./gateway.ts";
+import { type Endpoint, listeners, makeScanner } from "./discovery.ts";
+import { autoModel, HOP_HEADER, inFlight, listModels, passthrough, routes } from "./gateway.ts";
 import { graphUsage, makeGraph, makeUsage, normUrl } from "./graph.ts";
-import { hardware, type RawGpu, readGpus } from "./hardware.ts";
+import { authorize, hardware, type RawGpu, readGpuList, readGpus, readThunderbolt } from "./hardware.ts";
 import { makeJobs } from "./jobs.ts";
 import { browse, detect, download, type Library, loadLibrary, matchHardware, record } from "./library.ts";
 import { type Catalog, loadCatalog, matchCard, toLocalRecipe } from "./registry.ts";
@@ -18,14 +19,18 @@ import { makeTelemetry } from "./telemetry.ts";
 let config = loadConfig();
 let catalog: Catalog = { info: { commit: null, error: "loading" }, cards: {}, recipes: new Map(), archived: [] };
 let rawGpus: RawGpu[] = [];
+let known: Map<string, RawGpu> | null = null;
+let thunderbolt: LocalThunderbolt[] = [];
+let hotplug: LocalHotplug[] = [];
 let library: Library | null = null;
+const host = process.env.LOCAL_STUDIO_CONTROLLER_HOST ?? "127.0.0.1";
 const shares = new Map<number, { preview: LocalSharePreview; at: number }>();
 const usage = makeUsage();
 const telemetry = makeTelemetry();
 
 const gpus = (): LocalGpu[] => {
   const reserved = jobs.reserved();
-  return rawGpus.map(({ uuid: _uuid, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
+  return rawGpus.map(({ uuid: _uuid, pids: _pids, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
 };
 
 const byCard = (all: boolean): Map<string, number[]> => {
@@ -35,20 +40,52 @@ const byCard = (all: boolean): Map<string, number[]> => {
 };
 const freeGpus = () => byCard(false);
 
-const jobs = makeJobs({ config: () => config, catalog: () => catalog, freeGpus, listening: () => Effect.map(listeners, (ls) => new Set((ls ?? []).map((l) => l.port))) });
-const scanner = makeScanner(config.id, (p) => jobs.jobPort(p));
+const jobs = makeJobs({
+  config: () => config,
+  catalog: () => catalog,
+  freeGpus,
+  listening: () => Effect.map(listeners, (ls) => new Set([...(ls ?? []).map((l) => l.port), ...cluster.poolPorts()])),
+  uuids: (indices) => indices.flatMap((i) => rawGpus.filter((g) => g.index === i).map((g) => g.uuid)),
+  indexOf: (uuid) => rawGpus.find((g) => g.uuid === uuid)?.index ?? null,
+});
+const scanner = makeScanner(config.id, (p) => jobs.jobPort(p) ?? cluster.poolPort(p));
+
+const localEndpoints = (): Endpoint[] => {
+  const lent = new Set(jobs.active().filter((j) => j.lent).map((j) => j.id));
+  const loads = telemetry.loads();
+  return scanner.current().map((ep) => ({
+    ...ep,
+    ...(ep.jobId && lent.has(ep.jobId) ? { lent: true } : {}),
+    load: { inFlight: inFlight(ep.id), running: null, waiting: null, kvPercent: null, decodeTps: null, ...loads.get(ep.port) },
+  }));
+};
 
 const selfNode = (): LocalNode => ({
   controller: { id: config.id, name: config.name, url: config.url, version: VERSION },
-  endpoints: scanner.current().map(({ base: _base, ...ep }) => ep),
+  endpoints: localEndpoints().map(({ base: _base, ...ep }) => ep),
   usage: usage.list(),
   peers: config.peers,
+  cluster: cluster.node(),
 });
 const graph = makeGraph(() => config, selfNode);
-const gw = { config: () => config, local: () => scanner.current(), usage: () => usage.list(), graph: () => graph.get(), record: usage.record };
+const cluster = makeCluster({
+  config: () => config,
+  save: (c) => {
+    config = c;
+    saveConfig(c);
+  },
+  gpus: () => rawGpus,
+  graph: () => graph.get(),
+  invalidate: () => graph.invalidate(),
+  jobs,
+  listenHost: host,
+  port,
+  takenPorts: () => Effect.map(listeners, (ls) => new Set([...(ls ?? []).map((l) => l.port), ...jobs.active().map((j) => j.port)])),
+});
+const gw = { config: () => config, local: localEndpoints, usage: () => usage.list(), graph: () => graph.get(), record: usage.record, cluster: () => cluster.node(), failoverMs: () => cluster.failoverMs(), refuse: (ep: Endpoint) => cluster.refuse(ep) };
 
 const excluded = (): Set<number> => {
-  const out = new Set([port, ...config.excludePorts]);
+  const out = new Set([port, ...config.excludePorts, ...cluster.rpcPorts()]);
   for (const p of config.peers) {
     const u = URL.parse(p);
     if (u && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(u.hostname)) out.add(Number(u.port || 80));
@@ -56,14 +93,42 @@ const excluded = (): Set<number> => {
   return out;
 };
 
-const tick = Effect.gen(function* () {
-  rawGpus = yield* readGpus;
-  yield* scanner.scan(excluded(), config.engineKeys);
-});
+const tick = Effect.suspend(() => scanner.scan(excluded(), config.engineKeys));
 
-const sample = Effect.gen(function* () {
-  rawGpus = yield* readGpus;
-  yield* telemetry.sample(scanner.current(), config.engineKeys);
+const suggest = (g: RawGpu): string[] => {
+  const card = matchCard(catalog, g.name, g.memoryTotalMiB);
+  const fromCatalog = card ? [...catalog.recipes].map(([k, e]) => toLocalRecipe(k, e, freeGpus(), byCard(true))).filter((r) => r.card === card && r.cards <= 1 && r.fits).map((r) => `${r.model} (${r.engine})`) : [];
+  const fromLibrary = library ? browse(library, matchHardware(library, [{ name: g.name, memoryGb: g.memoryTotalMiB / 1024, count: 1 }]), false).models.slice(0, 3).map((m) => m.repo) : [];
+  return [...new Set([...fromCatalog, ...fromLibrary])].slice(0, 5);
+};
+
+const note = (e: Omit<LocalHotplug, "at">) => {
+  const cutoff = Date.now() - 3600_000;
+  hotplug = [{ ...e, at: now() }, ...hotplug.filter((h) => Date.parse(h.at) > cutoff)].slice(0, 8);
+};
+
+const watchHardware = Effect.gen(function* () {
+  const next = yield* readGpuList;
+  thunderbolt = yield* readThunderbolt;
+  if (!next) return;
+  const prev = known;
+  rawGpus = next;
+  known = new Map(next.map((g) => [g.uuid, g]));
+  if (!prev) return;
+  for (const [uuid, g] of prev) {
+    if (known.has(uuid)) continue;
+    const why = `${g.name} was unplugged.`;
+    for (const j of jobs.onGpu(uuid, g.index)) yield* Effect.result(jobs.stop(j.id, why));
+    yield* Effect.promise(() => cluster.gpuGone(uuid, why));
+    note({ change: "removed", gpu: g.name, memoryTotalMiB: g.memoryTotalMiB, external: !!g.external, message: why, suggestions: [] });
+  }
+  for (const g of next) {
+    if (prev.has(g.uuid)) continue;
+    const ideas = suggest(g);
+    const gb = Math.round(g.memoryTotalMiB / 1024);
+    const how = g.external ? `${g.name} connected over Thunderbolt or USB4${g.link ? `: ${g.link.note}` : "."}` : `${g.name} is ready.`;
+    note({ change: "added", gpu: g.name, memoryTotalMiB: g.memoryTotalMiB, external: !!g.external, message: ideas.length ? how : `${how} No registry recipe fits its ${gb} GB yet.`, suggestions: ideas });
+  }
 });
 
 const snapshot = async (): Promise<LocalSnapshot> => {
@@ -75,13 +140,14 @@ const snapshot = async (): Promise<LocalSnapshot> => {
   return {
     controller: selfNode().controller,
     generatedAt: now(),
-    hardware: hardware(gpus()),
+    hardware: hardware(gpus(), thunderbolt, hotplug),
     auto: await autoModel(gw),
     endpoints,
     models: [...ids].sort().map((id) => ({ id, live: live.has(id), requests: totals.get(id)?.requests ?? 0 })),
     controllers: g.links,
     jobs: jobs.list(),
     usage: [...totals.values()],
+    cluster: await cluster.view(),
   };
 };
 
@@ -103,6 +169,8 @@ const unload = (p: number) =>
   Effect.gen(function* () {
     const ep = scanner.current().find((e) => e.port === p && e.live);
     if (!ep) return yield* fail(404, "NOT_RUNNING", `nothing is serving on port ${p}`);
+    const pool = cluster.poolPort(p);
+    if (pool) return yield* cluster.stopPool(pool);
     if (ep.jobId) return yield* jobs.stop(ep.jobId);
     const published = (yield* exec(["docker", "ps", "-q", "--filter", `publish=${p}`], 10_000)).stdout.split("\n").filter(Boolean);
     const ids = [...published, containerOf(ep.pid)].filter((id): id is string => !!id);
@@ -118,6 +186,7 @@ const unload = (p: number) =>
 
 const load = (recipeId: string, req: LocalRunRequest) =>
   Effect.gen(function* () {
+    if (req.lend && clusterSettings(config).lend !== "never" && cluster.state() !== "lent") return yield* fail(409, "OWNER_ACTIVE", `${config.name} is not lending its GPU right now.`);
     if (req.replace && !req.dryRun) {
       for (const ep of scanner.current().filter((e) => e.live)) yield* unload(ep.port);
       const entry = catalog.recipes.get(recipeId);
@@ -175,12 +244,16 @@ const saved = <A>(next: typeof config, result: A) => {
   return json(result);
 };
 
-const handle = async (req: Request): Promise<Response> => {
+const handle = async (req: Request, peer: string | null): Promise<Response> => {
   const url = new URL(req.url);
   const p = url.pathname;
   const post = req.method === "POST";
   const match = (re: RegExp) => (post ? re.exec(p)?.[1] : undefined);
-  if (req.method === "GET" && p === "/api/health") return json({ ok: true, id: config.id, name: config.name, version: VERSION, api: 2 });
+  if (req.method === "GET" && p === "/api/health") return json({ ok: true, id: config.id, name: config.name, version: VERSION, api: 2, cluster: clusterSettings(config).discover });
+  if (post && p === "/api/cluster/hello") {
+    if (!clusterSettings(config).discover || Number(req.headers.get("content-length") ?? 0) > 4096) return json({ error: { code: "NOT_FOUND", message: `${req.method} ${p}` } }, 404);
+    return json(await run(cluster.hello(await body(req, LocalHelloRequest))));
+  }
   if (!authorized(req)) return json({ error: { code: "UNAUTHORIZED", message: "fleet key required" } }, 401);
   if (req.method === "GET" && (p === "/v1/models" || p === "/models")) return listModels(gw);
   if (post && /^\/v1\/(chat\/completions|completions|messages|responses)$/.test(p)) return passthrough(gw, req, p);
@@ -212,6 +285,26 @@ const handle = async (req: Request): Promise<Response> => {
     const u = normUrl(await run(deployController(config, await body(req, LocalDeployRequest))));
     return saved({ ...config, peers: [...new Set([...config.peers.map(normUrl), u])] }, { url: u });
   }
+  if (req.method === "GET" && p === "/api/cluster") return json(await cluster.view());
+  if (post && p === "/api/cluster") {
+    await cluster.configure(await body(req, LocalClusterRequest));
+    graph.invalidate();
+    return json(await cluster.view());
+  }
+  if (post && p === "/api/cluster/rpc") return json(await run(cluster.startRpc(await body(req, LocalRpcRequest), peer)));
+  if (post && p === "/api/cluster/rpc/stop") return json(await run(cluster.stopRpcFor((await body(req, LocalRpcRequest)).id)));
+  if (post && p === "/api/cluster/release") {
+    const r = await body(req, LocalReleaseRequest);
+    return json(await run(cluster.release(r.controllerId, r.reason)));
+  }
+  if (post && p === "/api/cluster/pool") return json(await run(cluster.launchPool(await body(req, LocalPoolRequest))));
+  const poolId = match(/^\/api\/cluster\/pool\/([\w-]+)\/stop$/);
+  if (poolId) return json(await run(cluster.stopPool(poolId)));
+  if (post && p === "/api/thunderbolt/authorize") {
+    const r = await run(authorize((await body(req, LocalAuthorizeRequest)).uuid));
+    thunderbolt = await Effect.runPromise(readThunderbolt);
+    return json(r);
+  }
   if (post && p === "/api/name") {
     const { name } = await body(req, LocalNameRequest);
     return saved({ ...config, name }, { name });
@@ -222,23 +315,46 @@ const handle = async (req: Request): Promise<Response> => {
     if (!/^https?:\/\/[^/]+$/.test(u)) throw httpError(400, "BAD_URL", "peer url must be http(s)://host:port");
     if (u === normUrl(config.url)) throw httpError(400, "SELF_PEER", "a controller cannot peer with itself");
     const peers = b.remove ? config.peers.filter((x) => normUrl(x) !== u) : [...new Set([...config.peers.map(normUrl), u])];
-    return saved({ ...config, peers }, { peers });
+    const id = b.remove ? (await graph.get()).links.find((l) => normUrl(l.url) === u && !l.self)?.id : undefined;
+    const was = (config.cluster?.ignored ?? []).filter((x) => x !== u);
+    const ignored = b.remove ? [...new Set([...was, u, ...(id ? [id] : [])])] : was;
+    return saved({ ...config, peers, ...(config.cluster || b.remove ? { cluster: { ...config.cluster, ignored } } : {}) }, { peers });
   }
   return json({ error: { code: "NOT_FOUND", message: `${req.method} ${p}` } }, 404);
 };
 
-const host = process.env.LOCAL_STUDIO_CONTROLLER_HOST ?? "127.0.0.1";
-Bun.serve({
-  port,
-  hostname: host,
-  idleTimeout: 0,
-  maxRequestBodySize: 256 * 1024 * 1024,
-  fetch: async (req) => {
-    const res = await handle(req).catch(errorResponse);
-    res.headers.set(LOCAL_STUDIO_CONTROLLER_HEADER, config.id);
-    return res;
-  },
-});
+const serve = (hostname: string) =>
+  Bun.serve({
+    port,
+    hostname,
+    idleTimeout: 0,
+    maxRequestBodySize: 256 * 1024 * 1024,
+    fetch: async (req, server) => {
+      const res = await handle(req, server.requestIP(req)?.address ?? null).catch(errorResponse);
+      res.headers.set(LOCAL_STUDIO_CONTROLLER_HEADER, config.id);
+      return res;
+    },
+  });
+serve(host);
+
+let tailnetServer: { ip: string; server: ReturnType<typeof serve> } | null = null;
+const listenTailnet = async () => {
+  const want = clusterSettings(config).discover && /^(127\.|localhost$)/.test(host) ? await cluster.tailnet() : null;
+  if (tailnetServer && tailnetServer.ip !== want) {
+    void tailnetServer.server.stop();
+    cluster.listening(`http://${tailnetServer.ip}:${port}`, false);
+    tailnetServer = null;
+  }
+  if (!want || tailnetServer || want === host) return;
+  try {
+    tailnetServer = { ip: want, server: serve(want) };
+    cluster.listening(`http://${want}:${port}`, true);
+  } catch (e) {
+    console.error(`could not listen on the tailnet address ${want}:${port}: ${String(e)}`);
+  }
+};
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => void cluster.shutdown().finally(() => process.exit(0)));
 
 const loop = async (ms: number, f: () => Promise<unknown>) => {
   for (;;) {
@@ -255,4 +371,13 @@ void loop(30 * 60_000, async () => {
 });
 void Effect.runPromise(jobs.reconcile);
 void loop(10_000, () => Effect.runPromise(scanner.scan(excluded(), config.engineKeys)));
-void loop(5_000, () => Effect.runPromise(sample));
+void loop(5_000, () => Effect.runPromise(telemetry.sample(scanner.current(), config.engineKeys)));
+void loop(2_000, async () => {
+  await Effect.runPromise(watchHardware);
+  await cluster.tick();
+  await cluster.watchPools();
+});
+void loop(15_000, async () => {
+  await listenTailnet();
+  await cluster.discover();
+});
