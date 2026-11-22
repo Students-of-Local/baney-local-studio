@@ -162,6 +162,8 @@ impl LiveState {
             | SessionEvent::UnknownEffectsUpdate { .. }
             | SessionEvent::LoopUpdate { .. }
             | SessionEvent::BudgetUpdate { .. }
+            | SessionEvent::PlanUsage { .. }
+            | SessionEvent::CheckUpdate { .. }
             | SessionEvent::AcceptanceUpdate { .. }
             | SessionEvent::PythonSentAgentMessage { .. } => false,
         }
