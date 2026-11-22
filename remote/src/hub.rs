@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
+use local_studio_core::plugins::Caller;
 use local_studio_core::{
     FileContent, ImageAttachment, Item, PromptDraft, Studio, Subscription, TranscriptOp, Update, Waker,
 };
@@ -168,6 +169,7 @@ struct Upload {
 
 struct Session {
     key: String,
+    name: String,
     conn: Option<(ConnId, Tx)>,
     seq: u64,
     buffer: VecDeque<Entry>,
@@ -182,6 +184,7 @@ impl Session {
     fn new(key: String) -> Self {
         Self {
             key,
+            name: String::new(),
             conn: None,
             seq: 0,
             buffer: VecDeque::new(),
@@ -1011,6 +1014,7 @@ impl Hub {
         let Some(session) = state.sessions.get_mut(device) else { return Some(conn) };
         session.close(REPLACED, "replaced by a newer socket");
         session.drop_partial();
+        name.clone_into(&mut session.name);
         let delta = !fresh
             && resume.epoch.as_deref() == Some(self.epoch.as_str())
             && resume.seq.is_some_and(|seq| {
@@ -1216,8 +1220,9 @@ impl Hub {
             _ => None,
         };
         let session = state.live(device, conn)?;
+        let caller = Caller::device(device, &session.name);
         let mut prompt = |value: &Value| resolve_prompt(session, value);
-        ops::dispatch(&self.studio, op, &args, &mut prompt)?;
+        ops::dispatch(&self.studio, op, &args, &caller, &mut prompt)?;
         if let Some((tag, given)) = tag {
             let accepted = key.clone().filter(|_| prompt_op);
             state.tags.insert(tag.clone(), Tag { device: device.to_string(), given, accepted });

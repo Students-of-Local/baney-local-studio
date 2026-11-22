@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::model::{CommandKind, SlashCommand};
@@ -32,6 +32,39 @@ pub const SESSION_OWNER: &str = "local-studio";
 pub const GRANTED: &str = "{granted}";
 
 pub type Standing<'a> = (&'a Plugin, Consent, Vec<Capability>);
+
+pub const CALLER_ENV: &str = "LOCAL_STUDIO_CALLER";
+pub const CALLER_NAME_ENV: &str = "LOCAL_STUDIO_CALLER_NAME";
+pub const HOST_PREFIX: &str = "local:";
+pub const DEVICE_PREFIX: &str = "device:";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caller {
+    pub id: String,
+    pub name: String,
+}
+
+impl Caller {
+    #[must_use]
+    pub fn device(id: &str, name: &str) -> Self {
+        let name = if name.trim().is_empty() { id } else { name.trim() };
+        Self { id: format!("{DEVICE_PREFIX}{id}"), name: name.to_string() }
+    }
+
+    #[must_use]
+    pub fn host(user: &str) -> Self {
+        let name = ["USER", "LOGNAME", "USERNAME"]
+            .iter()
+            .find_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
+            .unwrap_or_else(|| user.to_string());
+        Self { id: format!("{HOST_PREFIX}{user}"), name }
+    }
+
+    pub(crate) fn insert(&self, env: &mut Map<String, Value>) {
+        env.insert(CALLER_ENV.to_string(), json!(self.id));
+        env.insert(CALLER_NAME_ENV.to_string(), json!(self.name));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -470,6 +503,9 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
         if !valid_env_name(name) {
             errors.push(format!("[mcp] env: bad variable name: {name:?}"));
         }
+        if [CALLER_ENV, CALLER_NAME_ENV].contains(&name.as_str()) {
+            errors.push(format!("[mcp] env: {name} is set by Local Studio"));
+        }
         if !valid_env_name(host) || !host.starts_with(&prefix) {
             errors.push(format!("[mcp] env {name}: the host variable must start with {prefix}, not {host:?}"));
         }
@@ -524,7 +560,7 @@ fn mcp_servers(ready: &[Standing]) -> Map<String, Value> {
 }
 
 #[must_use]
-pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
+pub fn session_servers(plugins: &[Plugin], grants: &Grants, caller: Option<&Caller>) -> Vec<Value> {
     plugins
         .iter()
         .filter(|plugin| plugin.local_only && plugin.asks(Capability::McpServer))
@@ -541,6 +577,9 @@ pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
                 .collect();
             env.insert(NO_BYTECODE.0.to_string(), json!("1"));
             env.insert(LOCAL_ONLY_ENV.to_string(), json!("1"));
+            if let Some(caller) = caller {
+                caller.insert(&mut env);
+            }
             Some(json!({
                 "type": "stdio",
                 "name": plugin.mcp_name(),

@@ -165,46 +165,53 @@ pub fn asks(plugin: &Plugin, grants: &Grants) -> bool {
 pub fn acp_servers(
     plugins: &[Plugin],
     grants: &Grants,
-    socket: &Path,
+    socket: Option<&Path>,
     thread: &str,
     tokens: &Tokens,
     foreign: &[String],
+    caller: Option<&super::Caller>,
 ) -> (Vec<Value>, Vec<String>) {
-    let asking: Vec<Plugin> = plugins.iter().filter(|plugin| asks(plugin, grants)).cloned().collect();
     let mut servers = Vec::new();
     let mut errors = Vec::new();
-    for (name, entry) in super::mcp_servers(&super::ready(&asking, grants)) {
-        let Some(plugin) = asking.iter().find(|plugin| plugin.mcp_name() == name) else { continue };
-        if foreign.contains(&name) {
+    for (name, entry) in super::mcp_servers(&super::ready(plugins, grants)) {
+        let Some(plugin) = plugins.iter().find(|plugin| plugin.mcp_name() == name) else { continue };
+        let asking = asks(plugin, grants) && socket.is_some();
+        if foreign.contains(&name) || (!asking && caller.is_none()) {
             continue;
         }
         if plugin.mcp.as_ref().is_some_and(|mcp| !mcp.env.is_empty()) {
-            errors.push(format!(
-                "{name} cannot ask you questions: its [mcp] env names host variables, and Eukhe resolves those only in settings.json entries"
-            ));
+            if asking {
+                errors.push(format!(
+                    "{name} cannot ask you questions: its [mcp] env names host variables, and Eukhe resolves those only in settings.json entries"
+                ));
+            }
             continue;
         }
-        let token = match tokens.issue(&plugin.id, thread) {
-            Ok(token) => token,
-            Err(error) => {
-                errors.push(format!("{name} cannot ask you questions: {error}"));
-                continue;
-            }
-        };
-        let env = json!({
-            super::NO_BYTECODE.0: "1",
-            SOCKET_ENV: socket.to_string_lossy(),
-            TOKEN_ENV: token,
-            THREAD_ENV: thread,
-            PID_ENV: std::process::id().to_string(),
-        });
+        let mut env = serde_json::Map::new();
+        env.insert(super::NO_BYTECODE.0.to_string(), json!("1"));
+        if let (true, Some(socket)) = (asking, socket) {
+            let token = match tokens.issue(&plugin.id, thread) {
+                Ok(token) => token,
+                Err(error) => {
+                    errors.push(format!("{name} cannot ask you questions: {error}"));
+                    continue;
+                }
+            };
+            env.insert(SOCKET_ENV.to_string(), json!(socket.to_string_lossy()));
+            env.insert(TOKEN_ENV.to_string(), json!(token));
+            env.insert(THREAD_ENV.to_string(), json!(thread));
+            env.insert(PID_ENV.to_string(), json!(std::process::id().to_string()));
+        }
+        if let Some(caller) = caller {
+            caller.insert(&mut env);
+        }
         servers.push(json!({
             "type": "stdio",
             "name": name,
             "command": entry["command"],
             "args": entry["args"],
             "cwd": entry["cwd"],
-            "env": env,
+            "env": Value::Object(env),
         }));
     }
     (servers, errors)

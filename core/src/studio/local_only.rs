@@ -119,7 +119,7 @@ impl Actor {
         }
         let grants =
             self.plugins_dir.as_deref().map(|dir| plugins::Grants::load(dir).unwrap_or_default()).unwrap_or_default();
-        let servers = plugins::session_servers(&plugins, &grants);
+        let servers = plugins::session_servers(&plugins, &grants, self.store.flags(id).caller.as_ref());
         let running = self.running(id);
         let served = self.threads.get(id).and_then(|thread| thread.served.as_deref()) == Some(active);
         if running && !served && !servers.is_empty() {
