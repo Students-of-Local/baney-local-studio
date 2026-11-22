@@ -62,6 +62,7 @@ struct Asked {
     headers: HeaderMap,
     body: Vec<u8>,
     stream: bool,
+    stream_id: Option<String>,
 }
 
 struct Reply {
@@ -153,10 +154,22 @@ fn asked(args: &Value) -> Result<Asked, OpError> {
         )));
     };
     let method = if method == "GET" { Method::GET } else { Method::POST };
-    let stream = match args.get("stream") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(_) => return Err(bad("args.stream must be true or false")),
+    // A client may name its stream up front, so it can cancel before the controller answers.
+    let (stream, stream_id) = match args.get("stream") {
+        None | Some(Value::Null) => (false, None),
+        Some(Value::Bool(flag)) => (*flag, None),
+        Some(Value::String(id))
+            if !id.is_empty()
+                && id.len() <= MAX_STREAM_ID
+                && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') =>
+        {
+            (true, Some(id.clone()))
+        }
+        Some(_) => {
+            return Err(bad(format!(
+                "args.stream must be true, false, or a stream id of 1 to {MAX_STREAM_ID} letters, digits, - or _"
+            )))
+        }
     };
     let body = match args.get("body") {
         None | Some(Value::Null) => Vec::new(),
@@ -171,6 +184,7 @@ fn asked(args: &Value) -> Result<Asked, OpError> {
         headers: headers_of(args.get("headers"))?,
         body,
         stream,
+        stream_id,
     })
 }
 
@@ -242,9 +256,15 @@ impl Fleet {
             reply.status(429, &format!("at most {FLEET_STREAMS} fleet streams at once from one device"));
             return Ok(());
         }
+        if let Some(id) = &asked.stream_id {
+            if mine.calls.values().any(|call| call.stream.as_deref() == Some(id.as_str())) {
+                drop(usage);
+                return Err(bad(format!("a fleet stream named {id} is already open on this device")));
+            }
+        }
         mine.recent.push_back(now);
         let call = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let stream = asked.stream.then(|| format!("f{call}"));
+        let stream = asked.stream.then(|| asked.stream_id.clone().unwrap_or_else(|| format!("f{call}")));
         let (cancel, cancelled) = oneshot::channel();
         mine.calls.insert(call, Call { conn, stream: stream.clone(), cancel: Some(cancel), abort: None });
         let fleet = Arc::clone(self);

@@ -143,6 +143,13 @@ async fn stub_connection(mut socket: TcpStream, stub: Arc<Stub>) -> anyhow::Resu
         match path.as_str() {
             "/v1/models" => respond(&mut socket, 200, "application/json", MODELS.as_bytes()).await?,
             "/api/node" => respond(&mut socket, 200, "application/json", NODE.as_bytes()).await?,
+            "/v1/chat/completions" if text.contains("silent") => {
+                let mut scratch = [0u8; 1024];
+                while matches!(socket.read(&mut scratch).await, Ok(read) if read > 0) {}
+                *lock(&stub.closed) += 1;
+                stub.changed.notify_waiters();
+                return Ok(());
+            }
             "/v1/chat/completions" if text.contains("hang") => {
                 socket.write_all(SSE_HEAD).await?;
                 socket.write_all(EVENTS[0].as_bytes()).await?;
@@ -204,10 +211,11 @@ impl View {
         }
         match frame.get("op").and_then(Value::as_str) {
             Some("hello") => self.hello = Some(frame),
+            Some("fleet") => self.fleet.push(frame.get("update").cloned().unwrap_or(Value::Null)),
             Some("update") => {
                 let update = frame.get("update").cloned().unwrap_or(Value::Null);
                 if update.get("type").and_then(Value::as_str).is_some_and(|kind| kind.starts_with("fleet_")) {
-                    self.fleet.push(update);
+                    bail!("a fleet update arrived in the resumable update sequence: {update}");
                 }
             }
             _ => {}
@@ -820,6 +828,27 @@ async fn stages(run_: Run<'_>, stub_task: tokio::task::JoinHandle<()>) -> anyhow
     let end = a.view().stream(&held).1.context("no fleet_end")?;
     ensure!(end["error"] == "cancelled", "the cancelled stream ended with {end}");
     a.refused("fleet_cancel", &json!({ "stream": held }), "unknown_stream").await?;
+
+    let silent = json!({
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": { "content-type": "application/json" },
+        "body": STANDARD.encode(br#"{"stream":true,"messages":[{"role":"user","content":"silent"}]}"#),
+        "stream": "early-1",
+    });
+    let seen = lock(&stub.seen).len();
+    let before = stub.closed();
+    let asked = a.ask("fleet_http", &silent);
+    stub.until("the silent request reached the controller", |stub| lock(&stub.seen).len() > seen).await?;
+    a.refused("fleet_http", &silent, "bad_args").await?;
+    a.result("fleet_cancel", &json!({ "stream": "early-1" })).await?;
+    stub.until("the unanswered stream's connection closed", |stub| stub.closed() > before).await?;
+    let answered = a.reply_to(asked, "fleet_http").await?;
+    ensure!(
+        status_of(answered.get("result").unwrap_or(&Value::Null)) == 499,
+        "a cancel before the answer gave {answered}"
+    );
+    println!("ok   fleet device: a client-named stream cancelled before the controller answered closed its connection");
     println!(
         "ok   fleet device: fleet_cancel mid-stream closed the controller connection and ended the stream as cancelled"
     );
