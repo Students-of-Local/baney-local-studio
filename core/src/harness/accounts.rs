@@ -149,16 +149,28 @@ pub(crate) fn carry(harness: Harness, from: &Path, to: &Path, cwd: &str, native:
     };
     let Some(source) = source else { return Ok(false) };
     let relative = source.strip_prefix(from).map_err(|error| error.to_string())?;
-    let target = to.join(relative);
-    if target.exists() {
-        return Ok(true);
+    let target = match harness {
+        Harness::Codex => rollout(&to.join("sessions"), native),
+        Harness::ClaudeCode | Harness::Eukhe => None,
     }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
-    }
-    std::fs::copy(&source, &target)
-        .map(|_| true)
-        .map_err(|error| format!("copy {} to {}: {error}", source.display(), target.display()))
+    .unwrap_or_else(|| to.join(relative));
+    let parent = target.parent().ok_or_else(|| format!("{} has no folder", target.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
+    let name = target.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let temporary = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::remove_file(&temporary).ok();
+    let copied = (|| {
+        let mut input = std::fs::File::open(&source)?;
+        let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        drop(output);
+        std::fs::rename(&temporary, &target)
+    })();
+    copied.map(|()| true).map_err(|error| {
+        std::fs::remove_file(&temporary).ok();
+        format!("copy {} to {}: {error}", source.display(), target.display())
+    })
 }
 
 pub(crate) fn rollout(root: &Path, thread: &str) -> Option<PathBuf> {

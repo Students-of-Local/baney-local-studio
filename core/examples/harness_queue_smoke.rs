@@ -516,7 +516,20 @@ fn account_switch(run: &mut Run, account: &Account) -> anyhow::Result<()> {
     run.start(&format!("{label}-after"), account.model, account.thinking)?;
     let after = run.thread();
     account.on(run, &format!("{label}: a new thread after the switch starts on {to}"), &after, second);
+    run.focus(&thread);
+    run.send("echo on b");
+    run.check(&format!("{label}: a turn on {to} is answered"), |watch| {
+        watch.replied("reply to echo on b").is_some() && !watch.busy
+    });
+    std::fs::remove_file(first.join("limited"))?;
+    unpark(account.root, first)?;
     std::fs::write(second.join("limited"), "")?;
+    run.send("limit golf");
+    run.check(&format!("{label}: switching back to {from} keeps the turn done on {to}"), |watch| {
+        watch.replied("reply to limit golf").is_some() && watch.replied("reply to echo on b").is_some() && !watch.busy
+    });
+    account.on(run, &format!("{label}: the thread runs on {from} again"), &thread, first);
+    std::fs::write(first.join("limited"), "")?;
     run.focus(&thread);
     let (errors, failed) = (run.watch.errors.len(), run.watch.failed.len());
     run.send("limit bravo");
@@ -528,6 +541,16 @@ fn account_switch(run: &mut Run, account: &Account) -> anyhow::Result<()> {
     run.check(&format!("{label}: with every account limited a Failed notification names the reset"), |watch| {
         watch.failed[failed..].iter().any(|(id, body)| *id == thread && body.contains("at its usage limit until"))
     });
+    Ok(())
+}
+
+fn unpark(root: &Path, dir: &Path) -> anyhow::Result<()> {
+    let path = root.join("data").join("harness").join("accounts.json");
+    let mut parks: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    if let Some(parked) = parks["parked"].as_object_mut() {
+        parked.remove(&dir.to_string_lossy().into_owned());
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&parks)?)?;
     Ok(())
 }
 

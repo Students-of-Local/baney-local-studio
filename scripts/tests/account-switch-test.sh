@@ -14,6 +14,9 @@ for cli in claude codex; do
     "ok   $label: the session file is in $b"
     "ok   $label: the switch raised no Failed notification"
     "ok   $label: a new thread after the switch starts on $b"
+    "ok   $label: a turn on $b is answered"
+    "ok   $label: switching back to $a keeps the turn done on $b"
+    "ok   $label: the thread runs on $a again"
     "ok   $label: with every account limited the error names when the first one resets"
     "ok   $label: with every account limited a Failed notification names the reset"
   )
