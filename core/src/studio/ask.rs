@@ -158,26 +158,36 @@ impl Actor {
         }
     }
 
-    /// Registers the thread's asking plugins with its session. Until this core has sent the session a list,
-    /// the session may still hold one from before a restart, with a plugin whose grant is gone since, so an
-    /// unknown list is always replaced, even by an empty one. Eukhe refuses a non-empty list mid-run but
+    /// Registers the thread's asking plugins, and every plugin server when the thread has a caller, with its
+    /// session. Until this core has sent the session a list, the session may still hold one from before a
+    /// restart, with a plugin whose grant is gone since, so an unknown list is always replaced, even by an empty one. Eukhe refuses a non-empty list mid-run but
     /// takes an empty one, so a busy session that may hold a server it should not is cleared and gets its
     /// list again on the next idle prompt.
-    pub(super) async fn sync_ask_servers(&mut self, id: &str, active: &str) {
-        let (asking, grants) = self.granted_askers();
-        self.ask_tokens.retain(|plugin, _| asking.iter().any(|known| known.id == plugin));
-        let mut servers = match self.ask_socket.clone() {
-            Some(socket) => {
+    pub(super) async fn sync_plugin_servers(&mut self, id: &str, active: &str) {
+        let caller = self.store.flags(id).caller;
+        let scanned = if self.plugins_dir.is_some() { self.plugins() } else { Vec::new() };
+        let grants = self.plugins_dir.as_deref().map(|dir| Grants::load(dir).unwrap_or_default()).unwrap_or_default();
+        self.ask_tokens.retain(|plugin, _| scanned.iter().any(|known| known.id == plugin && ask::asks(known, &grants)));
+        let mut servers = match (self.ask_socket.clone(), &caller) {
+            (None, None) => Vec::new(),
+            (socket, caller) => {
                 let foreign = crate::daemon::agent_dir()
                     .and_then(|agent| Some(plugins::foreign_servers(self.plugins_dir.as_deref()?, &agent)))
                     .unwrap_or_default();
-                let (servers, errors) = ask::acp_servers(&asking, &grants, &socket, id, &self.ask_tokens, &foreign);
+                let (servers, errors) = ask::acp_servers(
+                    &scanned,
+                    &grants,
+                    socket.as_deref(),
+                    id,
+                    &self.ask_tokens,
+                    &foreign,
+                    caller.as_ref(),
+                );
                 if !errors.is_empty() {
                     self.mailbox.notice(NoticeLevel::Warning, format!("Plugins: {}", errors.join("; ")));
                 }
                 servers
             }
-            None => Vec::new(),
         };
         let before = self.ask_sent.get(active).and_then(Value::as_array);
         if before == Some(&servers) {
@@ -204,7 +214,8 @@ impl Actor {
                 self.ask_sent.insert(active.to_string(), servers);
             }
             Err(error) => {
-                self.mailbox.notice(NoticeLevel::Warning, format!("Plugins that ask you questions are off: {error}"));
+                self.mailbox
+                    .notice(NoticeLevel::Warning, format!("Plugin tool servers for this thread are off: {error}"));
             }
         }
     }

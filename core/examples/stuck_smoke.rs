@@ -18,8 +18,12 @@ const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const STOP_BOUND: Duration = Duration::from_secs(20);
 const CRASH_BOUND: Duration = Duration::from_secs(45);
 const DELETE_BOUND: Duration = Duration::from_secs(20);
+const ROSTER_BOUND: Duration = Duration::from_secs(20);
 const PROMPT: &str =
     "Use the bash tool to run exactly this command once: `sleep 90 && echo slept`. Then reply with only the word done.";
+const LATE_PROMPT: &str =
+    "Use the bash tool to run exactly this command once: `sleep 20 && echo slept`. Then reply with only the word done.";
+const NO_ROSTER_PUSH: &str = "EUKHE_WORKER_DISABLE_ROSTER_PUSH";
 
 #[derive(Default)]
 struct Signal {
@@ -55,6 +59,7 @@ struct Watch {
     tool_running: bool,
     busy: Option<bool>,
     usage: Option<UsageReport>,
+    drops: u32,
 }
 
 impl Watch {
@@ -88,7 +93,12 @@ fn apply(watch: &mut Watch, update: Update) {
             watch.busy = Some(info.busy);
         }
         Update::Usage { report, .. } => watch.usage = Some(report),
-        Update::Connection { state } => watch.connection = Some(state),
+        Update::Connection { state } => {
+            if matches!(state, Connection::Lost { .. }) {
+                watch.drops += 1;
+            }
+            watch.connection = Some(state);
+        }
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
         Update::Threads { threads } => watch.threads = threads,
         Update::ThreadStarted { thread, .. } => watch.started.push(thread),
@@ -134,17 +144,28 @@ fn daemon_call(socket: &Path, command: DaemonCommand) -> anyhow::Result<(Value, 
     })
 }
 
-fn roster_summary(socket: &Path, thread: &str) -> anyhow::Result<(Value, Option<Value>)> {
+fn roster_entry(socket: &Path, thread: &str) -> anyhow::Result<(Value, Option<Value>)> {
     let (hello, data) = daemon_call(socket, DaemonCommand::RosterSubscribe { id: None, rest: Map::default() })?;
-    let summary = data
+    let entry = data
         .get("roster")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|entry| entry.get("summary"))
-        .find(|summary| summary.get("sessionId").and_then(Value::as_str) == Some(thread))
+        .find(|entry| {
+            entry.get("summary").and_then(|summary| summary.get("sessionId")).and_then(Value::as_str) == Some(thread)
+        })
         .cloned();
-    Ok((hello, summary))
+    Ok((hello, entry))
+}
+
+fn roster_summary(socket: &Path, thread: &str) -> anyhow::Result<(Value, Option<Value>)> {
+    let (hello, entry) = roster_entry(socket, thread)?;
+    Ok((hello, entry.and_then(|mut entry| entry.get_mut("summary").map(Value::take))))
+}
+
+fn roster_status(socket: &Path, thread: &str) -> anyhow::Result<String> {
+    let (_, entry) = roster_entry(socket, thread)?;
+    Ok(entry.and_then(|entry| entry.get("status").and_then(Value::as_str).map(str::to_string)).unwrap_or_default())
 }
 
 fn pid_of(value: Option<&Value>) -> Option<u32> {
@@ -233,11 +254,21 @@ fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
 }
 
 fn start_long_turn(studio: &Studio, signal: &Signal, watch: &mut Watch, draft: &str) -> anyhow::Result<String> {
+    start_turn(studio, signal, watch, draft, PROMPT)
+}
+
+fn start_turn(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    draft: &str,
+    prompt: &str,
+) -> anyhow::Result<String> {
     let before = watch.started.len();
     studio.start_thread(
         draft.to_string(),
         Some(watch.projects[0].clone()),
-        PromptDraft { text: PROMPT.to_string(), images: Vec::new(), files: Vec::new() },
+        PromptDraft { text: prompt.to_string(), images: Vec::new(), files: Vec::new() },
         real_model::thread_settings(AccessMode::FullAccess, WorktreeChoice::Local),
     );
     pump(studio, signal, watch, &format!("{draft}: thread started"), STEP_TIMEOUT, |watch| {
@@ -345,6 +376,112 @@ fn drive(config: StudioConfig, work: &Path, socket: &Path) -> anyhow::Result<()>
     outcome
 }
 
+fn kill_supervisor(socket: &Path) -> anyhow::Result<u32> {
+    let (hello, _) = daemon_call(socket, DaemonCommand::RosterSubscribe { id: None, rest: Map::default() })?;
+    let pid = pid_of(hello.get("supervisorPid")).context("the daemon hello names no supervisor pid")?;
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let socket_arg = socket.as_os_str().as_encoded_bytes();
+    if !cmdline.split(|byte| *byte == 0).any(|arg| arg == socket_arg) {
+        bail!("supervisor {pid} was not started on this smoke's socket {}; not killing it", socket.display());
+    }
+    let status = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status()?;
+    if !status.success() {
+        bail!("kill -KILL {pid} failed: {status}");
+    }
+    println!("ok   killed this smoke's daemon supervisor {pid} mid-turn (its worker lives on)");
+    Ok(pid)
+}
+
+fn late_roster(config: StudioConfig, work: &Path, socket: &Path) -> anyhow::Result<()> {
+    let signal = Arc::new(Signal::default());
+    let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+    let mut watch = Watch::default();
+    let outcome = (|| {
+        pump(&studio, &signal, &mut watch, "late roster: daemon connected", STEP_TIMEOUT, |watch| {
+            matches!(watch.connection, Some(Connection::Ready))
+        })?;
+        studio.add_project(work.to_string_lossy().into_owned());
+        pump(&studio, &signal, &mut watch, "late roster: project added", STEP_TIMEOUT, |watch| {
+            watch.projects.len() == 1
+        })?;
+        let thread = start_turn(&studio, &signal, &mut watch, "draft-late", LATE_PROMPT)?;
+        studio.select_thread(None);
+        watch.focused = None;
+        let drops = watch.drops;
+        let killed = kill_supervisor(socket)?;
+        pump(&studio, &signal, &mut watch, "late roster: the core sees the daemon go", STEP_TIMEOUT, |watch| {
+            watch.drops > drops
+        })?;
+        pump(
+            &studio,
+            &signal,
+            &mut watch,
+            "late roster: the core reconnects to a new supervisor",
+            STEP_TIMEOUT,
+            |watch| matches!(watch.connection, Some(Connection::Ready)),
+        )?;
+        let (hello, _) = daemon_call(socket, DaemonCommand::RosterSubscribe { id: None, rest: Map::default() })?;
+        if pid_of(hello.get("supervisorPid")) == Some(killed) {
+            bail!("the daemon still answers as the killed supervisor {killed}");
+        }
+        let started = Instant::now();
+        let mut polled: Option<Instant> = None;
+        loop {
+            for update in studio.tick() {
+                apply(&mut watch, update);
+            }
+            if polled.is_none_or(|at| at.elapsed() >= Duration::from_millis(500)) {
+                polled = Some(Instant::now());
+                if !daemon_view(socket, &thread)?.1 {
+                    break;
+                }
+            }
+            if started.elapsed() >= STEP_TIMEOUT {
+                bail!("timed out after {} s waiting for the adopted turn to end", STEP_TIMEOUT.as_secs());
+            }
+            signal.wait(Duration::from_millis(100));
+        }
+        println!("ok   late roster: the daemon runs the turn no more ({:.1} s)", started.elapsed().as_secs_f64());
+        let status = roster_status(socket, &thread)?;
+        if status != "running" {
+            bail!(
+                "could not force the state: the daemon's roster says {status:?} for the idle thread, not a stale running"
+            );
+        }
+        println!("ok   late roster: the daemon's roster still says running for the idle thread");
+        let result = pump(
+            &studio,
+            &signal,
+            &mut watch,
+            "late roster: the row leaves Working within the bound",
+            ROSTER_BOUND,
+            |watch| watch.row(&thread).is_some_and(|row| !matches!(row.status, ThreadStatus::Working)),
+        );
+        if let Err(error) = result {
+            let status = roster_status(socket, &thread).unwrap_or_default();
+            bail!(
+                "{error:#} (daemon roster status {status:?}, the daemon runs the thread={})",
+                daemon_view(socket, &thread)?.1
+            );
+        }
+        let status = roster_status(socket, &thread)?;
+        println!("ok   late roster: the daemon's roster still says {status:?}, so the core asked the session itself");
+        studio.select_thread(Some(thread.clone()));
+        watch.focused = Some(thread.clone());
+        pump(
+            &studio,
+            &signal,
+            &mut watch,
+            "late roster: the row stays out of Working once opened",
+            STOP_BOUND,
+            |watch| watch.busy == Some(false) && !watch.working(&thread),
+        )?;
+        anyhow::Ok(())
+    })();
+    studio.shutdown();
+    outcome
+}
+
 fn main() -> anyhow::Result<()> {
     let usage = "usage: stuck_smoke <eukhe> <scratch dir>";
     let mut args = std::env::args_os().skip(1);
@@ -356,8 +493,7 @@ fn main() -> anyhow::Result<()> {
     real_model::install(&agent_dir)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
-    let socket = root.join("d.sock");
-    let config = StudioConfig {
+    let config = |socket: &Path| StudioConfig {
         socket_path: Some(socket.to_string_lossy().into_owned()),
         session_dir: Some(agent_dir.join("sessions").to_string_lossy().into_owned()),
         data_dir: None,
@@ -365,8 +501,19 @@ fn main() -> anyhow::Result<()> {
         take_over_serve: false,
         launch: Some(DaemonLaunch { program: daemon.to_string_lossy().into_owned() }),
     };
-    let outcome = drive(config, &work, &socket);
+    let socket = root.join("d.sock");
+    let outcome = drive(config(&socket), &work, &socket);
     let stopped = stop_daemon(&socket);
+    outcome?;
+    stopped?;
+    let late_work = root.join("late-work");
+    std::fs::create_dir_all(&late_work)?;
+    std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("late-data"));
+    std::env::set_var(NO_ROSTER_PUSH, "1");
+    let late_socket = root.join("l.sock");
+    let outcome = late_roster(config(&late_socket), &late_work, &late_socket);
+    std::env::remove_var(NO_ROSTER_PUSH);
+    let stopped = stop_daemon(&late_socket);
     outcome?;
     stopped?;
     println!("PASS stuck smoke");

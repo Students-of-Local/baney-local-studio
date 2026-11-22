@@ -37,7 +37,7 @@ use crate::transcript::Transcript;
 use crate::workspace::model::{
     FollowUpBehavior, NewThreadWorkspace, ResponseStreaming, Settings, T3Choices, TerminalFrame,
 };
-use crate::workspace::{PreparedWorktree, Workspace};
+use crate::workspace::{AddedWorktree, PreparedWorktree, Workspace};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -57,6 +57,7 @@ const TITLE_CONTEXT_LIMIT: usize = 4000;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const START_GRACE: Duration = Duration::from_secs(30);
 const RELINK_DELAY: Duration = Duration::from_secs(1);
+const ROSTER_GRACE: Duration = Duration::from_secs(3);
 const RELINK_ATTEMPTS: u32 = 20;
 const PROBE_TIMEOUT_MS: u64 = 5_000;
 const KILL_TIMEOUT_MS: u64 = 15_000;
@@ -310,6 +311,7 @@ enum Command {
         project: Option<String>,
         prompt: PromptDraft,
         settings: ThreadSettings,
+        caller: Option<plugins::Caller>,
     },
     StartThreads {
         draft: String,
@@ -391,6 +393,7 @@ enum Command {
     },
     ForkThread {
         thread: String,
+        caller: Option<plugins::Caller>,
     },
     Compact {
         thread: String,
@@ -520,6 +523,9 @@ enum Command {
         relink: bool,
     },
     StopCheck {
+        thread: String,
+    },
+    RosterCheck {
         thread: String,
     },
     CliSettle {
@@ -737,6 +743,7 @@ impl Studio {
             ask_sent: HashMap::new(),
             consents: Arc::default(),
             t3: t3::Watch::default(),
+            roster_checks: HashSet::new(),
         };
         let poller = inbox.clone();
         runtime.spawn(async move {
@@ -817,7 +824,7 @@ impl Studio {
     }
 
     pub fn start_thread(&self, draft: String, project: Option<String>, prompt: PromptDraft, settings: ThreadSettings) {
-        self.send_command(Command::StartThread { draft, project, prompt, settings });
+        self.send_command(Command::StartThread { draft, project, prompt, settings, caller: None });
     }
 
     pub fn start_threads(
@@ -892,7 +899,7 @@ impl Studio {
     }
 
     pub fn fork_thread(&self, thread: String) {
-        self.send_command(Command::ForkThread { thread });
+        self.send_command(Command::ForkThread { thread, caller: None });
     }
 
     pub fn compact(&self, thread: String) {
@@ -1141,6 +1148,18 @@ pub fn serve_holds_lock(data_dir: Option<String>) -> bool {
         .is_some_and(serve::runs_serve)
 }
 
+#[cfg(unix)]
+fn host_caller() -> Option<plugins::Caller> {
+    let (one, _other) = tokio::net::UnixStream::pair().ok()?;
+    let uid = one.peer_cred().ok()?.uid();
+    Some(plugins::Caller::host(&uid.to_string()))
+}
+
+#[cfg(not(unix))]
+fn host_caller() -> Option<plugins::Caller> {
+    std::env::var("USERNAME").ok().filter(|name| !name.is_empty()).map(|name| plugins::Caller::host(&name))
+}
+
 impl Studio {
     pub fn subscribe(&self, waker: Arc<dyn Waker>) -> Subscription {
         self.mailbox.subscribe(waker)
@@ -1152,6 +1171,21 @@ impl Studio {
 
     pub fn queued(&self) -> usize {
         self.backlog.commands.load(Ordering::SeqCst)
+    }
+
+    pub fn start_thread_as(
+        &self,
+        draft: String,
+        project: Option<String>,
+        prompt: PromptDraft,
+        settings: ThreadSettings,
+        caller: plugins::Caller,
+    ) {
+        self.send_command(Command::StartThread { draft, project, prompt, settings, caller: Some(caller) });
+    }
+
+    pub fn fork_thread_as(&self, thread: String, caller: plugins::Caller) {
+        self.send_command(Command::ForkThread { thread, caller: Some(caller) });
     }
 
     fn send_command(&self, command: Command) {
@@ -1189,10 +1223,11 @@ struct Live {
     shown: HashMap<u64, Vec<Block>>,
 }
 
-/// A worktree `create_thread` made, with the branch it created (`None` when the branch already existed).
+/// A worktree `create_thread` made (`None` when setup was skipped and it was removed), with the branch it
+/// created (`None` when the branch already existed).
 struct MadeWorktree {
     project: PathBuf,
-    path: PathBuf,
+    path: Option<PathBuf>,
     branch: Option<String>,
 }
 
@@ -1276,6 +1311,7 @@ struct Actor {
     ask_sent: HashMap<String, Value>,
     consents: Arc<std::sync::Mutex<plugins::Pendings>>,
     t3: t3::Watch,
+    roster_checks: HashSet<String>,
 }
 
 #[cfg(unix)]
@@ -1582,7 +1618,73 @@ impl Actor {
             for thread in unsure {
                 self.itself.send(Command::Verify { thread, attempt: 0, relink: false });
             }
+            self.watch_rosters();
         }
+        self.dirty = true;
+    }
+
+    fn roster_only(&self, id: &str) -> bool {
+        self.harness(id).is_none()
+            && self.roster_for(id).is_some_and(|row| row.running)
+            && !self.threads.get(id).is_some_and(|thread| {
+                thread.pending_run
+                    || thread.stopping.is_some()
+                    || thread.live.as_ref().is_some_and(|live| live.state.busy)
+            })
+    }
+
+    fn watch_roster(&mut self, id: &str) {
+        if self.client.is_some() && self.roster_only(id) && self.roster_checks.insert(id.to_string()) {
+            self.later(ROSTER_GRACE, Command::RosterCheck { thread: id.to_string() });
+        }
+    }
+
+    fn watch_rosters(&mut self) {
+        let running: Vec<String> =
+            self.roster.values().filter(|row| row.running).map(|row| row.session_id.clone()).collect();
+        for id in running {
+            self.watch_roster(&id);
+        }
+    }
+
+    async fn roster_check(&mut self, id: &str) {
+        self.roster_checks.remove(id);
+        if !self.roster_only(id) {
+            return;
+        }
+        let Some(active) = self.daemon_active(id) else { return };
+        let idle = match self.state_of(&active).await {
+            Ok(state) => !["isStreaming", "isCompacting", "isBashRunning"]
+                .iter()
+                .any(|key| state.get(key).and_then(Value::as_bool) == Some(true)),
+            Err(_) => false,
+        };
+        let children = self.children.values().any(|child| {
+            child.agent.running
+                && (child.parent_session_id.as_deref() == Some(id)
+                    || child.parent_active_session_id.as_deref() == Some(active.as_str()))
+        });
+        if idle && !children && self.roster_only(id) {
+            self.roster_idle(id);
+        }
+        self.watch_roster(id);
+    }
+
+    fn roster_idle(&mut self, id: &str) {
+        let failed = self.roster_for(id).is_some_and(|row| row.failed);
+        for row in self.roster.values_mut().filter(|row| row.session_id == id) {
+            row.running = false;
+        }
+        let attached = self.threads.get(id).is_some_and(|thread| thread.live.is_some());
+        let ended_by_events = self.threads.get_mut(id).is_some_and(|thread| {
+            thread.run_started_at = None;
+            std::mem::take(&mut thread.ended_by_events)
+        });
+        if !attached && !ended_by_events {
+            self.run_finished(id, failed);
+        }
+        self.itself.send(Command::SendHeld { thread: id.to_string() });
+        self.emit_info(id);
         self.dirty = true;
     }
 
@@ -1651,8 +1753,8 @@ impl Actor {
             Command::SelectThread { thread } => self.select(thread).await,
             Command::WatchThread { thread } => self.watch(&thread).await,
             Command::UnwatchThread { thread } => self.unwatch(&thread).await,
-            Command::StartThread { draft, project, prompt, settings } => {
-                self.start_thread(&draft, project, prompt, settings, None).await;
+            Command::StartThread { draft, project, prompt, settings, caller } => {
+                self.start_thread(&draft, project, prompt, settings, None, caller).await;
             }
             Command::StartThreads { draft, project, prompt, settings, models } => {
                 self.start_threads(&draft, project, prompt, settings, models).await;
@@ -1713,8 +1815,8 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
-            Command::ForkThread { thread } => {
-                if let Err(error) = self.fork(&thread).await {
+            Command::ForkThread { thread, caller } => {
+                if let Err(error) = self.fork(&thread, caller).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
@@ -1887,6 +1989,7 @@ impl Actor {
             }
             Command::Verify { thread, attempt, relink } => self.verify(&thread, attempt, relink).await,
             Command::StopCheck { thread } => self.stop_check(&thread).await,
+            Command::RosterCheck { thread } => self.roster_check(&thread).await,
             Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
             Command::T3Poll => self.t3_poll(false, None),
@@ -2215,7 +2318,7 @@ impl Actor {
         entry.path = Some(created.session_file);
         entry.cwd = Some(cwd);
         self.attach(id, &created.active_session_id).await?;
-        self.sync_ask_servers(id, &created.active_session_id).await;
+        self.sync_plugin_servers(id, &created.active_session_id).await;
         Ok(created.active_session_id)
     }
 
@@ -2390,8 +2493,9 @@ impl Actor {
         prompt: PromptDraft,
         settings: ThreadSettings,
         fan_out: Option<String>,
+        caller: Option<plugins::Caller>,
     ) {
-        match self.create_thread(draft, project, settings, fan_out, &prompt.text).await {
+        match self.create_thread(draft, project, settings, fan_out, &prompt.text, caller).await {
             Ok(id) => {
                 if let Err(error) = self.send_prompt(&id, prompt, Delivery::Queue, None).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
@@ -2401,6 +2505,7 @@ impl Actor {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn create_thread(
         &mut self,
         draft: &str,
@@ -2408,6 +2513,7 @@ impl Actor {
         settings: ThreadSettings,
         fan_out: Option<String>,
         prompt: &str,
+        caller: Option<plugins::Caller>,
     ) -> Result<String, String> {
         let project_path = match &project {
             Some(project) => Some(self.store.project_id(project).ok_or_else(|| format!("Unknown project {project}."))?),
@@ -2442,19 +2548,12 @@ impl Actor {
         let cwd = match (&choice, &project_path) {
             (WorktreeChoice::Existing { path }, _) => path.clone(),
             (WorktreeChoice::NewWorktree { branch, base }, Some(project)) => {
-                let existed = self.workspace.branch_exists(Path::new(project), branch).await;
-                match self.workspace.prepare_worktree(draft, Path::new(project), branch, base.as_deref()).await? {
-                    PreparedWorktree::Worktree(path) => {
-                        let cwd = path.to_string_lossy().into_owned();
-                        made = Some(MadeWorktree {
-                            project: PathBuf::from(project),
-                            path,
-                            branch: (!existed).then(|| branch.clone()),
-                        });
-                        cwd
-                    }
-                    PreparedWorktree::Local => project.clone(),
-                }
+                let pinned = settings.provider.as_ref().or(effective.default_provider.as_ref()).is_some()
+                    && settings.model.as_ref().or(effective.default_model.as_ref()).is_some();
+                let probe = harness == Harness::Eukhe && !pinned;
+                let (cwd, worktree) = self.new_worktree(draft, project, branch, base.as_deref(), probe).await?;
+                made = Some(worktree);
+                cwd
             }
             (WorktreeChoice::NewWorktree { .. }, None) => return Err("A new worktree needs a project.".to_string()),
             (WorktreeChoice::Local | WorktreeChoice::Default, Some(project)) => project.clone(),
@@ -2485,10 +2584,11 @@ impl Actor {
             flags.project.clone_from(&project_path);
             flags.access = Some(access);
             flags.fan_out = fan_out;
+            flags.caller = caller.or_else(host_caller);
         });
         self.save();
         self.attach(&id, &created.active_session_id).await?;
-        self.sync_ask_servers(&id, &created.active_session_id).await;
+        self.sync_plugin_servers(&id, &created.active_session_id).await;
         let provider = settings.provider.or(effective.default_provider);
         let model = settings.model.or(effective.default_model);
         let thinking = settings.thinking_level.or(effective.default_thinking_level);
@@ -2501,6 +2601,48 @@ impl Actor {
         self.mailbox.push(Update::ThreadStarted { draft: draft.to_string(), thread: id.clone() });
         self.dirty = true;
         Ok(id)
+    }
+
+    /// Makes a new worktree of `project` on `branch` and runs its setup scripts. While the Claude sign-in holds and
+    /// `probe` asks for it, the model a session would get in the worktree is read first, so an `anthropic` start
+    /// is refused, its worktree and branch removed, before any setup script runs.
+    async fn new_worktree(
+        &mut self,
+        draft: &str,
+        project: &str,
+        branch: &str,
+        base: Option<&str>,
+        probe: bool,
+    ) -> Result<(String, MadeWorktree), String> {
+        let root = Path::new(project);
+        let made_branch = (!self.workspace.branch_exists(root, branch).await).then(|| branch.to_string());
+        let mut made = MadeWorktree { project: PathBuf::from(project), path: None, branch: made_branch };
+        let prepared = match self.workspace.add_worktree(draft, root, branch, base).await {
+            Ok(AddedWorktree::New(new)) => {
+                if probe && self.workspace.claude_signed_in() {
+                    let cwd = new.path().to_string_lossy().into_owned();
+                    let refused = match self.default_at(&cwd).await {
+                        Ok((model, _)) => self.workspace.eukhe_refuses(model.map(|key| key.provider).as_deref()),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(refused) = refused {
+                        self.workspace.refuse_worktree(new, made.branch.as_deref(), &refused).await;
+                        return Err(refused);
+                    }
+                }
+                self.workspace.setup_worktree(new).await?
+            }
+            Ok(AddedWorktree::Local) => PreparedWorktree::Local,
+            Err(error) => return Err(error),
+        };
+        Ok(match prepared {
+            PreparedWorktree::Worktree(path) => {
+                let cwd = path.to_string_lossy().into_owned();
+                made.path = Some(path);
+                (cwd, made)
+            }
+            PreparedWorktree::Local => (project.to_string(), made),
+        })
     }
 
     /// While the Claude sign-in holds, reads the model a new thread's session actually runs on (its real cwd's
@@ -2517,7 +2659,15 @@ impl Actor {
             return Ok(());
         }
         let active = self.live_active(id).unwrap_or_else(|| created.to_string());
-        let refused = match self.session_provider(&active).await {
+        let mut read = self.session_provider(&active).await;
+        for _ in 0..2 {
+            if read.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            read = self.session_provider(&active).await;
+        }
+        let refused = match read {
             Ok(provider) => self.workspace.eukhe_refuses(provider.as_deref()),
             Err(error) => Err(error),
         };
@@ -2531,16 +2681,21 @@ impl Actor {
     /// Undoes a thread `create_thread` made but will not start: its session, its saved file, its rows, and the
     /// worktree and branch made for it, so a refused start leaves nothing behind.
     async fn abandon_thread(&mut self, draft: &str, id: &str, active: &str, file: &str, made: Option<MadeWorktree>) {
-        let _ = self
+        let killed = self
             .call(DaemonCommand::Kill { id: None, active_session_id: active.to_string(), rest: Map::default() })
             .await;
+        if let Err(error) = killed {
+            self.mailbox.notice(NoticeLevel::Warning, format!("The refused session was not stopped: {error}"));
+        }
         let delete = DaemonCommand::DeleteSavedSession {
             id: None,
             active_session_id: None,
             session_path: file.to_string(),
             rest: Map::default(),
         };
-        let _ = self.call(delete).await;
+        if let Err(error) = self.call(delete).await {
+            self.mailbox.notice(NoticeLevel::Warning, format!("The refused session file was kept: {error}"));
+        }
         if let Some(thread) = self.threads.remove(id) {
             if let Some(live) = thread.live {
                 self.by_active.remove(&live.active);
@@ -2551,7 +2706,7 @@ impl Actor {
         self.store.threads.remove(id);
         self.save();
         if let Some(made) = made {
-            self.workspace.discard_worktree(draft, &made.project, &made.path, made.branch.as_deref()).await;
+            self.workspace.discard_worktree(draft, &made.project, made.path.as_deref(), made.branch.as_deref()).await;
         }
         self.dirty = true;
     }
@@ -2565,7 +2720,7 @@ impl Actor {
         models: Vec<ModelKey>,
     ) {
         if models.is_empty() {
-            self.start_thread(draft, project, prompt, settings, None).await;
+            self.start_thread(draft, project, prompt, settings, None, None).await;
             return;
         }
         let base = match &settings.worktree {
@@ -2588,7 +2743,8 @@ impl Actor {
                     WorktreeChoice::Local
                 },
             };
-            self.start_thread(&member, project.clone(), prompt.clone(), member_settings, Some(group.clone())).await;
+            self.start_thread(&member, project.clone(), prompt.clone(), member_settings, Some(group.clone()), None)
+                .await;
         }
     }
 
@@ -2677,7 +2833,7 @@ impl Actor {
             if !self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy) {
                 self.flush_ask_notes(id).await;
             }
-            self.sync_ask_servers(id, &active).await;
+            self.sync_plugin_servers(id, &active).await;
             let command = DaemonCommand::Prompt {
                 id: None,
                 active_session_id: active,
@@ -3250,7 +3406,7 @@ impl Actor {
         Ok(())
     }
 
-    async fn fork(&mut self, id: &str) -> Result<(), String> {
+    async fn fork(&mut self, id: &str, caller: Option<plugins::Caller>) -> Result<(), String> {
         if let Some(harness) = self.harness(id) {
             return Err(cli::unsupported(harness, "fork"));
         }
@@ -3295,6 +3451,7 @@ impl Actor {
             fork.project = flags.project;
             fork.access = flags.access;
             fork.local_only = flags.local_only;
+            fork.caller = caller.or(flags.caller);
         });
         self.save();
         self.threads.insert(fork_id.clone(), Thread { path, cwd, ..Thread::default() });
@@ -3509,6 +3666,11 @@ impl Actor {
     }
 
     async fn daemon_default(&self) -> Result<(Option<ModelKey>, Option<String>), String> {
+        self.default_at(&self.home).await
+    }
+
+    /// The model and thinking level Eukhe gives a new session in `cwd`, read from a throwaway session.
+    async fn default_at(&self, cwd: &str) -> Result<(Option<ModelKey>, Option<String>), String> {
         let created = self
             .call(DaemonCommand::Create {
                 id: None,
@@ -3516,7 +3678,7 @@ impl Actor {
                 continue_recent: None,
                 no_session: Some(true),
                 name: None,
-                config: Some(self.create_config(&self.home)),
+                config: Some(self.create_config(cwd)),
                 runtime_metadata: None,
                 lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
                 env: None,
@@ -4161,6 +4323,9 @@ impl Actor {
                 self.emit_info(&id);
             }
         }
+        if self.client.is_some() {
+            self.watch_rosters();
+        }
         self.push_daemon();
         if children_changed || children_before != self.children.len() {
             for watched in self.watched_ids() {
@@ -4474,6 +4639,7 @@ impl Actor {
         self.emit_info(id);
         self.send_held(id).await;
         self.release(id).await;
+        self.watch_roster(id);
     }
 
     fn rows(&mut self, archived: bool) -> Vec<ThreadRow> {

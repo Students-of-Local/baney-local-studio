@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -12,12 +13,15 @@ use futures_util::{SinkExt, StreamExt};
 use local_studio_core::link::devices::{unhex, Devices};
 use local_studio_core::link::{noise, pairing, snow};
 use local_studio_core::{
-    AccessMode, Approval, ApprovalAnswer, Block, DaemonLaunch, Delivery, Harness, Item, ItemKind, Machine,
-    MachineState, ModelOption, Project, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus,
-    TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    AccessMode, Approval, ApprovalAnswer, Block, DaemonLaunch, Delivery, Harness, ImageAttachment, Item, ItemKind,
+    Machine, MachineState, ModelOption, PairedDevice, Project, PromptDraft, Studio, StudioConfig, ThreadRow,
+    ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
 use tokio_tungstenite::tungstenite::Message;
+
+#[path = "../../core/examples/support/real_model.rs"]
+mod real_model;
 
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 const QUICK: Duration = Duration::from_secs(30);
@@ -32,6 +36,10 @@ const NAME: &str = "smoke-a";
 const PONG: &str = "Reply with only the word pong.";
 const PING: &str = "Reply with only the word ping.";
 const QUEUED: &str = "Reply with only the word queued.";
+const B_NAME: &str = "smoke-b";
+const LOCAL: &str = "Reply with only the word local.";
+const TEST_CA: &str = "LOCAL_STUDIO_LINK_TEST_CA";
+const FROZEN_IMAGE: usize = 20 << 20;
 
 const PROVIDER: &str = "claude-code";
 const STORY: &str = "Write a 600 word short story about a lighthouse keeper on a northern island, in plain prose.";
@@ -68,6 +76,9 @@ struct View {
     notices: Vec<String>,
     failed: HashMap<String, String>,
     pairing: Option<(String, String, i64)>,
+    serving: Option<bool>,
+    devices: Option<Vec<PairedDevice>>,
+    drops: usize,
     usage: Option<UsageReport>,
     daemon: Option<u32>,
     sockets: Vec<String>,
@@ -78,7 +89,10 @@ struct View {
 impl View {
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Machines { machines } => self.machines = machines,
+            Update::Machines { machines } => {
+                self.drops += machines.iter().filter(|machine| machine.state != MachineState::Connected).count();
+                self.machines = machines;
+            }
             Update::Models { models, .. } => self.models = models,
             Update::Threads { threads } => self.threads = threads,
             Update::Projects { projects } => self.projects = projects,
@@ -114,7 +128,11 @@ impl View {
                 println!("     request {request} failed: {message}");
                 self.failed.insert(request, message);
             }
-            Update::Pairing { request, link, expires_at, .. } => self.pairing = Some((request, link, expires_at)),
+            Update::Pairing { request, link, expires_at, serving, .. } => {
+                self.pairing = Some((request, link, expires_at));
+                self.serving = Some(serving);
+            }
+            Update::PairedDevices { devices } => self.devices = Some(devices),
             Update::Usage { report, .. } => self.usage = Some(report),
             Update::Daemon { socket, pid, .. } => {
                 self.sockets.push(socket);
@@ -180,6 +198,20 @@ struct Desk {
 
 impl Desk {
     fn open(label: &'static str, eukhe: &Path, data: &Path, socket: &Path) -> anyhow::Result<Self> {
+        Self::start(label, eukhe, data, socket, false)
+    }
+
+    fn app(label: &'static str, eukhe: &Path, data: &Path, socket: &Path) -> anyhow::Result<Self> {
+        Self::start(label, eukhe, data, socket, true)
+    }
+
+    fn start(
+        label: &'static str,
+        eukhe: &Path,
+        data: &Path,
+        socket: &Path,
+        take_over_serve: bool,
+    ) -> anyhow::Result<Self> {
         let signal = Arc::new(Signal::default());
         let config = StudioConfig {
             socket_path: Some(socket.to_string_lossy().into_owned()),
@@ -187,7 +219,7 @@ impl Desk {
             data_dir: Some(data.to_string_lossy().into_owned()),
             launch: Some(DaemonLaunch { program: eukhe.to_string_lossy().into_owned() }),
             controller_main: None,
-            take_over_serve: false,
+            take_over_serve,
         };
         let studio =
             Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -353,22 +385,6 @@ fn git(work: &Path, home: &Path, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn scratch_agent(agent: &Path) -> anyhow::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::create_dir_all(agent)?;
-    for (name, data) in [("auth.json", "{}"), ("settings.json", r#"{"onboardingShown":true}"#)] {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(agent.join(name))
-            .with_context(|| format!("create {}", agent.join(name).display()))?
-            .write_all(data.as_bytes())?;
-    }
-    local_studio_core::check_scratch_agent(agent).map_err(|error| anyhow::anyhow!(error))
-}
-
 fn mode(path: &Path) -> anyhow::Result<u32> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
 }
@@ -408,6 +424,8 @@ struct Run {
     a: Side,
     b: Side,
     work: PathBuf,
+    b_work: PathBuf,
+    tls: PathBuf,
     serve: Serve,
     model: String,
     daemons: Vec<(PathBuf, Option<u32>)>,
@@ -438,11 +456,15 @@ fn add_project(run: &mut Run) -> anyhow::Result<()> {
 }
 
 fn pairing_link(run: &Run) -> anyhow::Result<String> {
-    let url = format!("ws://127.0.0.1:{}/v1/ws", run.serve.port);
-    let printed = run.serve.run(&run.a, &["pair", "--url", &url, "--name", NAME])?;
+    pair_link(&run.serve, &run.a, run.serve.port, NAME)
+}
+
+fn pair_link(serve: &Serve, side: &Side, port: u16, name: &str) -> anyhow::Result<String> {
+    let url = format!("ws://127.0.0.1:{port}/v1/ws");
+    let printed = serve.run(side, &["pair", "--url", &url, "--name", name])?;
     let own = format!("{}://pair?", pairing::scheme(CHANNEL));
     let link = printed.lines().find(|line| line.starts_with(&own)).context("pair printed no link")?;
-    println!("ok   local-studio-serve pair printed a {} link", pairing::scheme(CHANNEL));
+    println!("ok   local-studio-serve pair printed a {} link for {name}", pairing::scheme(CHANNEL));
     Ok(link.to_string())
 }
 
@@ -468,6 +490,11 @@ fn pair_checks(run: &mut Run, b: &mut Desk) -> anyhow::Result<String> {
         "expires_at {expires_at}"
     );
     println!("ok   open_pairing minted {} for {} (same pairing.json as serve pair)", parsed.id, parsed.url);
+    ensure!(b.view.serving == Some(false), "open_pairing on B, which has no serve.json, reported serving");
+    println!("ok   open_pairing on B reports serving == false (no serve.json)");
+    b.studio.close_pairing("pair-b".to_string());
+    let minted = run.b.data.join("remote/pairing.json");
+    b.until("close_pairing removes the pairing it minted", QUICK, |_| !minted.exists())?;
 
     let link = pairing_link(run)?;
     let started = Instant::now();
@@ -502,6 +529,363 @@ fn pair_checks(run: &mut Run, b: &mut Desk) -> anyhow::Result<String> {
         })
     })?;
     Ok(id)
+}
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+struct Phone {
+    label: &'static str,
+    machine: String,
+    out: tokio::sync::mpsc::UnboundedSender<String>,
+    frames: Arc<Mutex<Vec<Value>>>,
+    next: u64,
+}
+
+async fn wire(
+    socket: Socket,
+    channel: noise::Channel,
+    mut out: tokio::sync::mpsc::UnboundedReceiver<String>,
+    frames: &Mutex<Vec<Value>>,
+) {
+    let (mut sink, mut stream) = socket.split();
+    let mut joiner = noise::Joiner::default();
+    let mut ping =
+        tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(20), Duration::from_secs(20));
+    loop {
+        let text = tokio::select! {
+            text = out.recv() => {
+                let Some(text) = text else {
+                    sink.close().await.ok();
+                    return;
+                };
+                text
+            }
+            _ = ping.tick() => json!({ "op": "ping" }).to_string(),
+            message = stream.next() => {
+                let Some(Ok(message)) = message else { return };
+                let Message::Binary(bytes) = message else { continue };
+                let Ok(record) = channel.open(&bytes) else { return };
+                if let Ok(Some(noise::Inbound::Json(text))) = joiner.feed(record) {
+                    if let Ok(frame) = serde_json::from_str(&text) {
+                        frames.lock().unwrap_or_else(PoisonError::into_inner).push(frame);
+                    }
+                }
+                continue;
+            }
+        };
+        for record in noise::json_records(&text) {
+            let Ok(sealed) = channel.seal(&record) else { return };
+            if sink.send(Message::binary(sealed)).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+impl Phone {
+    async fn pair(label: &'static str, link: &str, device: &str) -> anyhow::Result<Self> {
+        let parsed = pairing::parse(link, CHANNEL).map_err(anyhow::Error::msg)?;
+        let (mut socket, _) = tokio_tungstenite::connect_async(parsed.url.as_str())
+            .await
+            .with_context(|| format!("{label}: connect to {}", parsed.url))?;
+        let header = noise::header("XXpsk3", &parsed.id);
+        socket.send(Message::text(header.clone())).await?;
+        let keys = snow::Builder::new(noise::XX.parse()?).generate_keypair()?;
+        let mut state = snow::Builder::new(noise::XX.parse()?)
+            .local_private_key(&keys.private)?
+            .psk(3, &parsed.secret)?
+            .prologue(&noise::prologue(&header))?
+            .build_initiator()?;
+        socket.send(Message::binary(noise::write(&mut state, &[])?)).await?;
+        let second = match tokio::time::timeout(QUICK, socket.next()).await.context("no second XX message")? {
+            Some(Ok(Message::Binary(bytes))) => bytes,
+            other => bail!("{label}: the machine answered the pairing with {other:?}"),
+        };
+        noise::read(&mut state, &second)?;
+        let record =
+            json!({ "id": device, "name": "Smoke Phone", "platform": "ios", "app": "0.4.0", "channel": CHANNEL });
+        socket.send(Message::binary(noise::write(&mut state, record.to_string().as_bytes())?)).await?;
+        let channel = noise::Channel::new(state.into_transport_mode()?);
+        let (out, rx) = tokio::sync::mpsc::unbounded_channel();
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&frames);
+        tokio::spawn(async move {
+            wire(socket, channel, rx, &kept).await;
+            kept.lock().unwrap_or_else(PoisonError::into_inner).push(json!({ "op": "closed" }));
+        });
+        let mut phone = Self { label, machine: String::new(), out, frames, next: 0 };
+        let hello = json!({ "op": "hello", "device": { "name": "Smoke Phone", "app": "0.4.0", "channel": CHANNEL }, "resume": { "watch": [] } });
+        phone.out.send(hello.to_string()).ok();
+        phone
+            .until("pairs through XXpsk3 and gets hello", QUICK, |frames| {
+                frames.iter().any(|frame| frame["op"] == "hello" || frame["op"] == "closed")
+            })
+            .await?;
+        let hello = phone.frames().into_iter().find(|frame| frame["op"] == "hello");
+        let hello = hello.with_context(|| format!("{label}: the socket closed before hello"))?;
+        phone.machine = hello.pointer("/machine/id").and_then(Value::as_str).unwrap_or_default().to_string();
+        Ok(phone)
+    }
+
+    fn frames(&self) -> Vec<Value> {
+        self.frames.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    async fn until(&self, step: &str, bound: Duration, check: impl Fn(&[Value]) -> bool) -> anyhow::Result<()> {
+        let started = Instant::now();
+        loop {
+            if check(&self.frames()) {
+                println!("ok   {}: {step} ({} ms)", self.label, started.elapsed().as_millis());
+                return Ok(());
+            }
+            ensure!(started.elapsed() < bound, "{}: timed out after {} s: {step}", self.label, bound.as_secs());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn linked_ops(&mut self, remote: &str, remote_project: &str) -> anyhow::Result<()> {
+        let text = json!({ "text": PING, "images": [], "files": [] });
+        self.refused("watch", json!({ "thread": remote }), "unknown_thread").await?;
+        self.refused(
+            "send",
+            json!({ "request": "p-send", "thread": remote, "prompt": text, "delivery": "default" }),
+            "unknown_thread",
+        )
+        .await?;
+        self.refused("load_earlier", json!({ "thread": remote }), "unknown_thread").await?;
+        self.refused("mark_unread", json!({ "thread": remote, "unread": true }), "unknown_thread").await?;
+        self.refused(
+            "start_thread",
+            json!({ "draft": "p-draft", "project": remote_project, "prompt": text, "settings": null }),
+            "unknown_project",
+        )
+        .await?;
+        let asks = [
+            ("search_threads", json!({ "request": "p-search", "query": "Reply", "limit": 50 }), "thread_search"),
+            ("list_archived", json!({ "request": "p-archived" }), "archived_threads"),
+        ];
+        for (op, args, kind) in asks {
+            self.next += 1;
+            self.out.send(json!({ "id": self.next, "op": op, "args": args }).to_string()).ok();
+            self.until(&format!("{op} answers with {kind}"), QUICK, |frames| {
+                wire_updates(frames).iter().any(|update| update["type"] == kind)
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn refused(&mut self, op: &str, args: Value, code: &str) -> anyhow::Result<()> {
+        self.next += 1;
+        let id = self.next;
+        self.out.send(json!({ "id": id, "op": op, "args": args }).to_string()).ok();
+        self.until(&format!("{op} is answered"), QUICK, |frames| frames.iter().any(|frame| frame["re"] == id)).await?;
+        let reply = self.frames().into_iter().find(|frame| frame["re"] == id).unwrap_or_default();
+        let got = reply.pointer("/error/code").and_then(Value::as_str);
+        ensure!(got == Some(code), "{}: {op} answered {reply}, not {code}", self.label);
+        println!(
+            "ok   {}: {op} naming a linked id is refused with {code}: {}",
+            self.label,
+            reply.pointer("/error/message").unwrap_or(&Value::Null)
+        );
+        Ok(())
+    }
+}
+
+fn wire_updates(frames: &[Value]) -> Vec<&Value> {
+    frames
+        .iter()
+        .flat_map(|frame| match frame["op"].as_str() {
+            Some("hello") => frame["snapshot"].as_array().map(|all| all.iter().collect()).unwrap_or_default(),
+            Some("update") => vec![&frame["update"]],
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn latest_ids(frames: &[Value], kind: &str) -> Vec<String> {
+    wire_updates(frames)
+        .into_iter()
+        .rev()
+        .find(|update| update["type"] == kind)
+        .and_then(|update| update[kind].as_array())
+        .map(|rows| rows.iter().filter_map(|row| row["id"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn threads_updates(frames: &[Value]) -> usize {
+    wire_updates(frames).into_iter().filter(|update| update["type"] == "threads").count()
+}
+
+fn only_local(phone: &Phone, machine: &str) -> anyhow::Result<usize> {
+    let frames = phone.frames();
+    let needle = format!("@{machine}/");
+    ensure!(
+        !frames.iter().any(|frame| frame.to_string().contains(&needle)),
+        "{}: a frame carries a {needle} id",
+        phone.label
+    );
+    let updates = wire_updates(&frames);
+    for update in &updates {
+        let kind = update["type"].as_str().unwrap_or_default();
+        ensure!(kind != "machines" && kind != "pairing", "{}: the hub relayed a {kind} update", phone.label);
+        for row in update
+            .get(kind)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|_| kind == "threads" || kind == "projects")
+        {
+            let id = row["id"].as_str().unwrap_or_default();
+            ensure!(
+                row.get("machine").is_none() && !id.starts_with('@'),
+                "{}: a {kind} row from a linked machine: {row}",
+                phone.label
+            );
+        }
+    }
+    Ok(updates.len())
+}
+
+fn own_thread(run: &Run, b: &mut Desk) -> anyhow::Result<(String, String)> {
+    let path = run.b_work.to_string_lossy().into_owned();
+    b.studio.add_project(path.clone());
+    b.until("B adds its own project", SETUP, |view| {
+        view.projects.iter().any(|project| project.path == path && project.machine.is_none())
+    })?;
+    let project = b
+        .view
+        .projects
+        .iter()
+        .find(|project| project.path == path && project.machine.is_none())
+        .context("no local project on B")?
+        .id
+        .clone();
+    let settings = real_model::thread_settings(AccessMode::Supervised, WorktreeChoice::Local);
+    b.studio.start_thread("d-local".to_string(), Some(project.clone()), draft(LOCAL), settings);
+    b.until("B starts its own thread on the local model", MODEL_STEP, |view| {
+        view.started.contains_key("d-local") || view.failed.contains_key("d-local")
+    })?;
+    let thread = b.view.started.get("d-local").cloned().context("B's own thread did not start")?;
+    ensure!(!thread.starts_with('@'), "B's own thread has a linked id {thread}");
+    b.studio.watch_thread(thread.clone());
+    b.until("B's own thread replies on the local model", MODEL_STEP, |view| {
+        view.replies(&thread) >= 1 && view.idle(&thread)
+    })?;
+    b.studio.unwatch_thread(thread.clone());
+    Ok((project, thread))
+}
+
+fn phone_checks(run: &mut Run, b: &mut Desk, machine: &str, remote: &str) -> anyhow::Result<()> {
+    let (project, own) = own_thread(run, b)?;
+    let port = free_port()?;
+    let installed =
+        run.serve.run(&run.b, &["install", "--no-load", "--json", "--port", &port.to_string(), "--name", B_NAME])?;
+    ensure!(installed.contains("\"written\""), "install --no-load answered {installed}");
+    let host = local_studio_remote::host::start(Arc::clone(&b.studio), Some(&run.b.data))?
+        .context("the in-process host returned no handle")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let checked = phones(run, b, &runtime, port, machine, remote, (&project, &own));
+    drop(runtime);
+    host.stop();
+    println!("ok   B's in-process host stopped");
+    checked?;
+    let revoked = run.serve.run(&run.a, &["revoke", "phone-on-a"])?;
+    println!("ok   A revokes the smoke phone so its device list holds only B again: {}", revoked.trim());
+    b.studio.load_usage("usage-b".to_string(), UsagePeriod::Day);
+    b.until("B's usage report loads", SETUP, |view| view.usage.is_some() || view.failed.contains_key("usage-b"))?;
+    real_model::check_usage(b.view.usage.as_ref().context("B's usage report failed")?)?;
+    b.view.usage = None;
+    println!("ok   B's usage report counts the local model's real tokens");
+    Ok(())
+}
+
+fn phones(
+    run: &Run,
+    b: &mut Desk,
+    runtime: &tokio::runtime::Runtime,
+    port: u16,
+    machine: &str,
+    remote: &str,
+    (project, own): (&str, &str),
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + QUICK;
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        ensure!(Instant::now() < deadline, "B's in-process host did not listen on {port} within 30 s");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    println!("ok   B's in-process host listens on 127.0.0.1:{port} while B stays linked to A");
+    ensure!(b.view.row(remote).is_some(), "B's own sidebar no longer lists A's thread {remote}");
+    let link = pair_link(&run.serve, &run.b, port, B_NAME)?;
+    let mut on_b = runtime.block_on(Phone::pair("phone on B", &link, "phone-on-b"))?;
+    ensure!(on_b.machine != machine, "the phone on B was answered by A's machine id");
+    let frames = on_b.frames();
+    let threads = latest_ids(&frames, "threads");
+    ensure!(threads.iter().any(|id| id == own), "the phone's snapshot from B lacks B's own thread: {threads:?}");
+    ensure!(
+        latest_ids(&frames, "projects").iter().any(|id| id == project),
+        "the phone's snapshot from B lacks B's own project"
+    );
+    only_local(&on_b, machine)?;
+    println!("ok   phone on B: the snapshot holds B's {} thread(s) and none of A's", threads.len());
+
+    let remote_project = b
+        .view
+        .projects
+        .iter()
+        .find(|project| project.machine.as_deref() == Some(machine))
+        .context("B lists no project from A")?
+        .id
+        .clone();
+    runtime.block_on(on_b.linked_ops(remote, &remote_project))?;
+
+    let seen = threads_updates(&on_b.frames());
+    let replies = b.view.replies(remote);
+    b.studio.send("r-phone".to_string(), remote.to_string(), draft(PING), Delivery::Default);
+    b.until("a turn on A's thread finishes on B while the phone listens", MODEL_STEP, |view| {
+        view.replies(remote) > replies && view.idle(remote)
+    })?;
+    b.studio.mark_unread(remote.to_string(), true);
+    b.until("A's thread shows unread on B", QUICK, |view| view.row(remote).is_some_and(|row| row.unread))?;
+    runtime.block_on(on_b.until("the hub forwards Threads updates the linked turn caused", QUICK, |frames| {
+        threads_updates(frames) > seen
+    }))?;
+    b.hold(Duration::from_secs(2));
+    b.studio.mark_unread(remote.to_string(), false);
+    let count = only_local(&on_b, machine)?;
+    ensure!(latest_ids(&on_b.frames(), "threads").iter().any(|id| id == own), "B's own thread left the phone's rows");
+    println!(
+        "ok   phone on B: {count} updates, {} Threads, none with a row, transcript, unread mark or notification from A",
+        threads_updates(&on_b.frames())
+    );
+    ensure!(
+        !on_b.frames().iter().any(|frame| frame["update"]["type"] == "request_failed"),
+        "a refused op still reached the core"
+    );
+
+    let (_, a_thread) = remote.strip_prefix('@').and_then(|id| id.split_once('/')).context("not a linked id")?;
+    let link = pairing_link(run)?;
+    let on_a = runtime.block_on(Phone::pair("phone on A", &link, "phone-on-a"))?;
+    ensure!(on_a.machine == machine, "the phone on A was answered by machine {}", on_a.machine);
+    only_local(&on_a, &on_b.machine)?;
+    let from_b = latest_ids(&on_b.frames(), "threads");
+    let from_a = latest_ids(&on_a.frames(), "threads");
+    let merged: Vec<(String, String)> = from_b
+        .iter()
+        .map(|id| (on_b.machine.clone(), id.clone()))
+        .chain(from_a.iter().map(|id| (on_a.machine.clone(), id.clone())))
+        .collect();
+    ensure!(merged.contains(&(on_b.machine.clone(), own.to_string())), "the merged list lacks B's thread");
+    ensure!(merged.contains(&(on_a.machine.clone(), a_thread.to_string())), "the merged list lacks A's thread");
+    ensure!(!from_a.iter().any(|id| id == own), "A listed B's thread");
+    ensure!(!from_b.iter().any(|id| id == a_thread), "B listed A's thread under A's own id");
+    println!(
+        "ok   the phone paired to B and to A lists {} threads by machine: {} from B (with {own}), {} from A (with {a_thread})",
+        merged.len(),
+        from_b.len(),
+        from_a.len()
+    );
+    Ok(())
 }
 
 fn pairing_now() -> i64 {
@@ -623,7 +1007,7 @@ fn offline(view: &View, machine: &str) -> bool {
     view.machine(machine).is_some_and(|machine| matches!(machine.state, MachineState::Offline { .. }))
 }
 
-fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
+fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str, thread: &str) -> anyhow::Result<()> {
     let project = b
         .view
         .projects
@@ -633,14 +1017,21 @@ fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<(
         .id
         .clone();
     b.until("the machine is connected before the freeze", QUICK, |view| connected(view, machine))?;
+    files_refused(run, b, thread)?;
     run.serve.pause("-STOP")?;
     let frozen = (|| {
         b.studio.list_commands("frozen-1".to_string(), Some(project));
+        let image = ImageAttachment { mime_type: "image/png".to_string(), data: vec![0x5a; FROZEN_IMAGE] };
+        let prompt = PromptDraft { text: PING.to_string(), images: vec![image], files: Vec::new() };
+        b.studio.send("frozen-image".to_string(), thread.to_string(), prompt, Delivery::Default);
         let left = b.until("a frozen machine leaves Connected within the silence limit", SILENT + MARGIN, |view| {
             !connected(view, machine)
         })?;
         b.until("the request sent during the freeze fails as disconnected", QUICK, |view| {
             view.failed.get("frozen-1").is_some_and(|message| message.contains("disconnected"))
+        })?;
+        b.until("the 20 MB image send stuck on the frozen socket fails as disconnected", QUICK, |view| {
+            view.failed.get("frozen-image").is_some_and(|message| message.contains("disconnected"))
         })?;
         anyhow::Ok(left)
     })();
@@ -743,6 +1134,309 @@ fn reconnect_checks(run: &mut Run, b: &mut Desk, machine: &str, thread: &str) ->
     Ok(())
 }
 
+fn lock_owner(data: &Path) -> Option<u32> {
+    std::fs::read_to_string(data.join("studio.lock")).ok()?.trim().parse().ok()
+}
+
+fn device_checks(desk: &mut Desk, device: &str) -> anyhow::Result<()> {
+    desk.studio.list_paired_devices();
+    desk.until("list_paired_devices answers PairedDevices", QUICK, |view| view.devices.is_some())?;
+    let listed = desk.view.devices.clone().unwrap_or_default();
+    ensure!(listed.len() == 1 && listed[0].id == device, "A lists {listed:?}, not exactly B's device {device}");
+    ensure!(listed[0].platform == std::env::consts::OS, "B's device platform is {}", listed[0].platform);
+    println!("ok   A lists exactly B ({}, platform {})", listed[0].name, listed[0].platform);
+    desk.view.devices = None;
+    let before = desk.view.notices.len();
+    desk.studio.revoke_paired_device("no-such-id".to_string());
+    desk.until("revoking an unknown device posts a notice and republishes the list", QUICK, |view| {
+        view.devices.is_some()
+            && view.notices[before..].iter().any(|notice| notice == "That device was already revoked")
+    })?;
+    let ids = |devices: &[PairedDevice]| devices.iter().map(|device| device.id.clone()).collect::<Vec<_>>();
+    let again = desk.view.devices.clone().unwrap_or_default();
+    ensure!(ids(&again) == ids(&listed), "the list after a stale revoke changed: {again:?}");
+    println!("ok   a stale revoke keeps the same list");
+    Ok(())
+}
+
+fn devices_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
+    let settings = json!({ "name": NAME, "port": run.serve.port });
+    local_studio_core::link::devices::write_private(
+        &run.a.data.join("remote/serve.json"),
+        format!("{settings}\n").as_bytes(),
+    )?;
+    b.until("the machine is connected before desk A opens", RECONNECT, |view| connected(view, machine))?;
+    let saved: Value = serde_json::from_slice(&std::fs::read(run.b.data.join("remote/links.json"))?)?;
+    let device = saved["machines"][0]["device"].as_str().context("links.json names no device id")?.to_string();
+    let serve = run.serve.child.as_ref().map(Child::id).context("serve is not running")?;
+    ensure!(lock_owner(&run.a.data) == Some(serve), "serve {serve} does not own A's studio.lock");
+    let drops = b.view.drops;
+    run.a.enter();
+    let started = Instant::now();
+    let mut desk = Desk::app("desktop A", &run.eukhe, &run.a.data, &run.a.socket)?;
+    run.report.push(format!("desk A took studio.lock over from serve: {} ms", started.elapsed().as_millis()));
+    ensure!(lock_owner(&run.a.data) == Some(std::process::id()), "desk A opened without owning studio.lock");
+    ensure!(run.serve.child.as_mut().context("no serve")?.try_wait()?.is_none(), "serve exited on the hand-over");
+    println!("ok   serve {serve} handed studio.lock to desk A and keeps waiting");
+    let checked = (|| {
+        let host = local_studio_remote::host::start(Arc::clone(&desk.studio), Some(&run.a.data))?
+            .context("serve.json exists, so desk A must serve in process")?;
+        let served = (|| {
+            b.until("B drops serve and reconnects to desk A's in-process server", RECONNECT, |view| {
+                view.drops > drops && connected(view, machine)
+            })?;
+            device_checks(&mut desk, &device)?;
+            desk.studio.open_pairing("pair-a".to_string());
+            desk.until("open_pairing on desk A answers", QUICK, |view| view.pairing.is_some())?;
+            ensure!(desk.view.serving == Some(true), "open_pairing on A, serving in process, reported not serving");
+            println!("ok   open_pairing on desk A reports serving == true (in-process server)");
+            open_pairing_phone(run, &mut desk, machine, &device)?;
+            desk.view.pairing = None;
+            desk.studio.open_pairing("pair-a2".to_string());
+            desk.until("a second open_pairing on desk A answers", QUICK, |view| view.pairing.is_some())?;
+            let minted = run.a.data.join("remote/pairing.json");
+            ensure!(minted.exists(), "open_pairing on desk A wrote no pairing.json");
+            desk.studio.close_pairing("pair-a2".to_string());
+            desk.until("close_pairing on desk A removes its pairing", QUICK, |_| !minted.exists())?;
+            offer_checks(&mut desk, &minted)?;
+            anyhow::Ok(())
+        })();
+        host.stop();
+        served
+    })();
+    let drops = b.view.drops;
+    let daemon = desk.close();
+    if let Some(slot) = run.daemons.iter_mut().find(|(socket, _)| *socket == run.a.socket) {
+        slot.1 = slot.1.or(daemon);
+    }
+    checked?;
+    let closed = Instant::now();
+    b.until("B reconnects to serve once desk A closes", RECONNECT, |view| {
+        view.drops > drops && connected(view, machine)
+    })?;
+    ensure!(lock_owner(&run.a.data) == Some(serve), "serve {serve} did not take studio.lock back");
+    run.report.push(format!("desk A closed to B reconnected to serve: {} ms", closed.elapsed().as_millis()));
+    println!("ok   serve {serve} took studio.lock back and serves B again");
+    Ok(())
+}
+
+fn offer_checks(desk: &mut Desk, minted: &Path) -> anyhow::Result<()> {
+    desk.view.pairing = None;
+    desk.studio.open_pairing("pair-c".to_string());
+    desk.studio.close_pairing("pair-c".to_string());
+    desk.hold(Duration::from_secs(2));
+    ensure!(!minted.exists(), "a sheet closed while its pairing was minting left pairing.json behind");
+    println!("ok   closing the sheet while its pairing mints leaves no pairing behind");
+    desk.studio.open_pairing("pair-d".to_string());
+    desk.studio.open_pairing("pair-e".to_string());
+    desk.until("the newer of two back to back open_pairing calls answers", QUICK, |view| {
+        view.pairing.as_ref().is_some_and(|(request, ..)| request == "pair-e")
+    })?;
+    desk.hold(Duration::from_secs(1));
+    let (_, link, _) = desk.view.pairing.clone().context("open_pairing gave no link")?;
+    let shown = pairing::parse(&link, CHANNEL).map_err(anyhow::Error::msg)?.id;
+    let saved: Value = serde_json::from_slice(&std::fs::read(minted).context("pairing.json is gone")?)?;
+    ensure!(saved["id"] == shown, "the sheet shows pairing {shown} but pairing.json holds {}", saved["id"]);
+    println!("ok   two back to back open_pairing calls leave the newer pairing {shown} on disk");
+    desk.studio.close_pairing("pair-e".to_string());
+    desk.until("closing the newer sheet removes its pairing", QUICK, |_| !minted.exists())?;
+    Ok(())
+}
+
+fn files_refused(run: &Run, b: &mut Desk, thread: &str) -> anyhow::Result<()> {
+    let replies = b.view.replies(thread);
+    let file = run.work.join("notes.txt").to_string_lossy().into_owned();
+    let prompt = PromptDraft { text: PING.to_string(), images: Vec::new(), files: vec![file] };
+    b.studio.send("files-1".to_string(), thread.to_string(), prompt, Delivery::Default);
+    b.until("a remote send with a file attached is refused", QUICK, |view| view.failed.contains_key("files-1"))?;
+    let message = b.view.failed.get("files-1").cloned().unwrap_or_default();
+    ensure!(message.contains(NAME), "the refusal does not name the machine: {message}");
+    b.hold(Duration::from_secs(2));
+    ensure!(b.view.replies(thread) == replies, "the refused send still ran a turn on A");
+    println!("ok   a remote send with files is refused before it leaves B: {message}");
+    Ok(())
+}
+
+fn open_pairing_phone(run: &Run, desk: &mut Desk, machine: &str, device: &str) -> anyhow::Result<()> {
+    let (_, link, _) = desk.view.pairing.clone().context("open_pairing gave no link")?;
+    let parsed = pairing::parse(&link, CHANNEL).map_err(anyhow::Error::msg)?;
+    let local = format!("ws://127.0.0.1:{}/v1/ws", run.serve.port);
+    let direct = pairing::link(CHANNEL, &local, &parsed.name, &parsed.id, &parsed.secret);
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let phone = runtime.block_on(Phone::pair("phone on desk A", &direct, "phone-open-pairing"))?;
+    ensure!(phone.machine == machine, "the open_pairing phone was answered by machine {}", phone.machine);
+    println!(
+        "ok   a phone pairs through desk A's open_pairing secret ({} for {}) with its in-process host",
+        parsed.id, parsed.url
+    );
+    desk.view.devices = None;
+    desk.studio.list_paired_devices();
+    desk.until("desk A lists the phone it paired", QUICK, |view| {
+        view.devices.as_ref().is_some_and(|devices| devices.iter().any(|known| known.id == "phone-open-pairing"))
+    })?;
+    desk.view.devices = None;
+    desk.studio.revoke_paired_device("phone-open-pairing".to_string());
+    desk.until("revoking the phone on desk A leaves only B", QUICK, |view| {
+        view.devices.as_ref().is_some_and(|devices| devices.len() == 1 && devices[0].id == device)
+    })?;
+    runtime.block_on(phone.until("the revoked phone's socket closes", QUICK, |frames| {
+        frames.iter().any(|frame| frame["op"] == "closed")
+    }))?;
+    drop(runtime);
+    println!("ok   desk A lists the phone, revokes it live, and lists only B again");
+    Ok(())
+}
+
+fn test_ca(root: &Path) -> anyhow::Result<PathBuf> {
+    let dir = root.join("tls");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("leaf.ext"),
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+    )?;
+    let ca: &[&str] = &[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-days",
+        "2",
+        "-subj",
+        "/CN=link smoke test CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+    ];
+    let request: &[&str] =
+        &["req", "-newkey", "rsa:2048", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=localhost"];
+    let sign: &[&str] = &[
+        "x509",
+        "-req",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-out",
+        "leaf.pem",
+        "-days",
+        "2",
+        "-extfile",
+        "leaf.ext",
+    ];
+    for args in [ca, request, sign] {
+        let output = Command::new("openssl").args(args).current_dir(&dir).output().context("run openssl")?;
+        ensure!(output.status.success(), "openssl {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(dir)
+}
+
+struct Terminator {
+    port: u16,
+    handshakes: Arc<AtomicUsize>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Terminator {
+    fn start(tls: &Path, upstream: u16) -> anyhow::Result<Self> {
+        use tokio_rustls::rustls;
+        use tokio_rustls::rustls::pki_types::pem::PemObject;
+        let certs =
+            rustls::pki_types::CertificateDer::pem_file_iter(tls.join("leaf.pem"))?.collect::<Result<Vec<_>, _>>()?;
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_file(tls.join("leaf.key"))?;
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&handshakes);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() else {
+                return;
+            };
+            runtime.block_on(async move {
+                let Ok(listener) = tokio::net::TcpListener::from_std(listener) else { return };
+                tokio::pin!(stopped);
+                loop {
+                    let accepted = tokio::select! {
+                        _ = &mut stopped => return,
+                        accepted = listener.accept() => accepted,
+                    };
+                    let Ok((tcp, _)) = accepted else { continue };
+                    let acceptor = acceptor.clone();
+                    let counted = Arc::clone(&counted);
+                    tokio::spawn(async move {
+                        let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let Ok(mut upstream) = tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await else {
+                            return;
+                        };
+                        tokio::io::copy_bidirectional(&mut tls, &mut upstream).await.ok();
+                    });
+                }
+            });
+        });
+        Ok(Self { port, handshakes, stop: Some(stop), thread: Some(thread) })
+    }
+
+    fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.send(()).ok();
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
+        }
+    }
+}
+
+fn wss_checks(run: &mut Run, b: &mut Desk) -> anyhow::Result<()> {
+    let terminator = Terminator::start(&run.tls, run.serve.port)?;
+    let url = format!("wss://localhost:{}/v1/ws", terminator.port);
+    let checked = (|| {
+        run.serve.run(&run.a, &["allow-host", "localhost"])?;
+        let printed = run.serve.run(&run.a, &["pair", "--url", &url, "--name", NAME])?;
+        let own = format!("{}://pair?", pairing::scheme(CHANNEL));
+        let link = printed.lines().find(|line| line.starts_with(&own)).context("pair printed no link")?.to_string();
+        let started = Instant::now();
+        b.studio.pair_machine(link);
+        b.until("B pairs with A over wss:// through a TLS terminator signed by the test CA", SETUP, |view| {
+            view.machines.iter().any(|machine| machine.url == url && machine.state == MachineState::Connected)
+        })?;
+        run.report.push(format!(
+            "wss pair_machine to connected (TLS + XXpsk3 + hello): {} ms",
+            started.elapsed().as_millis()
+        ));
+        let machine = b.view.machines.iter().find(|machine| machine.url == url).context("no wss machine")?.id.clone();
+        let handshakes = terminator.handshakes.load(Ordering::SeqCst);
+        ensure!(handshakes >= 1, "the TLS terminator completed no handshake");
+        b.until("A's rows arrive over wss", QUICK, |view| {
+            view.threads.iter().any(|row| row.machine.as_deref() == Some(machine.as_str()))
+        })?;
+        println!(
+            "ok   B links to A over {url} ({handshakes} TLS handshake(s) under the test CA) and lists A's threads"
+        );
+        b.studio.forget_machine(machine);
+        b.until("forget_machine removes the wss machine", QUICK, |view| view.machines.is_empty())?;
+        anyhow::Ok(())
+    })();
+    terminator.stop();
+    checked
+}
+
 fn revoke_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
     run.serve.run(&run.a, &["revoke", "--all"])?;
     b.until("revoking B on A turns the machine to pair_again", QUICK, |view| {
@@ -810,10 +1504,13 @@ fn drive(run: &mut Run) -> anyhow::Result<()> {
     let driven = (|| {
         let machine = pair_checks(run, &mut b)?;
         let thread = model_checks(run, &mut b, &machine)?;
-        freeze_checks(run, &mut b, &machine)?;
+        phone_checks(run, &mut b, &machine, &thread)?;
+        freeze_checks(run, &mut b, &machine, &thread)?;
         reconnect_checks(run, &mut b, &machine, &thread)?;
+        devices_checks(run, &mut b, &machine)?;
         let seen = b.view.items(&thread).to_vec();
         revoke_checks(run, &mut b, &machine)?;
+        wss_checks(run, &mut b)?;
         anyhow::Ok((thread, seen))
     })();
     let daemon = b.close();
@@ -830,6 +1527,8 @@ fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(args.next().context(usage)?);
     std::fs::create_dir_all(&root)?;
     let root = std::fs::canonicalize(root)?;
+    let tls = test_ca(&root)?;
+    std::env::set_var(TEST_CA, tls.join("ca.pem"));
     let bin = std::env::current_exe()?
         .parent()
         .and_then(Path::parent)
@@ -839,15 +1538,22 @@ fn main() -> anyhow::Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unset")?;
     let a = Side::new(&root, "a", Some(home))?;
     let b = Side::new(&root, "b", None)?;
-    scratch_agent(&b.agent())?;
+    real_model::install(&b.agent())?;
     let work = a.root.join("work");
     std::fs::create_dir_all(&work)?;
     std::fs::write(work.join("notes.txt"), "link smoke notes\n")?;
     git(&work, &b.home, &["init", "-q", "-b", "main"])?;
     git(&work, &b.home, &["add", "."])?;
     git(&work, &b.home, &["commit", "-q", "-m", "seed"])?;
+    let b_work = b.root.join("work");
+    std::fs::create_dir_all(&b_work)?;
+    std::fs::write(b_work.join("notes.txt"), "link smoke notes on B\n")?;
+    git(&b_work, &b.home, &["init", "-q", "-b", "main"])?;
+    git(&b_work, &b.home, &["add", "."])?;
+    git(&b_work, &b.home, &["commit", "-q", "-m", "seed"])?;
     let serve = Serve { bin, port: free_port()?, child: None };
-    let mut run = Run { eukhe, a, b, work, serve, model: String::new(), daemons: Vec::new(), report: Vec::new() };
+    let mut run =
+        Run { eukhe, a, b, work, b_work, tls, serve, model: String::new(), daemons: Vec::new(), report: Vec::new() };
     let outcome = drive(&mut run);
     if outcome.is_err() {
         let log = std::fs::read_to_string(run.a.root.join("serve.log")).unwrap_or_default();

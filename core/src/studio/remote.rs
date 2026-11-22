@@ -112,6 +112,12 @@ impl Studio {
         self.mailbox.push(Update::RequestFailed { request, message: "This build cannot pair devices".to_string() });
     }
 
+    #[cfg_attr(not(feature = "link"), allow(unused_variables))]
+    pub fn close_pairing(&self, request: String) {
+        #[cfg(feature = "link")]
+        self.links.close_pairing(&request, self.data_dir.clone());
+    }
+
     pub fn list_paired_devices(&self) {
         #[cfg(feature = "link")]
         self.publish_devices(crate::link::devices::Devices::new(&self.data_dir).list());
@@ -160,7 +166,10 @@ impl Studio {
                 devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen));
                 self.mailbox.push(Update::PairedDevices { devices });
             }
-            Err(error) => self.mailbox.notice(NoticeLevel::Error, format!("Could not read paired devices: {error:#}")),
+            Err(error) => {
+                self.mailbox.notice(NoticeLevel::Error, format!("Could not read paired devices: {error:#}"));
+                self.mailbox.push(Update::PairedDevices { devices: Vec::new() });
+            }
         }
     }
 }
@@ -241,7 +250,7 @@ mod route {
                     self.links.unwatch(machine, id);
                     None
                 }
-                Command::StartThread { draft, project: Some(project), prompt, settings } if remote(&project) => {
+                Command::StartThread { draft, project: Some(project), prompt, settings, .. } if remote(&project) => {
                     let (machine, id) = split(&project)?;
                     let args = json!({ "draft": draft, "project": id, "settings": settings });
                     self.links.request(machine, "start_thread", args, Some(prompt), Some(draft));
@@ -297,7 +306,7 @@ mod route {
                     self.thread_op("mark_unread", &thread, json!({ "unread": unread }));
                     None
                 }
-                Command::ForkThread { thread } if remote(&thread) => {
+                Command::ForkThread { thread, .. } if remote(&thread) => {
                     self.thread_op("fork_thread", &thread, json!({}));
                     None
                 }

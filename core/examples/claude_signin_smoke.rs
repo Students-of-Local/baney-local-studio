@@ -8,8 +8,8 @@ use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
-    AccessMode, Connection, DaemonLaunch, Delivery, ModelKey, ModelOption, Project, PromptDraft, ProviderCredential,
-    ProviderStatus, Settings, Studio, StudioConfig, ThreadSettings, Update, Waker, WorktreeChoice,
+    AccessMode, Connection, DaemonLaunch, Delivery, ModelKey, ModelOption, Project, ProjectScript, PromptDraft,
+    ProviderCredential, ProviderStatus, Settings, Studio, StudioConfig, ThreadSettings, Update, Waker, WorktreeChoice,
 };
 use serde_json::Map;
 
@@ -65,6 +65,7 @@ struct View {
     projects: Vec<Project>,
     settings: Option<Settings>,
     threads: Vec<String>,
+    scripts: Vec<(String, usize)>,
 }
 
 impl View {
@@ -165,6 +166,7 @@ impl Harness {
             Update::Projects { projects } => view.projects = projects,
             Update::Settings { settings } => view.settings = Some(settings),
             Update::Threads { threads } => view.threads = threads.into_iter().map(|row| row.id).collect(),
+            Update::ProjectScripts { project, scripts } => view.scripts.push((project, scripts.len())),
             _ => {}
         }
     }
@@ -214,20 +216,50 @@ fn agent_dir() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(std::env::var_os("EUKHE_CODING_AGENT_DIR").context("agent dir")?))
 }
 
-/// Whether any file under `dir` holds `text`, so a refused prompt can be shown never to reach a session.
-fn any_file_holds(dir: &Path, text: &str) -> anyhow::Result<bool> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(false) };
+/// Every file under `dir`, so a refused start can be shown to leave no session file behind.
+fn files_under(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(Vec::new()) };
+    let mut files = Vec::new();
     for entry in entries {
         let path = entry?.path();
         if path.is_dir() {
-            if any_file_holds(&path, text)? {
-                return Ok(true);
-            }
-        } else if std::fs::read(&path).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(text)) {
-            return Ok(true);
+            files.extend(files_under(&path)?);
+        } else {
+            files.push(path);
         }
     }
-    Ok(false)
+    files.sort();
+    Ok(files)
+}
+
+fn setup_script(name: &str, command: &str, wait: bool) -> ProjectScript {
+    ProjectScript {
+        id: name.to_string(),
+        name: name.to_string(),
+        command: command.to_string(),
+        icon: None,
+        keybinding: None,
+        run_on_worktree_setup: true,
+        wait_for_setup: wait,
+    }
+}
+
+fn set_scripts(harness: &mut Harness, repo: &Path, scripts: Vec<ProjectScript>) -> anyhow::Result<()> {
+    let key = repo.to_string_lossy().into_owned();
+    let count = scripts.len();
+    harness.studio.set_project_scripts(key.clone(), scripts);
+    harness.pump_until(&format!("{count} worktree setup scripts are saved"), |view| {
+        view.scripts.iter().any(|(project, saved)| *project == key && *saved == count)
+    })
+}
+
+/// Whether any process is left in the process group a setup script led.
+fn group_alive(pid: &str) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-0", "--", &format!("-{}", pid.trim())])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Waits until nothing accepts on `socket`, so the next Studio launches a fresh daemon.
@@ -349,6 +381,7 @@ fn signed_in(harness: &mut Harness) -> anyhow::Result<()> {
     println!("ok   starting an Eukhe anthropic thread is refused: {refusal}");
     default_model_refused(harness)?;
     worktree_left_alone(harness)?;
+    setup_scripts_not_run(harness)?;
     title_skipped(harness)?;
     commit_message_skipped(harness)?;
     project_default_allowed(harness)?;
@@ -418,7 +451,9 @@ fn project_repo(harness: &mut Harness, name: &str, files: &[(&str, &str)]) -> an
     Ok((repo, project))
 }
 
-/// Starts `settings` in a new worktree of `repo`, requires the refusal, and requires no branch or worktree left.
+/// Starts `settings` in a new worktree of `repo`, runs `during`, requires the refusal, and requires no branch or
+/// worktree left.
+#[allow(clippy::too_many_arguments)]
 fn worktree_refused(
     harness: &mut Harness,
     repo: &Path,
@@ -427,11 +462,13 @@ fn worktree_refused(
     branch: &str,
     settings: ThreadSettings,
     what: &str,
+    during: impl FnOnce(&mut Harness) -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
     let before = git(repo, &["branch", "--list", "local-studio/*"])?;
     let settings =
         ThreadSettings { worktree: WorktreeChoice::NewWorktree { branch: branch.to_string(), base: None }, ..settings };
     harness.studio.start_thread(draft.to_string(), Some(project), prompt("ping"), settings);
+    during(harness)?;
     let refusal = refused_start(harness, draft, what)?;
     let after = git(repo, &["branch", "--list", "local-studio/*"])?;
     ensure!(before == after, "a refused start left branches: before {before:?}, after {after:?}");
@@ -451,8 +488,42 @@ fn worktree_left_alone(harness: &mut Harness) -> anyhow::Result<()> {
         "local-studio/1",
         on(HAIKU, WorktreeChoice::Local),
         what,
+        |_| Ok(()),
     )?;
     println!("ok   a refused worktree start leaves no local-studio/* branch or worktree: {refusal}");
+    Ok(())
+}
+
+/// Eukhe's global default is `anthropic` and the project has worktree setup scripts: a thread with no provider in
+/// a new worktree must be refused before any of them runs.
+fn setup_scripts_not_run(harness: &mut Harness) -> anyhow::Result<()> {
+    let (repo, project) = project_repo(harness, "setup-repo", &[])?;
+    let run = repo.parent().context("run dir")?.to_path_buf();
+    let marker = run.join("setup-marker");
+    let pidfile = run.join("setup-slow.pid");
+    set_scripts(
+        harness,
+        &repo,
+        vec![
+            setup_script("marker", &format!("touch '{}'", marker.display()), true),
+            setup_script("slow", &format!("echo $$ > '{}'; sleep 30", pidfile.display()), false),
+        ],
+    )?;
+    println!("     the project runs a marker script and a slow script on worktree setup");
+    let what = "an Eukhe thread on the anthropic default in a new worktree with setup scripts";
+    let refusal = worktree_refused(
+        harness,
+        &repo,
+        project,
+        "setup-draft",
+        "local-studio/3",
+        unset(WorktreeChoice::Local),
+        what,
+        |_| Ok(()),
+    )?;
+    ensure!(!marker.exists(), "a setup script ran before the refusal: {} exists", marker.display());
+    ensure!(!pidfile.exists(), "the slow setup script started before the refusal: {} exists", pidfile.display());
+    println!("ok   refused before any setup script ran, leaving no marker, branch or worktree: {refusal}");
     Ok(())
 }
 
@@ -599,6 +670,8 @@ fn project_default_refused(harness: &mut Harness) -> anyhow::Result<()> {
         default.as_ref().is_some_and(|key| key.provider == STUB),
         "the global daemon default is not the stub, so the scenario proves nothing: {default:?}"
     );
+    let sessions = agent_dir()?.join("sessions");
+    let sessions_before = files_under(&sessions)?;
     let (repo, project) = project_repo(harness, "anthropic-project", &[(".eukhe/settings.json", DEFAULT_HAIKU)])?;
     println!("     the project's .eukhe/settings.json default is anthropic");
     let text = "ping-project-default";
@@ -619,11 +692,90 @@ fn project_default_refused(harness: &mut Harness) -> anyhow::Result<()> {
         "local-studio/2",
         unset(WorktreeChoice::Local),
         what,
+        |_| Ok(()),
     )?;
     println!("ok   in a new worktree it is refused, leaving no local-studio/* branch or worktree: {refusal}");
-    let sessions = agent_dir()?.join("sessions");
-    ensure!(!any_file_holds(&sessions, text)?, "the refused prompt reached a session under {}", sessions.display());
-    println!("ok   the refused prompt reached no session");
+    running_setup_stopped(harness)?;
+    skipped_setup_branch_removed(harness)?;
+    let left = files_under(&sessions)?;
+    ensure!(left == sessions_before, "refused starts left session files: before {sessions_before:?}, after {left:?}");
+    println!("ok   the refused starts left no session file ({} before and after)", left.len());
+    harness.studio.start_thread("kept-draft".to_string(), None, prompt(""), unset(WorktreeChoice::Local));
+    harness.pump_until("a thread on the stub default starts with no prompt sent", |view| {
+        view.thread("kept-draft").is_some() || view.failure("kept-draft").is_some()
+    })?;
+    if let Some(failure) = harness.view.failure("kept-draft") {
+        bail!("a thread on the {STUB} default was refused: {failure}");
+    }
+    let kept = files_under(&sessions)?;
+    ensure!(kept.len() > left.len(), "a started thread wrote no session file, so the check above proves nothing");
+    println!("ok   a started thread does write session files ({} now)", kept.len());
+    Ok(())
+}
+
+/// A waiting setup script switches the new worktree's default to `anthropic`, so the start is refused after setup
+/// while a slow script that ignores TERM still runs: the discard must end that script before the worktree goes.
+fn running_setup_stopped(harness: &mut Harness) -> anyhow::Result<()> {
+    let (repo, project) = project_repo(harness, "late-repo", &[])?;
+    let run = repo.parent().context("run dir")?.to_path_buf();
+    let marker = run.join("late-marker");
+    let pidfile = run.join("late-slow.pid");
+    let switch = format!("mkdir -p .eukhe && printf '%s' '{DEFAULT_HAIKU}' > .eukhe/settings.json");
+    let slow = format!("trap '' TERM; echo $$ > '{}'; sleep 6; touch '{}'", pidfile.display(), marker.display());
+    set_scripts(harness, &repo, vec![setup_script("switch", &switch, true), setup_script("slow", &slow, false)])?;
+    println!("     a waiting setup script makes the worktree's default anthropic; a slow one ignores TERM");
+    let what = "an Eukhe thread whose worktree setup made its default anthropic";
+    let refusal = worktree_refused(
+        harness,
+        &repo,
+        project,
+        "late-draft",
+        "local-studio/4",
+        unset(WorktreeChoice::Local),
+        what,
+        |_| Ok(()),
+    )?;
+    let pid = std::fs::read_to_string(&pidfile)
+        .context("the slow setup script never started, so the scenario proves nothing")?
+        .trim()
+        .to_string();
+    ensure!(!group_alive(&pid), "setup script group {pid} still runs after its worktree was removed");
+    println!("ok   the discard ended the running setup script (group {pid}) before removing the worktree: {refusal}");
+    std::thread::sleep(Duration::from_secs(7));
+    ensure!(!marker.exists(), "the slow setup script finished after the discard: {} exists", marker.display());
+    println!("ok   the slow setup script never finished");
+    Ok(())
+}
+
+/// Setup is skipped while a waiting script runs, so the thread falls back to the project folder, whose uncommitted
+/// `.eukhe/settings.json` default is `anthropic`: the refusal must still delete the branch the worktree made.
+fn skipped_setup_branch_removed(harness: &mut Harness) -> anyhow::Result<()> {
+    let (repo, project) = project_repo(harness, "skip-repo", &[])?;
+    std::fs::create_dir_all(repo.join(".eukhe"))?;
+    std::fs::write(repo.join(".eukhe/settings.json"), DEFAULT_HAIKU)?;
+    let pidfile = repo.parent().context("run dir")?.join("skip-wait.pid");
+    let wait = format!("echo $$ > '{}'; sleep 30", pidfile.display());
+    set_scripts(harness, &repo, vec![setup_script("wait", &wait, true)])?;
+    println!("     the project folder's uncommitted default is anthropic; its waiting setup script is skipped");
+    let what = "an Eukhe thread whose skipped setup fell back to the anthropic project folder";
+    let refusal = worktree_refused(
+        harness,
+        &repo,
+        project,
+        "skip-draft",
+        "local-studio/5",
+        unset(WorktreeChoice::Local),
+        what,
+        |harness| {
+            let started = pidfile.clone();
+            harness.pump_until("the waiting setup script runs", move |_| started.exists())?;
+            harness.studio.skip_worktree_setup("skip-draft".to_string());
+            Ok(())
+        },
+    )?;
+    let pid = std::fs::read_to_string(&pidfile)?.trim().to_string();
+    ensure!(!group_alive(&pid), "the skipped setup script group {pid} still runs");
+    println!("ok   skipping setup and then refusing leaves no local-studio/* branch or worktree: {refusal}");
     Ok(())
 }
 

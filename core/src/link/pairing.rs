@@ -117,6 +117,7 @@ pub fn link(channel: &str, url: &str, name: &str, id: &str, secret: &[u8; KEY_BY
 }
 
 pub struct Minted {
+    pub id: String,
     pub link: String,
     pub url: String,
     pub expires_at: i64,
@@ -129,7 +130,7 @@ pub fn mint(data_dir: &Path, channel: &str, url: Option<String>, name: Option<St
         .or_else(|| settings.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_string))
         .unwrap_or_else(host_name);
     let (id, secret, expires_at) = Devices::new(data_dir).open_pairing()?;
-    Ok(Minted { link: link(channel, &url, &name, &id, &secret.0), url, expires_at })
+    Ok(Minted { link: link(channel, &url, &name, &id, &secret.0), id, url, expires_at })
 }
 
 #[derive(Debug)]
