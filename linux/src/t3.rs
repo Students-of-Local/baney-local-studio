@@ -72,7 +72,7 @@ pub fn summary(group: &T3Group) -> String {
     parts.join(" · ")
 }
 
-fn chosen(choices: &T3Choices, kind: T3Kind) -> bool {
+fn chosen(choices: T3Choices, kind: T3Kind) -> bool {
     match kind {
         T3Kind::Accounts => choices.accounts,
         T3Kind::Projects => choices.projects,
@@ -175,7 +175,7 @@ pub fn present(app: &Rc<App>, report: &T3Report, open: &[T3Kind]) {
         move |choices: &T3Choices| -> usize {
             groups
                 .iter()
-                .filter(|group| chosen(choices, group.kind))
+                .filter(|group| chosen(*choices, group.kind))
                 .map(|group| count(group, T3ItemState::Import))
                 .sum()
         }
@@ -191,7 +191,7 @@ pub fn present(app: &Rc<App>, report: &T3Report, open: &[T3Kind]) {
             .expanded(open.contains(&group.kind))
             .build();
         let switch = gtk::Switch::builder()
-            .active(chosen(&choices.borrow(), group.kind))
+            .active(chosen(*choices.borrow(), group.kind))
             .valign(gtk::Align::Center)
             .sensitive(count(group, T3ItemState::Import) > 0)
             .build();
@@ -334,11 +334,8 @@ pub fn accounts_group(accounts: &HarnessAccounts) -> adw::PreferencesGroup {
         .description("Each account is a config folder with its own sign-in. When one hits its usage limit, a thread can move to another.")
         .build();
     let label = |dir: &str| accounts.labels.iter().find(|label| label.dir == dir);
-    let entries = accounts
-        .claude
-        .iter()
-        .map(|dir| ("Claude Code", dir))
-        .chain(accounts.codex.iter().map(|dir| ("Codex", dir)));
+    let entries =
+        accounts.claude.iter().map(|dir| ("Claude Code", dir)).chain(accounts.codex.iter().map(|dir| ("Codex", dir)));
     let mut any = false;
     for (harness, dir) in entries {
         any = true;

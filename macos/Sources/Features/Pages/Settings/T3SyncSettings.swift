@@ -82,7 +82,7 @@ struct HarnessAccountsSection: View {
                 ForEach(rows, id: \.dir) { row in
                     HStack(spacing: 8) {
                         Circle()
-                            .fill(row.label?.accent.flatMap(RGBA.parse).map { Color(nsColor: $0.nsColor) } ?? Theme.tertiaryText)
+                            .fill(row.label?.accent.flatMap(ThemeColorParser.parse).map { Color(nsColor: $0.nsColor) } ?? Theme.tertiaryText)
                             .frame(width: 8, height: 8)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 1) {

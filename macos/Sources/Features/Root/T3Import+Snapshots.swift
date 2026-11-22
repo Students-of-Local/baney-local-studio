@@ -6,7 +6,7 @@ extension SnapshotCatalog {
     @MainActor static var t3Import: [SnapshotEntry] {
         [
             sheet("t3-import", T3Fixtures.firstRun, open: [], height: 560),
-            sheet("t3-import-details", T3Fixtures.firstRun, open: [.accounts, .models], height: 760),
+            sheet("t3-import-details", T3Fixtures.firstRun, open: [.accounts, .models], height: 600),
             sheet("t3-import-synced", T3Fixtures.synced, open: [.projects], height: 560),
             SnapshotEntry(
                 name: "pages-settings-t3-sync",
@@ -42,7 +42,7 @@ extension SnapshotCatalog {
 enum T3Fixtures {
     static let source = "/Users/demo/.t3/userdata"
 
-    static var settings: Settings {
+    static var settings: LocalStudioKit.Settings {
         var settings = PagesFixtures.settings
         settings.harnessAccounts = HarnessAccounts(
             claude: ["/Users/demo/.claude", "/Users/demo/.claude-work"],
