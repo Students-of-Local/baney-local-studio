@@ -1231,6 +1231,44 @@ mod hub {
         Ok(())
     }
 
+    fn whole_catalog(hub: &mut Hub, plugins: &Path) -> anyhow::Result<()> {
+        let entries: Vec<CatalogPlugin> =
+            hub.seen.catalog.iter().filter(|entry| entry.id != CATALOG).cloned().collect();
+        ensure!(!entries.is_empty(), "the bundled catalog lists only {CATALOG}");
+        for entry in entries {
+            let id = entry.id.clone();
+            let request = format!("hub-catalog-{id}");
+            let listed: Vec<String> = entry.grants.iter().map(|grant| grant.id.clone()).collect();
+            hub.studio.install_plugin(request.clone(), id.clone());
+            hub.pump(&format!("{id} installs from its pinned catalog tree"), |seen| {
+                seen.outcome(&request).is_some() || seen.sheet(&request).is_some()
+            })?;
+            if let Some(sheet) = hub.seen.sheet(&request).cloned() {
+                let ids: Vec<String> = sheet.rows.iter().map(|row| row.id.clone()).collect();
+                ensure!(ids == listed, "{id} sheet asks for {ids:?}, the catalog lists {listed:?}");
+                hub.answer(&format!("{id} installs with what the catalog lists"), &request, &[])?;
+            } else {
+                ensure!(listed.is_empty(), "{id} lists {listed:?} in the catalog but opened no sheet");
+            }
+            ensure!(
+                matches!(hub.seen.outcome(&request), Some(Ok(_))),
+                "{id} catalog install: {:?}",
+                hub.seen.outcome(&request)
+            );
+            let row = hub.seen.row(&id).context("catalog row")?.clone();
+            let granted: Vec<String> = row.grants.iter().map(|grant| grant.id.clone()).collect();
+            ensure!(
+                row.pinned && row.state != PluginState::Failed && granted == listed,
+                "{id} does not match its catalog entry: {row:?}"
+            );
+            let remove = format!("hub-remove-{id}");
+            hub.studio.remove_plugin(remove.clone(), id.clone());
+            hub.pump(&format!("remove {id}"), |seen| seen.outcome(&remove).is_some() && seen.row(&id).is_none())?;
+            ensure!(!plugins.join(&id).exists(), "{id} folder is still there");
+        }
+        Ok(())
+    }
+
     fn untold(hub: &mut Hub, dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir.join("bin"))?;
         std::fs::write(dir.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
@@ -1363,6 +1401,7 @@ mod hub {
         catalog_pin(hub, plugins)?;
         let plain = repo.parent().context("scratch root")?.join(PLAIN);
         untold(hub, &plain)?;
+        whole_catalog(hub, plugins)?;
 
         for (request, id) in [("hub-remove", ID), ("hub-remove-catalog", CATALOG), ("hub-remove-plain", PLAIN)] {
             hub.studio.remove_plugin(request.into(), id.into());
