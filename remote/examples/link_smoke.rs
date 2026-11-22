@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -12,9 +13,9 @@ use futures_util::{SinkExt, StreamExt};
 use local_studio_core::link::devices::{unhex, Devices};
 use local_studio_core::link::{noise, pairing, snow};
 use local_studio_core::{
-    AccessMode, Approval, ApprovalAnswer, Block, DaemonLaunch, Delivery, Harness, Item, ItemKind, Machine,
-    MachineState, ModelOption, PairedDevice, Project, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings,
-    ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    AccessMode, Approval, ApprovalAnswer, Block, DaemonLaunch, Delivery, Harness, ImageAttachment, Item, ItemKind,
+    Machine, MachineState, ModelOption, PairedDevice, Project, PromptDraft, Studio, StudioConfig, ThreadRow,
+    ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
 use tokio_tungstenite::tungstenite::Message;
@@ -37,6 +38,8 @@ const PING: &str = "Reply with only the word ping.";
 const QUEUED: &str = "Reply with only the word queued.";
 const B_NAME: &str = "smoke-b";
 const LOCAL: &str = "Reply with only the word local.";
+const TEST_CA: &str = "LOCAL_STUDIO_LINK_TEST_CA";
+const FROZEN_IMAGE: usize = 20 << 20;
 
 const PROVIDER: &str = "claude-code";
 const STORY: &str = "Write a 600 word short story about a lighthouse keeper on a northern island, in plain prose.";
@@ -422,6 +425,7 @@ struct Run {
     b: Side,
     work: PathBuf,
     b_work: PathBuf,
+    tls: PathBuf,
     serve: Serve,
     model: String,
     daemons: Vec<(PathBuf, Option<u32>)>,
@@ -1003,7 +1007,7 @@ fn offline(view: &View, machine: &str) -> bool {
     view.machine(machine).is_some_and(|machine| matches!(machine.state, MachineState::Offline { .. }))
 }
 
-fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
+fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str, thread: &str) -> anyhow::Result<()> {
     let project = b
         .view
         .projects
@@ -1013,14 +1017,21 @@ fn freeze_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<(
         .id
         .clone();
     b.until("the machine is connected before the freeze", QUICK, |view| connected(view, machine))?;
+    files_refused(run, b, thread)?;
     run.serve.pause("-STOP")?;
     let frozen = (|| {
         b.studio.list_commands("frozen-1".to_string(), Some(project));
+        let image = ImageAttachment { mime_type: "image/png".to_string(), data: vec![0x5a; FROZEN_IMAGE] };
+        let prompt = PromptDraft { text: PING.to_string(), images: vec![image], files: Vec::new() };
+        b.studio.send("frozen-image".to_string(), thread.to_string(), prompt, Delivery::Default);
         let left = b.until("a frozen machine leaves Connected within the silence limit", SILENT + MARGIN, |view| {
             !connected(view, machine)
         })?;
         b.until("the request sent during the freeze fails as disconnected", QUICK, |view| {
             view.failed.get("frozen-1").is_some_and(|message| message.contains("disconnected"))
+        })?;
+        b.until("the 20 MB image send stuck on the frozen socket fails as disconnected", QUICK, |view| {
+            view.failed.get("frozen-image").is_some_and(|message| message.contains("disconnected"))
         })?;
         anyhow::Ok(left)
     })();
@@ -1179,8 +1190,13 @@ fn devices_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<
             desk.until("open_pairing on desk A answers", QUICK, |view| view.pairing.is_some())?;
             ensure!(desk.view.serving == Some(true), "open_pairing on A, serving in process, reported not serving");
             println!("ok   open_pairing on desk A reports serving == true (in-process server)");
-            desk.studio.close_pairing("pair-a".to_string());
+            open_pairing_phone(run, &mut desk, machine, &device)?;
+            desk.view.pairing = None;
+            desk.studio.open_pairing("pair-a2".to_string());
+            desk.until("a second open_pairing on desk A answers", QUICK, |view| view.pairing.is_some())?;
             let minted = run.a.data.join("remote/pairing.json");
+            ensure!(minted.exists(), "open_pairing on desk A wrote no pairing.json");
+            desk.studio.close_pairing("pair-a2".to_string());
             desk.until("close_pairing on desk A removes its pairing", QUICK, |_| !minted.exists())?;
             anyhow::Ok(())
         })();
@@ -1201,6 +1217,200 @@ fn devices_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<
     run.report.push(format!("desk A closed to B reconnected to serve: {} ms", closed.elapsed().as_millis()));
     println!("ok   serve {serve} took studio.lock back and serves B again");
     Ok(())
+}
+
+fn files_refused(run: &Run, b: &mut Desk, thread: &str) -> anyhow::Result<()> {
+    let replies = b.view.replies(thread);
+    let file = run.work.join("notes.txt").to_string_lossy().into_owned();
+    let prompt = PromptDraft { text: PING.to_string(), images: Vec::new(), files: vec![file] };
+    b.studio.send("files-1".to_string(), thread.to_string(), prompt, Delivery::Default);
+    b.until("a remote send with a file attached is refused", QUICK, |view| view.failed.contains_key("files-1"))?;
+    let message = b.view.failed.get("files-1").cloned().unwrap_or_default();
+    ensure!(message.contains(NAME), "the refusal does not name the machine: {message}");
+    b.hold(Duration::from_secs(2));
+    ensure!(b.view.replies(thread) == replies, "the refused send still ran a turn on A");
+    println!("ok   a remote send with files is refused before it leaves B: {message}");
+    Ok(())
+}
+
+fn open_pairing_phone(run: &Run, desk: &mut Desk, machine: &str, device: &str) -> anyhow::Result<()> {
+    let (_, link, _) = desk.view.pairing.clone().context("open_pairing gave no link")?;
+    let parsed = pairing::parse(&link, CHANNEL).map_err(anyhow::Error::msg)?;
+    let local = format!("ws://127.0.0.1:{}/v1/ws", run.serve.port);
+    let direct = pairing::link(CHANNEL, &local, &parsed.name, &parsed.id, &parsed.secret);
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let phone = runtime.block_on(Phone::pair("phone on desk A", &direct, "phone-open-pairing"))?;
+    ensure!(phone.machine == machine, "the open_pairing phone was answered by machine {}", phone.machine);
+    println!(
+        "ok   a phone pairs through desk A's open_pairing secret ({} for {}) with its in-process host",
+        parsed.id, parsed.url
+    );
+    desk.view.devices = None;
+    desk.studio.list_paired_devices();
+    desk.until("desk A lists the phone it paired", QUICK, |view| {
+        view.devices.as_ref().is_some_and(|devices| devices.iter().any(|known| known.id == "phone-open-pairing"))
+    })?;
+    desk.view.devices = None;
+    desk.studio.revoke_paired_device("phone-open-pairing".to_string());
+    desk.until("revoking the phone on desk A leaves only B", QUICK, |view| {
+        view.devices.as_ref().is_some_and(|devices| devices.len() == 1 && devices[0].id == device)
+    })?;
+    runtime.block_on(phone.until("the revoked phone's socket closes", QUICK, |frames| {
+        frames.iter().any(|frame| frame["op"] == "closed")
+    }))?;
+    drop(runtime);
+    println!("ok   desk A lists the phone, revokes it live, and lists only B again");
+    Ok(())
+}
+
+fn test_ca(root: &Path) -> anyhow::Result<PathBuf> {
+    let dir = root.join("tls");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("leaf.ext"),
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+    )?;
+    let ca: &[&str] = &[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-days",
+        "2",
+        "-subj",
+        "/CN=link smoke test CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+    ];
+    let request: &[&str] =
+        &["req", "-newkey", "rsa:2048", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=localhost"];
+    let sign: &[&str] = &[
+        "x509",
+        "-req",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-out",
+        "leaf.pem",
+        "-days",
+        "2",
+        "-extfile",
+        "leaf.ext",
+    ];
+    for args in [ca, request, sign] {
+        let output = Command::new("openssl").args(args).current_dir(&dir).output().context("run openssl")?;
+        ensure!(output.status.success(), "openssl {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(dir)
+}
+
+struct Terminator {
+    port: u16,
+    handshakes: Arc<AtomicUsize>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Terminator {
+    fn start(tls: &Path, upstream: u16) -> anyhow::Result<Self> {
+        use tokio_rustls::rustls;
+        use tokio_rustls::rustls::pki_types::pem::PemObject;
+        let certs =
+            rustls::pki_types::CertificateDer::pem_file_iter(tls.join("leaf.pem"))?.collect::<Result<Vec<_>, _>>()?;
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_file(tls.join("leaf.key"))?;
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&handshakes);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() else {
+                return;
+            };
+            runtime.block_on(async move {
+                let Ok(listener) = tokio::net::TcpListener::from_std(listener) else { return };
+                tokio::pin!(stopped);
+                loop {
+                    let accepted = tokio::select! {
+                        _ = &mut stopped => return,
+                        accepted = listener.accept() => accepted,
+                    };
+                    let Ok((tcp, _)) = accepted else { continue };
+                    let acceptor = acceptor.clone();
+                    let counted = Arc::clone(&counted);
+                    tokio::spawn(async move {
+                        let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let Ok(mut upstream) = tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await else {
+                            return;
+                        };
+                        tokio::io::copy_bidirectional(&mut tls, &mut upstream).await.ok();
+                    });
+                }
+            });
+        });
+        Ok(Self { port, handshakes, stop: Some(stop), thread: Some(thread) })
+    }
+
+    fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.send(()).ok();
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
+        }
+    }
+}
+
+fn wss_checks(run: &mut Run, b: &mut Desk) -> anyhow::Result<()> {
+    let terminator = Terminator::start(&run.tls, run.serve.port)?;
+    let url = format!("wss://localhost:{}/v1/ws", terminator.port);
+    let checked = (|| {
+        run.serve.run(&run.a, &["allow-host", "localhost"])?;
+        let printed = run.serve.run(&run.a, &["pair", "--url", &url, "--name", NAME])?;
+        let own = format!("{}://pair?", pairing::scheme(CHANNEL));
+        let link = printed.lines().find(|line| line.starts_with(&own)).context("pair printed no link")?.to_string();
+        let started = Instant::now();
+        b.studio.pair_machine(link);
+        b.until("B pairs with A over wss:// through a TLS terminator signed by the test CA", SETUP, |view| {
+            view.machines.iter().any(|machine| machine.url == url && machine.state == MachineState::Connected)
+        })?;
+        run.report.push(format!(
+            "wss pair_machine to connected (TLS + XXpsk3 + hello): {} ms",
+            started.elapsed().as_millis()
+        ));
+        let machine = b.view.machines.iter().find(|machine| machine.url == url).context("no wss machine")?.id.clone();
+        let handshakes = terminator.handshakes.load(Ordering::SeqCst);
+        ensure!(handshakes >= 1, "the TLS terminator completed no handshake");
+        b.until("A's rows arrive over wss", QUICK, |view| {
+            view.threads.iter().any(|row| row.machine.as_deref() == Some(machine.as_str()))
+        })?;
+        println!(
+            "ok   B links to A over {url} ({handshakes} TLS handshake(s) under the test CA) and lists A's threads"
+        );
+        b.studio.forget_machine(machine);
+        b.until("forget_machine removes the wss machine", QUICK, |view| view.machines.is_empty())?;
+        anyhow::Ok(())
+    })();
+    terminator.stop();
+    checked
 }
 
 fn revoke_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
@@ -1271,11 +1481,12 @@ fn drive(run: &mut Run) -> anyhow::Result<()> {
         let machine = pair_checks(run, &mut b)?;
         let thread = model_checks(run, &mut b, &machine)?;
         phone_checks(run, &mut b, &machine, &thread)?;
-        freeze_checks(run, &mut b, &machine)?;
+        freeze_checks(run, &mut b, &machine, &thread)?;
         reconnect_checks(run, &mut b, &machine, &thread)?;
         devices_checks(run, &mut b, &machine)?;
         let seen = b.view.items(&thread).to_vec();
         revoke_checks(run, &mut b, &machine)?;
+        wss_checks(run, &mut b)?;
         anyhow::Ok((thread, seen))
     })();
     let daemon = b.close();
@@ -1292,6 +1503,8 @@ fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(args.next().context(usage)?);
     std::fs::create_dir_all(&root)?;
     let root = std::fs::canonicalize(root)?;
+    let tls = test_ca(&root)?;
+    std::env::set_var(TEST_CA, tls.join("ca.pem"));
     let bin = std::env::current_exe()?
         .parent()
         .and_then(Path::parent)
@@ -1316,7 +1529,7 @@ fn main() -> anyhow::Result<()> {
     git(&b_work, &b.home, &["commit", "-q", "-m", "seed"])?;
     let serve = Serve { bin, port: free_port()?, child: None };
     let mut run =
-        Run { eukhe, a, b, work, b_work, serve, model: String::new(), daemons: Vec::new(), report: Vec::new() };
+        Run { eukhe, a, b, work, b_work, tls, serve, model: String::new(), daemons: Vec::new(), report: Vec::new() };
     let outcome = drive(&mut run);
     if outcome.is_err() {
         let log = std::fs::read_to_string(run.a.root.join("serve.log")).unwrap_or_default();
