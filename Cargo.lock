@@ -1440,6 +1440,7 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -1450,6 +1451,7 @@ dependencies = [
  "toml",
  "two-face",
  "uniffi",
+ "webpki-roots 1.0.11",
  "x25519-dalek",
 ]
 
