@@ -184,6 +184,7 @@ The controller caps fleet work with one of two levers, chosen per GPU:
 | `lever`          | `nvidia-limit`, `duty-cycle` or `none`                                                   |
 | `measured`, `measuredW` | Whether draw is measured, and the fleet GPUs' draw now in watts (or `null`)       |
 | `helper`         | `installed` when `sudo -n` may run `nvidia-smi -pl`, `missing`, or `unsupported` (not Linux with NVIDIA) |
+| `maxW`           | The most fleet work could draw here: the GPUs' summed `power.max_limit`, 30 W on Apple Silicon, or `null` |
 | `gpus`           | Per GPU: `uuid`, `index`, `lever`, `limitW` and `originalW`                              |
 
 `reason` stays plain, for example "In use, so it lends at up to 60 W." `LOCAL_STUDIO_TEST_PRESENT` is for checks only: `1` or `0`, or the path of a file holding `1` or `0`, replaces the presence reading.

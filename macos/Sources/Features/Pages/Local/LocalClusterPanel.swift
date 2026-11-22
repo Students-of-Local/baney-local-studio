@@ -1,3 +1,4 @@
+import AppKit
 import LocalStudioKit
 import SwiftUI
 
@@ -250,6 +251,10 @@ private struct LocalLendingBlock: View {
                 IconLabel("Lent to \(server.forName), \(server.gpus.map { "G\($0)" }.joined(separator: ", "))", symbol: "arrow.up.right")
                     .font(.system(size: 12.5))
             }
+            if cluster.lend != .never {
+                LocalPowerBlock(controller: controller, cluster: cluster, pages: pages)
+                    .padding(.top, 8)
+            }
         }
     }
 
@@ -264,6 +269,172 @@ private struct LocalLendingBlock: View {
         Binding(get: { cluster.discover }, set: { on in
             pages.perform(.setDiscovery(controller: controller.target, discover: on), pending: .discovery(controller.target))
         })
+    }
+}
+
+private struct LocalPowerBlock: View {
+    let controller: LocalController
+    let cluster: LocalCluster
+    let pages: PagesStore
+
+    @State private var activeDraft: Double?
+    @State private var awayDraft: Double?
+
+    private var power: LocalClusterPower { cluster.power }
+    private var pending: Bool { pages.isPending(.power(controller.target)) }
+
+    private var top: Double {
+        if let max = power.maxW, max > 0 { return (max / 5).rounded(.up) * 5 }
+        return (controller.hardware?.gpus.isEmpty ?? true) ? 30 : 150
+    }
+
+    private var activeValue: Double { activeDraft ?? min(Double(power.activeWatts), top) }
+    // The controller takes 1 W and up while away; "stop lending" is the Lending control's job.
+    static let awayLow: Double = 5
+    private var awayValue: Double { awayDraft ?? power.awayWatts.map { Swift.min(Swift.max(Double($0), Self.awayLow), top) } ?? top }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            PanelTitle("Power for the fleet")
+            PowerSlider(
+                title: "While you're using this computer",
+                value: Binding(get: { activeValue }, set: { activeDraft = $0 }),
+                low: 0,
+                top: top,
+                label: activeValue == 0 ? "Off" : "Up to \(Int(activeValue)) W",
+                disabled: pending
+            ) { commit() }
+            Text("Fleet work stops the moment you start a game or any GPU program.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            PowerSlider(
+                title: "While you're away",
+                value: Binding(get: { awayValue }, set: { awayDraft = $0 }),
+                low: Self.awayLow,
+                top: top,
+                label: awayValue >= top ? "No limit" : "Up to \(Int(awayValue)) W",
+                disabled: pending
+            ) { commit() }
+            if power.present == nil {
+                Text("This desktop doesn't report when you're at it, so the away limit applies.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let status {
+                Text(status)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if let lever {
+                Text(lever)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            if power.helper == .missing {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use the hardware power limit")
+                            .font(.system(size: 12.5))
+                        Text("Needs a one-time administrator step.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(LocalPowerBlock.helperCommand, forType: .string)
+                    }
+                    .buttonStyle(DashboardButtonStyle(bordered: true))
+                    .help("Copy \(LocalPowerBlock.helperCommand) to run in Terminal")
+                }
+            }
+        }
+        .onChange(of: pending) { _, now in
+            if !now {
+                activeDraft = nil
+                awayDraft = nil
+            }
+        }
+    }
+
+    static let helperCommand = "local-studio fleet power-helper --yes"
+
+    private func commit() {
+        let active = UInt32(activeValue.rounded())
+        let away: UInt32? = awayValue >= top ? nil : UInt32(awayValue.rounded())
+        guard active != power.activeWatts || away != power.awayWatts else {
+            activeDraft = nil
+            awayDraft = nil
+            return
+        }
+        pages.perform(
+            .setPowerBudget(controller: controller.target, activeWatts: active, awayWatts: away),
+            pending: .power(controller.target)
+        )
+    }
+
+    private var status: String? {
+        var parts: [String] = []
+        switch power.present {
+        case true?: parts.append("You're using it")
+        case false?: parts.append("You're away")
+        case nil: break
+        }
+        if cluster.state == .lent, let cap = power.capW {
+            if let measured = power.measuredW {
+                parts.append("Drawing about \(Int(measured.rounded())) W of \(Int(cap.rounded())) W")
+            } else {
+                parts.append("Capped at \(Int(cap.rounded())) W")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var lever: String? {
+        switch power.lever {
+        case .nvidiaLimit: "Uses the GPU's hardware power limit."
+        case .dutyCycle: "Pauses fleet work in short bursts to stay under the cap."
+        case .none: nil
+        }
+    }
+}
+
+private struct PowerSlider: View {
+    let title: String
+    @Binding var value: Double
+    let low: Double
+    let top: Double
+    let label: String
+    let disabled: Bool
+    let commit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(.system(size: 12.5))
+                Spacer(minLength: 8)
+                Text(label)
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            Slider(value: $value, in: low...top, step: 5) {
+                Text(title)
+            } onEditingChanged: { editing in
+                if !editing { commit() }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            .disabled(disabled)
+            .accessibilityValue(label)
+        }
     }
 }
 

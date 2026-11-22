@@ -1,11 +1,12 @@
-use std::cell::RefCell;
-use std::rc::Weak;
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::pango;
+use gtk::{glib, pango};
 use local_studio_core::{
     LocalAction, LocalCluster, LocalController, LocalGpu, LocalHotplug, LocalLendMode, LocalLendState, LocalPool,
-    LocalPoolModel, LocalPoolPhase, LocalThunderbolt, LocalThunderboltState,
+    LocalPoolModel, LocalPoolPhase, LocalPowerHelper, LocalPowerLever, LocalThunderbolt, LocalThunderboltState,
 };
 
 use crate::app::App;
@@ -14,6 +15,10 @@ use crate::icons;
 use crate::numbers::gigabytes;
 
 const MIB: u64 = 1_048_576;
+const HELPER_COMMAND: &str = "local-studio fleet power-helper --yes";
+const COMMIT_DELAY: Duration = Duration::from_millis(400);
+const AWAY_LOW: f64 = 5.0;
+const PRESENCE_UNKNOWN: &str = "This desktop doesn't report when you're at it, so the away limit applies.";
 
 fn row(spacing: i32) -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Horizontal, spacing)
@@ -85,15 +90,160 @@ pub struct ClusterView {
     pub root: gtk::Box,
     app: Weak<App>,
     shown: RefCell<String>,
+    dragging: Rc<Cell<bool>>,
+}
+
+struct PowerDraft {
+    app: Weak<App>,
+    target: String,
+    top: f64,
+    active: Cell<f64>,
+    away: Cell<f64>,
+    current: (u32, Option<u32>),
+    timer: RefCell<Option<glib::SourceId>>,
+    dragging: Rc<Cell<bool>>,
+}
+
+impl PowerDraft {
+    fn schedule(self: &Rc<Self>) {
+        self.dragging.set(true);
+        if let Some(timer) = self.timer.borrow_mut().take() {
+            timer.remove();
+        }
+        let draft = self.clone();
+        let source = glib::timeout_add_local_once(COMMIT_DELAY, move || {
+            draft.timer.borrow_mut().take();
+            draft.commit();
+        });
+        self.timer.replace(Some(source));
+    }
+
+    fn commit(&self) {
+        self.dragging.set(false);
+        let active = whole(self.active.get());
+        let away = (self.away.get() < self.top).then(|| whole(self.away.get()));
+        if (active, away) == self.current {
+            return;
+        }
+        act(
+            &self.app,
+            LocalAction::SetPowerBudget { controller: self.target.clone(), active_watts: active, away_watts: away },
+            format!("power:{}", self.target),
+        );
+    }
+}
+
+fn whole(watts: f64) -> u32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let whole = watts.round().clamp(0.0, 10_000.0) as u32;
+    whole
+}
+
+fn snap(watts: f64) -> f64 {
+    (watts / 5.0).round() * 5.0
+}
+
+fn power_top(controller: &LocalController, cluster: &LocalCluster) -> f64 {
+    match cluster.power.max_w.filter(|max| *max > 0.0) {
+        Some(max) => (max / 5.0).ceil() * 5.0,
+        None if controller.hardware.as_ref().is_some_and(|hardware| !hardware.gpus.is_empty()) => 150.0,
+        None => 30.0,
+    }
+}
+
+fn active_caption(watts: f64) -> String {
+    if watts <= 0.0 {
+        "Off".to_string()
+    } else {
+        format!("Up to {} W", whole(watts))
+    }
+}
+
+fn away_caption(watts: f64, top: f64) -> String {
+    if watts >= top {
+        "No limit".to_string()
+    } else {
+        format!("Up to {} W", whole(watts))
+    }
+}
+
+fn power_status(cluster: &LocalCluster) -> Option<String> {
+    let power = &cluster.power;
+    let mut parts: Vec<String> = Vec::new();
+    match power.present {
+        Some(true) => parts.push("You're using it".to_string()),
+        Some(false) => parts.push("You're away".to_string()),
+        None => {}
+    }
+    if let (LocalLendState::Lent, Some(cap)) = (cluster.state, power.cap_w) {
+        parts.push(match power.measured_w {
+            Some(measured) => format!("Drawing about {} W of {} W", whole(measured), whole(cap)),
+            None => format!("Capped at {} W", whole(cap)),
+        });
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn power_lever(cluster: &LocalCluster) -> Option<String> {
+    match cluster.power.lever {
+        LocalPowerLever::NvidiaLimit => Some("Uses the GPU's hardware power limit.".to_string()),
+        LocalPowerLever::DutyCycle => Some("Pauses fleet work in short bursts to stay under the cap.".to_string()),
+        LocalPowerLever::None => None,
+    }
+}
+
+fn power_slider(
+    title: &str,
+    value: f64,
+    low: f64,
+    top: f64,
+    caption: impl Fn(f64) -> String + 'static,
+    busy: bool,
+    changed: impl Fn(f64) + 'static,
+) -> gtk::Box {
+    let block = column(4);
+    let head = row(8);
+    let name = label(title, &["ls-dash-label"]);
+    name.set_hexpand(true);
+    head.append(&name);
+    let shown = label(&caption(value), &["dim-label", "ls-dash-small", "numeric"]);
+    head.append(&shown);
+    block.append(&head);
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, low, top, 5.0);
+    scale.set_draw_value(false);
+    scale.set_round_digits(0);
+    scale.set_hexpand(true);
+    scale.set_value(value);
+    scale.set_sensitive(!busy);
+    scale.update_property(&[
+        gtk::accessible::Property::Label(title),
+        gtk::accessible::Property::ValueText(&caption(value)),
+    ]);
+    scale.connect_value_changed(move |scale| {
+        let snapped = snap(scale.value()).max(low);
+        if (snapped - scale.value()).abs() > f64::EPSILON {
+            scale.set_value(snapped);
+            return;
+        }
+        let text = caption(snapped);
+        shown.set_text(&text);
+        scale.update_property(&[gtk::accessible::Property::ValueText(&text)]);
+        changed(snapped);
+    });
+    block.append(&scale);
+    block
 }
 
 impl ClusterView {
     pub fn build(app: &Weak<App>) -> Self {
         let root = column(36);
-        Self { root, app: app.clone(), shown: RefCell::new(String::new()) }
+        Self { root, app: app.clone(), shown: RefCell::new(String::new()), dragging: Rc::new(Cell::new(false)) }
     }
 
     pub fn fill(&self, controller: &LocalController, pending: &dyn Fn(&str) -> bool) {
+        if self.dragging.get() {
+            return;
+        }
         let target = controller.target.as_str();
         let keys: Vec<String> = [
             controller
@@ -102,7 +252,12 @@ impl ClusterView {
                 .flat_map(|hardware| &hardware.thunderbolt)
                 .map(|device| format!("authorize:{target}:{}", device.uuid))
                 .collect::<Vec<_>>(),
-            vec![format!("lending:{target}"), format!("discovery:{target}"), format!("pool:{target}")],
+            vec![
+                format!("lending:{target}"),
+                format!("discovery:{target}"),
+                format!("pool:{target}"),
+                format!("power:{target}"),
+            ],
             controller
                 .cluster
                 .iter()
@@ -309,6 +464,88 @@ impl ClusterView {
         for server in &cluster.lent {
             let gpus = server.gpus.iter().map(|gpu| format!("G{gpu}")).collect::<Vec<_>>().join(", ");
             block.append(&label(&format!("Lent to {}, {gpus}", server.for_name), &["ls-dash-label"]));
+        }
+        if cluster.lend != LocalLendMode::Never {
+            block.append(&self.power(controller, cluster, pending));
+        }
+        block
+    }
+
+    fn power(&self, controller: &LocalController, cluster: &LocalCluster, pending: &dyn Fn(&str) -> bool) -> gtk::Box {
+        let power = &cluster.power;
+        let block = column(10);
+        block.set_margin_top(8);
+        block.append(&title("Power for the fleet", None));
+        let busy = pending(&format!("power:{}", controller.target));
+        let top = power_top(controller, cluster);
+        let active = f64::from(power.active_watts).min(top);
+        // The controller takes 1 W and up while away; "stop lending" is the Lending control's job.
+        let away = power.away_watts.map_or(top, |watts| f64::from(watts).clamp(AWAY_LOW, top));
+        let draft = Rc::new(PowerDraft {
+            app: self.app.clone(),
+            target: controller.target.clone(),
+            top,
+            active: Cell::new(active),
+            away: Cell::new(away),
+            current: (power.active_watts, power.away_watts),
+            timer: RefCell::new(None),
+            dragging: self.dragging.clone(),
+        });
+        let using = draft.clone();
+        block.append(&power_slider(
+            "While you're using this computer",
+            active,
+            0.0,
+            top,
+            active_caption,
+            busy,
+            move |watts| {
+                using.active.set(watts);
+                using.schedule();
+            },
+        ));
+        block.append(&wrapped(
+            "Fleet work stops the moment you start a game or any GPU program.",
+            &["dim-label", "ls-dash-small"],
+        ));
+        let leaving = draft;
+        block.append(&power_slider(
+            "While you're away",
+            away,
+            AWAY_LOW,
+            top,
+            move |watts| away_caption(watts, top),
+            busy,
+            move |watts| {
+                leaving.away.set(watts);
+                leaving.schedule();
+            },
+        ));
+        if power.present.is_none() {
+            block.append(&wrapped(PRESENCE_UNKNOWN, &["dim-label", "ls-dash-small"]));
+        }
+        if let Some(status) = power_status(cluster) {
+            let line = label(&status, &["dim-label", "ls-dash-small"]);
+            line.set_ellipsize(pango::EllipsizeMode::End);
+            block.append(&line);
+        }
+        if let Some(lever) = power_lever(cluster) {
+            let line = wrapped(&lever, &["dim-label", "ls-dash-small"]);
+            line.set_selectable(true);
+            block.append(&line);
+        }
+        if power.helper == LocalPowerHelper::Missing {
+            let line = row(10);
+            let text = column(2);
+            text.set_hexpand(true);
+            text.append(&label("Use the hardware power limit", &["ls-dash-label"]));
+            text.append(&wrapped("Needs a one-time administrator step.", &["dim-label", "ls-dash-small"]));
+            line.append(&text);
+            let copy = parts::button(&gtk::Label::new(Some("Copy")), true);
+            copy.set_tooltip_text(Some(&format!("Copy {HELPER_COMMAND} to run in a terminal")));
+            copy.connect_clicked(|button| button.clipboard().set_text(HELPER_COMMAND));
+            line.append(&copy);
+            block.append(&line);
         }
         block
     }

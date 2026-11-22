@@ -653,6 +653,7 @@ try {
     JSON.stringify(s.power),
   );
   assert.equal(s.power.helper, process.platform === "linux" ? "missing" : "unsupported");
+  await waitFor(async () => (await cl(B)).power.maxW === 320, "B reports its GPU's 320 W max_limit as maxW", 10_000);
   for (const bad of [{ activeWatts: 2001 }, { activeWatts: 1.5 }, { awayWatts: -1 }, { awayWatts: 0 }, { activeWatts: null }, { activeWatts: "60" }]) {
     r = await call(B, "/api/cluster", { power: bad });
     assert.equal(r.status, 400, `${JSON.stringify(bad)} must be refused`);

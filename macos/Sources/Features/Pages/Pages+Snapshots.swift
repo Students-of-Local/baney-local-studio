@@ -170,6 +170,51 @@ extension SnapshotCatalog {
                 view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.reclaimedMachine.url)) }
             ),
             SnapshotEntry(
+                name: "pages-local-cluster-power-in-use",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.powerInUseMachine, with: PagesFixtures.laptop)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.powerInUseMachine.url)) }
+            ),
+            SnapshotEntry(
+                name: "pages-local-cluster-power-away",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.powerAwayMachine, with: PagesFixtures.laptop)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.powerAwayMachine.url)) }
+            ),
+            SnapshotEntry(
+                name: "pages-local-cluster-power-duty-cycle",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.powerDutyCycleMachine, with: PagesFixtures.offline)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.powerDutyCycleMachine.url)) }
+            ),
+            SnapshotEntry(
+                name: "pages-local-cluster-power-helper-missing",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.powerHelperMissingMachine, with: PagesFixtures.laptop)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.powerHelperMissingMachine.url)) }
+            ),
+            SnapshotEntry(
+                name: "pages-local-cluster-power-presence-unknown",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.powerPresenceUnknownMachine, with: PagesFixtures.laptop)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.powerPresenceUnknownMachine.url)) }
+            ),
+            SnapshotEntry(
                 name: "pages-local-cluster-apple-silicon",
                 size: clusterSize,
                 updates: PagesFixtures.base + [

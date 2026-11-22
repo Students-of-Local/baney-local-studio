@@ -196,6 +196,7 @@ export const LocalPower = Schema.Struct({
   measured: Schema.Boolean,
   measuredW: OptionalNumber,
   helper: Schema.Literals(["installed", "missing", "unsupported"]),
+  maxW: OptionalNumber,
   gpus: Schema.Array(Schema.Struct({ uuid: Schema.String, index: Schema.Number, lever: LocalPowerLever, limitW: OptionalNumber, originalW: OptionalNumber })),
 });
 export type LocalPower = typeof LocalPower.Type;
