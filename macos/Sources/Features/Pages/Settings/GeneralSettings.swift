@@ -74,7 +74,7 @@ private struct GeneralSettingsForm: View {
     }
 
     @ViewBuilder private var projectDefaults: some View {
-        SettingsSection(.projectDefaults, footer: "Used for new threads. Each thread can still change its model, thinking level and permissions.") {
+        SettingsSection(.projectDefaults, footer: "Used for new threads. Match the model gives frontier models Full access, small models Auto and unknown models Supervised. Each thread can still change its model, thinking level and permissions.") {
             SettingRow(.defaultModel) {
                 ModelChoicePicker(
                     title: SettingKey.defaultModel.title, models: store.conversation.models,
@@ -97,11 +97,12 @@ private struct GeneralSettingsForm: View {
                 .disabled(thinkingLevels.isEmpty)
             }
             SettingRow(.permissions) {
-                Picker(SettingKey.permissions.title, selection: bind(\.defaultAccess)) {
-                    Text("Supervised").tag(AccessMode.supervised)
-                    Text("Auto-accept edits").tag(AccessMode.autoAcceptEdits)
-                    Text("Auto").tag(AccessMode.auto)
-                    Text("Full access").tag(AccessMode.fullAccess)
+                Picker(SettingKey.permissions.title, selection: bind.access) {
+                    Text("Match the model").tag(AccessMode?.none)
+                    Divider()
+                    ForEach(AccessMode.all, id: \.self) { mode in
+                        Text(mode.title).tag(AccessMode?.some(mode))
+                    }
                 }
             }
             SettingRow(.newThreads) {

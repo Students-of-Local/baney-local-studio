@@ -30,7 +30,7 @@ struct ComposerCommands: ViewModifier {
             }
             .studioCommand("composer.mode", in: store) {
                 let all = AccessMode.all
-                let index = all.firstIndex(of: conversation.access(settings: settings)) ?? -1
+                let index = all.firstIndex(of: conversation.access(settings: settings, project: project)) ?? -1
                 conversation.setAccess(all[(index + 1) % all.count])
             }
             .studioCommand("composer.workspace", in: store, enabled: draftWorkspace) {

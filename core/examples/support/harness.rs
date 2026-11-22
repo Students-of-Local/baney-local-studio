@@ -709,7 +709,7 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
             provider: Some(target.provider.to_string()),
             model: Some(model),
             thinking_level: target.thinking.map(str::to_string),
-            access: AccessMode::Supervised,
+            access: Some(AccessMode::Supervised),
             worktree: WorktreeChoice::Local,
         };
         let first =

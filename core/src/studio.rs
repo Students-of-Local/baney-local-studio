@@ -2414,6 +2414,10 @@ impl Actor {
             None => None,
         };
         let effective = self.workspace.effective_settings(project_path.as_deref());
+        let access = settings.access.unwrap_or_else(|| {
+            let model = settings.model.clone().or_else(|| effective.default_model.clone());
+            crate::access::default_access(effective.access_follows_model, effective.default_access, model)
+        });
         let harness = settings
             .provider
             .as_deref()
@@ -2459,17 +2463,7 @@ impl Actor {
         if harness != Harness::Eukhe {
             let model = if settings.provider.is_some() { settings.model } else { effective.default_model };
             let thinking = settings.thinking_level.or(effective.default_thinking_level);
-            return self.cli_create(
-                draft,
-                harness,
-                cwd,
-                project_path,
-                settings.access,
-                model,
-                thinking,
-                fan_out,
-                prompt,
-            );
+            return self.cli_create(draft, harness, cwd, project_path, access, model, thinking, fan_out, prompt);
         }
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let created = saved_sessions::create_resident(&client, None, self.create_config(&cwd))
@@ -2489,7 +2483,7 @@ impl Actor {
         self.store.update(&id, |flags| {
             flags.activity_at = Some(now);
             flags.project.clone_from(&project_path);
-            flags.access = Some(settings.access);
+            flags.access = Some(access);
             flags.fan_out = fan_out;
         });
         self.save();

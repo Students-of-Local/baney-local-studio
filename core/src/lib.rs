@@ -1,5 +1,6 @@
 #![cfg_attr(feature = "ffi", allow(unsafe_code))]
 
+mod access;
 mod daemon;
 mod harness;
 mod highlight;
@@ -24,6 +25,7 @@ mod workspace;
 
 pub use local_studio_version::{CHANNEL, VERSION};
 
+pub use access::{default_access, model_tier, ModelTier};
 pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
 pub use model::{
     AccessMode, Approval, ApprovalAnswer, Block, CatalogPlugin, CommandKind, Connection, ConsentAnswer, ConsentNeed,

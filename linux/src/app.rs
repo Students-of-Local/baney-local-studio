@@ -933,7 +933,7 @@ impl App {
             provider: model.as_ref().map(|model| model.provider.clone()),
             model: model.map(|model| model.model),
             thinking_level: state.active_thinking(),
-            access: state.active_access(),
+            access: state.draft_settings.access,
             worktree,
         };
         let compare = std::mem::take(&mut state.draft_settings.compare);

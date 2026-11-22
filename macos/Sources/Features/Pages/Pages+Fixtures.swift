@@ -7,7 +7,7 @@ enum PagesFixtures {
     static var settings: Settings {
         Settings(
             defaultProvider: "anthropic", defaultModel: "claude-sonnet-4-5", defaultThinkingLevel: "medium",
-            defaultAccess: .autoAcceptEdits, newThreadWorkspace: .worktree, newWorktreesStartFromOrigin: true,
+            defaultAccess: .autoAcceptEdits, accessFollowsModel: true, newThreadWorkspace: .worktree, newWorktreesStartFromOrigin: true,
             workingSection: true, autoSettleMerged: true, autoSettleInactive: true, autoSettleInactiveDays: 3,
             notifications: .notificationsAndSound, inAppNotifications: false, timeFormat: .locale,
             responseStreaming: .paragraph, hideWhitespace: true, diffFilesCollapsed: true, diffLayout: .stacked,

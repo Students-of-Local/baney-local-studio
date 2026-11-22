@@ -40,6 +40,7 @@ pub(crate) fn effective(global: &Settings, overrides: &ProjectSettings) -> Setti
     }
     if let Some(access) = overrides.default_access {
         settings.default_access = access;
+        settings.access_follows_model = false;
     }
     if let Some(workspace) = overrides.new_thread_workspace {
         settings.new_thread_workspace = workspace;

@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use super::model::{Keybinding, Settings};
+use crate::model::AccessMode;
 
 const DEFAULT_KEYBINDINGS: &[(&str, &str, Option<&str>)] = &[
     ("sidebar.toggle", "cmd+b", None),
@@ -210,6 +211,18 @@ pub(crate) fn load_json<T: DeserializeOwned + Default>(path: &Path) -> (T, Optio
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (T::default(), None),
         Err(error) => (T::default(), Some(format!("could not read {}: {error}", path.display()))),
     }
+}
+
+pub(crate) fn load_settings(path: &Path) -> (Settings, Option<String>) {
+    let (mut settings, error) = load_json::<Settings>(path);
+    let chosen = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value.get("accessFollowsModel").is_some());
+    if !chosen {
+        settings.access_follows_model = settings.default_access == AccessMode::Supervised;
+    }
+    (settings, error)
 }
 
 pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {

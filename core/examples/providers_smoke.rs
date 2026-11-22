@@ -306,7 +306,7 @@ fn settings(provider: &str, model: &str) -> ThreadSettings {
         provider: Some(provider.to_string()),
         model: Some(model.to_string()),
         thinking_level: None,
-        access: AccessMode::FullAccess,
+        access: Some(AccessMode::FullAccess),
         worktree: WorktreeChoice::Local,
     }
 }

@@ -175,7 +175,7 @@ fn prompt(text: &str) -> PromptDraft {
 }
 
 fn unset(worktree: WorktreeChoice) -> ThreadSettings {
-    ThreadSettings { provider: None, model: None, thinking_level: None, access: AccessMode::Supervised, worktree }
+    ThreadSettings { provider: None, model: None, thinking_level: None, access: Some(AccessMode::Supervised), worktree }
 }
 
 fn on(model: &str, worktree: WorktreeChoice) -> ThreadSettings {
@@ -183,7 +183,7 @@ fn on(model: &str, worktree: WorktreeChoice) -> ThreadSettings {
         provider: Some(ANTHROPIC.to_string()),
         model: Some(model.to_string()),
         thinking_level: None,
-        access: AccessMode::Supervised,
+        access: Some(AccessMode::Supervised),
         worktree,
     }
 }

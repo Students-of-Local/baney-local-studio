@@ -523,7 +523,7 @@ fn model_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<St
         provider: Some(PROVIDER.to_string()),
         model: Some(run.model.clone()),
         thinking_level: None,
-        access: AccessMode::Supervised,
+        access: Some(AccessMode::Supervised),
         worktree: WorktreeChoice::Local,
     };
     let started = Instant::now();

@@ -573,7 +573,7 @@ fn settings() -> ThreadSettings {
         provider: Some(PROVIDER.to_string()),
         model: Some(MODEL.to_string()),
         thinking_level: None,
-        access: AccessMode::FullAccess,
+        access: Some(AccessMode::FullAccess),
         worktree: WorktreeChoice::Local,
     }
 }
