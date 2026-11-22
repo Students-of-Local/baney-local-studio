@@ -68,6 +68,12 @@ struct RootView: View {
             OnboardingView(store: store)
                 .interactiveDismissDisabled()
         }
+        .sheet(isPresented: t3Shown) {
+            if let report = store.pages.t3 {
+                T3ImportSheet(report: report) { store.pages.dismissT3Import() } bringOver: { store.pages.importT3($0) }
+                    .interactiveDismissDisabled()
+            }
+        }
         .sheet(isPresented: Bindable(shell).cloneShown) {
             CloneRepositorySheet(store: store)
         }
@@ -138,7 +144,11 @@ struct RootView: View {
     }
 
     private var consentShown: Binding<ConsentRequest?> {
-        Binding { store.needsOnboarding ? nil : store.consents.first } set: { _ in }
+        Binding { store.needsOnboarding || store.needsT3Import ? nil : store.consents.first } set: { _ in }
+    }
+
+    private var t3Shown: Binding<Bool> {
+        Binding { store.needsT3Import } set: { _ in }
     }
 
     private var onboardingShown: Binding<Bool> {

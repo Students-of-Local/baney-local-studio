@@ -34,7 +34,9 @@ use crate::skills::{Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
-use crate::workspace::model::{FollowUpBehavior, NewThreadWorkspace, ResponseStreaming, Settings, TerminalFrame};
+use crate::workspace::model::{
+    FollowUpBehavior, NewThreadWorkspace, ResponseStreaming, Settings, T3Choices, TerminalFrame,
+};
 use crate::workspace::{PreparedWorktree, Workspace};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -64,6 +66,7 @@ mod ask;
 mod cli;
 mod local_only;
 mod remote;
+mod t3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -171,6 +174,7 @@ fn remembered(update: &Update) -> bool {
             | Update::Models { .. }
             | Update::DaemonDefault { .. }
             | Update::Consents { .. }
+            | Update::T3Sync { .. }
     )
 }
 
@@ -501,6 +505,20 @@ enum Command {
     HarnessModels {
         models: Vec<ModelOption>,
     },
+    T3Poll,
+    T3Loaded {
+        data: Option<Box<crate::workspace::t3::T3Data>>,
+        print: crate::workspace::t3::Fingerprint,
+        import: Option<T3Choices>,
+    },
+    T3Import {
+        choices: T3Choices,
+    },
+    T3Dismiss,
+    T3SetSync {
+        enabled: bool,
+    },
+    T3Refresh,
     Shutdown {
         done: std::sync::mpsc::Sender<()>,
     },
@@ -688,7 +706,16 @@ impl Studio {
             ask_notes: HashMap::new(),
             ask_sent: HashMap::new(),
             consents: Arc::default(),
+            t3: t3::Watch::default(),
         };
+        let poller = inbox.clone();
+        runtime.spawn(async move {
+            let mut every = tokio::time::interval(t3::POLL);
+            loop {
+                every.tick().await;
+                poller.send(Command::T3Poll);
+            }
+        });
         runtime.spawn(actor.run(receiver, cli_events));
         Ok(Arc::new(Self {
             commands,
@@ -916,6 +943,22 @@ impl Studio {
 
     pub fn cancel_subagent(&self, thread: String, child: String) {
         self.send_command(Command::CancelSubagent { thread, child });
+    }
+
+    pub fn import_t3(&self, choices: T3Choices) {
+        self.send_command(Command::T3Import { choices });
+    }
+
+    pub fn dismiss_t3_import(&self) {
+        self.send_command(Command::T3Dismiss);
+    }
+
+    pub fn set_t3_sync(&self, enabled: bool) {
+        self.send_command(Command::T3SetSync { enabled });
+    }
+
+    pub fn refresh_t3(&self) {
+        self.send_command(Command::T3Refresh);
     }
 
     pub fn load_message_image(&self, request: String, thread: String, entry: String, index: u32) {
@@ -1175,6 +1218,7 @@ struct Actor {
     ask_notes: HashMap<String, Vec<String>>,
     ask_sent: HashMap<String, Value>,
     consents: Arc<std::sync::Mutex<plugins::Pendings>>,
+    t3: t3::Watch,
 }
 
 #[cfg(unix)]
@@ -1764,6 +1808,12 @@ impl Actor {
             Command::StopCheck { thread } => self.stop_check(&thread).await,
             Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
+            Command::T3Poll => self.t3_poll(false, None),
+            Command::T3Refresh => self.t3_poll(true, None),
+            Command::T3Import { choices } => self.t3_poll(true, Some(choices)),
+            Command::T3Loaded { data, print, import } => self.t3_loaded(data, print, import),
+            Command::T3Dismiss => self.t3_dismiss(),
+            Command::T3SetSync { enabled } => self.t3_set_sync(enabled),
             Command::HarnessModels { models } => {
                 self.codex_models = models;
                 self.push_models();

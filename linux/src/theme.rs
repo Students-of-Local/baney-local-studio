@@ -141,6 +141,10 @@ popover.ls-palette > contents { padding: 0; }
 .ls-consent-finding { color: var(--error-color); }
 .ls-consent-link { padding: 0 4px; min-height: 0; color: var(--accent-color); }
 .ls-consent-tag { font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; color: var(--error-color); background: alpha(var(--error-color), 0.12); }
+.ls-t3-import { color: var(--accent-color); }
+.ls-t3-synced { color: var(--success-color); }
+.ls-t3-kept { color: alpha(currentColor, 0.62); }
+.ls-t3-unsupported { color: alpha(currentColor, 0.38); }
 .ls-consent-footer { padding: 18px; background: alpha(currentColor, 0.03); }
 .ls-dash-tab { padding: 8px 7px; min-height: 0; border-radius: 0; }
 .ls-dash-tab label { color: alpha(var(--window-fg-color), 0.62); font-weight: 400; }

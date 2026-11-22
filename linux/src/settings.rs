@@ -36,6 +36,9 @@ struct Inner {
     fleet: crate::fleet::Fleet,
     kernel: adw::ActionRow,
     kernel_button: gtk::Button,
+    t3_group: adw::PreferencesGroup,
+    t3_rows: RefCell<Vec<gtk::Widget>>,
+    t3_shown: RefCell<String>,
 }
 
 impl SettingsDialog {
@@ -45,6 +48,11 @@ impl SettingsDialog {
         let weak = Rc::downgrade(app);
         let state = app.state.borrow();
         let general = general_page(&weak, &state);
+        let t3_group = adw::PreferencesGroup::builder()
+            .title("T3 Code")
+            .description("Brings accounts, projects, model picks, favorites, hidden models, keybindings and appearance over from T3 Code and follows its changes. A value you change in Local Studio is never overwritten.")
+            .build();
+        general.add(&t3_group);
         let diagnostics = group(&general, "Diagnostics");
         let version = adw::ActionRow::builder()
             .title("Version")
@@ -90,6 +98,9 @@ impl SettingsDialog {
                 fleet,
                 kernel,
                 kernel_button,
+                t3_group,
+                t3_rows: RefCell::new(Vec::new()),
+                t3_shown: RefCell::new(String::new()),
             }),
         };
         settings.refresh(app);
@@ -126,6 +137,23 @@ impl SettingsDialog {
         self.refresh_archive(&state);
         self.refresh_kernel(&state);
         self.refresh_connections(&weak, &state);
+        self.refresh_t3(&weak, &state);
+    }
+
+    fn refresh_t3(&self, app: &Weak<App>, state: &State) {
+        let shown = format!("{:?}", state.t3);
+        if *self.inner.t3_shown.borrow() == shown && !self.inner.t3_rows.borrow().is_empty() {
+            return;
+        }
+        self.inner.t3_shown.replace(shown);
+        for row in self.inner.t3_rows.take() {
+            self.inner.t3_group.remove(&row);
+        }
+        let rows = crate::t3::rows(app, state.t3.as_ref());
+        for row in &rows {
+            self.inner.t3_group.add(row);
+        }
+        self.inner.t3_rows.replace(rows);
     }
 
     fn refresh_connections(&self, app: &Weak<App>, state: &State) {
@@ -173,7 +201,8 @@ impl SettingsDialog {
 
     fn refresh_providers(&self, app: &Weak<App>, state: &State) {
         let shown = format!(
-            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{}",
+            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{}",
+            state.settings.harness_accounts,
             state.providers,
             state.engines,
             state.provider_errors,
@@ -257,6 +286,7 @@ impl SettingsDialog {
             group.add(&row);
         }
         groups.push(group);
+        groups.push(crate::t3::accounts_group(&state.settings.harness_accounts));
         groups.push(crate::providers::signin_group());
         for group in &groups {
             self.inner.providers_page.add(group);

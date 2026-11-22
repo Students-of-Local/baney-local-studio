@@ -279,6 +279,7 @@ impl Harness {
             | Update::TerminalExited { .. }
             | Update::Settings { .. }
             | Update::Keybindings { .. }
+            | Update::T3Sync { .. }
             | Update::ProjectScripts { .. }
             | Update::ProjectSettings { .. }
             | Update::WorktreeSetup { .. }

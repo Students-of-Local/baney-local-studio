@@ -33,6 +33,7 @@ libghostty-vt.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 syntect.workspace = true
 toml.workspace = true
 two-face.workspace = true

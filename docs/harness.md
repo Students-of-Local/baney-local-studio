@@ -135,7 +135,7 @@ Token use comes from `thread/tokenUsage/updated`: the driver records the differe
 
 ### Account switching
 
-A CLI account is a config dir: Claude Code reads `CLAUDE_CONFIG_DIR` (default `~/.claude`), Codex reads `CODEX_HOME` (default `~/.codex`). The accounts of a CLI are `~/.claude` plus every `~/.claude-*` dir holding `.credentials.json` (on macOS, where Claude Code keeps its sign-in in the Keychain, a dir holding `.claude.json` instead), or `~/.codex` plus every `~/.codex-*` holding `auth.json`, default first and then by name. The settings `harnessAccounts.claude` and `harnessAccounts.codex` replace that list when not empty; `switchAccountsOnLimit` (on by default) turns the switch off.
+A CLI account is a config dir: Claude Code reads `CLAUDE_CONFIG_DIR` (default `~/.claude`), Codex reads `CODEX_HOME` (default `~/.codex`). The accounts of a CLI are `~/.claude` plus every `~/.claude-*` dir holding `.credentials.json` (on macOS, where Claude Code keeps its sign-in in the Keychain, a dir holding `.claude.json` instead), or `~/.codex` plus every `~/.codex-*` holding `auth.json`, default first and then by name. The settings `harnessAccounts.claude` and `harnessAccounts.codex` replace that list when not empty; `switchAccountsOnLimit` (on by default) turns the switch off. `harnessAccounts.labels` names an account and records where it came from; the T3 Code import fills it (`docs/t3-import.md`).
 
 Each CLI thread keeps its account in `ThreadFlags.account` (absent for the default dir). The driver sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for the child, and reads history and finds the session file in that dir. A new thread starts on the first account that is not parked.
 

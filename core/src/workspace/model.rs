@@ -707,6 +707,94 @@ pub struct Settings {
 pub struct HarnessAccounts {
     pub claude: Vec<String>,
     pub codex: Vec<String>,
+    pub labels: Vec<AccountLabel>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(default, rename_all = "camelCase")]
+pub struct AccountLabel {
+    pub dir: String,
+    pub name: String,
+    pub accent: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(default, rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
+pub struct T3Choices {
+    pub accounts: bool,
+    pub projects: bool,
+    pub models: bool,
+    pub keybindings: bool,
+    pub appearance: bool,
+    pub preferences: bool,
+}
+
+impl Default for T3Choices {
+    fn default() -> Self {
+        Self { accounts: true, projects: true, models: true, keybindings: true, appearance: true, preferences: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[serde(rename_all = "camelCase")]
+pub enum T3Kind {
+    Accounts,
+    Projects,
+    Models,
+    Keybindings,
+    Appearance,
+    Preferences,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[serde(rename_all = "camelCase")]
+pub enum T3ItemState {
+    Import,
+    Synced,
+    Kept,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct T3Item {
+    pub key: String,
+    pub label: String,
+    pub detail: String,
+    pub state: T3ItemState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct T3Group {
+    pub kind: T3Kind,
+    pub title: String,
+    pub chosen: bool,
+    pub items: Vec<T3Item>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
+pub struct T3Report {
+    pub found: bool,
+    pub source: String,
+    pub enabled: bool,
+    pub offered: bool,
+    pub applied: bool,
+    pub last_synced_at: Option<i64>,
+    pub choices: T3Choices,
+    pub groups: Vec<T3Group>,
+    pub problems: Vec<String>,
 }
 
 impl Default for Settings {

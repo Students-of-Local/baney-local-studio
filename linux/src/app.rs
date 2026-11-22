@@ -615,6 +615,11 @@ impl App {
                 dirty.sidebar = true;
                 dirty.settings = true;
             }
+            Update::T3Sync { report } => {
+                self.state.borrow_mut().t3 = Some(report);
+                crate::t3::offer(self);
+                dirty.settings = true;
+            }
             Update::Keybindings { bindings } => {
                 self.state.borrow_mut().keybindings = bindings;
                 crate::bindings::apply(self);

@@ -133,6 +133,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ProviderModels { .. }
         | Update::Settings { .. }
         | Update::Keybindings { .. }
+        | Update::T3Sync { .. }
         | Update::ProjectScripts { .. }
         | Update::ProjectSettings { .. }
         | Update::WorktreeSetup { .. }

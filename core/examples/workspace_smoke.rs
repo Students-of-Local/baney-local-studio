@@ -306,7 +306,8 @@ impl Harness {
             | Update::Skills { .. }
             | Update::Subagents { .. }
             | Update::MessageImage { .. }
-            | Update::ProviderModels { .. } => {}
+            | Update::ProviderModels { .. }
+            | Update::T3Sync { .. } => {}
         }
     }
 }

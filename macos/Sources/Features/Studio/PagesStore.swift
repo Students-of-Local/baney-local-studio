@@ -66,6 +66,7 @@ final class PagesStore {
     private(set) var settings: Settings?
     private(set) var keybindings: [Keybinding] = []
     private(set) var keybindingIndex = KeybindingIndex()
+    private(set) var t3: T3Report?
     private(set) var pullsProject: String?
     private(set) var pullsRequest: String?
     private(set) var pullsError: String?
@@ -347,6 +348,22 @@ final class PagesStore {
     func showPullRequest(number: UInt64, request: String) {
         pullDetailNumber = number
         pullDetailRequest = request
+    }
+
+    func setT3(_ report: T3Report) {
+        t3 = report
+    }
+
+    func importT3(_ choices: T3Choices) {
+        core.run { $0.importT3(choices: choices) }
+    }
+
+    func dismissT3Import() {
+        core.run { $0.dismissT3Import() }
+    }
+
+    func setT3Sync(_ enabled: Bool) {
+        core.run { $0.setT3Sync(enabled: enabled) }
     }
 
     func setHiddenModel(provider: String, model: String, hidden: Bool) {

@@ -15,6 +15,7 @@ mod projects;
 pub(crate) mod providers;
 mod settings;
 mod setup;
+pub(crate) mod t3;
 mod terminal;
 pub(crate) mod time;
 mod usage;
@@ -674,6 +675,36 @@ impl Workspace {
             workspace.inner.settings.send_replace(settings.clone());
             workspace.push(Update::Settings { settings });
             workspace.push_overridden_projects();
+        });
+    }
+
+    pub(crate) fn current(&self) -> Settings {
+        self.current_settings()
+    }
+
+    pub(crate) fn apply_settings(&self, settings: Settings) {
+        self.inner.settings.send_replace(settings::sanitize(settings.clone()));
+        self.update_settings(settings);
+    }
+
+    pub(crate) fn keybinding_overrides(&self) -> BTreeMap<String, Option<String>> {
+        self.inner.keybindings.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn replace_keybindings(&self, overrides: BTreeMap<String, Option<String>>) {
+        overrides.clone_into(&mut self.inner.keybindings.lock().unwrap_or_else(PoisonError::into_inner));
+        self.push(Update::Keybindings { bindings: settings::keybindings(&overrides) });
+        let workspace = self.clone();
+        self.inner.runtime.spawn(async move {
+            let _guard = workspace.inner.save_lock.lock().await;
+            let path = workspace.inner.data_dir.join("keybindings.json");
+            let result = tokio::task::spawn_blocking(move || settings::save_json(&path, &overrides))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            if let Err(message) = result {
+                workspace.error(message);
+            }
         });
     }
 

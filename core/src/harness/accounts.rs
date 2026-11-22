@@ -106,11 +106,20 @@ pub(crate) fn label(dir: &Path) -> String {
     dir.file_name().map_or_else(|| key(dir), |name| name.to_string_lossy().into_owned())
 }
 
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), crate::platform::home()) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),
     }
+}
+
+pub(crate) fn signed_in(harness: Harness, dir: &Path) -> bool {
+    names(harness).is_some_and(|(_, _, marker)| std::fs::symlink_metadata(dir.join(marker)).is_ok())
+}
+
+pub(crate) fn home_dir_of(harness: Harness) -> Option<PathBuf> {
+    let (_, base, _) = names(harness)?;
+    crate::platform::home().map(|home| PathBuf::from(home).join(base))
 }
 
 pub(crate) fn list(harness: Harness, overrides: &[String]) -> Vec<PathBuf> {

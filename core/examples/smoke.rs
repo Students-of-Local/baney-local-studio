@@ -221,6 +221,7 @@ impl Harness {
             | Update::Providers { .. }
             | Update::ProviderModels { .. }
             | Update::Keybindings { .. }
+            | Update::T3Sync { .. }
             | Update::RequestDone { .. }
             | Update::LocalOnly { .. }
             | Update::ProjectScripts { .. }

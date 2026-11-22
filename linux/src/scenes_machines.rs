@@ -45,7 +45,7 @@ fn link(url: &str) -> String {
     )
 }
 
-fn scroll_to_end(root: &gtk::Widget) {
+pub fn scroll_to_end(root: &gtk::Widget) {
     let mut stack = vec![root.clone()];
     while let Some(widget) = stack.pop() {
         if let Some(scroller) = widget.downcast_ref::<gtk::ScrolledWindow>() {
