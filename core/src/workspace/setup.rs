@@ -18,6 +18,7 @@ const PUSH_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const STOP_WAIT: Duration = Duration::from_secs(10);
+const DRAIN_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedWorktree {
@@ -275,9 +276,12 @@ async fn run_script(
             Some(line) = received.recv() => progress.output(index, &line),
             _ = flush.tick() => progress.flush(),
             status = child.wait() => {
-                while let Ok(line) = received.try_recv() {
-                    progress.output(index, &line);
-                }
+                let _ = tokio::time::timeout(DRAIN_WAIT, async {
+                    while let Some(line) = received.recv().await {
+                        progress.output(index, &line);
+                    }
+                })
+                .await;
                 break ScriptEnd::Exited(status.ok().and_then(|status| status.code()));
             }
             changed = signal.changed() => {

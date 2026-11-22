@@ -377,7 +377,7 @@ const PR_LIST: &str = r#"[{"number":7,"title":"Add feature","url":"https://githu
 const LOCAL_STUDIO_JSON: &str = r#"{
   // JSONC is tolerated
   "scripts": [
-    { "name": "Echo", "command": "echo setup-ran-in-$(basename \"$LOCAL_STUDIO_WORKTREE_PATH\")", "runOnWorktreeCreate": true, "async": false },
+    { "name": "Echo", "command": "(sleep 0.5; echo setup-ran-in-$(basename \"$LOCAL_STUDIO_WORKTREE_PATH\")) &", "runOnWorktreeCreate": true, "async": false },
     { "name": "Hello", "command": "echo script-ran", "icon": "test" },
   ],
 }
