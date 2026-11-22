@@ -18,6 +18,7 @@ final class StudioStore {
     let workspace: WorkspaceStore
     let pages: PagesStore
     let machines: MachinesStore
+    let updates: UpdatesStore
 
     @ObservationIgnored let core = CoreHandle()
     @ObservationIgnored let requests = RequestCenter()
@@ -37,6 +38,7 @@ final class StudioStore {
         workspace = WorkspaceStore(core: core, requests: requests)
         pages = PagesStore(core: core, requests: requests)
         machines = MachinesStore(core: core, requests: requests)
+        updates = UpdatesStore(core: core)
         workspace.panels.bind(conversation: conversation, inbox: inbox, pages: pages)
         conversation.pendingsChanged = { [weak self] in self?.syncPendings() }
         conversation.onSendFailure = { [weak self] in self?.post(.error, $0) }
@@ -302,6 +304,8 @@ final class StudioStore {
                 kernelNoticeHidden = false
             }
             kernel = state
+        case .appUpdate(let state):
+            updates.setState(state)
         case .requestDone(let request, let message):
             requests.complete(request, .done(message))
         case .requestFailed(let request, let message):

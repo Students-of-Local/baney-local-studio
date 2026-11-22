@@ -13,6 +13,13 @@ struct RootView: View {
         HStack(spacing: 0) {
             SidebarView(store: store)
                 .frame(width: shell.sidebarWidth)
+                .overlay(alignment: .topTrailing) {
+                    UpdateReadyChrome(updates: store.updates)
+                        .padding(.leading, shell.chromeEnd + 4)
+                        .padding(.trailing, Theme.Metrics.sidebarInset - 2)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .frame(height: Theme.Metrics.titlebarHeight)
+                }
                 .frame(width: shell.sidebarVisible ? shell.sidebarWidth : 0, alignment: .trailing)
                 .clipped()
                 .accessibilityHidden(!shell.sidebarVisible)
@@ -241,6 +248,11 @@ struct WindowChrome: View {
                 }
             }
         }
+        .background(ChromeTrailingProbe { trailing in
+            if store.shell.chromeEnd != trailing {
+                store.shell.chromeEnd = trailing
+            }
+        })
     }
 
     private func hint(_ title: String, _ command: String) -> String {

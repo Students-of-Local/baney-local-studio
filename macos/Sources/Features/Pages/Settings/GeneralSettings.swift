@@ -41,11 +41,7 @@ private struct GeneralSettingsForm: View {
                     }
                 }
             }
-            SettingsSection(.about) {
-                SettingRow(.version) {
-                    LabeledContent(SettingKey.version.title, value: StudioPaths.version)
-                }
-            }
+            UpdatesSection(settings: settings, store: store)
             T3SyncSection(pages: pages)
             SettingsSection(.diagnostics) {
                 SettingRow(.dataFolder) {

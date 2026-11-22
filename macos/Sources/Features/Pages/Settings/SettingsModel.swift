@@ -68,7 +68,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     var summary: String {
         switch self {
         case .project: "Name, icon, checkout, defaults and scripts for each project."
-        case .general: "Defaults for new threads, how threads are organized, confirmations and diagnostics."
+        case .general: "Defaults for new threads, how threads are organized, confirmations, updates and diagnostics."
         case .appearance: "Theme, interface and typography."
         case .keybindings: "Keyboard shortcuts for every command."
         case .snapshots: "Capture the window of another app and attach it to the composer."
@@ -89,7 +89,7 @@ enum SettingsGroup: Hashable {
     case keyboard
     case confirmations
     case textGeneration
-    case about
+    case updates
     case t3Code
     case diagnostics
     case legacy
@@ -125,7 +125,7 @@ enum SettingsGroup: Hashable {
         case .keyboard: "Keyboard"
         case .confirmations: "Confirmations"
         case .textGeneration: "Text Generation"
-        case .about: "About"
+        case .updates: "Updates"
         case .t3Code: "T3 Code"
         case .diagnostics: "Diagnostics"
         case .legacy: "Legacy"
@@ -157,7 +157,7 @@ enum SettingsGroup: Hashable {
 
     var pane: SettingsPane {
         switch self {
-        case .projectDefaults, .organization, .behavior, .keyboard, .confirmations, .textGeneration, .about, .t3Code, .diagnostics, .legacy: .general
+        case .projectDefaults, .organization, .behavior, .keyboard, .confirmations, .textGeneration, .updates, .t3Code, .diagnostics, .legacy: .general
         case .theme, .interface, .typography: .appearance
         case .shortcuts: .keybindings
         case .snapshotCapture, .snapshotFeedback: .snapshots
@@ -183,7 +183,7 @@ enum SettingKey: CaseIterable {
     case vimKeys
     case confirmUnpin, confirmArchive, confirmDelete, quitShortcut
     case textGenerationModel
-    case version
+    case version, updateStatus, automaticUpdates, releaseNotes, channel
     case t3Sync
     case dataFolder, pythonKernel
     case contextMeter
@@ -211,7 +211,7 @@ enum SettingKey: CaseIterable {
         case .vimKeys: .keyboard
         case .confirmUnpin, .confirmArchive, .confirmDelete, .quitShortcut: .confirmations
         case .textGenerationModel: .textGeneration
-        case .version: .about
+        case .version, .updateStatus, .automaticUpdates, .releaseNotes, .channel: .updates
         case .t3Sync: .t3Code
         case .dataFolder, .pythonKernel: .diagnostics
         case .contextMeter: .legacy
@@ -274,6 +274,10 @@ enum SettingKey: CaseIterable {
         case .textGenerationModel: "Text generation model"
         case .version: "Version"
         case .t3Sync: "T3 Code sync"
+        case .updateStatus: "Update status"
+        case .automaticUpdates: "Automatic updates"
+        case .releaseNotes: "Release notes"
+        case .channel: "Channel"
         case .dataFolder: "Data folder"
         case .pythonKernel: "Python kernel"
         case .contextMeter: "Context window indicator"
@@ -360,8 +364,12 @@ enum SettingKey: CaseIterable {
         case .confirmUnpin, .confirmArchive, .confirmDelete: "dialog prompt"
         case .quitShortcut: "cmd q hold"
         case .textGenerationModel: "titles commit messages"
-        case .version: "about update"
+        case .version: "about build"
         case .t3Sync: "t3 import bring over migrate sync settings projects favorites keybindings"
+        case .updateStatus: "check now download restart install software"
+        case .automaticUpdates: "background download software"
+        case .releaseNotes: "changes what's new"
+        case .channel: "stable nightly dev switch install open"
         case .dataFolder, .dataLocation: "logs finder reveal storage"
         case .pythonKernel: "python ipython runtime install fetch eukhe"
         case .contextMeter: "legacy tokens"
