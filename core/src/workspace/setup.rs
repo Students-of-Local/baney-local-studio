@@ -244,9 +244,12 @@ async fn run_script(
             Some(line) = received.recv() => progress.output(index, &line),
             _ = flush.tick() => progress.flush(),
             status = child.wait() => {
-                while let Ok(line) = received.try_recv() {
-                    progress.output(index, &line);
-                }
+                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                    while let Some(line) = received.recv().await {
+                        progress.output(index, &line);
+                    }
+                })
+                .await;
                 break ScriptEnd::Exited(status.ok().and_then(|status| status.code()));
             }
             changed = signal.changed() => {
