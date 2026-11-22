@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
+use tokio::task::JoinHandle;
 
 use crate::devices::{self, Devices};
 use crate::hub::{self, Feed, Hub};
@@ -17,7 +18,7 @@ use crate::limits::Gate;
 use crate::pairing::host_name;
 use crate::server::{self, Hosts, Route, Server};
 use crate::settings::{self, Effective, Settings};
-use crate::{service, CHANNEL, VERSION};
+use crate::{lock, service, CHANNEL, VERSION};
 
 const BIND_WAIT: Duration = Duration::from_secs(10);
 const BIND_RETRY: Duration = Duration::from_millis(200);
@@ -94,12 +95,15 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
         bound = bind(config.port, BIND_WAIT) => bound?,
         stop = &mut until => return Ok(stop),
     };
+    let mut tunnel_error = None;
     let tunnel = match config.tunnel_port {
         Some(port) => tokio::select! {
             bound = bind(port, BIND_WAIT) => match bound {
                 Ok(listener) => Some((listener, port)),
                 Err(error) => {
-                    eprintln!("local-studio-serve: could not start the tunnel listener, serving without it: {error:#}");
+                    let message = format!("{error:#}");
+                    eprintln!("local-studio-serve: could not start the tunnel listener, serving without it: {message}");
+                    tunnel_error = Some(message);
                     None
                 }
             },
@@ -130,17 +134,28 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
     tokio::spawn(server::revocations(Arc::clone(&server)));
     let (stopping, stopped) = watch::channel(false);
     tokio::spawn(server::listen(local, Route::Local, Arc::clone(&server), stopped.clone()));
-    let tunnel_port = tunnel.as_ref().map(|(_, port)| *port);
-    if let Some((listener, _)) = tunnel {
-        tokio::spawn(server::listen(listener, Route::Tunnel, Arc::clone(&server), stopped.clone()));
-    }
+    let tunnel = tunnel.map(|(listener, port)| Tunnel {
+        port,
+        task: tokio::spawn(server::listen(listener, Route::Tunnel, Arc::clone(&server), stopped.clone())),
+    });
     let answering = tokio::spawn(answer_requests(Arc::clone(&studio), data_dir.clone()));
-    let watcher = Watcher { data_dir, flags, default_name, server: Arc::clone(&server), stopped, tunnel: tunnel_port };
+    let watcher = Watcher {
+        data_dir: data_dir.clone(),
+        flags,
+        default_name,
+        server: Arc::clone(&server),
+        stopped,
+        tunnel,
+        tunnel_error,
+    };
+    watcher.record();
     let watching = tokio::spawn(watcher.run(config, reload));
     let stop = until.await;
     watching.abort();
+    watching.await.ok();
     answering.abort();
     stopping.send_replace(true);
+    lock::clear_listening(&data_dir);
     let (code, reason) = match stop {
         Stop::Quit => (GOING_AWAY, "serve stopped"),
         Stop::HandOver => (RESTARTING, "service restart"),
@@ -154,13 +169,19 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
     Ok(stop)
 }
 
+struct Tunnel {
+    port: u16,
+    task: JoinHandle<()>,
+}
+
 struct Watcher {
     data_dir: PathBuf,
     flags: Settings,
     default_name: String,
     server: Arc<Server>,
     stopped: watch::Receiver<bool>,
-    tunnel: Option<u16>,
+    tunnel: Option<Tunnel>,
+    tunnel_error: Option<String>,
 }
 
 impl Watcher {
@@ -189,7 +210,7 @@ impl Watcher {
                     continue;
                 }
             };
-            self.start_tunnel(&next).await;
+            self.steer_tunnel(&next).await;
             if next == current {
                 continue;
             }
@@ -213,18 +234,58 @@ impl Watcher {
         }
     }
 
-    async fn start_tunnel(&mut self, config: &Effective) {
-        if self.tunnel.is_some() || config.allow_tunnel_hosts.is_empty() {
+    fn record(&self) {
+        let listening = lock::Listening {
+            pid: std::process::id(),
+            port: self.server.port,
+            tunnel_port: self.tunnel.as_ref().map(|tunnel| tunnel.port),
+            pinned_tunnel_port: self.flags.tunnel_port,
+        };
+        if let Err(error) = lock::record_listening(&self.data_dir, &listening) {
+            eprintln!("local-studio-serve: could not record the listening ports: {error:#}");
+        }
+    }
+
+    async fn steer_tunnel(&mut self, config: &Effective) {
+        let wanted = config.tunnel_port;
+        if self.tunnel.as_ref().map(|tunnel| tunnel.port) == wanted {
             return;
         }
-        let Some(port) = config.tunnel_port else { return };
+        if let Some(tunnel) = self.tunnel.take() {
+            tunnel.task.abort();
+            tunnel.task.await.ok();
+            let why =
+                if wanted.is_some() { "serve.json moved the tunnel port" } else { "the last tunnel host was removed" };
+            eprintln!("local-studio-serve: {why}: stopped the tunnel listener on 127.0.0.1:{}", tunnel.port);
+            self.record();
+        }
+        let Some(port) = wanted else {
+            self.tunnel_error = None;
+            return;
+        };
         match bind(port, Duration::ZERO).await {
             Ok(listener) => {
-                eprintln!("local-studio-serve: a tunnel host was added: tunnel on http://127.0.0.1:{port}");
-                self.tunnel = Some(port);
-                tokio::spawn(server::listen(listener, Route::Tunnel, Arc::clone(&self.server), self.stopped.clone()));
+                eprintln!("local-studio-serve: tunnel on http://127.0.0.1:{port}");
+                self.tunnel_error = None;
+                let task = tokio::spawn(server::listen(
+                    listener,
+                    Route::Tunnel,
+                    Arc::clone(&self.server),
+                    self.stopped.clone(),
+                ));
+                self.tunnel = Some(Tunnel { port, task });
+                self.record();
             }
-            Err(error) => eprintln!("local-studio-serve: could not start the tunnel listener: {error:#}"),
+            Err(error) => {
+                let message = format!("{error:#}");
+                if self.tunnel_error.as_ref() != Some(&message) {
+                    eprintln!(
+                        "local-studio-serve: could not start the tunnel listener: {message}; serve tries again every {} s and logs again when that changes",
+                        RELOAD_EVERY.as_secs()
+                    );
+                }
+                self.tunnel_error = Some(message);
+            }
         }
     }
 }
@@ -505,16 +566,12 @@ async fn settled(stop: &mut watch::Receiver<bool>, mut done: impl FnMut() -> boo
     }
 }
 
-fn ports(config: &Effective) -> (u16, Option<u16>) {
-    (config.port, config.tunnel_port)
-}
-
 async fn session(studio: &Arc<Studio>, data_dir: &Path, stop: &mut watch::Receiver<bool>) -> Session {
     if !settled(stop, || settings::exists(data_dir)).await {
         return Session::Stopped;
     }
     let name = host_name();
-    let started = configured(data_dir, &Settings::default(), &name).ok().as_ref().map(ports);
+    let started = configured(data_dir, &Settings::default(), &name).ok().map(|config| config.port);
     let (waker, notify) = hub::signal();
     let feed = Feed::Subscription(studio.subscribe(waker));
     let launch = Launch {
@@ -529,11 +586,7 @@ async fn session(studio: &Arc<Studio>, data_dir: &Path, stop: &mut watch::Receiv
         let mut gone = false;
         let changed = settled(stop, || {
             gone = !settings::exists(data_dir);
-            gone || configured(data_dir, &Settings::default(), &name)
-                .ok()
-                .as_ref()
-                .map(ports)
-                .is_some_and(|now| Some(now) != started)
+            gone || configured(data_dir, &Settings::default(), &name).is_ok_and(|now| Some(now.port) != started)
         })
         .await;
         if !changed {
