@@ -1140,11 +1140,12 @@ mod hub {
 
     fn release(repo: &Path, version: &str, capabilities: &[&str]) -> anyhow::Result<()> {
         let listed: Vec<String> = capabilities.iter().map(|name| format!("{name:?}")).collect();
-        let gates: String = capabilities
+        let gates: Vec<String> = capabilities
             .iter()
             .filter(|name| plugin_store::Capability::parse(name).is_some_and(plugin_store::Capability::sensitive))
             .map(|name| format!("{name} = \"{name} for the fixture\"\n"))
             .collect();
+        let gates = gates.join("");
         std::fs::write(
             repo.join("plugin.toml"),
             format!(
@@ -1197,6 +1198,44 @@ mod hub {
         hub.studio.shutdown();
         outcome?;
         println!("PASS plugin smoke: hub");
+        Ok(())
+    }
+
+    fn updates(hub: &mut Hub, repo: &Path) -> anyhow::Result<()> {
+        release(repo, "1.1.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
+        hub.studio.check_plugin_updates("hub-check".into());
+        hub.pump("the update check finds 1.1.0 on the channel", |seen| {
+            seen.outcome("hub-check").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
+        })?;
+        let update = hub.seen.row(ID).and_then(|row| row.update.clone()).context("update")?;
+        ensure!(update.version == "1.1.0" && update.asks == ["synthetic-input"], "update: {update:?}");
+        ensure!(hub.seen.checked.is_some(), "no check time");
+        ensure!(
+            hub.seen.row(CATALOG).is_some_and(|row| row.update.is_none()),
+            "the pinned catalog plugin shows an update"
+        );
+
+        hub.studio.update_plugin("hub-update".into(), ID.into());
+        let sheet = hub.sheet("an update that asks for more asks consent again", "hub-update")?;
+        let ids: Vec<&str> = sheet.rows.iter().map(|row| row.id.as_str()).collect();
+        ensure!(ids == ["synthetic-input"] && sheet.update_from.as_deref() == Some("1.0.0"), "update sheet: {sheet:?}");
+        hub.answer("update with the new switch off", "hub-update", &[])?;
+        hub.pump("the plugin runs 1.1.0 and the update badge clears", |seen| {
+            seen.row(ID)
+                .is_some_and(|row| row.version == "1.1.0" && row.update.is_none() && row.state == PluginState::Running)
+        })?;
+
+        release(repo, "1.2.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
+        let sheets = hub.seen.sheets;
+        hub.studio.check_plugin_updates("hub-check-2".into());
+        hub.pump("the next check finds 1.2.0", |seen| {
+            seen.outcome("hub-check-2").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
+        })?;
+        hub.studio.update_plugin("hub-update-2".into(), ID.into());
+        hub.pump("an update that asks for nothing new installs without a sheet", |seen| {
+            seen.outcome("hub-update-2").is_some() && seen.row(ID).is_some_and(|row| row.version == "1.2.0")
+        })?;
+        ensure!(hub.seen.sheets == sheets, "an update with the same capabilities opened a sheet");
         Ok(())
     }
 
@@ -1266,40 +1305,7 @@ mod hub {
         })?;
         ensure!(args(agent)?.is_some_and(|args| args[1] == "--granted="), "args {:?}", args(agent)?);
 
-        release(repo, "1.1.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
-        hub.studio.check_plugin_updates("hub-check".into());
-        hub.pump("the update check finds 1.1.0 on the channel", |seen| {
-            seen.outcome("hub-check").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
-        })?;
-        let update = hub.seen.row(ID).and_then(|row| row.update.clone()).context("update")?;
-        ensure!(update.version == "1.1.0" && update.asks == ["synthetic-input"], "update: {update:?}");
-        ensure!(hub.seen.checked.is_some(), "no check time");
-        ensure!(
-            hub.seen.row(CATALOG).is_some_and(|row| row.update.is_none()),
-            "the pinned catalog plugin shows an update"
-        );
-
-        hub.studio.update_plugin("hub-update".into(), ID.into());
-        let sheet = hub.sheet("an update that asks for more asks consent again", "hub-update")?;
-        let ids: Vec<&str> = sheet.rows.iter().map(|row| row.id.as_str()).collect();
-        ensure!(ids == ["synthetic-input"] && sheet.update_from.as_deref() == Some("1.0.0"), "update sheet: {sheet:?}");
-        hub.answer("update with the new switch off", "hub-update", &[])?;
-        hub.pump("the plugin runs 1.1.0 and the update badge clears", |seen| {
-            seen.row(ID)
-                .is_some_and(|row| row.version == "1.1.0" && row.update.is_none() && row.state == PluginState::Running)
-        })?;
-
-        release(repo, "1.2.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
-        let sheets = hub.seen.sheets;
-        hub.studio.check_plugin_updates("hub-check-2".into());
-        hub.pump("the next check finds 1.2.0", |seen| {
-            seen.outcome("hub-check-2").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
-        })?;
-        hub.studio.update_plugin("hub-update-2".into(), ID.into());
-        hub.pump("an update that asks for nothing new installs without a sheet", |seen| {
-            seen.outcome("hub-update-2").is_some() && seen.row(ID).is_some_and(|row| row.version == "1.2.0")
-        })?;
-        ensure!(hub.seen.sheets == sheets, "an update with the same capabilities opened a sheet");
+        updates(hub, repo)?;
 
         for (request, id) in [("hub-remove", ID), ("hub-remove-catalog", CATALOG)] {
             hub.studio.remove_plugin(request.into(), id.into());

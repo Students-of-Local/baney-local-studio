@@ -220,6 +220,7 @@ fn compare(new: &str, old: &str) -> Option<Ordering> {
     Some(new_numbers.cmp(&old_numbers).then(pre))
 }
 
+#[must_use]
 pub fn check(root: &Path, plugins: &[Plugin], channel: &str) -> (BTreeMap<String, Available>, Vec<String>) {
     let origins = Origins::load(root).unwrap_or_default();
     let mut found: BTreeMap<String, Available> = BTreeMap::new();
