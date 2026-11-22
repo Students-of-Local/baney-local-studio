@@ -21,6 +21,13 @@ for cli in claude codex; do
     "ok   $label: with every account limited a Failed notification names the reset"
   )
 done
+for case in "claude .claude-b after a message Stop dropped" "claude .claude-b after a steered follow-up" "codex .codex-b after a held message Codex refused"; do
+  read -r cli b rest <<< "$case"
+  steps+=(
+    "ok   $cli-account: $rest: the limit turn's own message is sent again and answered on $b"
+    "ok   $cli-account: $rest: the thread runs on $b"
+  )
+done
 steps+=("PASS harness_queue_smoke")
 for step in "${steps[@]}"; do
   grep -qxF "$step" <<< "$out" || { echo "$out" | grep -E '^(MISS|Error|- )' | head -20; echo "missing: $step"; exit 1; }

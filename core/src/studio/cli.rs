@@ -28,9 +28,9 @@ pub(super) struct Cli {
     restart: bool,
     unanswered: usize,
     epoch: u64,
-    asked: VecDeque<Option<Asked>>,
-    ended: Option<Asked>,
-    just_ended: bool,
+    sent: VecDeque<Asked>,
+    turn: Option<String>,
+    ended: Option<String>,
 }
 
 struct Asked {
@@ -38,18 +38,35 @@ struct Asked {
     images: Vec<Image>,
 }
 
+const SENT_KEPT: usize = 32;
+
 impl Cli {
-    fn turn_ended(&mut self) {
-        self.ended = self.asked.pop_front().flatten();
-        self.just_ended = true;
+    fn note_sent(&mut self, text: &str, images: &[Image]) {
+        self.sent.push_back(Asked { text: text.to_string(), images: images.to_vec() });
+        while self.sent.len() > SENT_KEPT {
+            self.sent.pop_front();
+        }
+        self.ended = None;
+    }
+
+    fn note_turn(&mut self, event: &SessionEvent) {
+        match event {
+            SessionEvent::AgentStart => {
+                self.turn = None;
+                self.ended = None;
+            }
+            SessionEvent::MessageStart { message: AgentMessage::User(user), .. } if self.turn.is_none() => {
+                self.turn = Some(crate::transcript::user_parts(&user.content).0);
+            }
+            SessionEvent::AgentEnd { .. } => self.ended = self.turn.take(),
+            _ => {}
+        }
     }
 
     fn limited_turn(&mut self) -> Option<Asked> {
-        if self.just_ended {
-            self.ended.take()
-        } else {
-            self.asked.pop_front().flatten()
-        }
+        let text = self.turn.take().or_else(|| self.ended.take())?;
+        let images = self.sent.iter().rev().find(|asked| asked.text == text).map(|asked| asked.images.clone());
+        Some(Asked { text, images: images.unwrap_or_default() })
     }
 }
 
@@ -354,9 +371,9 @@ impl Actor {
             restart: false,
             unanswered: 0,
             epoch: 0,
-            asked: VecDeque::new(),
+            sent: VecDeque::new(),
+            turn: None,
             ended: None,
-            just_ended: false,
         };
         let access = flags.access.unwrap_or(AccessMode::FullAccess);
         if access != launch.access {
@@ -482,9 +499,8 @@ impl Actor {
         cli.unanswered += 1;
         cli.epoch += 1;
         let sent = cli.driver.send(text, images, steer, request);
-        if sent.is_ok() && !steer {
-            cli.asked.push_back(Some(Asked { text: text.to_string(), images: images.to_vec() }));
-            cli.just_ended = false;
+        if sent.is_ok() {
+            cli.note_sent(text, images);
         }
         if sent.is_err() {
             self.answered(id);
@@ -631,9 +647,6 @@ impl Actor {
         if let Err(error) = cli.driver.compact() {
             self.answered(id);
             self.mailbox.notice(NoticeLevel::Error, error);
-        } else {
-            cli.asked.push_back(None);
-            cli.just_ended = false;
         }
     }
 
@@ -795,7 +808,7 @@ impl Actor {
             Event::Session(event) => self.cli_session(&id, &event).await,
             Event::Idle => {
                 if let Some(cli) = self.drivers.get_mut(&id) {
-                    cli.turn_ended();
+                    cli.ended = None;
                 }
                 self.answered(&id);
                 let busy =
@@ -856,7 +869,7 @@ impl Actor {
         if !self.drivers.contains_key(&id) {
             self.cli_halt(&id).await;
         }
-        let limited = if stop.limit { self.cli_limited(&id, harness, &stop) } else { Limited::Off };
+        let limited = if stop.limit { self.cli_limited(&id, harness, &stop, resend.is_some()) } else { Limited::Off };
         let reason = stop.reason.trim_end_matches('.').to_string();
         let detail = match limited {
             Limited::Switched(note) => return self.cli_switched(&id, resend, note),
@@ -911,11 +924,7 @@ impl Actor {
 
     async fn cli_session(&mut self, id: &str, event: &SessionEvent) {
         if let Some(cli) = self.drivers.get_mut(id) {
-            match event {
-                SessionEvent::TurnEnd { .. } => cli.turn_ended(),
-                SessionEvent::AgentEnd { .. } => {}
-                _ => cli.just_ended = false,
-            }
+            cli.note_turn(event);
         }
         self.apply_event(id, event, 0).await;
         let ended = matches!(event, SessionEvent::AgentEnd { .. });
@@ -1003,7 +1012,7 @@ impl Actor {
         accounts::stored(harness, dir)
     }
 
-    fn cli_limited(&mut self, id: &str, harness: Harness, stop: &Stop) -> Limited {
+    fn cli_limited(&mut self, id: &str, harness: Harness, stop: &Stop, known: bool) -> Limited {
         let (listed, switching) = self.cli_overrides(harness);
         let flags = self.store.flags(id);
         let Some(from) = accounts::dir_of(harness, flags.account.as_deref()) else { return Limited::Off };
@@ -1015,6 +1024,9 @@ impl Actor {
         let mut parks = Parks::load(&self.data_dir);
         if let Err(error) = parks.park(&from, until) {
             self.mailbox.notice(NoticeLevel::Warning, format!("Could not record the account's usage limit: {error}"));
+        }
+        if !known {
+            return Limited::Off;
         }
         let list = accounts::list(harness, &listed);
         let Some(to) = list.iter().find(|dir| **dir != from && parks.until(dir).is_none()).cloned() else {

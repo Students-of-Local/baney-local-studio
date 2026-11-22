@@ -208,6 +208,12 @@ impl Run {
         self.studio.send(format!("send-{}", self.sent), self.thread(), prompt(text), Delivery::Queue);
     }
 
+    fn steer(&mut self, text: &str) {
+        self.sent += 1;
+        println!("     steer {text:?}");
+        self.studio.send(format!("send-{}", self.sent), self.thread(), prompt(text), Delivery::Steer);
+    }
+
     fn start(&mut self, label: &str, (provider, model): (&str, &str), thinking: Option<&str>) -> anyhow::Result<()> {
         self.start_with(label, (provider, model), thinking, AccessMode::FullAccess)
     }
@@ -554,6 +560,75 @@ fn unpark(root: &Path, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn fresh_accounts(account: &Account) -> anyhow::Result<()> {
+    for dir in [&account.first, &account.second] {
+        std::fs::remove_file(dir.join("limited")).ok();
+        unpark(account.root, dir)?;
+    }
+    std::fs::write(account.first.join("limited"), "")?;
+    Ok(())
+}
+
+fn limit_resend(
+    run: &mut Run,
+    account: &Account,
+    case: &str,
+    before: impl FnOnce(&mut Run) -> anyhow::Result<()>,
+    (limited, stale): (&str, Option<&str>),
+) -> anyhow::Result<()> {
+    let label = account.label;
+    let to = name_of(&account.second);
+    fresh_accounts(account)?;
+    run.start(&format!("{label}-{case}"), account.model, account.thinking)?;
+    let thread = run.thread();
+    before(run)?;
+    let reply = format!("reply to {limited}");
+    run.check(&format!("{label}: {case}: the limit turn's own message is sent again and answered on {to}"), |watch| {
+        watch.replied(&reply).is_some() && !watch.busy
+    });
+    if let Some(stale) = stale.filter(|stale| run.watch.replied(&format!("reply to {stale}")).is_some()) {
+        run.watch.miss(format!("{label}: {case}: the switch sent {stale:?} again instead of {limited:?}"));
+    }
+    account.on(run, &format!("{label}: {case}: the thread runs on {to}"), &thread, &account.second);
+    Ok(())
+}
+
+fn claude_resend_cases(run: &mut Run, account: &Account) -> anyhow::Result<()> {
+    let drop = |run: &mut Run| {
+        run.slow("slow discard echo three")?;
+        run.send("foxtrot three");
+        run.studio.abort(run.thread());
+        run.setup("the stopped turn ended", |watch| !watch.busy)?;
+        run.until(Duration::from_secs(1), |_| false);
+        run.send("limit golf three");
+        Ok(())
+    };
+    limit_resend(run, account, "after a message Stop dropped", drop, ("limit golf three", Some("foxtrot three")))?;
+    let steer = |run: &mut Run| {
+        run.slow("slow hotel three")?;
+        run.steer("india three");
+        run.send("limit juliet three");
+        Ok(())
+    };
+    limit_resend(run, account, "after a steered follow-up", steer, ("limit juliet three", None))
+}
+
+fn codex_resend_cases(run: &mut Run, account: &Account) -> anyhow::Result<()> {
+    let refused = |run: &mut Run| {
+        run.slow("slow kilo three")?;
+        run.send("reject lima three");
+        run.send("limit mike three");
+        Ok(())
+    };
+    limit_resend(
+        run,
+        account,
+        "after a held message Codex refused",
+        refused,
+        ("limit mike three", Some("reject lima three")),
+    )
+}
+
 fn name_of(dir: &Path) -> String {
     dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -581,6 +656,7 @@ fn account_scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
         second: claude_b,
     };
     account_switch(run, &claude)?;
+    claude_resend_cases(run, &claude)?;
     let codex = Account {
         root,
         label: "codex-account",
@@ -589,7 +665,8 @@ fn account_scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
         first: codex_a,
         second: codex_b,
     };
-    account_switch(run, &codex)
+    account_switch(run, &codex)?;
+    codex_resend_cases(run, &codex)
 }
 
 fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
