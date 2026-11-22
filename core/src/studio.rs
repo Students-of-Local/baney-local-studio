@@ -392,6 +392,7 @@ enum Command {
     },
     ForkThread {
         thread: String,
+        caller: Option<plugins::Caller>,
     },
     Compact {
         thread: String,
@@ -893,7 +894,7 @@ impl Studio {
     }
 
     pub fn fork_thread(&self, thread: String) {
-        self.send_command(Command::ForkThread { thread });
+        self.send_command(Command::ForkThread { thread, caller: None });
     }
 
     pub fn compact(&self, thread: String) {
@@ -1176,6 +1177,10 @@ impl Studio {
         caller: plugins::Caller,
     ) {
         self.send_command(Command::StartThread { draft, project, prompt, settings, caller: Some(caller) });
+    }
+
+    pub fn fork_thread_as(&self, thread: String, caller: plugins::Caller) {
+        self.send_command(Command::ForkThread { thread, caller: Some(caller) });
     }
 
     fn send_command(&self, command: Command) {
@@ -1737,8 +1742,8 @@ impl Actor {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
-            Command::ForkThread { thread } => {
-                if let Err(error) = self.fork(&thread).await {
+            Command::ForkThread { thread, caller } => {
+                if let Err(error) = self.fork(&thread, caller).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
                 }
             }
@@ -3285,7 +3290,7 @@ impl Actor {
         Ok(())
     }
 
-    async fn fork(&mut self, id: &str) -> Result<(), String> {
+    async fn fork(&mut self, id: &str, caller: Option<plugins::Caller>) -> Result<(), String> {
         if let Some(harness) = self.harness(id) {
             return Err(cli::unsupported(harness, "fork"));
         }
@@ -3330,7 +3335,7 @@ impl Actor {
             fork.project = flags.project;
             fork.access = flags.access;
             fork.local_only = flags.local_only;
-            fork.caller = flags.caller;
+            fork.caller = caller.or(flags.caller);
         });
         self.save();
         self.threads.insert(fork_id.clone(), Thread { path, cwd, ..Thread::default() });

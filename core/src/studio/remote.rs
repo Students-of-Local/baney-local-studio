@@ -297,7 +297,7 @@ mod route {
                     self.thread_op("mark_unread", &thread, json!({ "unread": unread }));
                     None
                 }
-                Command::ForkThread { thread } if remote(&thread) => {
+                Command::ForkThread { thread, .. } if remote(&thread) => {
                     self.thread_op("fork_thread", &thread, json!({}));
                     None
                 }

@@ -76,7 +76,7 @@ pub fn dispatch(
         }
         "rename_thread" => studio.rename_thread(arg(a, "thread")?, arg(a, "title")?),
         "regenerate_title" => studio.regenerate_title(arg(a, "thread")?),
-        "fork_thread" => studio.fork_thread(arg(a, "thread")?),
+        "fork_thread" => studio.fork_thread_as(arg(a, "thread")?, caller.clone()),
         "set_archived" => studio.set_archived(arg(a, "thread")?, arg(a, "archived")?),
         "set_pinned" => studio.set_pinned(arg(a, "thread")?, arg(a, "pinned")?),
         "set_settled" => studio.set_settled(arg(a, "thread")?, arg(a, "settled")?),
