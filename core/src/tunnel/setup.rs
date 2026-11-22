@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -32,6 +32,7 @@ const OWN: Service = Service { label: SERVICE_LABEL, unit: SERVICE_UNIT, what: "
 const TYCHICUS: Service =
     Service { label: "com.tychicus.cloudflared", unit: "tychicus-cloudflared.service", what: "Tychicus's tunnel" };
 const CHECK_WAITS: [u64; 7] = [0, 1, 2, 4, 8, 15, 30];
+const DOH: [&str; 2] = ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"];
 const SERVICE_WAIT: Duration = Duration::from_secs(10);
 const RUN_TIMEOUT: Duration = Duration::from_mins(1);
 const YML: &str = "cloudflared.yml";
@@ -845,69 +846,189 @@ fn ready(route: &Route, checks: &Value, message: &str) -> Value {
         "mcpUrl": format!("https://{}/mcp", route.hostname),
         "wsUrl": format!("wss://{}/v1/ws", route.hostname),
         "checks": checks,
-        "message": message,
+        "message": format!("{message}{}", dns_note(checks)),
     })
 }
 
+fn check_url() -> Option<String> {
+    std::env::var("LS_TUNNEL_CHECK_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|base| base.trim_end_matches('/').to_string())
+}
+
+fn check_origin(hostname: &str) -> String {
+    match std::env::var("LS_TUNNEL_CHECK_HTTP_PORT").ok().and_then(|port| port.trim().parse::<u16>().ok()) {
+        Some(port) => format!("http://{hostname}:{port}"),
+        None => format!("https://{hostname}"),
+    }
+}
+
+fn doh_bases() -> Vec<String> {
+    std::env::var("LS_TUNNEL_DOH")
+        .ok()
+        .map(|list| list.split(',').map(|base| base.trim().to_string()).filter(|base| !base.is_empty()).collect())
+        .filter(|bases: &Vec<String>| !bases.is_empty())
+        .unwrap_or_else(|| DOH.iter().map(ToString::to_string).collect())
+}
+
+async fn resolves_here(hostname: &str) -> Result<(), String> {
+    match tokio::time::timeout(Duration::from_secs(10), tokio::net::lookup_host((hostname, 443))).await {
+        Ok(Ok(mut addrs)) => addrs.next().map(|_| ()).ok_or_else(|| "no address".to_string()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("the lookup took over 10 seconds".into()),
+    }
+}
+
+async fn probe(client: &reqwest::Client, base: &str, hostname: &str, mcp: bool, health: bool) -> Result<(), String> {
+    let get = |path: &str| {
+        client.get(format!("{base}{path}")).header("Host", hostname).timeout(Duration::from_secs(15)).send()
+    };
+    if health {
+        let answer = get("/v1/health").await.map_err(|error| format!("https://{hostname}/v1/health: {error}"))?;
+        let code = answer.status().as_u16();
+        let ok = code == 200
+            && answer.json::<Value>().await.ok().and_then(|value| value.get("ok").and_then(Value::as_bool))
+                == Some(true);
+        if !ok {
+            return Err(format!("https://{hostname}/v1/health answered {code}, not 200 from local-studio-serve."));
+        }
+    }
+    if mcp {
+        let answer = get("/mcp").await.map_err(|error| format!("https://{hostname}/mcp: {error}"))?;
+        let challenge = answer.headers().get("www-authenticate").and_then(|value| value.to_str().ok()).unwrap_or("");
+        if answer.status().as_u16() != 401 || !challenge.contains("resource_metadata") {
+            return Err(format!(
+                "https://{hostname}/mcp must answer 401 with WWW-Authenticate naming resource_metadata; it answered {}. No auth, no tunnel.",
+                answer.status().as_u16()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn merge_dns(checks: &mut Value, other: &Value) {
+    if other["dns"] == "public_only" {
+        checks["dns"] = json!("public_only");
+    }
+}
+
+fn dns_note(checks: &Value) -> &'static str {
+    if checks["dns"] == "public_only" {
+        " This computer's DNS still has the old answer for the new name, so the checks looked it up over DNS over HTTPS. That clears on its own, and nothing is needed."
+    } else {
+        ""
+    }
+}
+
 impl Tunnel {
-    fn check_base(hostname: &str) -> String {
-        std::env::var("LS_TUNNEL_CHECK_URL")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map_or_else(|| format!("https://{hostname}"), |base| base.trim_end_matches('/').to_string())
-    }
-
-    async fn check_once(&self, hostname: &str, mcp: bool, health: bool) -> Result<(), String> {
-        let base = Self::check_base(hostname);
-        let get = |path: &str| {
-            self.http.get(format!("{base}{path}")).header("Host", hostname).timeout(Duration::from_secs(15)).send()
+    async fn check_once(&self, hostname: &str, mcp: bool, health: bool) -> Result<&'static str, String> {
+        if let Some(base) = check_url() {
+            return probe(&self.http, &base, hostname, mcp, health).await.map(|()| "local");
+        }
+        let base = check_origin(hostname);
+        let error = match probe(&self.http, &base, hostname, mcp, health).await {
+            Ok(()) => return Ok("local"),
+            Err(error) => error,
         };
-        if health {
-            let answer = get("/v1/health").await.map_err(|error| format!("https://{hostname}/v1/health: {error}"))?;
-            let code = answer.status().as_u16();
-            let ok = code == 200
-                && answer.json::<Value>().await.ok().and_then(|value| value.get("ok").and_then(Value::as_bool))
-                    == Some(true);
-            if !ok {
-                return Err(format!("https://{hostname}/v1/health answered {code}, not 200 from local-studio-serve."));
-            }
-        }
-        if mcp {
-            let answer = get("/mcp").await.map_err(|error| format!("https://{hostname}/mcp: {error}"))?;
-            let challenge =
-                answer.headers().get("www-authenticate").and_then(|value| value.to_str().ok()).unwrap_or("");
-            if answer.status().as_u16() != 401 || !challenge.contains("resource_metadata") {
-                return Err(format!(
-                    "https://{hostname}/mcp must answer 401 with WWW-Authenticate naming resource_metadata; it answered {}. No auth, no tunnel.",
-                    answer.status().as_u16()
-                ));
-            }
-        }
-        Ok(())
+        let Err(local) = resolves_here(hostname).await else { return Err(error) };
+        let addrs = self.public_lookup(hostname).await.map_err(|public| {
+            format!(
+                "{hostname} doesn't resolve on this computer ({local}), and DNS over HTTPS has no address for it either ({public})."
+            )
+        })?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(hostname, &addrs)
+            .build()
+            .map_err(|error| error.to_string())?;
+        probe(&client, &base, hostname, mcp, health).await.map_err(|error| {
+            format!("{error} (This computer's DNS has no answer for {hostname} yet, so this check used the address DNS over HTTPS gave.)")
+        })?;
+        Ok("public_only")
     }
 
-    async fn public_checks(&self, hostnames: &[String], ports: Ports, health: bool) -> Result<Value, String> {
-        let mcp = listening(ports.mcp);
-        for hostname in hostnames {
-            let mut last = String::new();
-            let mut passed = false;
-            for wait in CHECK_WAITS {
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-                match self.check_once(hostname, mcp, health).await {
-                    Ok(()) => {
-                        passed = true;
-                        break;
-                    }
-                    Err(error) => last = error,
+    async fn public_lookup(&self, hostname: &str) -> Result<Vec<SocketAddr>, String> {
+        let mut said = Vec::new();
+        for base in doh_bases() {
+            let mut found = Vec::new();
+            let mut problem = None;
+            for kind in ["A", "AAAA"] {
+                match self.doh(&base, hostname, kind).await {
+                    Ok(ips) => found.extend(ips),
+                    Err(error) => problem = Some(error),
                 }
             }
-            if !passed {
-                return Err(last);
+            if !found.is_empty() {
+                return Ok(found.into_iter().map(|ip| SocketAddr::new(ip, 443)).collect());
+            }
+            said.push(format!("{base}: {}", problem.unwrap_or_else(|| "no A or AAAA record".into())));
+        }
+        Err(said.join("; "))
+    }
+
+    async fn doh(&self, base: &str, hostname: &str, kind: &str) -> Result<Vec<IpAddr>, String> {
+        let answer = self
+            .http
+            .get(format!("{base}?name={}&type={kind}", query(hostname)))
+            .header("accept", "application/dns-json")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !answer.status().is_success() {
+            return Err(format!("answered {}", answer.status().as_u16()));
+        }
+        let value: Value = answer.json().await.map_err(|error| error.to_string())?;
+        let want = if kind == "A" { 1 } else { 28 };
+        Ok(value
+            .get("Answer")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|record| record.get("type").and_then(Value::as_u64) == Some(want))
+            .filter_map(|record| record.get("data").and_then(Value::as_str)?.parse::<IpAddr>().ok())
+            .collect())
+    }
+
+    async fn public_checks(
+        &self,
+        hostnames: &[String],
+        ports: Ports,
+        health: bool,
+        mcp: bool,
+    ) -> Result<Value, String> {
+        let listens = mcp && listening(ports.mcp);
+        let mut dns = "local";
+        if health || listens {
+            for hostname in hostnames {
+                let mut last = String::new();
+                let mut passed = false;
+                for wait in CHECK_WAITS {
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    match self.check_once(hostname, listens, health).await {
+                        Ok(found) => {
+                            if found == "public_only" {
+                                dns = found;
+                            }
+                            passed = true;
+                            break;
+                        }
+                        Err(error) => last = error,
+                    }
+                }
+                if !passed {
+                    return Err(last);
+                }
             }
         }
-        Ok(
-            json!({ "health": if health { "ok" } else { "unchecked" }, "mcp": if mcp { "ok" } else { "not_listening" } }),
-        )
+        let mcp_state = match (mcp, listens) {
+            (_, true) => "ok",
+            (true, false) => "not_listening",
+            (false, false) => "unchecked",
+        };
+        Ok(json!({ "health": if health { "ok" } else { "unchecked" }, "mcp": mcp_state, "dns": dns }))
     }
 
     #[must_use]
@@ -951,7 +1072,7 @@ impl Tunnel {
         ))
     }
 
-    async fn start_cloudflare(
+    async fn start_service(
         &self,
         manager: &Manager,
         cloudflared: &Path,
@@ -959,7 +1080,7 @@ impl Tunnel {
         credentials: &Path,
         hostnames: &[String],
         ports: Ports,
-    ) -> Result<Value, Failure> {
+    ) -> Result<bool, Failure> {
         let yml = self.dir.join(YML);
         self.private_write(YML, ingress(tunnel, credentials, hostnames, ports).as_bytes())?;
         let args = argv(&["tunnel", "--no-autoupdate", "--config", &yml.display().to_string(), "run"]);
@@ -976,9 +1097,22 @@ impl Tunnel {
             ));
         }
         let allowed: Vec<bool> = hostnames.iter().map(|name| serve_allow(name)).collect();
-        match self.public_checks(hostnames, ports, true).await {
+        Ok(allowed.iter().all(|ok| *ok))
+    }
+
+    async fn start_cloudflare(
+        &self,
+        manager: &Manager,
+        cloudflared: &Path,
+        tunnel: &str,
+        credentials: &Path,
+        hostnames: &[String],
+        ports: Ports,
+    ) -> Result<Value, Failure> {
+        let allowed = self.start_service(manager, cloudflared, tunnel, credentials, hostnames, ports).await?;
+        match self.public_checks(hostnames, ports, true, true).await {
             Ok(mut checks) => {
-                checks["serveAllowed"] = json!(allowed.iter().all(|ok| *ok));
+                checks["serveAllowed"] = json!(allowed);
                 Ok(checks)
             }
             Err(error) => {
@@ -1120,7 +1254,7 @@ impl Tunnel {
         }
         self.save_tailnet_record(&record)?;
         let allowed = allow_host(&dns).await;
-        let checks = match self.public_checks(std::slice::from_ref(&dns), ports, allowed.is_ok()).await {
+        let checks = match self.public_checks(std::slice::from_ref(&dns), ports, allowed.is_ok(), true).await {
             Ok(checks) => checks,
             Err(error) => {
                 let left = self.unmount(&bin, &added).await;
@@ -1140,7 +1274,8 @@ impl Tunnel {
             value["next"] = json!(command);
             value["command"] = json!(command);
             value["message"] = json!(format!(
-                "The tailnet paths are up, but local-studio-serve hasn't allowed {dns} on its local listener, so the phone path isn't checked yet. Update local-studio-serve, then run: {command} ({why})"
+                "The tailnet paths are up, but local-studio-serve hasn't allowed {dns} on its local listener, so the phone path isn't checked yet. Update local-studio-serve, then run: {command} ({why}){}",
+                dns_note(&checks)
             ));
         }
         Ok(value)
@@ -1239,21 +1374,51 @@ impl Tunnel {
                 return Err(self.roll_back(&manager, &cause, stopped, was_running, new).await.into());
             }
         };
-        let mut value = ready(&route, &checks, "Local Studio runs Tychicus's tunnel now.");
-        value["tunnelId"] = json!(old.tunnel);
-        match join_tychicus().await {
-            Ok(()) => value["tychicus"] = json!("joined"),
-            Err(why) => {
-                value["state"] = json!("needs_tychicus_join");
-                value["next"] = json!("needs_tychicus_join");
-                value["tychicus"] = json!("not_joined");
-                value["command"] = json!("tychicus remote join");
-                value["message"] = json!(format!(
+        Ok(self.adopt_join(&route, checks, &names, ports, &old.tunnel).await)
+    }
+
+    async fn adopt_join(
+        &self,
+        route: &Route,
+        mut checks: Value,
+        names: &[String],
+        ports: Ports,
+        tunnel: &str,
+    ) -> Value {
+        let (tychicus, stuck) = match join_tychicus().await {
+            Ok(()) => match self.public_checks(names, ports, false, true).await {
+                Ok(after) => {
+                    checks["mcp"] = after["mcp"].clone();
+                    merge_dns(&mut checks, &after);
+                    ("joined", None)
+                }
+                Err(error) => {
+                    checks["mcp"] = json!("failed");
+                    (
+                        "joined",
+                        Some(format!(
+                            "Local Studio runs the tunnel now and Tychicus joined, but Tychicus serve doesn't answer /mcp on every name yet: {error} Check Tychicus, then run tychicus remote join again."
+                        )),
+                    )
+                }
+            },
+            Err(why) => (
+                "not_joined",
+                Some(format!(
                     "Local Studio runs the tunnel now. Tychicus still needs to join it: run tychicus remote join. ({why})"
-                ));
-            }
+                )),
+            ),
+        };
+        let mut value = ready(route, &checks, "Local Studio runs Tychicus's tunnel now.");
+        value["tunnelId"] = json!(tunnel);
+        value["tychicus"] = json!(tychicus);
+        if let Some(message) = stuck {
+            value["state"] = json!("needs_tychicus_join");
+            value["next"] = json!("needs_tychicus_join");
+            value["command"] = json!("tychicus remote join");
+            value["message"] = json!(format!("{message}{}", dns_note(&checks)));
         }
-        Ok(value)
+        value
     }
 
     fn adopt_plan(
@@ -1275,14 +1440,16 @@ impl Tunnel {
             old.credentials.display()
         ));
         steps.push(format!("Install and start {} ({}).", OWN.what, manager.file(OWN).display()));
-        steps.push(format!("Check {} answer.", names.join(" and ")));
+        steps.push(format!("Check that {} answers /mcp while both connectors run.", old.hostname));
         steps.push(format!(
-            "Disable and stop {} ({}) so it doesn't start again at login, keeping its files, then check again.",
+            "Disable and stop {} ({}) so it doesn't start again at login, keeping its files, then check /v1/health on {} and /mcp on {} with Local Studio's connector alone.",
             TYCHICUS.what,
-            manager.file(TYCHICUS).display()
+            manager.file(TYCHICUS).display(),
+            names.join(" and "),
+            old.hostname
         ));
         steps.push(format!("Write {}.", self.route_path().display()));
-        steps.push("Run tychicus remote join.".into());
+        steps.push(format!("Run tychicus remote join, then check /mcp on {}.", names.join(" and ")));
         json!({
             "state": "confirm",
             "next": "confirm",
@@ -1346,17 +1513,35 @@ impl Tunnel {
         was_running: bool,
         stopped: &mut bool,
     ) -> Result<(Route, Value), String> {
-        let checks = self
-            .start_cloudflare(manager, cloudflared, &old.tunnel, &old.credentials, names, ports)
+        let allowed = self
+            .start_service(manager, cloudflared, &old.tunnel, &old.credentials, names, ports)
             .await
             .map_err(|failure| failure.message)?;
+        let accepted = std::slice::from_ref(&old.hostname);
+        let mut checks = json!({ "health": "unchecked", "mcp": "unchecked", "dns": "local" });
         if was_running {
+            let both = self
+                .public_checks(accepted, ports, false, true)
+                .await
+                .map_err(|error| format!("While both tunnel connectors ran: {error}"))?;
+            merge_dns(&mut checks, &both);
             *stopped = true;
             manager.retire(TYCHICUS).await?;
-            self.public_checks(names, ports, true)
-                .await
-                .map_err(|error| format!("After Tychicus's tunnel stopped: {error}"))?;
         }
+        let after = |error: String| {
+            if was_running {
+                format!("After Tychicus's tunnel stopped: {error}")
+            } else {
+                error
+            }
+        };
+        let health = self.public_checks(names, ports, true, false).await.map_err(after)?;
+        let served = self.public_checks(accepted, ports, false, true).await.map_err(after)?;
+        checks["health"] = health["health"].clone();
+        checks["mcp"] = served["mcp"].clone();
+        merge_dns(&mut checks, &health);
+        merge_dns(&mut checks, &served);
+        checks["serveAllowed"] = json!(allowed);
         let route = new_route("cloudflare", &names[0], &names[1..], ports);
         self.write_route(&route)?;
         Ok((route, checks))
