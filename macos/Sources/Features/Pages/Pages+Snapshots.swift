@@ -152,6 +152,33 @@ extension SnapshotCatalog {
                 view: { store in AnyView(LocalPage(store: store)) }
             ),
             SnapshotEntry(
+                name: "pages-local-cluster-lending",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.egpuMachine, with: PagesFixtures.laptop)),
+                    .localDashboard(dashboard: PagesFixtures.dashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.egpuMachine.url)) }
+            ),
+            SnapshotEntry(
+                name: "pages-local-cluster-reclaimed",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.reclaimedMachine, with: PagesFixtures.laptop)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.reclaimedMachine.url)) }
+            ),
+            SnapshotEntry(
+                name: "pages-local-cluster-apple-silicon",
+                size: clusterSize,
+                updates: PagesFixtures.base + [
+                    .local(request: "fixture", snapshot: PagesFixtures.clusterSnapshot(PagesFixtures.appleSiliconMachine, with: PagesFixtures.offline)),
+                    .localDashboard(dashboard: PagesFixtures.idleDashboard),
+                ],
+                view: { store in AnyView(LocalPage(store: store, selected: PagesFixtures.appleSiliconMachine.url)) }
+            ),
+            SnapshotEntry(
                 name: "pages-usage-empty",
                 size: CGSize(width: 1740, height: 1300),
                 updates: PagesFixtures.base,
@@ -214,6 +241,7 @@ extension SnapshotCatalog {
 
     private static let settingsSize = CGSize(width: 860, height: 680)
     private static let dashboardSize = CGSize(width: 1740, height: 940)
+    private static let clusterSize = CGSize(width: 1740, height: 1720)
 
     private static var dashboardUpdates: [Update] {
         [.local(request: "fixture", snapshot: PagesFixtures.dashboardSnapshot), .localDashboard(dashboard: PagesFixtures.dashboard)]

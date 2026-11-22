@@ -47,6 +47,11 @@ pub enum LocalAction {
     Download { controller: String, record: String },
     PreviewShare { controller: String, port: u16 },
     Share { controller: String, port: u16 },
+    Authorize { controller: String, uuid: String },
+    SetLending { controller: String, lend: LocalLendMode },
+    SetDiscovery { controller: String, discover: bool },
+    LaunchPool { controller: String, model: String },
+    StopPool { controller: String, pool: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -923,6 +928,9 @@ pub struct LocalController {
     pub requests: u64,
     pub tokens: u64,
     pub measured_requests: u64,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub cluster: Option<LocalCluster>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -937,6 +945,15 @@ pub struct LocalHardware {
     pub memory_capacity_bytes: u64,
     pub memory_label: String,
     pub gpu_summary: String,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub egpu_note: Option<String>,
+    #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = []))]
+    pub thunderbolt: Vec<LocalThunderbolt>,
+    #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = []))]
+    pub hotplug: Vec<LocalHotplug>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,6 +966,145 @@ pub struct LocalGpu {
     pub memory_used_mib: u64,
     pub memory_total_mib: u64,
     pub busy: bool,
+    #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = false))]
+    pub external: bool,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub link: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalThunderboltState {
+    Pending,
+    Authorizing,
+    Authorized,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalThunderbolt {
+    pub uuid: String,
+    pub name: String,
+    pub vendor: Option<String>,
+    pub state: LocalThunderboltState,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalHotplug {
+    pub at: String,
+    pub added: bool,
+    pub gpu: String,
+    pub external: bool,
+    pub message: String,
+    pub suggestions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalLendMode {
+    Never,
+    Idle,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalLendState {
+    Off,
+    Lent,
+    Reclaimed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalClusterCheck {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalLentServer {
+    pub endpoint: String,
+    pub for_name: String,
+    pub gpus: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalPoolPhase {
+    Starting,
+    Ready,
+    Failed,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalPool {
+    pub id: String,
+    pub alias: String,
+    pub port: u16,
+    pub members: Vec<String>,
+    pub phase: LocalPoolPhase,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalPoolModel {
+    pub path: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub fits_one: bool,
+    pub fits_pool: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalClusterMachine {
+    pub id: String,
+    pub name: String,
+    pub lend: LocalLendMode,
+    pub state: LocalLendState,
+    pub reason: String,
+    pub gpus: u32,
+    pub free_mib: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalCluster {
+    pub discover: bool,
+    pub lend: LocalLendMode,
+    pub state: LocalLendState,
+    pub reason: String,
+    pub rpc: bool,
+    pub draining: bool,
+    pub free_mib: u64,
+    pub checks: Vec<LocalClusterCheck>,
+    pub lent: Vec<LocalLentServer>,
+    pub pools: Vec<LocalPool>,
+    pub models: Vec<LocalPoolModel>,
+    pub machines: Vec<LocalClusterMachine>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

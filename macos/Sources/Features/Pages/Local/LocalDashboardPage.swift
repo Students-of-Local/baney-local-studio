@@ -285,6 +285,13 @@ private struct LocalMachineDashboard: View {
                 .frame(height: 1)
                 .padding(.top, 36)
                 .padding(.bottom, 44)
+            if controller.hardware != nil || controller.cluster != nil {
+                LocalClusterPanel(controller: controller, pages: pages)
+                Rectangle()
+                    .fill(Theme.hairline)
+                    .frame(height: 1)
+                    .padding(.vertical, 44)
+            }
             DailyHeatmap(
                 values: dashboard.map { $0.tokens.daily.map { Double($0) } },
                 lastDay: dashboard?.tokens.lastDay,

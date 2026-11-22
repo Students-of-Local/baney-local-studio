@@ -23,6 +23,7 @@ pub fn scenes() -> Vec<&'static str> {
     all.extend(crate::t3::SCENES);
     all.extend(crate::scenes_pickers::SCENES);
     all.extend(crate::dashboard_scenes::SCENES);
+    all.extend(crate::cluster_scenes::SCENES);
     all.extend(crate::keyboard::SCENES);
     all.extend(crate::usage_scenes::scenes());
     all.extend(crate::link_scenes::scenes());
@@ -906,6 +907,8 @@ fn local_snapshot() -> LocalSnapshot {
                     memory_used_mib: 21_000,
                     memory_total_mib: 24_564,
                     busy: true,
+                    external: false,
+                    link: None,
                 },
                 LocalGpu {
                     index: 1,
@@ -914,12 +917,17 @@ fn local_snapshot() -> LocalSnapshot {
                     memory_used_mib: 20_400,
                     memory_total_mib: 24_564,
                     busy: true,
+                    external: false,
+                    link: None,
                 },
             ],
             memory_used_bytes: 43_400_000_000,
             memory_capacity_bytes: 51_500_000_000,
             memory_label: "VRAM".to_string(),
             gpu_summary: "2× RTX 4090".to_string(),
+            egpu_note: None,
+            thunderbolt: Vec::new(),
+            hotplug: Vec::new(),
         }),
         endpoints: vec![LocalEndpoint {
             id: "ep-1".to_string(),
@@ -941,6 +949,7 @@ fn local_snapshot() -> LocalSnapshot {
         requests: 18_420,
         tokens: 412_000_000,
         measured_requests: 18_100,
+        cluster: None,
     };
     let studio = LocalController {
         target: "http://studio.tail1234.ts.net:18091".to_string(),
@@ -968,6 +977,9 @@ fn local_snapshot() -> LocalSnapshot {
             memory_capacity_bytes: 192_000_000_000,
             memory_label: "Memory".to_string(),
             gpu_summary: "Apple M2 Ultra".to_string(),
+            egpu_note: None,
+            thunderbolt: Vec::new(),
+            hotplug: Vec::new(),
         }),
         endpoints: Vec::new(),
         jobs: vec![LocalJob {
@@ -984,6 +996,7 @@ fn local_snapshot() -> LocalSnapshot {
         requests: 2_310,
         tokens: 61_000_000,
         measured_requests: 2_200,
+        cluster: None,
     };
     let laptop = LocalController {
         target: "http://laptop.tail1234.ts.net:18091".to_string(),
@@ -1009,6 +1022,7 @@ fn local_snapshot() -> LocalSnapshot {
         requests: 0,
         tokens: 0,
         measured_requests: 0,
+        cluster: None,
     };
     let variant = |id: &str, engine: &str, hardware: &str, count: u32, size: f64, recommended: bool, fits: bool| {
         RegistryVariant {

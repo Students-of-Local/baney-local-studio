@@ -14,9 +14,11 @@ use serde_json::{json, Value};
 use tokio::task::JoinSet;
 
 use super::model::{
-    LocalAction, LocalController, LocalDownload, LocalEndpoint, LocalEngineState, LocalGpu, LocalHardware, LocalJob,
-    LocalMachineStatus, LocalModelUsage, LocalRecipe, LocalRecord, LocalRegistry, LocalRegistryMatch, LocalShare,
-    LocalSnapshot, LocalTailnet, LocalUsage, RegistryModel, RegistryVariant, Settings, TailnetDevice, UsageDay,
+    LocalAction, LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalController, LocalDownload, LocalEndpoint,
+    LocalEngineState, LocalGpu, LocalHardware, LocalHotplug, LocalJob, LocalLendMode, LocalLendState, LocalLentServer,
+    LocalMachineStatus, LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase, LocalRecipe, LocalRecord,
+    LocalRegistry, LocalRegistryMatch, LocalShare, LocalSnapshot, LocalTailnet, LocalThunderbolt,
+    LocalThunderboltState, LocalUsage, RegistryModel, RegistryVariant, Settings, TailnetDevice, UsageDay,
 };
 use super::process;
 use super::time::{day_key, monday_of, now_ms, parse_rfc3339_ms, DAY_MS};
@@ -137,6 +139,8 @@ fn hardware(value: &Value) -> LocalHardware {
             memory_used_mib: unsigned(gpu, "memoryUsedMiB"),
             memory_total_mib: unsigned(gpu, "memoryTotalMiB"),
             busy: flag(gpu, "busy"),
+            external: flag(gpu, "external"),
+            link: gpu.get("link").and_then(|link| optional_text(link, "note")),
         })
         .collect();
     let cpus = small(value, "cpus");
@@ -168,6 +172,122 @@ fn hardware(value: &Value) -> LocalHardware {
         memory_capacity_bytes,
         memory_label: memory_label.to_string(),
         gpu_summary,
+        egpu_note: optional_text(value, "egpuNote"),
+        thunderbolt: array(value, "thunderbolt").iter().filter_map(thunderbolt).collect(),
+        hotplug: array(value, "hotplug")
+            .iter()
+            .map(|event| LocalHotplug {
+                at: text(event, "at"),
+                added: text(event, "change") == "added",
+                gpu: text(event, "gpu"),
+                external: flag(event, "external"),
+                message: text(event, "message"),
+                suggestions: strings(event, "suggestions"),
+            })
+            .collect(),
+    }
+}
+
+fn thunderbolt(value: &Value) -> Option<LocalThunderbolt> {
+    let state = match text(value, "state").as_str() {
+        "pending" => LocalThunderboltState::Pending,
+        "authorizing" => LocalThunderboltState::Authorizing,
+        "authorized" => LocalThunderboltState::Authorized,
+        "failed" => LocalThunderboltState::Failed,
+        _ => return None,
+    };
+    Some(LocalThunderbolt {
+        uuid: text(value, "uuid"),
+        name: text(value, "name"),
+        vendor: optional_text(value, "vendor"),
+        state,
+        message: optional_text(value, "message"),
+    })
+}
+
+fn lend_mode(value: &Value) -> LocalLendMode {
+    match text(value, "lend").as_str() {
+        "idle" => LocalLendMode::Idle,
+        "always" => LocalLendMode::Always,
+        _ => LocalLendMode::Never,
+    }
+}
+
+fn lend_state(value: &Value) -> LocalLendState {
+    match text(value, "state").as_str() {
+        "lent" => LocalLendState::Lent,
+        "reclaimed" => LocalLendState::Reclaimed,
+        _ => LocalLendState::Off,
+    }
+}
+
+fn cluster(value: &Value) -> LocalCluster {
+    LocalCluster {
+        discover: flag(value, "discover"),
+        lend: lend_mode(value),
+        state: lend_state(value),
+        reason: text(value, "reason"),
+        rpc: flag(value, "rpc"),
+        draining: flag(value, "draining"),
+        free_mib: unsigned(value, "freeMiB"),
+        checks: array(value, "checks")
+            .iter()
+            .map(|check| LocalClusterCheck {
+                name: text(check, "name"),
+                ok: flag(check, "ok"),
+                detail: text(check, "detail"),
+            })
+            .collect(),
+        lent: array(value, "rpcServers")
+            .iter()
+            .map(|server| LocalLentServer {
+                endpoint: text(server, "endpoint"),
+                for_name: text(server, "forName"),
+                gpus: array(server, "gpus")
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .filter_map(|gpu| u32::try_from(gpu).ok())
+                    .collect(),
+            })
+            .collect(),
+        pools: array(value, "pools")
+            .iter()
+            .map(|pool| LocalPool {
+                id: text(pool, "id"),
+                alias: text(pool, "alias"),
+                port: port(pool, "port"),
+                members: array(pool, "members").iter().map(|member| text(member, "name")).collect(),
+                phase: match text(pool, "phase").as_str() {
+                    "ready" => LocalPoolPhase::Ready,
+                    "failed" => LocalPoolPhase::Failed,
+                    "stopped" => LocalPoolPhase::Stopped,
+                    _ => LocalPoolPhase::Starting,
+                },
+                message: optional_text(pool, "message"),
+            })
+            .collect(),
+        models: array(value, "models")
+            .iter()
+            .map(|model| LocalPoolModel {
+                path: text(model, "path"),
+                name: text(model, "name"),
+                size_bytes: unsigned(model, "sizeBytes"),
+                fits_one: flag(model, "fitsOne"),
+                fits_pool: flag(model, "fitsPool"),
+            })
+            .collect(),
+        machines: array(value, "machines")
+            .iter()
+            .map(|machine| LocalClusterMachine {
+                id: text(machine, "id"),
+                name: text(machine, "name"),
+                lend: lend_mode(machine),
+                state: lend_state(machine),
+                reason: text(machine, "reason"),
+                gpus: small(machine, "gpus"),
+                free_mib: unsigned(machine, "freeMiB"),
+            })
+            .collect(),
     }
 }
 
@@ -458,6 +578,7 @@ fn controller(
         requests: usage_rows.iter().map(|row| unsigned(row, "requests")).sum(),
         tokens: tokens_of(usage_rows, "", "9999"),
         measured_requests: usage_rows.iter().map(|row| unsigned(row, "measuredRequests")).sum(),
+        cluster: snapshot.filter(|_| !gone).and_then(|snapshot| snapshot.get("cluster")).map(cluster),
     }
 }
 
@@ -895,6 +1016,11 @@ impl Local {
             | LocalAction::RunRecipe { .. }
             | LocalAction::StopRun { .. }
             | LocalAction::StopPort { .. } => self.fleet_action(&root, action).await?,
+            LocalAction::Authorize { .. }
+            | LocalAction::SetLending { .. }
+            | LocalAction::SetDiscovery { .. }
+            | LocalAction::LaunchPool { .. }
+            | LocalAction::StopPool { .. } => self.cluster_action(&root, action).await?,
         }
         self.assemble(&root).await
     }
@@ -951,11 +1077,71 @@ impl Local {
                 let path = format!("/api/ports/{port}/stop");
                 self.request(&endpoint, Method::POST, &path, Some(json!({})), ACTION_TIMEOUT).await?;
             }
-            LocalAction::Registry { .. }
+            LocalAction::Authorize { .. }
+            | LocalAction::SetLending { .. }
+            | LocalAction::SetDiscovery { .. }
+            | LocalAction::LaunchPool { .. }
+            | LocalAction::StopPool { .. }
+            | LocalAction::Registry { .. }
             | LocalAction::Inspect { .. }
             | LocalAction::Download { .. }
             | LocalAction::PreviewShare { .. }
             | LocalAction::Share { .. } => {}
+        }
+        Ok(())
+    }
+
+    async fn cluster_action(&self, root: &Endpoint, action: LocalAction) -> Result<(), String> {
+        match action {
+            LocalAction::Authorize { controller, uuid } => {
+                let endpoint = self.target(root, &controller).await?;
+                self.request(
+                    &endpoint,
+                    Method::POST,
+                    "/api/thunderbolt/authorize",
+                    Some(json!({ "uuid": uuid })),
+                    ACTION_TIMEOUT,
+                )
+                .await?;
+            }
+            LocalAction::SetLending { controller, lend } => {
+                let endpoint = self.target(root, &controller).await?;
+                let lend = match lend {
+                    LocalLendMode::Never => "never",
+                    LocalLendMode::Idle => "idle",
+                    LocalLendMode::Always => "always",
+                };
+                self.request(&endpoint, Method::POST, "/api/cluster", Some(json!({ "lend": lend })), ACTION_TIMEOUT)
+                    .await?;
+            }
+            LocalAction::SetDiscovery { controller, discover } => {
+                let endpoint = self.target(root, &controller).await?;
+                self.request(
+                    &endpoint,
+                    Method::POST,
+                    "/api/cluster",
+                    Some(json!({ "discover": discover })),
+                    ACTION_TIMEOUT,
+                )
+                .await?;
+            }
+            LocalAction::LaunchPool { controller, model } => {
+                let endpoint = self.target(root, &controller).await?;
+                self.request(
+                    &endpoint,
+                    Method::POST,
+                    "/api/cluster/pool",
+                    Some(json!({ "model": model })),
+                    ACTION_TIMEOUT,
+                )
+                .await?;
+            }
+            LocalAction::StopPool { controller, pool } => {
+                let endpoint = self.target(root, &controller).await?;
+                let path = format!("/api/cluster/pool/{}/stop", encode_segment(&pool));
+                self.request(&endpoint, Method::POST, &path, Some(json!({})), ACTION_TIMEOUT).await?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1028,7 +1214,12 @@ impl Local {
             | LocalAction::Rename { .. }
             | LocalAction::RunRecipe { .. }
             | LocalAction::StopRun { .. }
-            | LocalAction::StopPort { .. } => {}
+            | LocalAction::StopPort { .. }
+            | LocalAction::Authorize { .. }
+            | LocalAction::SetLending { .. }
+            | LocalAction::SetDiscovery { .. }
+            | LocalAction::LaunchPool { .. }
+            | LocalAction::StopPool { .. } => {}
         }
         Ok(())
     }

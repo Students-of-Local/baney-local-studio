@@ -30,7 +30,7 @@ const telemetry = makeTelemetry();
 
 const gpus = (): LocalGpu[] => {
   const reserved = jobs.reserved();
-  return rawGpus.map(({ uuid: _uuid, pids: _pids, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
+  return rawGpus.map(({ uuid: _uuid, pids: _pids, stale: _stale, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
 };
 
 const byCard = (all: boolean): Map<string, number[]> => {
@@ -301,6 +301,7 @@ const handle = async (req: Request, peer: string | null): Promise<Response> => {
   const poolId = match(/^\/api\/cluster\/pool\/([\w-]+)\/stop$/);
   if (poolId) return json(await run(cluster.stopPool(poolId)));
   if (post && p === "/api/thunderbolt/authorize") {
+    if (!/^(::ffff:)?127\.|^::1$/.test(peer ?? "")) return json({ error: { code: "LOCAL_ONLY", message: `Approve a Thunderbolt device on ${config.name} itself. Approving one gives it direct memory access, so it is never done over the network.` } }, 403);
     const r = await run(authorize((await body(req, LocalAuthorizeRequest)).uuid));
     thunderbolt = await Effect.runPromise(readThunderbolt);
     return json(r);

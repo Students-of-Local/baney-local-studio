@@ -80,7 +80,7 @@ try {
     [
       "#!/bin/sh",
       'case "$1" in',
-      '  --query-gpu=*) if [ -s "$FAKE_GPU_DIR/gpus.csv" ]; then cat "$FAKE_GPU_DIR/gpus.csv"; else echo "No devices were found"; exit 6; fi; if [ -f "$FAKE_GPU_DIR/lost" ]; then echo "Unable to determine the device handle for GPU0000:2C:00.0: Unknown Error"; exit 15; fi ;;',
+      '  --query-gpu=*) if [ -f "$FAKE_GPU_DIR/lostonly" ]; then echo "Unable to determine the device handle for GPU0000:2C:00.0: Unknown Error"; exit 15; fi; if [ -s "$FAKE_GPU_DIR/gpus.csv" ]; then cat "$FAKE_GPU_DIR/gpus.csv"; else echo "No devices were found"; exit 6; fi; if [ -f "$FAKE_GPU_DIR/lost" ]; then echo "Unable to determine the device handle for GPU0000:2C:00.0: Unknown Error"; exit 15; fi ;;',
       '  --query-compute-apps=*) cat "$FAKE_GPU_DIR/apps.csv" 2>/dev/null ;;',
       "esac",
       "",
@@ -446,6 +446,24 @@ try {
     return x.hardware.hotplug.find((h) => h.change === "added" && h.suggestions.length) ? x : null;
   }, "suggestions for the new card", 8_000);
   assert(s.hardware.hotplug.find((h) => h.change === "added").suggestions.includes("tiny-egpu-model (vllm)"));
+  write(join(dirs.a.gpu, "lostonly"), "");
+  s = await waitFor(async () => {
+    const x = await snap(A);
+    return !x.hardware.gpus.some((g) => g.external) ? x : null;
+  }, "a lost eGPU with no rows printed drops only that GPU", 8_000);
+  assert(s.hardware.gpus.some((g) => g.index === 0 && !g.external), "the internal GPU stays listed when only the eGPU is lost");
+  assert(!s.hardware.hotplug.some((h) => h.change === "removed" && !h.external), "the internal GPU is not reported unplugged");
+  let set = await call(A, "/api/cluster", { lend: "idle" });
+  assert(set.ok, await set.text());
+  s = await waitFor(async () => {
+    const x = await snap(A);
+    return x.cluster.checks.some((c) => c.name === "GPU readings" && !c.ok) ? x : null;
+  }, "frozen readings after a lost GPU fail the lending check", 10_000);
+  assert.notEqual(s.cluster.state, "lent", "a machine with a lost GPU does not lend on stale readings");
+  set = await call(A, "/api/cluster", { lend: "never" });
+  assert(set.ok, await set.text());
+  rmSync(join(dirs.a.gpu, "lostonly"));
+  await waitFor(async () => ((await snap(A)).hardware.gpus.some((g) => g.external) ? true : null), "eGPU back after the lost read", 8_000);
 
   step("routing by load and failover");
   const pick = async (body = { model: shared, messages: [] }) => {
@@ -502,7 +520,10 @@ try {
   assert.deepEqual(dry.argv.slice(1, 4), ["-m", model, "--rpc"]);
   assert.deepEqual(dry.argv[4].split(",").sort(), [`127.0.0.1:${rpcPort.b}`, `127.0.0.1:${rpcPort.c}`].sort());
   assert.equal(dry.pool, null);
-  r = await call(A, "/api/cluster/pool", { model, alias: "pooled-tiny" }, auth, 60_000);
+  const race = await Promise.all([1, 2].map(() => call(A, "/api/cluster/pool", { model, alias: "pooled-tiny" }, auth, 60_000)));
+  assert.deepEqual(race.map((x) => x.status).sort(), [200, 409], "two launches at once get one pool");
+  r = race.find((x) => x.status === 200);
+  assert.match((await race.find((x) => x.status === 409).json()).error.message, /already serves a pooled model/);
   const launched = await r.json();
   assert.equal(r.status, 200, JSON.stringify(launched));
   const argv = launched.argv;
@@ -519,6 +540,9 @@ try {
   assert.equal(rpcB.endpoint, `127.0.0.1:${rpcPort.b}`);
   const bStub = rpcs.find((x) => x.owner === dirs.b.gpu);
   assert(bStub && alive(bStub.pid), "B runs one rpc-server");
+  r = await call(A, "/api/cluster/pool", { model, alias: "pooled-twice" }, auth, 30_000);
+  assert.equal(r.status, 409, "a second pool on the same lenders is refused");
+  assert.match((await r.json()).error.message, /already serves a pooled model/);
   assert.equal(bStub.cuda, "0");
   await waitFor(async () => {
     const res = await call(C, "/v1/chat/completions", { model: "pooled-tiny", messages: [] });
