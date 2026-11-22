@@ -421,7 +421,6 @@ pub async fn download(
     }
     let root = staging_dir(data_dir, &build.channel);
     let dir = root.join(slot(&offer.version));
-    clear_other_slots(&root, &dir);
     std::fs::create_dir_all(&dir).map_err(|error| Refusal::Apply(format!("create {}: {error}", dir.display())))?;
     let _ = std::fs::remove_file(dir.join(READY_FILE));
     let part = dir.join(format!("{}.part", offer.asset));
@@ -500,6 +499,7 @@ pub async fn download(
     let text = serde_json::to_vec_pretty(&ready).map_err(|error| Refusal::Apply(error.to_string()))?;
     std::fs::write(dir.join(READY_FILE), text)
         .map_err(|error| Refusal::Apply(format!("write {READY_FILE}: {error}")))?;
+    clear_other_slots(&root, &dir);
     Ok(Staged { version: offer.version.clone(), notes: offer.notes.clone(), artifact, dir })
 }
 
@@ -526,10 +526,7 @@ pub fn staged(build: &Build, data_dir: &Path) -> Option<Staged> {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ReadyFile>(&bytes).ok())
             .filter(|ready| ready.channel == build.channel && ready.asset == build.asset());
-        let Some(ready) = ready else {
-            let _ = std::fs::remove_dir_all(&dir);
-            continue;
-        };
+        let Some(ready) = ready else { continue };
         let artifact = dir.join(&ready.asset);
         let usable = matches!(newer(build, &ready.version), Ok(true))
             && verify_file(build, &artifact, &ready.sha256, &ready.signature, &ready.asset).is_ok();

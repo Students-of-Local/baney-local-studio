@@ -274,6 +274,7 @@ if [ -z "$verifier" ]; then
   if command -v minisign > /dev/null; then verifier=minisign
   elif [ -n "$openssl3" ]; then verifier=openssl
   elif [ -n "$python" ]; then verifier=python3
+  elif [ "$os" = Darwin ]; then die "checking the signature needs minisign, OpenSSL 3 or python3: run xcode-select --install (python3) or brew install minisign, then run this again"
   else die "checking the signature needs minisign, OpenSSL 3 or python3; install one and run this again"
   fi
 fi

@@ -99,10 +99,19 @@ fn main() -> ExitCode {
 }
 
 fn run(scratch: &Path) -> Outcome {
+    let marker = scratch.join(".update_smoke");
+    let empty = std::fs::read_dir(scratch).map_or(true, |mut entries| entries.next().is_none());
+    if !empty && !marker.is_file() {
+        return Err(format!(
+            "{} is not empty and was not made by update_smoke; give an empty or new folder",
+            scratch.display()
+        ));
+    }
     if scratch.exists() {
         std::fs::remove_dir_all(scratch).map_err(|error| format!("clear {}: {error}", scratch.display()))?;
     }
     std::fs::create_dir_all(scratch).map_err(|error| error.to_string())?;
+    write(&marker, "")?;
     let root = scratch.canonicalize().map_err(|error| error.to_string())?;
     let web = root.join("web");
     std::fs::create_dir_all(&web).map_err(|error| error.to_string())?;

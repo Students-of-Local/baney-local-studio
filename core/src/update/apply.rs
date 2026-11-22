@@ -323,7 +323,10 @@ pub fn current_install() -> Result<PathBuf, String> {
 #[must_use]
 pub fn install_path(channel: &str) -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
-        return Some(PathBuf::from("/Applications").join(format!("{}.app", channel_name(channel))));
+        let name = format!("{}.app", channel_name(channel));
+        let system = PathBuf::from("/Applications").join(&name);
+        let user = crate::store::home_dir().map(|home| home.join("Applications").join(&name));
+        return Some(user.filter(|user| user.exists() && !system.exists()).unwrap_or(system));
     }
     if cfg!(target_os = "linux") {
         let slug = match channel {

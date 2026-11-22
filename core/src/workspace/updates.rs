@@ -104,7 +104,7 @@ impl Workspace {
         };
         let workspace = self.clone();
         self.inner.runtime.spawn(async move {
-            let Ok(_busy) = workspace.inner.updates.busy.try_lock() else { return };
+            let _busy = workspace.inner.updates.busy.lock().await;
             workspace.run_download(offer).await;
         });
     }
@@ -117,7 +117,7 @@ impl Workspace {
         };
         let workspace = self.clone();
         self.inner.runtime.spawn(async move {
-            let Ok(_busy) = workspace.inner.updates.busy.try_lock() else { return };
+            let _busy = workspace.inner.updates.busy.lock().await;
             workspace.set_update(AppUpdateState::Applying { version: staged.version.clone() });
             let build = Build::current();
             let version = staged.version.clone();
@@ -196,7 +196,9 @@ impl Workspace {
             }
             Ok(Checked::Available(offer)) => {
                 *self.inner.updates.offer.lock().unwrap_or_else(PoisonError::into_inner) = Some(offer.clone());
-                if let Some(staged) = ready.filter(|staged| staged.version == offer.version) {
+                if let Some(staged) =
+                    ready.filter(|staged| staged.version == offer.version || !self.current_settings().automatic_updates)
+                {
                     self.set_update(AppUpdateState::Ready { version: staged.version, notes: staged.notes });
                 } else if self.current_settings().automatic_updates {
                     self.run_download(offer).await;
@@ -246,11 +248,16 @@ impl Workspace {
                 *self.inner.updates.staged.lock().unwrap_or_else(PoisonError::into_inner) = Some(staged);
             }
             Err(refusal) => {
-                self.set_update(AppUpdateState::Failed {
-                    reason: refusal.to_string(),
-                    version: Some(offer.version),
-                    notes: offer.notes,
-                });
+                let kept = self.inner.updates.staged.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                if let Some(staged) = kept.filter(|staged| staged.artifact.is_file()) {
+                    self.set_update(AppUpdateState::Ready { version: staged.version, notes: staged.notes });
+                } else {
+                    self.set_update(AppUpdateState::Failed {
+                        reason: refusal.to_string(),
+                        version: Some(offer.version),
+                        notes: offer.notes,
+                    });
+                }
             }
         }
     }
