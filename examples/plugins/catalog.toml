@@ -1,5 +1,8 @@
 [[plugin]]
 id = "smoothstone"
+name = "Smoothstone"
+description = "Make 3D printable parts with the stone CLI and its tested parametric recipes"
+capabilities = []
 git = "https://github.com/baney75/local-studio"
 rev = "715e0ace08107d726b6f84a461a418ee191c5437"
 subdir = "examples/plugins/smoothstone"
@@ -7,7 +10,40 @@ tree = "sha256:46e84a10126c4e5a86e549b420a63ab6989646ec9680f28850ca4ee0afa01267"
 
 [[plugin]]
 id = "gantrel"
+name = "Gantrel"
+description = "Design 3D printable parts with a local model, then slice, upload and watch them on your printers"
+capabilities = []
 git = "https://github.com/baney75/Gantrel"
 rev = "5cdd0899732ccf87a892bd602b8fda45bc09489e"
 tree = "sha256:c66f4c35b2c3f556d5e4fc3cfa7fbcf380006142726764dddd19ffc6095ff025"
 exclude = ["scripts", "tests"]
+
+[[plugin]]
+id = "hildegard"
+name = "Hildegard"
+description = "Make images, video, speech, designed voices and cleaned audio on your own GPU, each one checked before you see it"
+capabilities = []
+git = "https://github.com/baney75/hildegard"
+rev = "504d94904cb998fbf2471fc8fb058ff403b66e1b"
+subdir = "local-studio/hildegard"
+tree = "sha256:4e10076fc0e358312b6a6ea907801342a2ac4f8dd2662948b668d1b2f98e00b4"
+
+[[plugin]]
+id = "tychicus-browser"
+name = "Tychicus Browser"
+description = "Work in Chromium tabs in the background through the Tychicus extension"
+capabilities = []
+git = "https://github.com/baney75/tychicus"
+rev = "fa6fcbe4aa8ef245dd9df25f5c0c35dd5bf7b7f7"
+subdir = "plugins/tychicus-browser"
+tree = "sha256:6517d70f3ad016a838dc9d669cc2dc3c4691fc5a1c370675409b1e45364902c5"
+
+[[plugin]]
+id = "tychicus-computer"
+name = "Tychicus Computer"
+description = "Read and operate desktop apps through accessibility APIs"
+capabilities = []
+git = "https://github.com/baney75/tychicus"
+rev = "fa6fcbe4aa8ef245dd9df25f5c0c35dd5bf7b7f7"
+subdir = "plugins/tychicus-computer"
+tree = "sha256:757adcfc83aaec5298fabe7b23ca2df374372eb467b19ab5f4d5d1811339eb0a"

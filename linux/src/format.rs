@@ -102,6 +102,28 @@ pub fn access_detail(mode: AccessMode) -> &'static str {
     }
 }
 
+pub fn default_access_names() -> Vec<&'static str> {
+    std::iter::once("Match the model").chain(ACCESS_MODES.iter().map(|mode| access_label(*mode))).collect()
+}
+
+pub fn default_access_index(settings: &local_studio_core::Settings) -> u32 {
+    if settings.access_follows_model {
+        0
+    } else {
+        access_index(settings.default_access) + 1
+    }
+}
+
+pub fn set_default_access(settings: &mut local_studio_core::Settings, index: usize) {
+    match index.checked_sub(1).and_then(|index| ACCESS_MODES.get(index)) {
+        Some(mode) => {
+            settings.access_follows_model = false;
+            settings.default_access = *mode;
+        }
+        None => settings.access_follows_model = true,
+    }
+}
+
 pub fn access_index(mode: AccessMode) -> u32 {
     match mode {
         AccessMode::Supervised => 0,

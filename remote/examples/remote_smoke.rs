@@ -2824,7 +2824,7 @@ async fn model_stage(run: &mut Run, model: &Target, a: &mut Client, c: &Client) 
         provider: Some(model.provider.clone()),
         model: Some(model.model.clone()),
         thinking_level: Some(model.thinking.clone()),
-        access: AccessMode::FullAccess,
+        access: Some(AccessMode::FullAccess),
         worktree: WorktreeChoice::Local,
     })?;
     let image = png(64);
@@ -3081,7 +3081,7 @@ async fn duplicate_replay(a: &mut Client) -> anyhow::Result<()> {
         provider: None,
         model: None,
         thinking_level: None,
-        access: AccessMode::Supervised,
+        access: Some(AccessMode::Supervised),
         worktree: WorktreeChoice::Local,
     })?;
     let args = json!({ "draft": "d-dup", "project": "/no-such-project-dup", "prompt": prompt("duplicate start"), "settings": settings });
@@ -3258,7 +3258,7 @@ async fn approval_recovery(
         provider: Some(model.provider.clone()),
         model: Some(model.model.clone()),
         thinking_level: Some(model.thinking.clone()),
-        access: AccessMode::Supervised,
+        access: Some(AccessMode::Supervised),
         worktree: WorktreeChoice::Local,
     })?;
     let text = bash_prompt("printf one > approval-1.txt");

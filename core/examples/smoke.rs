@@ -78,6 +78,7 @@ struct View {
     partial_text: bool,
     composer: Vec<(String, String)>,
     models: Option<Vec<ModelOption>>,
+    access: HashMap<String, AccessMode>,
     hidden: Vec<ModelKey>,
     search: Option<Vec<ThreadSearchHit>>,
     archived: Option<Vec<ThreadRow>>,
@@ -155,19 +156,7 @@ impl Harness {
                 self.view.started.insert(draft, thread);
             }
             Update::Transcript { thread, op } => self.transcript(&thread, op)?,
-            Update::Approvals { thread, approvals } => {
-                for approval in approvals {
-                    if self.view.answered.insert(format!("{thread}/{}", approval.request_id)) {
-                        println!("     approval {} {:?}", approval.command, approval.effects);
-                        self.view.approvals += 1;
-                        *self.view.approvals_by_thread.entry(thread.clone()).or_default() += 1;
-                        let always =
-                            self.view.always.iter().any(|draft| self.view.thread(draft).as_ref() == Some(&thread));
-                        let answer = if always { ApprovalAnswer::AlwaysAllowSession } else { ApprovalAnswer::Approve };
-                        self.studio.answer_approval(thread.clone(), approval.request_id, answer);
-                    }
-                }
-            }
+            Update::Approvals { thread, approvals } => self.approve(&thread, approvals),
             Update::ComposerText { thread, text } => self.view.composer.push((thread, text)),
             Update::Models { models, hidden, .. } => {
                 self.view.models = Some(models);
@@ -195,8 +184,10 @@ impl Harness {
             }
             Update::MessageImage { data, .. } => self.view.image = Some(data),
             Update::Usage { report, .. } => self.view.usage = Some(report),
-            Update::Thread { .. }
-            | Update::Questions { .. }
+            Update::Thread { thread, info } => {
+                self.view.access.insert(thread, info.access);
+            }
+            Update::Questions { .. }
             | Update::QuestionsSettled { .. }
             | Update::Subagents { .. }
             | Update::GitStatus { .. }
@@ -218,6 +209,7 @@ impl Harness {
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
             | Update::Consents { .. }
+            | Update::Plugins { .. }
             | Update::LocalDashboard { .. }
             | Update::Providers { .. }
             | Update::ProviderModels { .. }
@@ -233,6 +225,19 @@ impl Harness {
             | Update::Daemon { .. } => {}
         }
         Ok(())
+    }
+
+    fn approve(&mut self, thread: &str, approvals: Vec<local_studio_core::Approval>) {
+        for approval in approvals {
+            if self.view.answered.insert(format!("{thread}/{}", approval.request_id)) {
+                println!("     approval {} {:?}", approval.command, approval.effects);
+                self.view.approvals += 1;
+                *self.view.approvals_by_thread.entry(thread.to_string()).or_default() += 1;
+                let always = self.view.always.iter().any(|draft| self.view.thread(draft).as_deref() == Some(thread));
+                let answer = if always { ApprovalAnswer::AlwaysAllowSession } else { ApprovalAnswer::Approve };
+                self.studio.answer_approval(thread.to_string(), approval.request_id, answer);
+            }
+        }
     }
 
     fn transcript(&mut self, thread: &str, op: TranscriptOp) -> anyhow::Result<()> {
@@ -392,6 +397,8 @@ fn main() -> anyhow::Result<()> {
         &work,
         &["-c", "user.name=Smoke", "-c", "user.email=smoke@example.com", "commit", "-q", "--allow-empty", "-m", "init"],
     )?;
+    std::fs::create_dir_all(&data)?;
+    std::fs::write(data.join("settings.json"), r#"{"defaultAccess":"fullAccess"}"#)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     let socket = root.join("d.sock");
@@ -862,13 +869,21 @@ fn round_four_settings(harness: &mut Harness, ids: &Ids) -> anyhow::Result<()> {
     let studio = Arc::clone(&harness.studio);
     let first = ids.first.clone();
     let mut settings = harness.view.settings.clone().context("no settings update")?;
+    ensure!(
+        !settings.access_follows_model && settings.default_access == AccessMode::FullAccess,
+        "settings saved before Match the model lost their fixed access"
+    );
+    println!("ok   settings saved before Match the model kept their fixed access");
     settings.follow_up_behavior = FollowUpBehavior::Steer;
     settings.response_streaming = ResponseStreaming::Turn;
+    settings.access_follows_model = true;
+    settings.default_access = AccessMode::Supervised;
     studio.update_settings(settings);
     harness.pump_until("settings applied", |view| {
         view.settings.as_ref().is_some_and(|settings| {
             settings.follow_up_behavior == FollowUpBehavior::Steer
                 && settings.response_streaming == ResponseStreaming::Turn
+                && settings.access_follows_model
         })
     })?;
     harness.view.partial_text = false;
@@ -911,7 +926,7 @@ fn round_four_sessions(harness: &mut Harness, ids: &Ids, always: &str) -> anyhow
         "draft-fan".to_string(),
         Some(ids.project.clone()),
         prompt(FAN),
-        settings(AccessMode::FullAccess),
+        ThreadSettings { access: None, ..settings(AccessMode::FullAccess) },
         vec![fan.clone(), fan],
     );
     harness.pump_until("fan-out threads answered in their own worktrees", |view| {
@@ -926,6 +941,15 @@ fn round_four_sessions(harness: &mut Harness, ids: &Ids, always: &str) -> anyhow
             && view.done_by_thread.get(&left.id) == Some(&1)
             && view.done_by_thread.get(&right.id) == Some(&1)
     })?;
+    let expected = local_studio_core::model_tier(real_model::model()).access();
+    for draft in ["draft-fan", "draft-fan#1"] {
+        let member = harness.view.thread(draft).context("no fan-out member")?;
+        studio.select_thread(Some(member.clone()));
+        harness.pump_until("fan-out member with no access picked takes its model's access", |view| {
+            view.access.get(&member) == Some(&expected)
+        })?;
+    }
+    println!("ok   fan-out with no access picked took {expected:?} from {}", real_model::model());
     Ok(())
 }
 

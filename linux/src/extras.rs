@@ -329,7 +329,11 @@ impl Extras {
                 local_studio_core::CommandKind::Template => "Template".to_string(),
                 local_studio_core::CommandKind::Skill => "Skill".to_string(),
                 local_studio_core::CommandKind::Plugin | local_studio_core::CommandKind::Command => {
-                    command.source.clone()
+                    if command.origin.is_empty() {
+                        command.source.clone()
+                    } else {
+                        command.origin.clone()
+                    }
                 }
             },
             insert: format!("/{} ", command.name),

@@ -175,6 +175,9 @@ pub struct SlashCommand {
     pub description: String,
     pub source: String,
     pub kind: CommandKind,
+    #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = ""))]
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +238,7 @@ pub struct ThreadSettings {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking_level: Option<String>,
-    pub access: AccessMode,
+    pub access: Option<AccessMode>,
     pub worktree: WorktreeChoice,
 }
 
@@ -491,6 +494,88 @@ pub struct ConsentRequest {
     pub files: u64,
     pub findings: Vec<String>,
     pub rows: Vec<ConsentRow>,
+    #[cfg_attr(feature = "wire", serde(default))]
+    pub unpinned: bool,
+    #[cfg_attr(feature = "wire", serde(default))]
+    pub told: bool,
+    #[cfg_attr(feature = "wire", serde(default))]
+    pub preset: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum PluginState {
+    Running,
+    Waiting,
+    Off,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PluginGrant {
+    pub id: String,
+    pub need: ConsentNeed,
+    pub sentence: String,
+    pub gates: Option<String>,
+    pub granted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PluginEntry {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PluginUpdate {
+    pub version: String,
+    pub revision: String,
+    pub asks: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PluginRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub icon: Option<String>,
+    pub state: PluginState,
+    pub detail: String,
+    pub grants: Vec<PluginGrant>,
+    pub told: bool,
+    pub commands: Vec<PluginEntry>,
+    pub skills: Vec<PluginEntry>,
+    pub source: String,
+    pub revision: Option<String>,
+    pub pinned: bool,
+    pub channel: Option<String>,
+    pub update: Option<PluginUpdate>,
+    pub folder: String,
+    pub local_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct CatalogPlugin {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub grants: Vec<PluginGrant>,
+    pub source: String,
+    pub revision: String,
+    pub local_only: bool,
+    pub installed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +742,12 @@ pub enum Update {
     },
     Consents {
         consents: Vec<ConsentRequest>,
+    },
+    Plugins {
+        plugins: Vec<PluginRow>,
+        catalog: Vec<CatalogPlugin>,
+        channel: String,
+        checked: Option<i64>,
     },
     Queue {
         thread: String,

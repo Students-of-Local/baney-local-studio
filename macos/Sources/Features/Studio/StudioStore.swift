@@ -19,6 +19,7 @@ final class StudioStore {
     let pages: PagesStore
     let machines: MachinesStore
     let updates: UpdatesStore
+    let plugins: PluginsStore
 
     @ObservationIgnored let core = CoreHandle()
     @ObservationIgnored let requests = RequestCenter()
@@ -39,6 +40,7 @@ final class StudioStore {
         pages = PagesStore(core: core, requests: requests)
         machines = MachinesStore(core: core, requests: requests)
         updates = UpdatesStore(core: core)
+        plugins = PluginsStore(core: core, requests: requests)
         workspace.panels.bind(conversation: conversation, inbox: inbox, pages: pages)
         conversation.pendingsChanged = { [weak self] in self?.syncPendings() }
         conversation.onSendFailure = { [weak self] in self?.post(.error, $0) }
@@ -140,10 +142,12 @@ final class StudioStore {
 
     func answerConsent(_ consent: ConsentRequest, _ answer: ConsentAnswer) {
         consents.removeAll { $0.request == consent.request }
-        requests.watch(consent.request) { [weak self] outcome in
-            switch outcome {
-            case .done(let message): self?.post(.info, message)
-            case .failed(let message): self?.post(.error, message)
+        if !plugins.owns(consent.request) {
+            requests.watch(consent.request) { [weak self] outcome in
+                switch outcome {
+                case .done(let message): self?.post(.info, message)
+                case .failed(let message): self?.post(.error, message)
+                }
             }
         }
         core.run { $0.answerConsent(request: consent.request, answer: answer) }
@@ -208,6 +212,8 @@ final class StudioStore {
             }
         case .consents(let consents):
             self.consents = consents
+        case .plugins(let plugins, let catalog, let channel, let checked):
+            self.plugins.set(plugins: plugins, catalog: catalog, channel: channel, checked: checked)
         case .approvals(let thread, let approvals):
             conversation.setApprovals(thread: thread, approvals: approvals)
         case .questions(let thread, let request, let source, let questions):
@@ -294,6 +300,7 @@ final class StudioStore {
             inbox.setProjectScripts(project: project, scripts: scripts)
         case .projectSettings(let project, let settings, let effective):
             inbox.setProjectSettings(project: project, settings: settings, effective: effective)
+            conversation.projectDefaults[project] = effective
         case .worktreeSetup(let thread, let stages, let done, let error):
             conversation.setWorktreeSetup(thread: thread, stages: stages, done: done, error: error)
         case .daemon(let socket, let version, let pid, let mismatch):

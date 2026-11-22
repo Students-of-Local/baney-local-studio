@@ -92,15 +92,16 @@ What a plugin can do today:
 
 - Ship skills and slash commands that appear in the composer.
 - Run its own MCP tool server for your sessions (`mcp-server`).
-- Declare each power it needs: `ask-user`, `native-host`, `site-secrets`, `accessibility`, `synthetic-input`, `screen-capture`. A plugin's tool server does not start until you have granted every one it asks for. The in-app consent sheet is being designed; today grants are made from the command line.
-- Install from a pinned catalog entry: a git URL, a full commit and a `sha256` of the tree, so what runs is exactly what was reviewed. Installs from a path or an unpinned git source are not pinned, and grants are not yet bound to the installed tree (#38).
+- Declare each power it needs: `ask-user`, `native-host`, `site-secrets`, `accessibility`, `synthetic-input`, `screen-capture`. A consent sheet shows each one before anything runs, and grants are bound to the installed tree. A plugin that puts `{granted}` in its server args gets each sensitive power on or off by itself; any other plugin's server waits for all of them.
+- Install from Settings, Plugins in one click: the catalog's entries are pinned to a full commit and a `sha256` of the tree, so what runs is exactly what was reviewed. A git URL or a folder installs too, with a warning that the catalog did not pin it.
+- Update in place: git plugins follow the app's channel (stable tags, the `nightly` tag or `main`), and an update asks again only for what is new. Settings, Plugins also shows each plugin's state, permissions, commands and skills, and removes it.
 
 The plugin family, in progress:
 
 | Plugin | What it is | State |
 | --- | --- | --- |
-| [Tychicus](https://github.com/baney75/tychicus) | Browser use and computer use for your agents | Ships Local Studio manifests today; becoming the default plugin |
-| [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | Ships a Local Studio manifest with six commands; joining the catalog |
+| [Tychicus](https://github.com/baney75/tychicus) | Browser use and computer use for your agents | Both plugins in the bundled catalog; becoming the default plugin |
+| [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | In the bundled catalog |
 | [Gantrel](https://github.com/baney75/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
 | [UntoCaesar](https://github.com/baney75/UntoCaesar) | Local-AI tax filing that never leaves your machine | Engine and manifest on a branch |
 | [Corunis](https://github.com/baney75/Corunis) | A private organizational brain for universities | MCP server and manifest on a branch |
@@ -113,7 +114,10 @@ local-studio plugin validate <dir>
 local-studio plugin install <catalog id, path or git source>
 local-studio plugin grant <id> <capability>...
 local-studio plugin list
+local-studio plugin revoke <id> [capability]...
 ```
+
+How consent, partial grants, channels and updates work: [docs/plugins.md](docs/plugins.md).
 
 Write your own: start from [examples/plugins/smoothstone](examples/plugins/smoothstone).
 

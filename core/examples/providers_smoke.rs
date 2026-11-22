@@ -288,6 +288,7 @@ impl Harness {
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
             | Update::Consents { .. }
+            | Update::Plugins { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
             | Update::AppUpdate { .. }
@@ -306,7 +307,7 @@ fn settings(provider: &str, model: &str) -> ThreadSettings {
         provider: Some(provider.to_string()),
         model: Some(model.to_string()),
         thinking_level: None,
-        access: AccessMode::FullAccess,
+        access: Some(AccessMode::FullAccess),
         worktree: WorktreeChoice::Local,
     }
 }

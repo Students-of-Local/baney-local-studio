@@ -12,7 +12,7 @@ struct SnapshotEntry {
 
 enum SnapshotCatalog {
     @MainActor static var all: [SnapshotEntry] {
-        shell + conversation + panels + pages + consent + t3Import + updates
+        shell + conversation + panels + pages + consent + t3Import + updates + plugins
     }
 }
 

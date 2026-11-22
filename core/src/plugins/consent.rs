@@ -54,7 +54,7 @@ impl Pendings {
     pub fn take(&mut self, request: &str) -> Option<Pending> {
         let index = self.items.iter().position(|pending| pending.request.request == request)?;
         let pending = self.items.remove(index);
-        if matches!(pending.kind, Kind::Grant { .. }) {
+        if matches!(pending.kind, Kind::Grant { .. }) && pending.request.request.starts_with(AUTO) {
             self.dismissed.insert(pending.request.request.clone());
         }
         Some(pending)
@@ -66,25 +66,40 @@ impl Pending {
     pub fn request(&self) -> &ConsentRequest {
         &self.request
     }
+
+    pub fn preset(&mut self, names: &[String]) {
+        self.request.preset = self
+            .asked
+            .iter()
+            .filter(|capability| capability.sensitive() && names.iter().any(|name| name == capability.name()))
+            .map(|capability| capability.name().to_string())
+            .collect();
+    }
 }
 
+const AUTO: &str = "consent:";
+
 pub fn offer_install(root: &Path, arg: &str, request: String) -> Result<Offer, String> {
-    let source = Source::parse(arg)?;
+    let (source, _) = Source::resolve(arg, crate::CHANNEL)?;
+    offer_source(root, &source, request)
+}
+
+pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Offer, String> {
     let catalog = Catalog::bundled()?;
-    let staged = stage(root, &source, &catalog).map_err(|errors| errors.join("; "))?;
+    let staged = stage(root, source, &catalog).map_err(|errors| errors.join("; "))?;
     let plugin = staged.plugin();
     let old = load(&root.join(&plugin.id)).ok();
     let asked = asked(plugin, staged.tree(), staged.origin(), &Grants::load(root)?, old.as_ref());
     if asked.is_empty() {
         let installed = staged.commit_with(root, Some((&[], &[]))).map_err(|errors| errors.join("; "))?;
-        let message = summary(&installed.plugin, &installed.consent, true, 0);
+        let message = summary(&installed.plugin, &installed.consent, Some(old.is_some()), 0);
         return Ok(Offer::Installed(
             installed.note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")),
         ));
     }
-    let (from, pin) = match &source {
+    let (from, pin) = match source {
         Source::Dir(_) => ("a local folder".to_string(), None),
-        Source::Git { url, rev } => (url.clone(), Some(rev.clone())),
+        Source::Git { url, rev } | Source::Follow { url, rev, .. } => (url.clone(), Some(rev.clone())),
         Source::Catalog(id) => {
             ("the Local Studio catalog".to_string(), catalog.entry(id).map(|entry| entry.rev.clone()))
         }
@@ -92,6 +107,7 @@ pub fn offer_install(root: &Path, arg: &str, request: String) -> Result<Offer, S
     let (_, findings) = scanned(plugin)?;
     let mut request = sheet(request, plugin, (from, pin), staged.files(), findings, &asked);
     request.install = true;
+    request.unpinned = !source.pinned();
     request.update_from = old.map(|old| old.version);
     Ok(Offer::Ask(Box::new(Pending { request, asked, kind: Kind::Install(staged) })))
 }
@@ -101,16 +117,31 @@ pub fn offer_grant(plugin: &Plugin, missing: &[Capability], grants: &Grants) -> 
     if !missing.iter().any(|capability| !capability.sensitive()) {
         return None;
     }
-    let tree = live_hash(&plugin.dir).ok()?;
-    let (files, findings) = scanned(plugin).ok()?;
+    offer_capabilities(plugin, missing, grants, grant_request(plugin)).ok()
+}
+
+pub fn offer_capabilities(
+    plugin: &Plugin,
+    missing: &[Capability],
+    grants: &Grants,
+    request: String,
+) -> Result<Pending, String> {
+    if let Some(extra) = missing.iter().find(|capability| !plugin.asks(**capability)) {
+        return Err(format!("{} does not ask for {}", plugin.name, extra.name()));
+    }
+    if missing.is_empty() {
+        return Err(format!("{} asks for nothing more", plugin.name));
+    }
+    let tree = live_hash(&plugin.dir)?;
+    let (files, findings) = scanned(plugin)?;
     let from = match grants.granted(&plugin.id).map(|(_, source, _)| source).unwrap_or_default() {
         source if source.starts_with("catalog ") => "the Local Studio catalog".to_string(),
         source if source.starts_with("git ") => source.trim_start_matches("git ").to_string(),
         "" => "a folder Local Studio did not install".to_string(),
         _ => "a local folder".to_string(),
     };
-    let request = sheet(grant_request(plugin), plugin, (from, None), files, findings, missing);
-    Some(Pending { request, asked: missing.to_vec(), kind: Kind::Grant { plugin: plugin.clone(), tree } })
+    let request = sheet(request, plugin, (from, None), files, findings, missing);
+    Ok(Pending { request, asked: missing.to_vec(), kind: Kind::Grant { plugin: plugin.clone(), tree } })
 }
 
 pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<String, String> {
@@ -133,7 +164,12 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
             }
             let installed =
                 staged.commit_with(root, Some((&pending.asked, &chosen))).map_err(|errors| errors.join("; "))?;
-            let message = summary(&installed.plugin, &installed.consent, true, chosen.len());
+            let message = summary(
+                &installed.plugin,
+                &installed.consent,
+                Some(pending.request.update_from.is_some()),
+                chosen.len(),
+            );
             Ok(installed.note.map_or_else(|| message.clone(), |note| format!("{message}; {note}")))
         }
         Kind::Grant { plugin, tree } => {
@@ -141,7 +177,7 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
             let mut grants = Grants::load(root)?;
             grants.grant(&plugin, &chosen, Some(&tree))?;
             grants.save(root)?;
-            Ok(summary(&plugin, &grants.consent(&plugin), false, chosen.len()))
+            Ok(summary(&plugin, &grants.consent(&plugin), None, chosen.len()))
         }
     }
 }
@@ -164,14 +200,32 @@ pub(super) fn asked(
         .collect()
 }
 
-fn summary(plugin: &Plugin, consent: &Consent, install: bool, granted: usize) -> String {
-    let count = if granted == 0 { "no new permissions".to_string() } else { format!("{granted} new permissions") };
-    let done = if install {
-        format!("Installed {} {} with {count}", plugin.name, plugin.version)
-    } else {
-        format!("{} {} has {count}", plugin.name, plugin.version)
+fn summary(plugin: &Plugin, consent: &Consent, install: Option<bool>, granted: usize) -> String {
+    let count = match granted {
+        0 => "no new permissions".to_string(),
+        1 => "1 new permission".to_string(),
+        granted => format!("{granted} new permissions"),
+    };
+    let done = match install {
+        Some(false) => format!("Installed {} {} with {count}", plugin.name, plugin.version),
+        Some(true) => format!("Updated {} to {} with {count}", plugin.name, plugin.version),
+        None => format!("{} {} has {count}", plugin.name, plugin.version),
     };
     match consent {
+        Consent::Ready if plugin.told() => {
+            let off: Vec<&str> = plugin
+                .capabilities
+                .iter()
+                .filter(|capability| capability.sensitive() && !granted_now(plugin, **capability))
+                .map(|capability| capability.name())
+                .collect();
+            if off.is_empty() {
+                done
+            } else {
+                let them = if off.len() == 1 { "it" } else { "them" };
+                format!("{done}; it runs with {} off until you turn {them} on in Settings, Plugins", off.join(", "))
+            }
+        }
         Consent::Ready => done,
         Consent::NeedsConsent { missing } => {
             let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
@@ -183,6 +237,11 @@ fn summary(plugin: &Plugin, consent: &Consent, install: bool, granted: usize) ->
         }
         Consent::Refused { reason } => format!("{done}, but it is off: {reason}"),
     }
+}
+
+fn granted_now(plugin: &Plugin, capability: Capability) -> bool {
+    let root = plugin.dir.parent().map(Path::to_path_buf).unwrap_or_default();
+    Grants::load(&root).is_ok_and(|grants| grants.standing(plugin).1.contains(&capability))
 }
 
 fn scanned(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
@@ -204,7 +263,10 @@ fn sheet(
 ) -> ConsentRequest {
     let command = plugin.mcp.as_ref().map(|mcp| {
         let name = mcp.command.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        std::iter::once(name).chain(mcp.args.iter().cloned()).collect::<Vec<_>>().join(" ")
+        std::iter::once(name)
+            .chain(mcp.args.iter().map(|arg| arg.replace(super::GRANTED, "<allowed>")))
+            .collect::<Vec<_>>()
+            .join(" ")
     });
     let rows = asked
         .iter()
@@ -230,5 +292,8 @@ fn sheet(
         files: files as u64,
         findings,
         rows,
+        unpinned: false,
+        told: plugin.told(),
+        preset: Vec::new(),
     }
 }

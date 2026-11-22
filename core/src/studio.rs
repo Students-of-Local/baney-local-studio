@@ -443,6 +443,33 @@ enum Command {
         request: String,
         outcome: Result<String, String>,
     },
+    LoadPlugins,
+    CheckPluginUpdates {
+        request: String,
+    },
+    PluginUpdatesChecked {
+        request: String,
+        found: std::collections::BTreeMap<String, plugins::hub::Available>,
+        errors: Vec<String>,
+    },
+    UpdatePlugin {
+        request: String,
+        id: String,
+    },
+    RemovePlugin {
+        request: String,
+        id: String,
+    },
+    GrantPlugin {
+        request: String,
+        id: String,
+        capabilities: Vec<String>,
+    },
+    RevokePlugin {
+        request: String,
+        id: String,
+        capability: String,
+    },
     ListArchived {
         request: String,
     },
@@ -699,6 +726,9 @@ impl Studio {
             generation: 0,
             codex_models: Vec::new(),
             plugin_consent: Vec::new(),
+            plugin_updates: std::collections::BTreeMap::new(),
+            plugin_checked: None,
+            plugins_pushed: None,
             ask_socket,
             ask_task,
             ask_tokens,
@@ -907,6 +937,30 @@ impl Studio {
 
     pub fn answer_consent(&self, request: String, answer: ConsentAnswer) {
         self.send_command(Command::AnswerConsent { request, answer });
+    }
+
+    pub fn load_plugins(&self) {
+        self.send_command(Command::LoadPlugins);
+    }
+
+    pub fn check_plugin_updates(&self, request: String) {
+        self.send_command(Command::CheckPluginUpdates { request });
+    }
+
+    pub fn update_plugin(&self, request: String, id: String) {
+        self.send_command(Command::UpdatePlugin { request, id });
+    }
+
+    pub fn remove_plugin(&self, request: String, id: String) {
+        self.send_command(Command::RemovePlugin { request, id });
+    }
+
+    pub fn grant_plugin(&self, request: String, id: String, capabilities: Vec<String>) {
+        self.send_command(Command::GrantPlugin { request, id, capabilities });
+    }
+
+    pub fn revoke_plugin(&self, request: String, id: String, capability: String) {
+        self.send_command(Command::RevokePlugin { request, id, capability });
     }
 
     pub fn list_archived(&self, request: String) {
@@ -1211,6 +1265,9 @@ struct Actor {
     generation: u64,
     codex_models: Vec<ModelOption>,
     plugin_consent: Vec<String>,
+    plugin_updates: std::collections::BTreeMap<String, plugins::hub::Available>,
+    plugin_checked: Option<i64>,
+    plugins_pushed: Option<Update>,
     ask_socket: Option<PathBuf>,
     ask_task: Option<tokio::task::JoinHandle<()>>,
     ask_tokens: plugins::ask::Tokens,
@@ -1723,6 +1780,30 @@ impl Actor {
             }
             Command::InstallPlugin { request, source } => self.install_plugin(request, source),
             Command::AnswerConsent { request, answer } => self.answer_consent(request, answer),
+            Command::LoadPlugins => {
+                self.plugins();
+            }
+            Command::CheckPluginUpdates { request } => self.check_plugin_updates(request),
+            Command::PluginUpdatesChecked { request, found, errors } => {
+                self.plugin_updates = found;
+                self.plugin_checked = Some(now_ms());
+                self.plugins();
+                let count = self.plugin_updates.len();
+                self.mailbox.push(if errors.is_empty() {
+                    let message = match count {
+                        0 => "Every plugin is up to date".to_string(),
+                        1 => "1 plugin update is ready".to_string(),
+                        count => format!("{count} plugin updates are ready"),
+                    };
+                    Update::RequestDone { request, message }
+                } else {
+                    Update::RequestFailed { request, message: errors.join("; ") }
+                });
+            }
+            Command::UpdatePlugin { request, id } => self.update_plugin(request, id),
+            Command::RemovePlugin { request, id } => self.remove_plugin(request, id),
+            Command::GrantPlugin { request, id, capabilities } => self.grant_plugin(request, &id, &capabilities),
+            Command::RevokePlugin { request, id, capability } => self.revoke_plugin(request, &id, &capability),
             Command::PluginsDone { request, outcome } => {
                 self.plugins();
                 self.mailbox.push(match outcome {
@@ -2333,6 +2414,10 @@ impl Actor {
             None => None,
         };
         let effective = self.workspace.effective_settings(project_path.as_deref());
+        let access = settings.access.unwrap_or_else(|| {
+            let model = settings.model.clone().or_else(|| effective.default_model.clone());
+            crate::access::default_access(effective.access_follows_model, effective.default_access, model)
+        });
         let harness = settings
             .provider
             .as_deref()
@@ -2378,17 +2463,7 @@ impl Actor {
         if harness != Harness::Eukhe {
             let model = if settings.provider.is_some() { settings.model } else { effective.default_model };
             let thinking = settings.thinking_level.or(effective.default_thinking_level);
-            return self.cli_create(
-                draft,
-                harness,
-                cwd,
-                project_path,
-                settings.access,
-                model,
-                thinking,
-                fan_out,
-                prompt,
-            );
+            return self.cli_create(draft, harness, cwd, project_path, access, model, thinking, fan_out, prompt);
         }
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let created = saved_sessions::create_resident(&client, None, self.create_config(&cwd))
@@ -2408,7 +2483,7 @@ impl Actor {
         self.store.update(&id, |flags| {
             flags.activity_at = Some(now);
             flags.project.clone_from(&project_path);
-            flags.access = Some(settings.access);
+            flags.access = Some(access);
             flags.fan_out = fan_out;
         });
         self.save();
@@ -2685,7 +2760,7 @@ impl Actor {
             plugins::Grants::default()
         });
         let ready = plugins::ready(&scan.plugins, &grants);
-        for (plugin, consent) in &ready {
+        for (plugin, consent, _) in &ready {
             match consent {
                 plugins::Consent::Ready => {}
                 plugins::Consent::NeedsConsent { missing } => {
@@ -2702,10 +2777,39 @@ impl Actor {
                 }
             }
         }
-        if let Some(agent) = crate::daemon::agent_dir() {
-            if let Err(error) = plugins::sync_mcp_servers(dir, &agent, &ready) {
+        let agent = crate::daemon::agent_dir();
+        if let Some(agent) = agent.as_deref() {
+            if let Err(error) = plugins::sync_mcp_servers(dir, agent, &ready) {
                 notes.push(error);
             }
+        }
+        let origins = plugins::Origins::load(dir).unwrap_or_default();
+        self.plugin_updates.retain(|id, available| {
+            origins.get(id).is_some_and(|origin| origin.rev.as_deref() != Some(available.rev.as_str()))
+        });
+        let taken = agent.as_deref().map(|agent| plugins::foreign_servers(dir, agent)).unwrap_or_default();
+        let rows = plugins::hub::rows(
+            dir,
+            &ready,
+            &scan.failures,
+            &grants,
+            &origins,
+            &self.plugin_updates,
+            &taken,
+            crate::CHANNEL,
+        );
+        let catalog = plugins::Catalog::bundled()
+            .map(|catalog| plugins::hub::catalog_rows(&catalog, &scan.plugins))
+            .unwrap_or_default();
+        let update = Update::Plugins {
+            plugins: rows,
+            catalog,
+            channel: crate::CHANNEL.to_string(),
+            checked: self.plugin_checked,
+        };
+        if self.plugins_pushed.as_ref() != Some(&update) {
+            self.plugins_pushed = Some(update.clone());
+            self.mailbox.push(update);
         }
         let mut pendings = self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut offered = false;
@@ -2729,13 +2833,18 @@ impl Actor {
         scan.plugins
     }
 
-    fn install_plugin(&mut self, request: String, source: String) {
-        let Some(root) = self.plugins_dir.clone() else {
-            self.mailbox.push(Update::RequestFailed { request, message: "No plugins folder: HOME is not set".into() });
-            return;
-        };
+    fn plugins_root(&mut self, request: &str) -> Option<PathBuf> {
+        let root = self.plugins_dir.clone();
+        if root.is_none() {
+            let message = "No plugins folder: HOME is not set".to_string();
+            self.mailbox.push(Update::RequestFailed { request: request.to_string(), message });
+        }
+        root
+    }
+
+    fn offering(&self) -> impl Fn(String, Result<plugins::Offer, String>) + Send + 'static {
         let (consents, mailbox, itself) = (Arc::clone(&self.consents), Arc::clone(&self.mailbox), self.itself.clone());
-        tokio::task::spawn_blocking(move || match plugins::offer_install(&root, &source, request.clone()) {
+        move |request, offer| match offer {
             Ok(plugins::Offer::Installed(message)) => {
                 itself.send(Command::PluginsDone { request, outcome: Ok(message) });
             }
@@ -2749,7 +2858,81 @@ impl Actor {
                 }
             }
             Err(message) => mailbox.push(Update::RequestFailed { request, message }),
+        }
+    }
+
+    fn install_plugin(&mut self, request: String, source: String) {
+        let Some(root) = self.plugins_root(&request) else { return };
+        let offering = self.offering();
+        tokio::task::spawn_blocking(move || {
+            let offer = plugins::offer_install(&root, &source, request.clone());
+            offering(request, offer);
         });
+    }
+
+    fn update_plugin(&mut self, request: String, id: String) {
+        let Some(root) = self.plugins_root(&request) else { return };
+        let offering = self.offering();
+        tokio::task::spawn_blocking(move || {
+            let offer = plugins::hub::follow(&root, &id, crate::CHANNEL)
+                .and_then(|source| plugins::offer_source(&root, &source, request.clone()));
+            offering(request, offer);
+        });
+    }
+
+    fn check_plugin_updates(&mut self, request: String) {
+        let Some(root) = self.plugins_root(&request) else { return };
+        let itself = self.itself.clone();
+        tokio::task::spawn_blocking(move || {
+            let scan = plugins::scan(&root);
+            let (found, errors) = plugins::hub::check(&root, &scan.plugins, crate::CHANNEL);
+            itself.send(Command::PluginUpdatesChecked { request, found, errors });
+        });
+    }
+
+    fn remove_plugin(&mut self, request: String, id: String) {
+        let Some(root) = self.plugins_root(&request) else { return };
+        self.plugin_updates.remove(&id);
+        let itself = self.itself.clone();
+        tokio::task::spawn_blocking(move || {
+            let outcome = plugins::hub::remove(&root, &id);
+            itself.send(Command::PluginsDone { request, outcome });
+        });
+    }
+
+    fn revoke_plugin(&mut self, request: String, id: &str, capability: &str) {
+        let Some(root) = self.plugins_root(&request) else { return };
+        let outcome = plugins::hub::revoke(&root, id, capability);
+        self.itself.send(Command::PluginsDone { request, outcome });
+    }
+
+    fn grant_plugin(&mut self, request: String, id: &str, capabilities: &[String]) {
+        let Some(root) = self.plugins_root(&request) else { return };
+        let scan = plugins::scan(&root);
+        let offer = (|| {
+            let plugin =
+                scan.plugins.iter().find(|plugin| plugin.id == id).ok_or_else(|| format!("{id} is not installed"))?;
+            let grants = plugins::Grants::load(&root)?;
+            let (_, held) = grants.standing(plugin);
+            let asked: Vec<plugins::Capability> = capabilities
+                .iter()
+                .map(|name| plugins::Capability::parse(name).ok_or_else(|| format!("unknown permission: {name}")))
+                .collect::<Result<_, _>>()?;
+            let missing: Vec<plugins::Capability> = plugin
+                .capabilities
+                .iter()
+                .copied()
+                .filter(|capability| {
+                    !held.contains(capability)
+                        && (asked.is_empty() || asked.contains(capability) || !capability.sensitive())
+                })
+                .chain(asked.iter().copied().filter(|capability| !plugin.asks(*capability)))
+                .collect();
+            let mut pending = plugins::offer_capabilities(plugin, &missing, &grants, request.clone())?;
+            pending.preset(capabilities);
+            Ok(plugins::Offer::Ask(Box::new(pending)))
+        })();
+        self.offering()(request, offer);
     }
 
     fn answer_consent(&mut self, request: String, answer: ConsentAnswer) {

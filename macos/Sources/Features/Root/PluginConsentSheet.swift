@@ -14,6 +14,7 @@ struct PluginConsentSheet: View {
         self.consent = consent
         self.answer = answer
         _findingsOpen = State(initialValue: findingsOpen)
+        _allowed = State(initialValue: Set(consent.preset))
     }
 
     var body: some View {
@@ -94,7 +95,8 @@ struct PluginConsentSheet: View {
         let replacing = consent.updateFrom.map { ", replacing \($0)," } ?? ""
         let version = "\(lead)Version \(consent.version)\(replacing) from \(consent.source)"
         guard let pin = consent.pin else { return Text("\(version).") }
-        return Text("\(version), pinned to \(Text(pin).font(.system(size: 12, design: .monospaced))).")
+        let at = consent.unpinned ? "at commit" : "pinned to"
+        return Text("\(version), \(at) \(Text(pin).font(.system(size: 12, design: .monospaced))).")
     }
 
     private var scan: some View {
@@ -110,6 +112,17 @@ struct PluginConsentSheet: View {
                     Button(findingsOpen ? "Hide findings" : "Show findings") { findingsOpen.toggle() }
                         .buttonStyle(.link)
                         .font(.system(size: 13))
+                }
+            }
+            if consent.unpinned {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .icon(.inline)
+                        .foregroundStyle(Theme.warning)
+                    Text("Not pinned by the Local Studio catalog. Read its code first if you do not know who wrote it.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.text)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if findingsOpen {
@@ -180,9 +193,7 @@ struct PluginConsentSheet: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 12) {
             if consent.rows.contains(where: { $0.need == .sensitive }) {
-                Text(
-                    "The plugin's tools stay off until every permission it asks for is on. To grant one later, run \(Text("local-studio plugin grant \(consent.plugin) <capability>").font(.system(size: 11, design: .monospaced)))."
-                )
+                Text(footerText)
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -202,6 +213,13 @@ struct PluginConsentSheet: View {
         }
     }
 
+    private var footerText: String {
+        if consent.told {
+            return "A switch left off is turned off for the plugin: Local Studio tells it, and cannot block a plugin that ignores it. Change any switch later in Settings, Plugins."
+        }
+        return "The plugin's tools stay off until every permission it asks for is on. Turn one on later in Settings, Plugins."
+    }
+
     private var title: String {
         if !consent.install {
             return "Allow \(consent.name) to run?"
@@ -213,7 +231,7 @@ struct PluginConsentSheet: View {
         let needed = consent.rows.filter { $0.need == .needed }.count
         let count = needed + chosen.count
         let noun = count == 1 ? "permission" : "permissions"
-        let off = count < consent.rows.count
+        let off = count < consent.rows.count && !consent.told
         if !consent.install {
             return off ? "Allow \(count) \(noun), tools off" : "Allow \(count) \(noun)"
         }

@@ -25,6 +25,9 @@ struct Inner {
     providers_page: adw::PreferencesPage,
     providers: RefCell<Vec<adw::PreferencesGroup>>,
     providers_shown: RefCell<String>,
+    plugins_page: adw::PreferencesPage,
+    plugins: RefCell<Vec<adw::PreferencesGroup>>,
+    plugins_shown: RefCell<String>,
     keys_page: adw::PreferencesPage,
     keys: RefCell<Vec<adw::PreferencesGroup>>,
     archive_page: adw::PreferencesPage,
@@ -74,6 +77,8 @@ impl SettingsDialog {
         dialog.add(&keys_page);
         let providers_page = page("providers", "Providers", icons::PROVIDERS);
         dialog.add(&providers_page);
+        let plugins_page = page("plugins", "Plugins", icons::PLUGIN);
+        dialog.add(&plugins_page);
         dialog.add(&source_control_page(&weak, &state));
         dialog.add(&storage_page(&weak));
         let fleet = crate::fleet::Fleet::new(&weak);
@@ -90,6 +95,9 @@ impl SettingsDialog {
                 providers_page,
                 providers: RefCell::new(Vec::new()),
                 providers_shown: RefCell::new(String::new()),
+                plugins_page,
+                plugins: RefCell::new(Vec::new()),
+                plugins_shown: RefCell::new(String::new()),
                 keys_page,
                 keys: RefCell::new(Vec::new()),
                 archive_page,
@@ -137,6 +145,7 @@ impl SettingsDialog {
         let state = app.state.borrow();
         let weak = Rc::downgrade(app);
         self.refresh_providers(&weak, &state);
+        self.refresh_plugins(&weak, &state);
         self.refresh_keys(&weak, &state);
         self.refresh_archive(&state);
         self.refresh_kernel(&state);
@@ -206,6 +215,31 @@ impl SettingsDialog {
         if let Some(label) = button {
             self.inner.kernel_button.set_label(label);
         }
+    }
+
+    fn refresh_plugins(&self, app: &Weak<App>, state: &State) {
+        let shown = format!(
+            "{:?}{:?}{}{:?}{}{:?}{:?}",
+            state.plugins,
+            state.catalog,
+            state.plugin_channel,
+            state.plugins_checked,
+            state.plugins_loaded,
+            state.plugin_pending,
+            state.plugin_error
+        );
+        if *self.inner.plugins_shown.borrow() == shown && !self.inner.plugins.borrow().is_empty() {
+            return;
+        }
+        self.inner.plugins_shown.replace(shown);
+        for group in self.inner.plugins.take() {
+            self.inner.plugins_page.remove(&group);
+        }
+        let groups = crate::plugins::groups(app, state);
+        for group in &groups {
+            self.inner.plugins_page.add(group);
+        }
+        self.inner.plugins.replace(groups);
     }
 
     fn refresh_providers(&self, app: &Weak<App>, state: &State) {
@@ -596,15 +630,15 @@ fn general_page(app: &Weak<App>, state: &State) -> adw::PreferencesPage {
             settings.default_model = model;
         },
     );
-    let access: Vec<&str> = format::ACCESS_MODES.iter().map(|mode| format::access_label(*mode)).collect();
+    let access = format::default_access_names();
     combo(
         &defaults,
         app,
         "Permissions",
-        "Default access for new threads",
+        "Match the model: Full access for frontier models, Auto for small ones, Supervised for unknown ones",
         &access,
-        |settings| format::access_index(settings.default_access) as usize,
-        |settings, index| settings.default_access = format::ACCESS_MODES.get(index).copied().unwrap_or_default(),
+        |settings| format::default_access_index(settings) as usize,
+        format::set_default_access,
     );
     combo(
         &defaults,

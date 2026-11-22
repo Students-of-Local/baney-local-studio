@@ -29,12 +29,16 @@ struct Resource {
     file_path: String,
     description: String,
     source: SkillSource,
-    plugin: Option<String>,
+    plugin: Option<(String, String)>,
 }
 
 impl Resource {
     fn label(&self) -> String {
-        self.plugin.as_ref().map_or_else(|| source_label(self.source).to_string(), |id| format!("plugin:{id}"))
+        self.plugin.as_ref().map_or_else(|| source_label(self.source).to_string(), |(id, _)| format!("plugin:{id}"))
+    }
+
+    fn origin(&self) -> String {
+        self.plugin.as_ref().map(|(_, name)| name.clone()).unwrap_or_default()
     }
 
     fn from_plugin(plugin: &Plugin, file: &plugins::PluginFile) -> Self {
@@ -43,7 +47,7 @@ impl Resource {
             file_path: file.path.display().to_string(),
             description: file.description.clone(),
             source: SkillSource::Personal,
-            plugin: Some(plugin.id.clone()),
+            plugin: Some((plugin.id.clone(), plugin.name.clone())),
         }
     }
 }
@@ -115,24 +119,28 @@ impl Resources {
             description: "Switch the response model for this thread".to_string(),
             source: "app".to_string(),
             kind: CommandKind::Command,
+            origin: String::new(),
         }];
         commands.extend(SESSION_COMMANDS.iter().map(|(name, description)| SlashCommand {
             name: (*name).to_string(),
             description: (*description).to_string(),
             source: "session".to_string(),
             kind: CommandKind::Command,
+            origin: String::new(),
         }));
         commands.extend(self.all_templates().iter().map(|template| SlashCommand {
             name: template.name.clone(),
             description: template.description.clone(),
             source: template.label(),
             kind: CommandKind::Template,
+            origin: template.origin(),
         }));
         commands.extend(self.all_skills().iter().map(|skill| SlashCommand {
             name: format!("skill:{}", skill.name),
             description: skill.description.clone(),
             source: skill.label(),
             kind: CommandKind::Skill,
+            origin: skill.origin(),
         }));
         commands.extend(plugins::commands(&self.plugins));
         commands
@@ -191,7 +199,13 @@ pub(crate) struct Expansion {
 
 impl Expansion {
     fn from<'a>(text: String, resources: impl IntoIterator<Item = &'a Resource>) -> Self {
-        Self { text, plugins: resources.into_iter().filter_map(|resource| resource.plugin.clone()).collect() }
+        Self {
+            text,
+            plugins: resources
+                .into_iter()
+                .filter_map(|resource| resource.plugin.as_ref().map(|(id, _)| id.clone()))
+                .collect(),
+        }
     }
 }
 

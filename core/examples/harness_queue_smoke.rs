@@ -227,7 +227,7 @@ impl Run {
             provider: Some(provider.to_string()),
             model: Some(model.to_string()),
             thinking_level: thinking.map(str::to_string),
-            access,
+            access: Some(access),
             worktree: WorktreeChoice::Local,
         };
         let draft = format!("draft-{label}");

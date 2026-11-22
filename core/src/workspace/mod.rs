@@ -107,7 +107,7 @@ impl Workspace {
         controller_main: Option<PathBuf>,
         text: TextGen,
     ) -> Self {
-        let (loaded, settings_error) = settings::load_json::<Settings>(&data_dir.join("settings.json"));
+        let (loaded, settings_error) = settings::load_settings(&data_dir.join("settings.json"));
         let (overrides, keybindings_error) =
             settings::load_json::<BTreeMap<String, Option<String>>>(&data_dir.join("keybindings.json"));
         for error in [settings_error, keybindings_error].into_iter().flatten() {

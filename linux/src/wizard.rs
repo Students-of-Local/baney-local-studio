@@ -87,11 +87,11 @@ pub fn present(app: &Rc<App>) {
         &projects,
     ));
     let defaults = adw::PreferencesGroup::new();
-    let access_names: Vec<&str> = format::ACCESS_MODES.iter().map(|mode| format::access_label(*mode)).collect();
+    let access_names = format::default_access_names();
     let access = adw::ComboRow::builder()
         .title("Permissions for new threads")
         .model(&gtk::StringList::new(&access_names))
-        .selected(format::access_index(state.settings.default_access))
+        .selected(format::default_access_index(&state.settings))
         .build();
     let notify = adw::SwitchRow::builder()
         .title("Notify me when a thread finishes or needs approval")
@@ -156,15 +156,14 @@ pub fn present(app: &Rc<App>) {
             return;
         }
         let Some(app) = weak.upgrade() else { return };
-        let mode =
-            format::ACCESS_MODES.get(usize::try_from(access.selected()).unwrap_or(0)).copied().unwrap_or_default();
+        let mode = usize::try_from(access.selected()).unwrap_or(0);
         let notifications = if notify.is_active() {
             local_studio_core::NotificationMode::NotificationsAndSound
         } else {
             local_studio_core::NotificationMode::Off
         };
         crate::settings::change(&app, move |settings| {
-            settings.default_access = mode;
+            format::set_default_access(settings, mode);
             settings.notifications = notifications;
             settings.onboarding_completed = true;
         });

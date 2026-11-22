@@ -25,7 +25,7 @@ struct ComposerControls: View {
                     .equatable()
                 ServiceTierMenu(store: store, tiers: conversation.serviceTiers(settings: settings), current: conversation.serviceTier(settings: settings))
                     .equatable()
-                AccessMenu(store: store, current: conversation.access(settings: settings))
+                AccessMenu(store: store, current: conversation.access(settings: settings, project: project))
                     .equatable()
                 StashMenu(store: store, project: project, prompts: conversation.stash.list(conversation.stashKey(project: project)), canStash: !draft.isEmpty)
                     .equatable()

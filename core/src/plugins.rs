@@ -9,13 +9,17 @@ use crate::model::{CommandKind, SlashCommand};
 pub mod ask;
 mod consent;
 mod grants;
+pub mod hub;
 mod install;
 #[cfg(all(test, unix))]
 mod tests;
 
-pub use consent::{answer, offer_grant, offer_install, Offer, Pending, Pendings};
+pub use consent::{answer, offer_capabilities, offer_grant, offer_install, offer_source, Offer, Pending, Pendings};
 pub use grants::{Consent, Grants, GRANTS};
-pub use install::{install, stage, tree_hash, Catalog, CatalogEntry, Installed, Source, Staged, MAX_FILE};
+pub use install::{
+    install, resolve_channel, stage, tree_hash, Catalog, CatalogEntry, Installed, Origin, Origins, Source, Staged,
+    MAX_FILE, ORIGINS,
+};
 
 pub const MANIFEST: &str = "plugin.toml";
 pub const MCP_PREFIX: &str = "plugin-";
@@ -25,6 +29,9 @@ pub const NO_BYTECODE: (&str, &str) = ("PYTHONDONTWRITEBYTECODE", "PATH");
 pub const LOCAL_ONLY_ENV: &str = "LOCAL_STUDIO_LOCAL_ONLY";
 pub const LOCAL_ONLY_LABEL: &str = "Runs only on local models";
 pub const SESSION_OWNER: &str = "local-studio";
+pub const GRANTED: &str = "{granted}";
+
+pub type Standing<'a> = (&'a Plugin, Consent, Vec<Capability>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -192,6 +199,22 @@ impl Plugin {
     #[must_use]
     pub fn mcp_name(&self) -> String {
         format!("{MCP_PREFIX}{}", self.id)
+    }
+
+    #[must_use]
+    pub fn told(&self) -> bool {
+        self.mcp.as_ref().is_some_and(|mcp| mcp.args.iter().any(|arg| arg.contains(GRANTED)))
+    }
+
+    #[must_use]
+    pub fn args(&self, held: &[Capability]) -> Vec<String> {
+        let names: Vec<&str> =
+            held.iter().filter(|capability| capability.sensitive()).map(|capability| capability.name()).collect();
+        let list = names.join(",");
+        self.mcp
+            .as_ref()
+            .map(|mcp| mcp.args.iter().map(|arg| arg.replace(GRANTED, &list)).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -465,18 +488,23 @@ fn valid_env_name(name: &str) -> bool {
 }
 
 #[must_use]
-pub fn ready<'a>(plugins: &'a [Plugin], grants: &Grants) -> Vec<(&'a Plugin, Consent)> {
-    plugins.iter().map(|plugin| (plugin, grants.consent(plugin))).collect()
+pub fn ready<'a>(plugins: &'a [Plugin], grants: &Grants) -> Vec<Standing<'a>> {
+    plugins
+        .iter()
+        .map(|plugin| {
+            let (consent, held) = grants.standing(plugin);
+            (plugin, consent, held)
+        })
+        .collect()
 }
 
-fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
+fn mcp_servers(ready: &[Standing]) -> Map<String, Value> {
     ready
         .iter()
-        .filter(|(plugin, consent)| {
+        .filter(|(plugin, consent, _)| {
             !plugin.local_only && *consent == Consent::Ready && plugin.asks(Capability::McpServer)
         })
-        .map(|(plugin, _)| *plugin)
-        .filter_map(|plugin| {
+        .filter_map(|(plugin, _, held)| {
             let mcp = plugin.mcp.as_ref()?;
             let dir = absolute(&plugin.dir);
             let mut env: Map<String, Value> =
@@ -485,7 +513,7 @@ fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
             let mut entry = json!({
                 "type": "stdio",
                 "command": absolute(&mcp.command).to_string_lossy(),
-                "args": mcp.args,
+                "args": plugin.args(held),
                 "cwd": dir.to_string_lossy(),
                 MCP_TAG: true,
             });
@@ -499,9 +527,12 @@ fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
 pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
     plugins
         .iter()
-        .filter(|plugin| plugin.local_only)
-        .filter(|plugin| grants.consent(plugin) == Consent::Ready && plugin.asks(Capability::McpServer))
+        .filter(|plugin| plugin.local_only && plugin.asks(Capability::McpServer))
         .filter_map(|plugin| {
+            let (consent, held) = grants.standing(plugin);
+            if consent != Consent::Ready {
+                return None;
+            }
             let mcp = plugin.mcp.as_ref()?;
             let mut env: Map<String, Value> = mcp
                 .env
@@ -514,7 +545,7 @@ pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
                 "type": "stdio",
                 "name": plugin.mcp_name(),
                 "command": absolute(&mcp.command).to_string_lossy(),
-                "args": mcp.args,
+                "args": plugin.args(&held),
                 "cwd": absolute(&plugin.dir).to_string_lossy(),
                 "env": env,
             }))
@@ -540,7 +571,7 @@ pub fn foreign_servers(root: &Path, agent: &Path) -> Vec<String> {
     servers.into_iter().filter(|(name, entry)| !written_by_us(&root, name, entry)).map(|(name, _)| name).collect()
 }
 
-pub fn sync_mcp_servers(root: &Path, agent: &Path, ready: &[(&Plugin, Consent)]) -> Result<bool, String> {
+pub fn sync_mcp_servers(root: &Path, agent: &Path, ready: &[Standing]) -> Result<bool, String> {
     let path = agent.join("settings.json");
     let mut settings = crate::workspace::providers::read_object(&path)?;
     let mut servers = match settings.remove("mcpServers") {
@@ -659,6 +690,7 @@ pub fn commands(plugins: &[Plugin]) -> Vec<SlashCommand> {
                 },
                 source: plugin.source(),
                 kind: CommandKind::Plugin,
+                origin: plugin.name.clone(),
             })
         })
         .collect()

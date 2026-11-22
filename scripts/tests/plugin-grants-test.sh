@@ -635,7 +635,7 @@ else
   out=$(drive "$S/src/sheet" cancel)
   echo "$out" | sed 's/^/  /'
   version=$(awk -F'"' '/^version/ { print $2 }' "$D/plugins/sheet/plugin.toml")
-  if ! echo "$out" | grep -q '^SHEET' && echo "$out" | grep -q '^DONE Installed Sheet 3.0.0 with no new permissions' && [ "$version" = 3.0.0 ]; then
+  if ! echo "$out" | grep -q '^SHEET' && echo "$out" | grep -q '^DONE Updated Sheet to 3.0.0 with no new permissions' && [ "$version" = 3.0.0 ]; then
     pass "#14 an update that removes a capability installs without asking"
   else
     fail "#14 an update that removes a capability installs without asking"

@@ -423,6 +423,8 @@ extension SnapshotCatalog {
                 updates.append(.local(request: "fixture", snapshot: PagesFixtures.localSnapshot))
             case .connections:
                 updates += [.machines(machines: ShellFixtures.machines), .pairedDevices(devices: ShellFixtures.pairedDevices)]
+            case .plugins:
+                updates.append(PluginsFixtures.update)
             default:
                 break
             }

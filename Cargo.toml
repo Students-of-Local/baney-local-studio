@@ -12,8 +12,8 @@ publish = false
 local-studio-core = { path = "core" }
 local-studio-version = { path = "version" }
 local-studio-remote = { path = "remote" }
-eukhe-client = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.73" }
-eukhe-types = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.73" }
+eukhe-client = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.78" }
+eukhe-types = { git = "https://github.com/gildrb/eukhe", tag = "eukhe-v0.10.78" }
 anyhow = "1"
 base64 = "0.22"
 blake2 = "0.10"

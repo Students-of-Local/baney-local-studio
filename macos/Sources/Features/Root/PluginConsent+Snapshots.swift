@@ -9,6 +9,8 @@ extension SnapshotCatalog {
             entry("plugin-consent-findings", ConsentFixtures.findings, height: 468, findingsOpen: true),
             entry("plugin-consent-update", ConsentFixtures.update, height: 318),
             entry("plugin-consent-long", ConsentFixtures.long, height: 640, findingsOpen: true),
+            entry("plugin-consent-git", ConsentFixtures.git, height: 470),
+            entry("plugin-consent-setting", ConsentFixtures.setting, height: 300),
         ]
     }
 
@@ -83,15 +85,25 @@ enum ConsentFixtures {
         description: String(repeating: "Reads pages in its own tabs and keeps notes for a thread. ", count: 5)
     )
 
+    static let git = request(
+        rows: Array(rows.prefix(3)), findings: [], unpinned: true, told: true
+    )
+
+    static let setting = request(
+        rows: [rows[2]], findings: [], install: false, told: true, preset: ["screen-capture"]
+    )
+
     static func request(
         rows: [ConsentRow], findings: [String], version: String = "1.4.0", updateFrom: String? = nil,
-        description: String = "Reads pages in its own tabs and keeps notes for a thread"
+        description: String = "Reads pages in its own tabs and keeps notes for a thread",
+        install: Bool = true, unpinned: Bool = false, told: Bool = false, preset: [String] = []
     ) -> ConsentRequest {
         ConsentRequest(
             request: "snapshot", plugin: "field-notes", name: "Field Notes", icon: nil,
             description: description, version: version,
-            install: true, updateFrom: updateFrom, source: "https://github.com/example/field-notes",
-            pin: "3f9a2c1", files: 14, findings: findings, rows: rows
+            install: install, updateFrom: updateFrom, source: "https://github.com/example/field-notes",
+            pin: "3f9a2c1", files: 14, findings: findings, rows: rows,
+            unpinned: unpinned, told: told, preset: preset
         )
     }
 }

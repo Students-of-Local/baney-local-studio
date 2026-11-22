@@ -235,7 +235,7 @@ fn probe(desk: &mut Desk, link: &str) -> anyhow::Result<()> {
         provider: Some(PROVIDER.to_string()),
         model: Some(MODEL.to_string()),
         thinking_level: None,
-        access: AccessMode::Supervised,
+        access: Some(AccessMode::Supervised),
         worktree: WorktreeChoice::Local,
     };
     let started = Instant::now();
