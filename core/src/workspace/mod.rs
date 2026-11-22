@@ -18,6 +18,7 @@ mod setup;
 pub(crate) mod t3;
 mod terminal;
 pub(crate) mod time;
+mod updates;
 mod usage;
 mod watch;
 mod writer;
@@ -88,6 +89,7 @@ struct Inner {
     text: TextGen,
     usage: Arc<Mutex<usage::Ledger>>,
     kernel: kernel::Kernel,
+    updates: updates::Updates,
 }
 
 #[derive(Clone)]
@@ -150,6 +152,7 @@ impl Workspace {
             text,
             usage: Arc::default(),
             kernel: kernel::Kernel::default(),
+            updates: updates::Updates::default(),
         });
         let workspace = Self { inner };
         let refresher = workspace.clone();

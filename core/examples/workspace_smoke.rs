@@ -303,6 +303,7 @@ impl Harness {
             | Update::ThreadSearch { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
+            | Update::AppUpdate { .. }
             | Update::Skills { .. }
             | Update::Subagents { .. }
             | Update::MessageImage { .. }

@@ -290,6 +290,7 @@ impl Harness {
             | Update::Consents { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
+            | Update::AppUpdate { .. }
             | Update::LocalDashboard { .. } => {}
         }
         Ok(())

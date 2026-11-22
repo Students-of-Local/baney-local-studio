@@ -151,6 +151,7 @@ impl Harness {
             | Update::WorktreeSetup { .. }
             | Update::Daemon { .. }
             | Update::Kernel { .. }
+            | Update::AppUpdate { .. }
             | Update::RequestDone { .. } => {}
         }
         Ok(())
