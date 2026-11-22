@@ -1,3 +1,4 @@
+use local_studio_core::plugins::Caller;
 use local_studio_core::{PromptDraft, Studio};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -53,6 +54,7 @@ pub fn dispatch(
     studio: &Studio,
     op: &str,
     a: &Value,
+    caller: &Caller,
     prompt: &mut dyn FnMut(&Value) -> Result<PromptDraft, OpError>,
 ) -> Result<(), OpError> {
     match op {
@@ -69,7 +71,8 @@ pub fn dispatch(
         "compact" => studio.compact(arg(a, "thread")?),
         "start_thread" => {
             let (draft, project, settings) = (arg(a, "draft")?, arg(a, "project")?, arg(a, "settings")?);
-            studio.start_thread(draft, project, prompt(a.get("prompt").unwrap_or(&Value::Null))?, settings);
+            let prompt = prompt(a.get("prompt").unwrap_or(&Value::Null))?;
+            studio.start_thread_as(draft, project, prompt, settings, caller.clone());
         }
         "rename_thread" => studio.rename_thread(arg(a, "thread")?, arg(a, "title")?),
         "regenerate_title" => studio.regenerate_title(arg(a, "thread")?),

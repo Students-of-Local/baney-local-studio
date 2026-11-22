@@ -113,6 +113,8 @@ Server to client: `{"op": "update", "seq": 413, "update": {"type": "transcript",
 
 **Cut to fit.** A single transcript item, or a whole answer such as `diff`, that can't fit in one 8 MiB frame is cut: the server shortens its longest strings and drops the tail of its longest lists until it fits, and adds `"cut": <bytes removed>` to that item or answer. The phone shows the item or answer as cut and offers the full version on the desktop. `cut` is an optional field inside protocol 2; a client that doesn't know it shows the shortened content.
 
+**Caller.** A thread a device starts with `start_thread` records that device as its caller, `device:<id>` with the device's name, and the thread's plugin MCP servers get it as `LOCAL_STUDIO_CALLER` (docs/plugins.md, Caller identity).
+
 **Worktree setup.** `start_thread` with a new worktree reports its setup before the thread exists. Until `thread_started`, each `worktree_setup` goes only to the device that started it, with `thread` set to that device's `draft`. After `thread_started`, later setup updates (scripts that don't block the thread) carry the thread id and go to the thread's watchers.
 
 ## Blobs

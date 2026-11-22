@@ -241,7 +241,7 @@ mod route {
                     self.links.unwatch(machine, id);
                     None
                 }
-                Command::StartThread { draft, project: Some(project), prompt, settings } if remote(&project) => {
+                Command::StartThread { draft, project: Some(project), prompt, settings, .. } if remote(&project) => {
                     let (machine, id) = split(&project)?;
                     let args = json!({ "draft": draft, "project": id, "settings": settings });
                     self.links.request(machine, "start_thread", args, Some(prompt), Some(draft));

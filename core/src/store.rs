@@ -63,6 +63,8 @@ pub(crate) struct ThreadFlags {
     pub(crate) local_only: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) caller: Option<crate::plugins::Caller>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

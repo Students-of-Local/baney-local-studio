@@ -310,6 +310,7 @@ enum Command {
         project: Option<String>,
         prompt: PromptDraft,
         settings: ThreadSettings,
+        caller: Option<plugins::Caller>,
     },
     StartThreads {
         draft: String,
@@ -817,7 +818,7 @@ impl Studio {
     }
 
     pub fn start_thread(&self, draft: String, project: Option<String>, prompt: PromptDraft, settings: ThreadSettings) {
-        self.send_command(Command::StartThread { draft, project, prompt, settings });
+        self.send_command(Command::StartThread { draft, project, prompt, settings, caller: None });
     }
 
     pub fn start_threads(
@@ -1141,6 +1142,18 @@ pub fn serve_holds_lock(data_dir: Option<String>) -> bool {
         .is_some_and(serve::runs_serve)
 }
 
+#[cfg(unix)]
+fn host_caller() -> Option<plugins::Caller> {
+    let (one, _other) = tokio::net::UnixStream::pair().ok()?;
+    let uid = one.peer_cred().ok()?.uid();
+    Some(plugins::Caller::host(&uid.to_string()))
+}
+
+#[cfg(not(unix))]
+fn host_caller() -> Option<plugins::Caller> {
+    std::env::var("USERNAME").ok().filter(|name| !name.is_empty()).map(|name| plugins::Caller::host(&name))
+}
+
 impl Studio {
     pub fn subscribe(&self, waker: Arc<dyn Waker>) -> Subscription {
         self.mailbox.subscribe(waker)
@@ -1152,6 +1165,17 @@ impl Studio {
 
     pub fn queued(&self) -> usize {
         self.backlog.commands.load(Ordering::SeqCst)
+    }
+
+    pub fn start_thread_as(
+        &self,
+        draft: String,
+        project: Option<String>,
+        prompt: PromptDraft,
+        settings: ThreadSettings,
+        caller: plugins::Caller,
+    ) {
+        self.send_command(Command::StartThread { draft, project, prompt, settings, caller: Some(caller) });
     }
 
     fn send_command(&self, command: Command) {
@@ -1651,8 +1675,8 @@ impl Actor {
             Command::SelectThread { thread } => self.select(thread).await,
             Command::WatchThread { thread } => self.watch(&thread).await,
             Command::UnwatchThread { thread } => self.unwatch(&thread).await,
-            Command::StartThread { draft, project, prompt, settings } => {
-                self.start_thread(&draft, project, prompt, settings, None).await;
+            Command::StartThread { draft, project, prompt, settings, caller } => {
+                self.start_thread(&draft, project, prompt, settings, None, caller).await;
             }
             Command::StartThreads { draft, project, prompt, settings, models } => {
                 self.start_threads(&draft, project, prompt, settings, models).await;
@@ -2215,7 +2239,7 @@ impl Actor {
         entry.path = Some(created.session_file);
         entry.cwd = Some(cwd);
         self.attach(id, &created.active_session_id).await?;
-        self.sync_ask_servers(id, &created.active_session_id).await;
+        self.sync_plugin_servers(id, &created.active_session_id).await;
         Ok(created.active_session_id)
     }
 
@@ -2390,8 +2414,9 @@ impl Actor {
         prompt: PromptDraft,
         settings: ThreadSettings,
         fan_out: Option<String>,
+        caller: Option<plugins::Caller>,
     ) {
-        match self.create_thread(draft, project, settings, fan_out, &prompt.text).await {
+        match self.create_thread(draft, project, settings, fan_out, &prompt.text, caller).await {
             Ok(id) => {
                 if let Err(error) = self.send_prompt(&id, prompt, Delivery::Queue, None).await {
                     self.mailbox.notice(NoticeLevel::Error, error);
@@ -2401,6 +2426,7 @@ impl Actor {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn create_thread(
         &mut self,
         draft: &str,
@@ -2408,6 +2434,7 @@ impl Actor {
         settings: ThreadSettings,
         fan_out: Option<String>,
         prompt: &str,
+        caller: Option<plugins::Caller>,
     ) -> Result<String, String> {
         let project_path = match &project {
             Some(project) => Some(self.store.project_id(project).ok_or_else(|| format!("Unknown project {project}."))?),
@@ -2491,10 +2518,11 @@ impl Actor {
             flags.project.clone_from(&project_path);
             flags.access = Some(settings.access);
             flags.fan_out = fan_out;
+            flags.caller = caller.or_else(host_caller);
         });
         self.save();
         self.attach(&id, &created.active_session_id).await?;
-        self.sync_ask_servers(&id, &created.active_session_id).await;
+        self.sync_plugin_servers(&id, &created.active_session_id).await;
         let provider = settings.provider.or(effective.default_provider);
         let model = settings.model.or(effective.default_model);
         let thinking = settings.thinking_level.or(effective.default_thinking_level);
@@ -2571,7 +2599,7 @@ impl Actor {
         models: Vec<ModelKey>,
     ) {
         if models.is_empty() {
-            self.start_thread(draft, project, prompt, settings, None).await;
+            self.start_thread(draft, project, prompt, settings, None, None).await;
             return;
         }
         let base = match &settings.worktree {
@@ -2594,7 +2622,8 @@ impl Actor {
                     WorktreeChoice::Local
                 },
             };
-            self.start_thread(&member, project.clone(), prompt.clone(), member_settings, Some(group.clone())).await;
+            self.start_thread(&member, project.clone(), prompt.clone(), member_settings, Some(group.clone()), None)
+                .await;
         }
     }
 
@@ -2683,7 +2712,7 @@ impl Actor {
             if !self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy) {
                 self.flush_ask_notes(id).await;
             }
-            self.sync_ask_servers(id, &active).await;
+            self.sync_plugin_servers(id, &active).await;
             let command = DaemonCommand::Prompt {
                 id: None,
                 active_session_id: active,
@@ -3301,6 +3330,7 @@ impl Actor {
             fork.project = flags.project;
             fork.access = flags.access;
             fork.local_only = flags.local_only;
+            fork.caller = flags.caller;
         });
         self.save();
         self.threads.insert(fork_id.clone(), Thread { path, cwd, ..Thread::default() });
