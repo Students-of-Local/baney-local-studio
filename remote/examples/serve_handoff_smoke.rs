@@ -859,7 +859,10 @@ fn pair_json(run: &Run) -> anyhow::Result<()> {
     let other = "other.tail1234.ts.net";
     let (_, hint) = mint(other)?;
     ensure!(hint.contains(&format!("allow-host {other}")), "pair gave no allow-host hint for {other}: {hint}");
-    println!("ok   pair --json prints one minted object ({known}); the allow-host hint shows only for a host serve.json does not list");
+    std::fs::write(data.join("remote").join("serve.json"), "{ not json")?;
+    let (_, broken) = mint(other)?;
+    ensure!(broken.contains("could not check"), "pair with a broken serve.json said nothing about it: {broken}");
+    println!("ok   pair --json prints one minted object ({known}); the allow-host hint shows only for a host serve.json does not list, and a broken serve.json still leaves one object and exit 0");
     Ok(())
 }
 

@@ -581,7 +581,13 @@ fn pair(mut args: Args) -> anyhow::Result<()> {
     }
     let host = url.strip_prefix("wss://").and_then(|rest| rest.split('/').next()).filter(|host| !host.is_empty());
     if let Some(host) = host {
-        let stored = settings::load(&data_dir)?.unwrap_or_default();
+        let stored = match settings::load(&data_dir) {
+            Ok(stored) => stored.unwrap_or_default(),
+            Err(error) => {
+                eprintln!("could not check {} for {host}: {error:#}", settings::path(&data_dir).display());
+                return Ok(());
+            }
+        };
         let known = stored.allow_hosts.iter().chain(&stored.allow_tunnel_hosts).any(|allowed| allowed == host);
         if !known {
             eprintln!(
