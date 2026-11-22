@@ -23,11 +23,11 @@ Layer splits (llama.cpp RPC pools, and later Fonsviva's node channel) never run 
 A paired device gets fleet access only when the serving machine's owner asks for it while minting the pairing:
 
 ```
-local-studio fleet invite [--json]          on the machine that shares: mints a pairing with the fleet scope, prints the link
-local-studio fleet join <link> [--json]     on the machine that uses it: pairs with that link and adds the machine as a fleet peer
+local-studio fleet invite [--url <wss url>] [--json]   on the machine that shares: mints a pairing with the fleet scope, prints the link
+local-studio fleet join <link> [--json]                on the machine that uses it: pairs with that link and adds the machine as a fleet peer
 ```
 
-The scope lives in the pending pairing on the serving machine (`devices.json`), never in the link, so the other side can't add it by editing the URL. When the handshake completes, that device's record gains `"scopes": ["fleet"]`. A phone paired the ordinary way has no scopes and gets `forbidden` from every fleet op. `local-studio-serve devices` lists the scope, and revoking the device (`local-studio-serve revoke <id>`) ends its fleet access with everything else. An agent can run both commands for a person: the only thing that crosses between the machines is the link, which the person copies or the agent passes.
+The link points at this machine's public route when it has one (the `cloudflare` or `hosted` hostname in `<data dir>/tunnel/route.json`, as `wss://<hostname>/v1/ws`), then its tailnet name; `--url` overrides both and must be `wss://`. `local-studio-serve pair --fleet` mints the same pairing. The scope lives in the pending pairing on the serving machine (`devices.json`), never in the link, so the other side can't add it by editing the URL. When the handshake completes, that device's record gains `"scopes": ["fleet"]`. A phone paired the ordinary way has no scopes and gets `forbidden` from every fleet op. `local-studio-serve devices` lists the scope, and revoking the device (`local-studio-serve revoke <id>`) ends its fleet access with everything else. An agent can run both commands for a person: the only thing that crosses between the machines is the link, which the person copies or the agent passes.
 
 `fleet join` without a link keeps today's meaning: turn on tailnet discovery.
 
@@ -35,10 +35,10 @@ The scope lives in the pending pairing on the serving machine (`devices.json`), 
 
 Two ops, added to protocol 2's op table (ops are additive: a server without them answers `not_remote`, and the client shows "update <machine> to use it in the fleet"):
 
-- `fleet_http {method, path, query, headers, body, stream}` → answer `{status, headers, body}`, or with `stream: true` `{status, headers, stream: <id>}` followed by updates `{"type":"fleet_chunk","stream","data"}` and one `{"type":"fleet_end","stream","error"?}`, sent only to the device that asked.
-- `fleet_cancel {stream}`: the client's caller went away; serve aborts its request to the controller.
+- `fleet_http {method, path, query, headers, body, stream}` → answer `{status, headers, body}`, or with `stream` set `{status, headers, stream: <id>}` followed by `{"type":"fleet_chunk","stream","data"}` and one `{"type":"fleet_end","stream","error"?}`. `stream` is `true` (serve names the stream) or the client's own id of 1 to 64 letters, digits, `-` or `_`, unique among that device's open streams, so the client can cancel before the controller answers. Chunks and the end go only to the connection that asked, as `{"op":"fleet","update":{...}}` frames outside the update sequence: they are never buffered for resume, because the request ends with the connection.
+- `fleet_cancel {stream}`: the client's caller went away; serve aborts its request to the controller. Closing the connection aborts every request it opened.
 
-`headers` passes only `content-type`, `accept` and `x-local-studio-endpoint`; serve sets `authorization: Bearer <its own fleet key>` (read from the controller's `config.json`, the same lookup `local-studio fleet` uses) and the hop header itself, and drops anything else. Bodies are base64 in the JSON frame, at most 6 MiB in each direction for a non-streaming request (413 otherwise; the JSON frame limit is 8 MiB). Each chunk carries what the controller's response stream gave, at most 64 KiB. Limits per device: 8 streams at once, 32 requests a minute beyond that are answered 429 (`remote/src/limits.rs` holds the numbers).
+`headers` passes only `content-type`, `accept` and `x-local-studio-endpoint`; serve sets `authorization: Bearer <its own fleet key>` (read from the controller's `config.json`, the same lookup `local-studio fleet` uses) and the hop header itself, and drops anything else. Bodies are base64 in the JSON frame, at most 6 MiB in each direction for a non-streaming request (413 otherwise). Base64 grows a body by a third, so a request body near 6 MiB passes the 8 MiB JSON frame limit and the socket closes first: the client side refuses a request body over 6 MiB with 413 before sending it. Each chunk carries what the controller's response stream gave, at most 64 KiB. Limits per device: 8 streams at once and 32 requests a minute; past either, 429 (`remote/src/limits.rs` holds the numbers).
 
 ## The client side
 
