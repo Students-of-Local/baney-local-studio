@@ -117,10 +117,17 @@ impl Link {
     }
 }
 
+enum Offer {
+    Minting,
+    Minted(String),
+    Closed,
+}
+
 #[derive(Default)]
 struct State {
     machines: Vec<Link>,
     selected: Option<(String, String)>,
+    offers: HashMap<String, Offer>,
 }
 
 impl State {
@@ -223,22 +230,50 @@ impl Links {
     }
 
     pub(crate) fn open_pairing(&self, request: String, data_dir: PathBuf) {
-        let mailbox = Arc::clone(&self.0.mailbox);
+        self.0.lock().offers.insert(request.clone(), Offer::Minting);
+        let inner = Arc::clone(&self.0);
         self.0.handle.spawn_blocking(move || {
-            let update = match pairing::mint(&data_dir, crate::CHANNEL, None, None) {
-                Ok(minted) => Update::Pairing {
-                    request,
-                    link: minted.link,
-                    url: minted.url,
-                    serving: pairing::serving(&data_dir),
-                    expires_at: minted.expires_at,
-                },
+            let minted = pairing::mint(&data_dir, crate::CHANNEL, None, None);
+            let mut state = inner.lock();
+            let closed = matches!(state.offers.get(&request), Some(Offer::Closed) | None);
+            let update = match minted {
+                Ok(minted) if closed => {
+                    state.offers.remove(&request);
+                    drop(state);
+                    expire(&inner.mailbox, &data_dir, &minted.id);
+                    return;
+                }
+                Ok(minted) => {
+                    state.offers.insert(request.clone(), Offer::Minted(minted.id));
+                    Update::Pairing {
+                        request,
+                        link: minted.link,
+                        url: minted.url,
+                        serving: pairing::serving(&data_dir),
+                        expires_at: minted.expires_at,
+                    }
+                }
                 Err(error) => {
+                    state.offers.remove(&request);
                     Update::RequestFailed { request, message: format!("Could not open a pairing: {error:#}") }
                 }
             };
-            mailbox.push(update);
+            drop(state);
+            inner.mailbox.push(update);
         });
+    }
+
+    pub(crate) fn close_pairing(&self, request: &str, data_dir: PathBuf) {
+        let mut state = self.0.lock();
+        let Some(offer) = state.offers.get_mut(request) else { return };
+        if matches!(offer, Offer::Minting) {
+            *offer = Offer::Closed;
+            return;
+        }
+        let Some(Offer::Minted(id)) = state.offers.remove(request) else { return };
+        drop(state);
+        let mailbox = Arc::clone(&self.0.mailbox);
+        self.0.handle.spawn_blocking(move || expire(&mailbox, &data_dir, &id));
     }
 
     pub(crate) fn watch(&self, machine: &str, thread: &str) {
@@ -472,6 +507,12 @@ enum Next {
     Binary(Vec<u8>),
     Text(String),
     Closed(Option<u16>),
+}
+
+fn expire(mailbox: &Mailbox, data_dir: &Path, id: &str) {
+    if let Err(error) = super::devices::Devices::new(data_dir).close_pairing(id) {
+        mailbox.notice(NoticeLevel::Error, format!("Could not close the pairing: {error:#}"));
+    }
 }
 
 async fn next(stream: &mut Stream) -> Next {

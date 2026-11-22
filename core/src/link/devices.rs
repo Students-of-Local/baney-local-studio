@@ -212,6 +212,17 @@ impl Devices {
         Ok((id, Psk(secret), expires_at))
     }
 
+    pub fn close_pairing(&self, id: &str) -> anyhow::Result<bool> {
+        let _held = self.hold()?;
+        match self.open()? {
+            Some(pairing) if pairing.id == id => {
+                std::fs::remove_file(&self.pairing).with_context(|| format!("remove {}", self.pairing.display()))?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn open(&self) -> anyhow::Result<Option<Pairing>> {
         match std::fs::read(&self.pairing) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),

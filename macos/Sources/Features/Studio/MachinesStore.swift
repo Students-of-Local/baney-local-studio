@@ -27,6 +27,7 @@ final class MachinesStore {
     @ObservationIgnored private let core: CoreHandle
     @ObservationIgnored private let requests: RequestCenter
     @ObservationIgnored private(set) var offerRequest: String?
+    @ObservationIgnored private var sheetRequest: String?
 
     init(core: CoreHandle, requests: RequestCenter) {
         self.core = core
@@ -73,11 +74,18 @@ final class MachinesStore {
             if case .failed(let message) = outcome { offerError = message }
         }
         offerRequest = request
-        core.run { $0.openPairing(request: request) }
+        let previous = sheetRequest
+        sheetRequest = request
+        core.run { studio in
+            if let previous { studio.closePairing(request: previous) }
+            studio.openPairing(request: request)
+        }
     }
 
     func closePairing() {
         if let offerRequest { requests.settle(offerRequest) }
+        if let sheetRequest { core.run { $0.closePairing(request: sheetRequest) } }
+        sheetRequest = nil
         offerRequest = nil
         opening = false
         offer = nil
