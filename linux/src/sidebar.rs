@@ -1013,6 +1013,7 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
         line.append(&title);
         if let Some(machine) = &card.machine {
             let glyph = icons::styled(machine.icon, "ls-meta");
+            glyph.update_property(&[gtk::accessible::Property::Label(&machine.tooltip())]);
             if !machine.reachable {
                 glyph.set_opacity(0.6);
             }
@@ -1096,6 +1097,7 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
             let tag = gtk::Box::new(gtk::Orientation::Horizontal, 3);
             tag.append(&icons::styled(machine.icon, "ls-meta"));
             let name = gtk::Label::new(Some(&machine.name));
+            name.update_property(&[gtk::accessible::Property::Label(&machine.tooltip())]);
             name.add_css_class("ls-meta");
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             tag.append(&name);

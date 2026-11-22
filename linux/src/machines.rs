@@ -313,11 +313,14 @@ pub fn open_pairing(app: &Rc<App>) {
     dialog.connect_closed(move |_| {
         PAIRING.with(|slot| slot.replace(None));
         let Some(app) = weak.upgrade() else { return };
-        {
+        let closed = {
             let mut state = app.state.borrow_mut();
-            state.pairing = None;
             state.offer = None;
             state.offer_error = None;
+            state.pairing.take()
+        };
+        if let Some(request) = closed {
+            app.core.run(|studio| studio.close_pairing(request));
         }
         app.core.run(Studio::list_paired_devices);
     });

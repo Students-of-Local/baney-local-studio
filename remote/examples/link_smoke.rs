@@ -13,8 +13,8 @@ use local_studio_core::link::devices::{unhex, Devices};
 use local_studio_core::link::{noise, pairing, snow};
 use local_studio_core::{
     AccessMode, Approval, ApprovalAnswer, Block, DaemonLaunch, Delivery, Harness, Item, ItemKind, Machine,
-    MachineState, ModelOption, Project, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus,
-    TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    MachineState, ModelOption, PairedDevice, Project, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings,
+    ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
 use tokio_tungstenite::tungstenite::Message;
@@ -73,6 +73,9 @@ struct View {
     notices: Vec<String>,
     failed: HashMap<String, String>,
     pairing: Option<(String, String, i64)>,
+    serving: Option<bool>,
+    devices: Option<Vec<PairedDevice>>,
+    drops: usize,
     usage: Option<UsageReport>,
     daemon: Option<u32>,
     sockets: Vec<String>,
@@ -83,7 +86,10 @@ struct View {
 impl View {
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Machines { machines } => self.machines = machines,
+            Update::Machines { machines } => {
+                self.drops += machines.iter().filter(|machine| machine.state != MachineState::Connected).count();
+                self.machines = machines;
+            }
             Update::Models { models, .. } => self.models = models,
             Update::Threads { threads } => self.threads = threads,
             Update::Projects { projects } => self.projects = projects,
@@ -119,7 +125,11 @@ impl View {
                 println!("     request {request} failed: {message}");
                 self.failed.insert(request, message);
             }
-            Update::Pairing { request, link, expires_at, .. } => self.pairing = Some((request, link, expires_at)),
+            Update::Pairing { request, link, expires_at, serving, .. } => {
+                self.pairing = Some((request, link, expires_at));
+                self.serving = Some(serving);
+            }
+            Update::PairedDevices { devices } => self.devices = Some(devices),
             Update::Usage { report, .. } => self.usage = Some(report),
             Update::Daemon { socket, pid, .. } => {
                 self.sockets.push(socket);
@@ -185,6 +195,20 @@ struct Desk {
 
 impl Desk {
     fn open(label: &'static str, eukhe: &Path, data: &Path, socket: &Path) -> anyhow::Result<Self> {
+        Self::start(label, eukhe, data, socket, false)
+    }
+
+    fn app(label: &'static str, eukhe: &Path, data: &Path, socket: &Path) -> anyhow::Result<Self> {
+        Self::start(label, eukhe, data, socket, true)
+    }
+
+    fn start(
+        label: &'static str,
+        eukhe: &Path,
+        data: &Path,
+        socket: &Path,
+        take_over_serve: bool,
+    ) -> anyhow::Result<Self> {
         let signal = Arc::new(Signal::default());
         let config = StudioConfig {
             socket_path: Some(socket.to_string_lossy().into_owned()),
@@ -192,7 +216,7 @@ impl Desk {
             data_dir: Some(data.to_string_lossy().into_owned()),
             launch: Some(DaemonLaunch { program: eukhe.to_string_lossy().into_owned() }),
             controller_main: None,
-            take_over_serve: false,
+            take_over_serve,
         };
         let studio =
             Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -462,6 +486,11 @@ fn pair_checks(run: &mut Run, b: &mut Desk) -> anyhow::Result<String> {
         "expires_at {expires_at}"
     );
     println!("ok   open_pairing minted {} for {} (same pairing.json as serve pair)", parsed.id, parsed.url);
+    ensure!(b.view.serving == Some(false), "open_pairing on B, which has no serve.json, reported serving");
+    println!("ok   open_pairing on B reports serving == false (no serve.json)");
+    b.studio.close_pairing("pair-b".to_string());
+    let minted = run.b.data.join("remote/pairing.json");
+    b.until("close_pairing removes the pairing it minted", QUICK, |_| !minted.exists())?;
 
     let link = pairing_link(run)?;
     let started = Instant::now();
@@ -1094,6 +1123,86 @@ fn reconnect_checks(run: &mut Run, b: &mut Desk, machine: &str, thread: &str) ->
     Ok(())
 }
 
+fn lock_owner(data: &Path) -> Option<u32> {
+    std::fs::read_to_string(data.join("studio.lock")).ok()?.trim().parse().ok()
+}
+
+fn device_checks(desk: &mut Desk, device: &str) -> anyhow::Result<()> {
+    desk.studio.list_paired_devices();
+    desk.until("list_paired_devices answers PairedDevices", QUICK, |view| view.devices.is_some())?;
+    let listed = desk.view.devices.clone().unwrap_or_default();
+    ensure!(listed.len() == 1 && listed[0].id == device, "A lists {listed:?}, not exactly B's device {device}");
+    ensure!(listed[0].platform == std::env::consts::OS, "B's device platform is {}", listed[0].platform);
+    println!("ok   A lists exactly B ({}, platform {})", listed[0].name, listed[0].platform);
+    desk.view.devices = None;
+    let before = desk.view.notices.len();
+    desk.studio.revoke_paired_device("no-such-id".to_string());
+    desk.until("revoking an unknown device posts a notice and republishes the list", QUICK, |view| {
+        view.devices.is_some()
+            && view.notices[before..].iter().any(|notice| notice == "That device was already revoked")
+    })?;
+    let ids = |devices: &[PairedDevice]| devices.iter().map(|device| device.id.clone()).collect::<Vec<_>>();
+    let again = desk.view.devices.clone().unwrap_or_default();
+    ensure!(ids(&again) == ids(&listed), "the list after a stale revoke changed: {again:?}");
+    println!("ok   a stale revoke keeps the same list");
+    Ok(())
+}
+
+fn devices_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
+    let settings = json!({ "name": NAME, "port": run.serve.port });
+    local_studio_core::link::devices::write_private(
+        &run.a.data.join("remote/serve.json"),
+        format!("{settings}\n").as_bytes(),
+    )?;
+    b.until("the machine is connected before desk A opens", RECONNECT, |view| connected(view, machine))?;
+    let saved: Value = serde_json::from_slice(&std::fs::read(run.b.data.join("remote/links.json"))?)?;
+    let device = saved["machines"][0]["device"].as_str().context("links.json names no device id")?.to_string();
+    let serve = run.serve.child.as_ref().map(Child::id).context("serve is not running")?;
+    ensure!(lock_owner(&run.a.data) == Some(serve), "serve {serve} does not own A's studio.lock");
+    let drops = b.view.drops;
+    run.a.enter();
+    let started = Instant::now();
+    let mut desk = Desk::app("desktop A", &run.eukhe, &run.a.data, &run.a.socket)?;
+    run.report.push(format!("desk A took studio.lock over from serve: {} ms", started.elapsed().as_millis()));
+    ensure!(lock_owner(&run.a.data) == Some(std::process::id()), "desk A opened without owning studio.lock");
+    ensure!(run.serve.child.as_mut().context("no serve")?.try_wait()?.is_none(), "serve exited on the hand-over");
+    println!("ok   serve {serve} handed studio.lock to desk A and keeps waiting");
+    let checked = (|| {
+        let host = local_studio_remote::host::start(Arc::clone(&desk.studio), Some(&run.a.data))?
+            .context("serve.json exists, so desk A must serve in process")?;
+        let served = (|| {
+            b.until("B drops serve and reconnects to desk A's in-process server", RECONNECT, |view| {
+                view.drops > drops && connected(view, machine)
+            })?;
+            device_checks(&mut desk, &device)?;
+            desk.studio.open_pairing("pair-a".to_string());
+            desk.until("open_pairing on desk A answers", QUICK, |view| view.pairing.is_some())?;
+            ensure!(desk.view.serving == Some(true), "open_pairing on A, serving in process, reported not serving");
+            println!("ok   open_pairing on desk A reports serving == true (in-process server)");
+            desk.studio.close_pairing("pair-a".to_string());
+            let minted = run.a.data.join("remote/pairing.json");
+            desk.until("close_pairing on desk A removes its pairing", QUICK, |_| !minted.exists())?;
+            anyhow::Ok(())
+        })();
+        host.stop();
+        served
+    })();
+    let drops = b.view.drops;
+    let daemon = desk.close();
+    if let Some(slot) = run.daemons.iter_mut().find(|(socket, _)| *socket == run.a.socket) {
+        slot.1 = slot.1.or(daemon);
+    }
+    checked?;
+    let closed = Instant::now();
+    b.until("B reconnects to serve once desk A closes", RECONNECT, |view| {
+        view.drops > drops && connected(view, machine)
+    })?;
+    ensure!(lock_owner(&run.a.data) == Some(serve), "serve {serve} did not take studio.lock back");
+    run.report.push(format!("desk A closed to B reconnected to serve: {} ms", closed.elapsed().as_millis()));
+    println!("ok   serve {serve} took studio.lock back and serves B again");
+    Ok(())
+}
+
 fn revoke_checks(run: &mut Run, b: &mut Desk, machine: &str) -> anyhow::Result<()> {
     run.serve.run(&run.a, &["revoke", "--all"])?;
     b.until("revoking B on A turns the machine to pair_again", QUICK, |view| {
@@ -1164,6 +1273,7 @@ fn drive(run: &mut Run) -> anyhow::Result<()> {
         phone_checks(run, &mut b, &machine, &thread)?;
         freeze_checks(run, &mut b, &machine)?;
         reconnect_checks(run, &mut b, &machine, &thread)?;
+        devices_checks(run, &mut b, &machine)?;
         let seen = b.view.items(&thread).to_vec();
         revoke_checks(run, &mut b, &machine)?;
         anyhow::Ok((thread, seen))

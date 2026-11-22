@@ -562,7 +562,7 @@ fn pair(mut args: Args) -> anyhow::Result<()> {
     let data_dir = args.data_dir()?;
     args.done()?;
     let url = url.or_else(pairing::tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{port}/v1/ws"));
-    let pairing::Minted { link, url, expires_at } = pairing::mint(&data_dir, CHANNEL, Some(url), Some(name))?;
+    let pairing::Minted { link, url, expires_at, .. } = pairing::mint(&data_dir, CHANNEL, Some(url), Some(name))?;
     if out.json {
         out.object(&json!({ "state": "minted", "link": link, "url": url, "expiresAt": expires_at }));
     } else {
