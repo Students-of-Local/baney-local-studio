@@ -57,6 +57,7 @@ const TITLE_CONTEXT_LIMIT: usize = 4000;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const START_GRACE: Duration = Duration::from_secs(30);
 const RELINK_DELAY: Duration = Duration::from_secs(1);
+const ROSTER_GRACE: Duration = Duration::from_secs(3);
 const RELINK_ATTEMPTS: u32 = 20;
 const PROBE_TIMEOUT_MS: u64 = 5_000;
 const KILL_TIMEOUT_MS: u64 = 15_000;
@@ -522,6 +523,9 @@ enum Command {
     StopCheck {
         thread: String,
     },
+    RosterCheck {
+        thread: String,
+    },
     CliSettle {
         thread: String,
         epoch: u64,
@@ -737,6 +741,7 @@ impl Studio {
             ask_sent: HashMap::new(),
             consents: Arc::default(),
             t3: t3::Watch::default(),
+            roster_checks: HashSet::new(),
         };
         let poller = inbox.clone();
         runtime.spawn(async move {
@@ -1277,6 +1282,7 @@ struct Actor {
     ask_sent: HashMap<String, Value>,
     consents: Arc<std::sync::Mutex<plugins::Pendings>>,
     t3: t3::Watch,
+    roster_checks: HashSet<String>,
 }
 
 #[cfg(unix)]
@@ -1583,7 +1589,73 @@ impl Actor {
             for thread in unsure {
                 self.itself.send(Command::Verify { thread, attempt: 0, relink: false });
             }
+            self.watch_rosters();
         }
+        self.dirty = true;
+    }
+
+    fn roster_only(&self, id: &str) -> bool {
+        self.harness(id).is_none()
+            && self.roster_for(id).is_some_and(|row| row.running)
+            && !self.threads.get(id).is_some_and(|thread| {
+                thread.pending_run
+                    || thread.stopping.is_some()
+                    || thread.live.as_ref().is_some_and(|live| live.state.busy)
+            })
+    }
+
+    fn watch_roster(&mut self, id: &str) {
+        if self.client.is_some() && self.roster_only(id) && self.roster_checks.insert(id.to_string()) {
+            self.later(ROSTER_GRACE, Command::RosterCheck { thread: id.to_string() });
+        }
+    }
+
+    fn watch_rosters(&mut self) {
+        let running: Vec<String> =
+            self.roster.values().filter(|row| row.running).map(|row| row.session_id.clone()).collect();
+        for id in running {
+            self.watch_roster(&id);
+        }
+    }
+
+    async fn roster_check(&mut self, id: &str) {
+        self.roster_checks.remove(id);
+        if !self.roster_only(id) {
+            return;
+        }
+        let Some(active) = self.daemon_active(id) else { return };
+        let idle = match self.state_of(&active).await {
+            Ok(state) => !["isStreaming", "isCompacting", "isBashRunning"]
+                .iter()
+                .any(|key| state.get(key).and_then(Value::as_bool) == Some(true)),
+            Err(_) => false,
+        };
+        let children = self.children.values().any(|child| {
+            child.agent.running
+                && (child.parent_session_id.as_deref() == Some(id)
+                    || child.parent_active_session_id.as_deref() == Some(active.as_str()))
+        });
+        if idle && !children && self.roster_only(id) {
+            self.roster_idle(id);
+        }
+        self.watch_roster(id);
+    }
+
+    fn roster_idle(&mut self, id: &str) {
+        let failed = self.roster_for(id).is_some_and(|row| row.failed);
+        for row in self.roster.values_mut().filter(|row| row.session_id == id) {
+            row.running = false;
+        }
+        let attached = self.threads.get(id).is_some_and(|thread| thread.live.is_some());
+        let ended_by_events = self.threads.get_mut(id).is_some_and(|thread| {
+            thread.run_started_at = None;
+            std::mem::take(&mut thread.ended_by_events)
+        });
+        if !attached && !ended_by_events {
+            self.run_finished(id, failed);
+        }
+        self.itself.send(Command::SendHeld { thread: id.to_string() });
+        self.emit_info(id);
         self.dirty = true;
     }
 
@@ -1888,6 +1960,7 @@ impl Actor {
             }
             Command::Verify { thread, attempt, relink } => self.verify(&thread, attempt, relink).await,
             Command::StopCheck { thread } => self.stop_check(&thread).await,
+            Command::RosterCheck { thread } => self.roster_check(&thread).await,
             Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
             Command::T3Poll => self.t3_poll(false, None),
@@ -4215,6 +4288,9 @@ impl Actor {
                 self.emit_info(&id);
             }
         }
+        if self.client.is_some() {
+            self.watch_rosters();
+        }
         self.push_daemon();
         if children_changed || children_before != self.children.len() {
             for watched in self.watched_ids() {
@@ -4528,6 +4604,7 @@ impl Actor {
         self.emit_info(id);
         self.send_held(id).await;
         self.release(id).await;
+        self.watch_roster(id);
     }
 
     fn rows(&mut self, archived: bool) -> Vec<ThreadRow> {
