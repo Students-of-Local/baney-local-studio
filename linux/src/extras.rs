@@ -140,6 +140,12 @@ impl Extras {
         taken
     }
 
+    pub fn restore(&self, images: Vec<ImageAttachment>, files: Vec<String>) {
+        self.images.replace(images);
+        self.files.replace(files);
+        self.render_chips();
+    }
+
     pub fn remember(&self, text: &str) {
         let mut history = self.history.borrow_mut();
         history.retain(|entry| entry != text);

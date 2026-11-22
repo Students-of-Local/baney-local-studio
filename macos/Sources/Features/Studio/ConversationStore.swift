@@ -536,6 +536,16 @@ final class ConversationStore {
         }
     }
 
+    func setComposerDraft(thread: String, draft prompt: PromptDraft) {
+        let draft = composer(key: thread)
+        draft.text = prompt.text
+        draft.images = prompt.images.map { ComposerImage(attachment: $0, thumbnail: NSImage(data: $0.data)) }
+        draft.files = prompt.files
+        if thread == self.thread {
+            focusRequest += 1
+        }
+    }
+
     func setModels(_ models: [ModelOption], favorites: [ModelKey], hidden: [ModelKey]) {
         self.models = models
         self.favorites = favorites

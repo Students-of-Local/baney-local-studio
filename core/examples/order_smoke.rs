@@ -102,6 +102,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ThreadSearch { .. }
         | Update::Queue { .. }
         | Update::ComposerText { .. }
+        | Update::ComposerDraft { .. }
         | Update::LocalOnly { .. }
         | Update::Models { .. }
         | Update::DaemonDefault { .. }

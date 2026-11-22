@@ -290,6 +290,7 @@ impl Harness {
             | Update::QuestionsSettled { .. }
             | Update::Queue { .. }
             | Update::ComposerText { .. }
+            | Update::ComposerDraft { .. }
             | Update::LocalOnly { .. }
             | Update::Models { .. }
             | Update::DaemonDefault { .. }

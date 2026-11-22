@@ -559,37 +559,48 @@ fn mcp_servers(ready: &[Standing]) -> Map<String, Value> {
         .collect()
 }
 
-#[must_use]
-pub fn session_servers(plugins: &[Plugin], grants: &Grants, caller: Option<&Caller>) -> Vec<Value> {
-    plugins
-        .iter()
-        .filter(|plugin| plugin.local_only && plugin.asks(Capability::McpServer))
-        .filter_map(|plugin| {
-            let (consent, held) = grants.standing(plugin);
-            if consent != Consent::Ready {
-                return None;
+pub fn session_servers(
+    plugins: &[Plugin],
+    grants: &Grants,
+    wanted: &[String],
+    caller: Option<&Caller>,
+) -> Result<Vec<Value>, Vec<String>> {
+    let mut servers = Vec::new();
+    let mut missing = Vec::new();
+    for plugin in plugins.iter().filter(|plugin| plugin.local_only && wanted.contains(&plugin.id)) {
+        let (consent, held) = grants.standing(plugin);
+        if consent != Consent::Ready || !plugin.asks(Capability::McpServer) {
+            continue;
+        }
+        let Some(mcp) = plugin.mcp.as_ref() else { continue };
+        let mut env = Map::new();
+        for (name, host) in &mcp.env {
+            match std::env::var(host) {
+                Ok(value) => {
+                    env.insert(name.clone(), Value::String(value));
+                }
+                Err(_) => missing.push(format!("{} needs {host}", plugin.id)),
             }
-            let mcp = plugin.mcp.as_ref()?;
-            let mut env: Map<String, Value> = mcp
-                .env
-                .iter()
-                .filter_map(|(name, host)| Some((name.clone(), Value::String(std::env::var(host).ok()?))))
-                .collect();
-            env.insert(NO_BYTECODE.0.to_string(), json!("1"));
-            env.insert(LOCAL_ONLY_ENV.to_string(), json!("1"));
-            if let Some(caller) = caller {
-                caller.insert(&mut env);
-            }
-            Some(json!({
-                "type": "stdio",
-                "name": plugin.mcp_name(),
-                "command": absolute(&mcp.command).to_string_lossy(),
-                "args": plugin.args(&held),
-                "cwd": absolute(&plugin.dir).to_string_lossy(),
-                "env": env,
-            }))
-        })
-        .collect()
+        }
+        env.insert(NO_BYTECODE.0.to_string(), json!("1"));
+        env.insert(LOCAL_ONLY_ENV.to_string(), json!("1"));
+        if let Some(caller) = caller {
+            caller.insert(&mut env);
+        }
+        servers.push(json!({
+            "type": "stdio",
+            "name": plugin.mcp_name(),
+            "command": absolute(&mcp.command).to_string_lossy(),
+            "args": plugin.args(&held),
+            "cwd": absolute(&plugin.dir).to_string_lossy(),
+            "env": env,
+        }));
+    }
+    if missing.is_empty() {
+        Ok(servers)
+    } else {
+        Err(missing)
+    }
 }
 
 fn written_by_us(root: &Path, name: &str, entry: &Value) -> bool {

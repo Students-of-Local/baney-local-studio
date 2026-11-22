@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{AccessMode, Harness, ModelKey};
+use crate::model::{AccessMode, Delivery, Harness, ImageAttachment, ModelKey, PromptDraft};
 
 const VERSION: u32 = 1;
 const FILE: &str = "state.json";
@@ -65,6 +65,76 @@ pub(crate) struct ThreadFlags {
     pub(crate) account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) caller: Option<crate::plugins::Caller>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) held: Vec<HeldPrompt>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct HeldPrompt {
+    pub(crate) text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) images: Vec<HeldImage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) files: Vec<String>,
+    pub(crate) steer: Option<bool>,
+    #[serde(skip)]
+    pub(crate) request: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct HeldImage {
+    pub(crate) mime_type: String,
+    pub(crate) data: String,
+}
+
+impl HeldPrompt {
+    pub(crate) fn new(prompt: &PromptDraft, delivery: Delivery, request: Option<String>) -> Self {
+        Self {
+            text: prompt.text.clone(),
+            images: prompt
+                .images
+                .iter()
+                .map(|image| HeldImage {
+                    mime_type: image.mime_type.clone(),
+                    data: crate::images::encode_base64(&image.data),
+                })
+                .collect(),
+            files: prompt.files.clone(),
+            steer: match delivery {
+                Delivery::Steer => Some(true),
+                Delivery::Queue => Some(false),
+                Delivery::Default => None,
+            },
+            request,
+        }
+    }
+
+    pub(crate) fn prompt(&self) -> PromptDraft {
+        PromptDraft {
+            text: self.text.clone(),
+            images: self
+                .images
+                .iter()
+                .filter_map(|image| {
+                    Some(ImageAttachment {
+                        mime_type: image.mime_type.clone(),
+                        data: crate::images::decode_base64(&image.data)?,
+                    })
+                })
+                .collect(),
+            files: self.files.clone(),
+        }
+    }
+
+    pub(crate) fn delivery(&self) -> Delivery {
+        match self.steer {
+            Some(true) => Delivery::Steer,
+            Some(false) => Delivery::Queue,
+            None => Delivery::Default,
+        }
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

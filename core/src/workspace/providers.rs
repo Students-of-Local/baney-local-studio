@@ -73,33 +73,33 @@ pub fn endpoint_presets() -> Vec<EndpointPreset> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Provider {
-    pub id: String,
-    pub base_url: Option<String>,
+pub(crate) struct Provider {
+    pub(crate) id: String,
+    pub(crate) base_url: Option<String>,
 }
 
 impl Provider {
     #[must_use]
-    pub fn configured(agent: &Path, id: &str) -> Self {
+    pub(crate) fn configured(agent: &Path, id: &str) -> Self {
         Self::from_models(&configured_providers(agent), id)
     }
 
     #[must_use]
-    pub fn from_models(providers: &Map<String, Value>, id: &str) -> Self {
+    pub(crate) fn from_models(providers: &Map<String, Value>, id: &str) -> Self {
         let base_url =
             providers.get(id).filter(|_| !is_built_in(id)).and_then(|entry| text(entry, "baseUrl")).map(str::to_string);
         Self { id: id.to_string(), base_url }
     }
 
     #[must_use]
-    pub fn is_local(&self) -> bool {
+    pub(crate) fn is_local(&self) -> bool {
         crate::harness::harness_of(&self.id) == crate::model::Harness::Eukhe
             && self.base_url.as_deref().is_some_and(local_url)
     }
 }
 
 #[must_use]
-pub fn configured_providers(agent: &Path) -> Map<String, Value> {
+pub(crate) fn configured_providers(agent: &Path) -> Map<String, Value> {
     match read_object(&agent.join("models.json")).ok().and_then(|mut root| root.remove("providers")) {
         Some(Value::Object(providers)) => providers,
         _ => Map::new(),

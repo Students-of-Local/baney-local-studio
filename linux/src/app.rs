@@ -489,6 +489,11 @@ impl App {
                     self.composer.set_text(&text);
                 }
             }
+            Update::ComposerDraft { thread, draft } => {
+                if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
+                    self.composer.set_draft(draft);
+                }
+            }
             Update::Models { models, favorites, hidden } => {
                 let mut state = self.state.borrow_mut();
                 state.models = models;
