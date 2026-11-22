@@ -24,7 +24,7 @@ mod writer;
 
 pub use self::api::terminal_preview;
 pub use self::providers::{configured_providers, endpoint_presets, Provider};
-pub(crate) use self::setup::PreparedWorktree;
+pub(crate) use self::setup::{AddedWorktree, PreparedWorktree};
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
