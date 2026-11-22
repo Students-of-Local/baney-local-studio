@@ -11,6 +11,12 @@ const LOOPBACK_KEPT: usize = 2;
 const FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const BAN: Duration = Duration::from_secs(600);
+pub const FLEET_STREAMS: usize = 8;
+pub const FLEET_PER_MINUTE: usize = 32;
+pub const FLEET_WINDOW: Duration = Duration::from_secs(60);
+pub const FLEET_BODY: usize = 6 << 20;
+pub const FLEET_CHUNK: usize = 64 << 10;
+pub const FLEET_CONNECT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Client {

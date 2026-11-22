@@ -1097,6 +1097,13 @@ impl Hub {
         }
     }
 
+    pub fn deliver(&self, device: &str, conn: ConnId, update: &Value) -> bool {
+        let mut state = self.state();
+        let Ok(session) = state.live(device, conn) else { return false };
+        session.push(text_of(update), None);
+        session.conn.is_some()
+    }
+
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
         unknown("thread", thread)?;
         let mut state = self.state();
