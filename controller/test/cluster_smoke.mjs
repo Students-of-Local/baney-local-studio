@@ -79,10 +79,28 @@ try {
     join(bin, "nvidia-smi"),
     [
       "#!/bin/sh",
+      'case "$*" in',
+      '  *-pl*) echo "$*" >> "$FAKE_GPU_DIR/pl.log"; echo "Power limit set to $4 W."; exit 0 ;;',
+      "esac",
       'case "$1" in',
+      '  --query-gpu=uuid,index,power.limit,*) cat "$FAKE_GPU_DIR/limits.csv" 2>/dev/null ;;',
+      '  --query-gpu=uuid,power.draw) if [ "$3" = "-lms" ]; then while :; do cat "$FAKE_GPU_DIR/draw.csv" 2>/dev/null; sleep 0.2; done; else cat "$FAKE_GPU_DIR/draw.csv"; fi ;;',
       '  --query-gpu=*) if [ -f "$FAKE_GPU_DIR/lostonly" ]; then echo "Unable to determine the device handle for GPU0000:2C:00.0: Unknown Error"; exit 15; fi; if [ -s "$FAKE_GPU_DIR/gpus.csv" ]; then cat "$FAKE_GPU_DIR/gpus.csv"; else echo "No devices were found"; exit 6; fi; if [ -f "$FAKE_GPU_DIR/lost" ]; then echo "Unable to determine the device handle for GPU0000:2C:00.0: Unknown Error"; exit 15; fi ;;',
       '  --query-compute-apps=*) cat "$FAKE_GPU_DIR/apps.csv" 2>/dev/null ;;',
       "esac",
+      "",
+    ].join("\n"),
+    0o755,
+  );
+  write(
+    join(bin, "sudo"),
+    [
+      "#!/bin/sh",
+      'echo "$*" >> "$FAKE_GPU_DIR/sudo.log"',
+      '[ -f "$FAKE_GPU_DIR/sudo-allow" ] || { echo "sudo: a password is required" >&2; exit 1; }',
+      '[ "$1" = "-n" ] && shift',
+      '[ "$1" = "-l" ] && exit 0',
+      'exec "$@"',
       "",
     ].join("\n"),
     0o755,
@@ -152,7 +170,7 @@ try {
       'const port = Number(a[a.indexOf("-p") + 1]);',
       "fs.writeFileSync(`${process.env.STUB_DIR}/rpc-${process.pid}.json`, JSON.stringify({ pid: process.pid, argv: a, cuda: process.env.CUDA_VISIBLE_DEVICES ?? null, owner: process.env.FAKE_GPU_DIR }));",
       'net.createServer((s) => { s.write("rpc-stub\\n"); s.on("data", (d) => s.write(d)); s.on("error", () => {}); }).listen(port, host);',
-      'process.on("SIGTERM", () => process.exit(0));',
+      'process.on("SIGTERM", () => { fs.writeFileSync(`${process.env.STUB_DIR}/term-${process.pid}`, ""); process.exit(0); });',
       "",
     ].join("\n"),
     0o755,
@@ -281,6 +299,7 @@ try {
     write(join(ps, "BAT0/type"), "Battery\n");
     write(join(d.gpu, "apps.csv"), "");
     write(join(d.gpu, "gpus.csv"), "");
+    write(join(d.gpu, "present"), "0\n");
   }
   const gpuRow = (i, uuid, name, used, total, util, bus, gen, width) =>
     `${i}, ${uuid}, ${name}, ${used}, ${total}, 50.0, 200.0, 40, ${util}, ${bus}, ${gen}, ${gen}, ${width}, ${width}\n`;
@@ -289,6 +308,19 @@ try {
   write(join(dirs.a.gpu, "gpus.csv"), internalA);
   write(join(dirs.b.gpu, "gpus.csv"), gpuRow(0, "GPU-b-0", "NVIDIA GeForce RTX 4080", 500, 16376, 0, "00000000:01:00.0", 4, 16));
   write(join(dirs.c.gpu, "gpus.csv"), gpuRow(0, "GPU-c-0", "NVIDIA GeForce RTX 4070", 500, 12282, 0, "00000000:01:00.0", 4, 16));
+  write(join(dirs.a.gpu, "limits.csv"), "GPU-a-0, 0, 140.00, 50.00, 200.00\n");
+  write(join(dirs.a.gpu, "sudo-allow"), "");
+  write(join(dirs.a.data, "power-restore.json"), JSON.stringify({ "GPU-a-0": { index: 0, originalW: 150 } }), 0o600);
+  // A controller killed mid duty cycle leaves its lent process stopped. The record names it by command, so a
+  // reused pid running something else (the decoy) is left alone.
+  const leftover = spawn("sleep", ["120"], { stdio: "ignore" });
+  const decoy = spawn("sleep", ["120"], { stdio: "ignore" });
+  strays.push(leftover, decoy);
+  process.kill(leftover.pid, "SIGSTOP");
+  process.kill(decoy.pid, "SIGSTOP");
+  write(join(dirs.a.data, "power-paused.json"), JSON.stringify({ pids: [{ pid: leftover.pid, comm: "sleep" }, { pid: decoy.pid, comm: "rpc-server" }], containers: [] }), 0o600);
+  write(join(dirs.b.gpu, "limits.csv"), "GPU-b-0, 0, 200.00, 50.00, 320.00\n");
+  write(join(dirs.b.gpu, "draw.csv"), "GPU-b-0, 30.00\n");
   const sysA = dirs.a.sys;
   const usb4 = "devices/pci0000:00/0000:00:1a.0/0000:07:00.0";
   mkdirSync(join(sysA, "bus/pci/devices"), { recursive: true });
@@ -356,6 +388,8 @@ try {
       LOCAL_STUDIO_CONTROLLER_PORT: String(ports[n]),
       LOCAL_STUDIO_CONTROLLER_HOST: "127.0.0.1",
       LOCAL_STUDIO_SYSFS: d.sys,
+      LOCAL_STUDIO_TEST_PRESENT: join(d.gpu, "present"),
+      LOCAL_STUDIO_TEST_POWER_TTL_MS: "3000",
       FAKE_GPU_DIR: d.gpu,
       STUB_DIR: stubs,
       PATH: `${bin}:${process.env.PATH}`,
@@ -371,6 +405,20 @@ try {
     }, `controller ${n} health`);
   }
   const { a: A, b: B, c: C, d: D } = ports;
+  const plLog = (n) => (existsSync(join(dirs[n].gpu, "pl.log")) ? readFileSync(join(dirs[n].gpu, "pl.log"), "utf8").trim().split("\n") : []);
+
+  step("a power limit left by a crash is restored at start");
+  await waitFor(async () => plLog("a").includes("-i 0 -pl 150") && !existsSync(join(dirs.a.data, "power-restore.json")), "A restores GPU 0 to 150 W and drops the record", 10_000);
+  step("a process left stopped by a crash is continued at start");
+  const procState = (pid) => {
+    if (process.platform === "linux") {
+      const t = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return t.slice(t.lastIndexOf(")") + 2).split(" ")[0];
+    }
+    return execFileSync("ps", ["-o", "stat=", "-p", String(pid)]).toString().trim();
+  };
+  await waitFor(async () => !procState(leftover.pid).startsWith("T") && !existsSync(join(dirs.a.data, "power-paused.json")), "A continues the stopped leftover and drops the record", 10_000);
+  assert(procState(decoy.pid).startsWith("T"), "a pid whose command changed is never continued");
 
   step("discovery over the tailnet with a fleet-key handshake");
   const started = Date.now();
@@ -393,7 +441,10 @@ try {
   assert.equal(health.cluster, true);
 
   step("Thunderbolt authorize and eGPU hot-plug");
-  let s = await snap(A);
+  let s = await waitFor(async () => {
+    const x = await snap(A);
+    return x.hardware.thunderbolt.length ? x : null;
+  }, "A reads its Thunderbolt devices", 10_000);
   const egpuNote = s.hardware.os === "darwin" && s.hardware.arch === "arm64";
   assert.equal(!!s.hardware.egpuNote, egpuNote, "Apple Silicon note matches the host");
   assert.equal(s.hardware.thunderbolt.find((t) => t.uuid === tbUuid)?.state, "pending");
@@ -574,6 +625,144 @@ try {
   assert.equal(s.cluster.state, "lent", JSON.stringify(s.cluster.checks));
   assert.equal(s.cluster.rpcServers.length, 1);
 
+  step("power budget while the owner is present");
+  const cl = async (port) => (await call(port, "/api/cluster")).json();
+  const present = (v) => write(join(dirs.b.gpu, "present"), v ? "1\n" : "0\n");
+  const restoreB = join(dirs.b.data, "power-restore.json");
+  const stat = (pid) => {
+    if (process.platform === "linux") {
+      const t = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return t.slice(t.lastIndexOf(")") + 2).split(" ")[0];
+    }
+    return execFileSync("ps", ["-o", "stat=", "-p", String(pid)]).toString().trim();
+  };
+  const seen = async (pid, ms) => {
+    const out = new Set();
+    const end = Date.now() + ms;
+    while (Date.now() < end && out.size < 2) {
+      out.add(stat(pid).startsWith("T") ? "stopped" : "running");
+      await new Promise((r) => setTimeout(r, 7));
+    }
+    return out;
+  };
+  s = await cl(B);
+  assert.equal(s.state, "lent");
+  assert.deepEqual(
+    [s.power.activeWatts, s.power.awayWatts, s.power.present, s.power.presenceSource, s.power.capW, s.power.lever],
+    [0, null, false, "test override", null, "none"],
+    JSON.stringify(s.power),
+  );
+  assert.equal(s.power.helper, process.platform === "linux" ? "missing" : "unsupported");
+  for (const bad of [{ activeWatts: 2001 }, { activeWatts: 1.5 }, { awayWatts: -1 }, { awayWatts: 0 }, { activeWatts: null }, { activeWatts: "60" }]) {
+    r = await call(B, "/api/cluster", { power: bad });
+    assert.equal(r.status, 400, `${JSON.stringify(bad)} must be refused`);
+  }
+  write(join(dirs.b.gpu, "sudo-allow"), "");
+  r = await call(B, "/api/cluster", { power: { activeWatts: 60 } });
+  assert.equal(r.status, 200, await r.clone().text());
+  s = await cl(B);
+  assert.equal(s.power.activeWatts, 60);
+  assert.equal(s.power.awayWatts, null);
+  assert.deepEqual(JSON.parse(readFileSync(join(dirs.b.data, "config.json"), "utf8")).cluster.power, { activeWatts: 60 });
+  const lentReason = s.reason;
+  const plStart = plLog("b").length;
+  present(true);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.state === "lent" && x.power.present === true && x.power.lever === "duty-cycle" ? x : null;
+  }, "B keeps lending at 60 W through the duty cycle while its owner is present", 10_000);
+  console.log(`   present: ${s.reason} (was: ${lentReason})`);
+  assert.equal(s.reason, "In use, so it lends at up to 60 W.");
+  assert.notEqual(s.reason, lentReason);
+  assert.equal(s.power.capW, 60);
+  assert.deepEqual(s.power.gpus, [{ uuid: "GPU-b-0", index: 0, lever: "duty-cycle", limitW: null, originalW: null }]);
+  assert.equal(plLog("b").length, plStart, "a board-wide limit would throttle the owner's own work, so none is set while present");
+  assert(!existsSync(restoreB));
+  assert(s.checks.some((c) => c.name === "Owner" && c.ok && /up to 60 W/.test(c.detail)), JSON.stringify(s.checks));
+
+  step("power budget while the owner is away uses the NVIDIA limit");
+  r = await call(B, "/api/cluster", { power: { awayWatts: 100 } });
+  assert.equal(r.status, 200, await r.clone().text());
+  present(false);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === false && x.power.lever === "nvidia-limit" ? x : null;
+  }, "away, B caps the GPU at 100 W through the NVIDIA limit", 10_000);
+  assert.equal(s.reason, "Idle, so its GPU is lent to the fleet, at up to 100 W.");
+  assert.deepEqual(s.power.gpus, [{ uuid: "GPU-b-0", index: 0, lever: "nvidia-limit", limitW: 100, originalW: 200 }]);
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 100");
+  assert.deepEqual(JSON.parse(readFileSync(restoreB, "utf8")), { "GPU-b-0": { index: 0, originalW: 200 } });
+  present(true);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === true && x.power.lever === "duty-cycle" && !existsSync(restoreB) ? x : null;
+  }, "the owner comes back: the GPU gets its own limit back and the duty cycle takes over", 10_000);
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 200");
+  r = await call(B, "/api/cluster", { power: { awayWatts: null } });
+  assert.equal(r.status, 200);
+  present(false);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === false && x.power.lever === "none" ? x : null;
+  }, "away with no away cap pulls no lever", 10_000);
+  assert.equal(s.reason, "Idle, so its GPU is lent to the fleet.");
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 200");
+  assert(!existsSync(restoreB), "the restore record is removed once the original limit is back");
+  rmSync(join(dirs.b.gpu, "sudo-allow"));
+  write(join(dirs.b.gpu, "draw.csv"), "GPU-b-0, 120.00\n");
+  r = await call(B, "/api/cluster", { power: { activeWatts: 40, awayWatts: 500 } });
+  assert.equal(r.status, 200, await r.clone().text());
+  present(true);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === true && x.power.capW === 40 && x.power.lever === "duty-cycle" && x.power.measuredW === 120 ? x : null;
+  }, "present, B duty-cycles on measured draw", 10_000);
+  console.log(`   duty cycle: ${s.reason}`);
+  assert.equal(s.reason, "In use, so it lends at up to 40 W.");
+  assert.equal(s.power.measured, true);
+  assert(!existsSync(restoreB), "a refused limit leaves no restore record");
+  const bystander = spawn("sleep", ["120"], { stdio: "ignore" });
+  strays.push(bystander);
+  const both = await waitFor(async () => ((await seen(bStub.pid, 3_000)).size === 2 ? true : null), "the lent rpc-server is stopped and continued", 10_000);
+  assert(both);
+  assert.deepEqual([...(await seen(bystander.pid, 1_000))], ["running"], "a process the controller did not start is never stopped");
+  r = await call(B, "/api/cluster", { power: { awayWatts: null } });
+  assert.equal(r.status, 200);
+  present(false);
+  await waitFor(async () => (await cl(B)).power.lever === "none", "budget removed", 10_000);
+  const freed = await seen(bStub.pid, 1_500);
+  assert.deepEqual([...freed], ["running"], "removing the budget continues the lent process");
+  present(true);
+  await waitFor(async () => (await cl(B)).power.lever === "duty-cycle", "duty cycle again", 10_000);
+  await waitFor(async () => ((await seen(bStub.pid, 3_000)).has("stopped") ? true : null), "stopped again", 10_000);
+
+  step("duty cycle with no readable draw uses a fixed share");
+  write(join(dirs.b.gpu, "draw.csv"), "");
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.lever === "duty-cycle" && x.power.measured === false && /can't read the GPU's power draw, so it runs fleet work 20% of the time/.test(x.reason) ? x : null;
+  }, "B duty-cycles at cap / limit when nvidia-smi reports no draw", 10_000);
+  console.log(`   unmeasured: ${s.reason}`);
+  await waitFor(async () => ((await seen(bStub.pid, 3_000)).size === 2 ? true : null), "the lent rpc-server is still stopped and continued", 10_000);
+  write(join(dirs.b.gpu, "draw.csv"), "GPU-b-0, 120.00\n");
+
+  step("installing the helper later switches to the NVIDIA limit without a new request");
+  r = await call(B, "/api/cluster", { power: { awayWatts: 100 } });
+  assert.equal(r.status, 200);
+  present(false);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === false && x.power.lever === "duty-cycle" && /sudo needs a password/.test(x.reason) ? x : null;
+  }, "away without sudo, B falls back to the duty cycle and says why", 10_000);
+  console.log(`   no helper: ${s.reason}`);
+  write(join(dirs.b.gpu, "sudo-allow"), "");
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.lever === "nvidia-limit" && x.power.helper === "installed" ? x : null;
+  }, "B retries sudo and sets the limit", 15_000);
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 100");
+  assert.deepEqual([...(await seen(bStub.pid, 1_500))], ["running"], "the duty cycle stops once the limit holds");
+
   step("reclaim when the owner returns");
   const owner = spawn("sleep", ["120"], { stdio: "ignore" });
   strays.push(owner);
@@ -593,12 +782,21 @@ try {
   const llama = readdirSync(stubs).filter((f) => /^llama-\d+\.json$/.test(f)).map((f) => JSON.parse(readFileSync(join(stubs, f), "utf8")));
   await waitFor(async () => llama.every((x) => !alive(x.pid)), "llama-server stopped");
   assert(alive(owner.pid), "the owner's process is never touched");
+  assert(existsSync(join(stubs, `term-${bStub.pid}`)), "the lent rpc-server was continued before it was stopped, so its SIGTERM handler ran");
+  s = await cl(B);
+  assert.equal(s.power.lever, "none");
+  assert.equal(s.power.capW, null);
   await waitFor(async () => (await snap(C)).cluster.rpcServers.length === 0, "C releases its rpc-server after the pool stops");
 
   step("battery");
   write(join(dirs.b.gpu, "apps.csv"), "");
   media({ ac_online: true, compute_pids: [], active_jobs: [], not_ready: null });
   await waitFor(async () => (await snap(B)).cluster.state === "lent", "B lends again", 15_000);
+  const plBefore = plLog("b").length;
+  await new Promise((r) => setTimeout(r, 3_000));
+  s = await cl(B);
+  assert.equal(s.power.lever, "none", "nothing is borrowed, so no lever is pulled");
+  assert.equal(plLog("b").length, plBefore, "an idle lent GPU keeps its own power limit");
   write(join(dirs.b.sys, "class/power_supply/AC/online"), "0\n");
   await waitFor(async () => {
     const b = await snap(B);
@@ -616,7 +814,7 @@ try {
   assert(!after.peers.includes(`http://127.0.0.1:${B}`), "discovery must not link a peer the user removed");
   assert(after.cluster.ignored.includes(`http://127.0.0.1:${B}`));
 
-  console.log("PASS cluster_smoke: tailnet discovery with fleet-key handshake, unlink kept, Thunderbolt authorize, eGPU hot-plug and bandwidth, job failure on clean and surprise unplug, routing by load, failover on error and timeout, no second run of a taken request, lending checks, pooled llama.cpp RPC launch through the gate, reclaim within 10 s, battery.");
+  console.log("PASS cluster_smoke: tailnet discovery with fleet-key handshake, unlink kept, Thunderbolt authorize, eGPU hot-plug and bandwidth, job failure on clean and surprise unplug, routing by load, failover on error and timeout, no second run of a taken request, lending checks, pooled llama.cpp RPC launch through the gate, reclaim within 10 s, battery, power budget (crash restore at start, stopped leftovers continued at start, NVIDIA limit set and restored, unreadable draw falls back to a fixed share, a later helper install takes over without a new request, no lever while nothing is borrowed, presence flips the reason, duty-cycle SIGSTOP/SIGCONT of the lent rpc-server only, SIGCONT on budget removal and reclaim).");
 } catch (error) {
   for (const [i, c] of children.entries()) console.error(`--- controller ${["a", "b", "c", "d"][i]} log\n${c.log?.().slice(-3000)}`);
   throw error;
