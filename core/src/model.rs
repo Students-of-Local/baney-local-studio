@@ -235,7 +235,7 @@ pub struct ThreadSettings {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking_level: Option<String>,
-    pub access: AccessMode,
+    pub access: Option<AccessMode>,
     pub worktree: WorktreeChoice,
 }
 

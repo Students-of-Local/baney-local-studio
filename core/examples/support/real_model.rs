@@ -176,7 +176,7 @@ pub fn thread_settings(access: AccessMode, worktree: WorktreeChoice) -> ThreadSe
         provider: Some(provider().to_string()),
         model: Some(model().to_string()),
         thinking_level: None,
-        access,
+        access: Some(access),
         worktree,
     }
 }

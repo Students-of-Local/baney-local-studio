@@ -827,7 +827,11 @@ final class ConversationStore {
         if thread != nil {
             return info?.access ?? .supervised
         }
-        return newThread.access ?? settings?.defaultAccess ?? .supervised
+        return newThread.access ?? defaultAccess(
+            followsModel: settings?.accessFollowsModel ?? true,
+            fixed: settings?.defaultAccess ?? .supervised,
+            model: currentModel(settings: settings)?.id
+        )
     }
 
     private func send(_ draft: ComposerDraft, project: String?, delivery: Delivery, settings: Settings?, defaultBranch: String?) {
@@ -851,14 +855,14 @@ final class ConversationStore {
             }
             let id = UUID().uuidString
             let model = currentModel(settings: settings)
+            let fanOut = newThread.fanOutModels(available: models)
             let options = ThreadSettings(
                 provider: model?.provider,
                 model: model?.id,
                 thinkingLevel: thinkingLevel(settings: settings),
-                access: access(settings: settings),
+                access: fanOut.isEmpty ? access(settings: settings) : newThread.access,
                 worktree: newThread.worktreeChoice(settings: settings, defaultBranch: defaultBranch)
             )
-            let fanOut = newThread.fanOutModels(available: models)
             if let tier = serviceTier(settings: settings) {
                 pendingServiceTier[id] = tier
                 for index in fanOut.indices.dropFirst() {

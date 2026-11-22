@@ -25,7 +25,7 @@ struct ProjectDefaultsSection: View {
                 }
             }
             Picker("Permissions", selection: binding(settings, \.defaultAccess)) {
-                Text(inherit(effective.map { Self.accessTitle($0.defaultAccess) } ?? "Supervised")).tag(AccessMode?.none)
+                Text(inherit(effective.map { $0.accessFollowsModel ? "Match the model" : Self.accessTitle($0.defaultAccess) } ?? "Match the model")).tag(AccessMode?.none)
                 Divider()
                 ForEach([AccessMode.supervised, .autoAcceptEdits, .auto, .fullAccess], id: \.self) { mode in
                     Text(Self.accessTitle(mode)).tag(AccessMode?.some(mode))

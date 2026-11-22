@@ -587,15 +587,15 @@ fn general_page(app: &Weak<App>, state: &State) -> adw::PreferencesPage {
             settings.default_model = model;
         },
     );
-    let access: Vec<&str> = format::ACCESS_MODES.iter().map(|mode| format::access_label(*mode)).collect();
+    let access = format::default_access_names();
     combo(
         &defaults,
         app,
         "Permissions",
-        "Default access for new threads",
+        "Match the model: Full access for frontier models, Auto for small ones, Supervised for unknown ones",
         &access,
-        |settings| format::access_index(settings.default_access) as usize,
-        |settings, index| settings.default_access = format::ACCESS_MODES.get(index).copied().unwrap_or_default(),
+        |settings| format::default_access_index(settings) as usize,
+        format::set_default_access,
     );
     combo(
         &defaults,

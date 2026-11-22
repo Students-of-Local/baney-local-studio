@@ -338,7 +338,7 @@ enum SettingKey: CaseIterable {
         switch self {
         case .defaultModel: "provider llm"
         case .thinkingLevel: "effort reasoning"
-        case .permissions: "access runtime mode supervised auto full"
+        case .permissions: "access runtime mode supervised auto full match model frontier small"
         case .newThreads: "worktree local checkout"
         case .startFromOrigin: "branch remote"
         case .addProjectBase: "folder directory"
@@ -494,6 +494,22 @@ struct SettingsBinder {
         return Binding(
             get: { current },
             set: { value in pages.update { $0[keyPath: keyPath] = value } }
+        )
+    }
+
+    var access: Binding<AccessMode?> {
+        let current = settings.accessFollowsModel ? nil : settings.defaultAccess
+        let pages = pages
+        return Binding(
+            get: { current },
+            set: { value in
+                pages.update { settings in
+                    settings.accessFollowsModel = value == nil
+                    if let value {
+                        settings.defaultAccess = value
+                    }
+                }
+            }
         )
     }
 }

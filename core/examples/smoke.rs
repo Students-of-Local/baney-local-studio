@@ -78,6 +78,7 @@ struct View {
     partial_text: bool,
     composer: Vec<(String, String)>,
     models: Option<Vec<ModelOption>>,
+    access: HashMap<String, AccessMode>,
     hidden: Vec<ModelKey>,
     search: Option<Vec<ThreadSearchHit>>,
     archived: Option<Vec<ThreadRow>>,
@@ -194,8 +195,10 @@ impl Harness {
             }
             Update::MessageImage { data, .. } => self.view.image = Some(data),
             Update::Usage { report, .. } => self.view.usage = Some(report),
-            Update::Thread { .. }
-            | Update::Questions { .. }
+            Update::Thread { thread, info } => {
+                self.view.access.insert(thread, info.access);
+            }
+            Update::Questions { .. }
             | Update::QuestionsSettled { .. }
             | Update::Subagents { .. }
             | Update::GitStatus { .. }
@@ -909,7 +912,7 @@ fn round_four_sessions(harness: &mut Harness, ids: &Ids, always: &str) -> anyhow
         "draft-fan".to_string(),
         Some(ids.project.clone()),
         prompt(FAN),
-        settings(AccessMode::FullAccess),
+        ThreadSettings { access: None, ..settings(AccessMode::FullAccess) },
         vec![fan.clone(), fan],
     );
     harness.pump_until("fan-out threads answered in their own worktrees", |view| {
@@ -924,6 +927,15 @@ fn round_four_sessions(harness: &mut Harness, ids: &Ids, always: &str) -> anyhow
             && view.done_by_thread.get(&left.id) == Some(&1)
             && view.done_by_thread.get(&right.id) == Some(&1)
     })?;
+    let expected = local_studio_core::model_tier(real_model::model()).access();
+    for draft in ["draft-fan", "draft-fan#1"] {
+        let member = harness.view.thread(draft).context("no fan-out member")?;
+        studio.select_thread(Some(member.clone()));
+        harness.pump_until("fan-out member with no access picked takes its model's access", |view| {
+            view.access.get(&member) == Some(&expected)
+        })?;
+    }
+    println!("ok   fan-out with no access picked took {expected:?} from {}", real_model::model());
     Ok(())
 }
 

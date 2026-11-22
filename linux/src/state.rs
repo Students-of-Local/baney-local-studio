@@ -178,7 +178,13 @@ impl State {
                 return info.access;
             }
         }
-        self.draft_settings.access.unwrap_or(self.settings.default_access)
+        self.draft_settings.access.unwrap_or_else(|| {
+            local_studio_core::default_access(
+                self.settings.access_follows_model,
+                self.settings.default_access,
+                self.active_model().map(|model| model.model),
+            )
+        })
     }
 
     pub fn thinking_levels(&self) -> Vec<String> {
