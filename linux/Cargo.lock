@@ -1664,7 +1664,6 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "base64 0.22.1",
- "blake2",
  "ed25519-dalek",
  "eukhe-client",
  "eukhe-types",
@@ -1680,8 +1679,6 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "rusqlite",
- "rustls",
- "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -1691,7 +1688,6 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "two-face",
- "webpki-roots 1.0.11",
  "x25519-dalek",
 ]
 
