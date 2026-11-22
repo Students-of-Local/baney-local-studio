@@ -21,6 +21,8 @@ interface Deps {
   catalog: () => Catalog;
   freeGpus: () => Map<string, number[]>;
   listening: () => Effect.Effect<Set<number>>;
+  uuids: (indices: readonly number[]) => string[];
+  indexOf: (uuid: string) => number | null;
 }
 
 export const makeJobs = (deps: Deps) => {
@@ -36,7 +38,8 @@ export const makeJobs = (deps: Deps) => {
   };
   const settle = (id: string, err: string | null) => update(id, err ? { phase: "failed", message: err } : { phase: "ready", message: null, progress: 1 });
   const active = () => [...jobs.values()].filter((j) => ACTIVE.has(j.phase));
-  const reserved = () => new Set(active().flatMap((j) => j.gpus));
+  const current = (j: LocalJob): number[] => (j.gpuUuids?.length ? j.gpuUuids.flatMap((u) => { const i = deps.indexOf(u); return i === null ? [] : [i]; }) : [...j.gpus]);
+  const reserved = () => new Set(active().flatMap(current));
 
   const plan = (recipeId: string, req: LocalRunRequest, id: string) =>
     Effect.gen(function* () {
@@ -159,13 +162,14 @@ export const makeJobs = (deps: Deps) => {
   return {
     list: () => [...jobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
     reserved,
+    onGpu: (uuid: string, index: number) => active().filter((j) => (j.gpuUuids?.length ? j.gpuUuids.includes(uuid) : j.gpus.includes(index))),
     jobPort: (port: number) => active().find((j) => j.port === port)?.id ?? null,
     run: (recipeId: string, req: LocalRunRequest) =>
       lock.withPermit(Effect.gen(function* () {
         const id = randomBytes(5).toString("hex");
         const p = yield* plan(recipeId, req, id);
         if (req.dryRun) return { job: null, argv: p.argv };
-        const job: LocalJob = { id, recipeId, gpus: p.gpus, port: p.port, container: p.name, phase: "pending", progress: null, message: null, startedAt: now(), updatedAt: now(), ...(req.lend ? { lent: true } : {}) };
+        const job: LocalJob = { id, recipeId, gpus: p.gpus, gpuUuids: deps.uuids(p.gpus), port: p.port, container: p.name, phase: "pending", progress: null, message: null, startedAt: now(), updatedAt: now(), ...(req.lend ? { lent: true } : {}) };
         jobs.set(id, job);
         save();
         track(id, (signal) => drive(id, p, signal));

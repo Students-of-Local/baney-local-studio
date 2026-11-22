@@ -81,27 +81,26 @@ export const pcieLink = (gen: number | null, width: number | null, maxGen: numbe
 
 export const readGpuList: Effect.Effect<RawGpu[] | null> = Effect.gen(function* () {
   const q = yield* exec(["nvidia-smi", `--query-gpu=${QUERY}`, "--format=csv,noheader,nounits"], 8_000);
-  if (q.code !== 0) return /no devices were found/i.test(`${q.stdout}${q.stderr}`) ? [] : null;
+  const rows = q.stdout.split("\n").filter((l) => /^\s*\d+\s*,\s*GPU-/.test(l));
+  const said = `${q.stdout}${q.stderr}`;
+  if (q.code !== 0 && !rows.length && !/GPU is lost|Unable to determine the device handle|fallen off the bus/i.test(said)) return /no devices were found/i.test(said) ? [] : null;
   const apps = (yield* exec(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"], 8_000)).stdout
     .split("\n")
     .map((l) => l.split(",").map((s) => s.trim()))
     .filter(([uuid]) => uuid);
-  return q.stdout
-    .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => {
-      const [index = "", uuid = "", name = "", used = "", total = "", power = "", limit = "", temp = "", util = "", bus = "", gen = "", maxGen = "", width = "", maxWidth = ""] = l.split(",").map((s) => s.trim());
-      const pids = apps.filter(([u]) => u === uuid).flatMap(([, pid]) => (Number(pid) > 0 ? [Number(pid)] : []));
-      const busId = pciId(bus) ? bus : null;
-      const external = busId ? isExternal(busId) : false;
-      return {
-        index: Number(index) || 0, uuid, name, memoryUsedMiB: Number(used) || 0, memoryTotalMiB: Number(total) || 0,
-        powerW: reading(power), powerLimitW: reading(limit), temperatureC: reading(temp), utilization: reading(util),
-        busy: pids.length > 0 || Number(used) > 2048,
-        pids, busId, external,
-        link: pcieLink(reading(gen), reading(width), reading(maxGen), reading(maxWidth), external),
-      };
-    });
+  return rows.map((l) => {
+    const [index = "", uuid = "", name = "", used = "", total = "", power = "", limit = "", temp = "", util = "", bus = "", gen = "", maxGen = "", width = "", maxWidth = ""] = l.split(",").map((s) => s.trim());
+    const pids = apps.filter(([u]) => u === uuid).flatMap(([, pid]) => (Number(pid) > 0 ? [Number(pid)] : []));
+    const busId = pciId(bus) ? bus : null;
+    const external = busId ? isExternal(busId) : false;
+    return {
+      index: Number(index) || 0, uuid, name, memoryUsedMiB: Number(used) || 0, memoryTotalMiB: Number(total) || 0,
+      powerW: reading(power), powerLimitW: reading(limit), temperatureC: reading(temp), utilization: reading(util),
+      busy: pids.length > 0 || Number(used) > 2048,
+      pids, busId, external,
+      link: pcieLink(reading(gen), reading(width), reading(maxGen), reading(maxWidth), external),
+    };
+  });
 });
 
 export const readGpus: Effect.Effect<RawGpu[]> = Effect.map(readGpuList, (g) => g ?? []);
@@ -155,7 +154,11 @@ export const authorize = (uuid: string) =>
     const why = `${r.stderr}\n${r.stdout}`;
     if (/polkit|not authorized|AccessDenied|authenticat|permission/i.test(why))
       return yield* fail(403, "NEEDS_PASSWORD", `Your system wants an administrator password to approve this device. Run "boltctl enroll --policy auto ${uuid}" in a terminal, or approve it in Settings, Privacy, Thunderbolt.`);
-    if (/already/i.test(why)) return { uuid, state: "authorized" as const };
+    if (/already/i.test(why)) {
+      const again = yield* exec(["boltctl", "authorize", uuid], 30_000);
+      if (again.code === 0 || /already authorized/i.test(`${again.stderr}${again.stdout}`)) return { uuid, state: "authorized" as const };
+      return yield* fail(500, "AUTHORIZE_FAILED", `boltctl could not approve the device: ${lastLine(again)}`);
+    }
     return yield* fail(500, "AUTHORIZE_FAILED", `boltctl could not approve the device: ${lastLine(r)}`);
   });
 
@@ -168,7 +171,9 @@ export const powerSource: Effect.Effect<"ac" | "battery" | "unknown"> = Effect.g
     return r.code !== 0 ? "unknown" : /'Battery Power'/.test(r.stdout) ? "battery" : "ac";
   }
   const dir = join(sysfs(), "class/power_supply");
-  const supplies = list(dir).map((d) => ({ type: read(join(dir, d, "type")), online: read(join(dir, d, "online")) }));
+  const supplies = list(dir)
+    .filter((d) => read(join(dir, d, "scope")) !== "Device")
+    .map((d) => ({ type: read(join(dir, d, "type")), online: read(join(dir, d, "online")) }));
   if (!supplies.some((s) => s.type === "Battery")) return "ac";
   return supplies.some((s) => s.type !== "Battery" && s.online === "1") ? "ac" : "battery";
 });

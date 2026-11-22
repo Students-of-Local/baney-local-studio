@@ -29,6 +29,7 @@ export const Config = Schema.Struct({
       rpcPort: Schema.optionalKey(Schema.Number),
       rpcServer: Schema.optionalKey(Schema.String),
       llamaServer: Schema.optionalKey(Schema.String),
+      ignored: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
 });

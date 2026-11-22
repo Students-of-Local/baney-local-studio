@@ -138,7 +138,7 @@ Clustering is off until a machine opts in with a `cluster` block in `config.json
 
 ### Discovery
 
-Every 15 seconds a discovering controller asks `tailscale status --json` for online devices and probes `GET /api/health` on each of `ports`. When a controller answers with `cluster: true`, the prober sends `POST /api/cluster/hello` with a random nonce and the address it called. The other side answers only if that address is its own, with an HMAC of the nonce, its id and that address under the fleet key. A controller with another key fails the proof and is never linked, and the address check stops one controller from relaying another's proof. Found controllers are added to `peers`. When the controller listens on loopback, discovery also opens a listener on the machine's tailnet IPv4 address.
+Every 15 seconds a discovering controller asks `tailscale status --json` for online devices and probes `GET /api/health` on each of `ports`. When a controller answers with `cluster: true`, the prober sends `POST /api/cluster/hello` with a random nonce and the address it called. The other side answers only if that address is its own, with an HMAC of the nonce, its id and that address under the fleet key. A controller with another key fails the proof and is never linked, and the address check stops one controller from relaying another's proof. Found controllers are added to `peers`. A controller you unlink with `POST /api/peers` is remembered in `cluster.ignored` and is not linked again by discovery until you add it back. When the controller listens on loopback, discovery also opens a listener on the machine's tailnet IPv4 address.
 
 ### Lending
 
@@ -146,21 +146,21 @@ Every 2 seconds a lending machine runs its checks:
 
 | Check          | Passes when                                                                                  |
 | -------------- | -------------------------------------------------------------------------------------------- |
-| GPU programs   | No GPU compute process outside the fleet (the controller's engines, jobs and lent servers)   |
+| GPU programs   | No GPU compute process outside the fleet (the controller's engines, jobs and lent servers, found by process tree, container id or the `LOCAL_STUDIO_FLEET_OWNER` tag) |
 | GPU use        | No GPU is 10% or more busy without a fleet process on it                                     |
 | Power          | The machine is on AC power                                                                   |
-| parish-media   | Where `~/.local/bin/parish-media` exists, its `status` is ready or only lists fleet work     |
+| parish-media   | Where `~/.local/bin/parish-media` exists, its `status` is ready, or the only programs it lists are fleet processes and the machine is on AC with no media jobs |
 | Owner          | On a Mac, nobody has touched the keyboard or mouse for a minute                              |
 
 `idle` lends once every check has passed for `idleSeconds` and reclaims the moment one fails. `always` lends whenever the machine has a GPU. On a reclaim the controller marks itself draining, tells the machines it lends to, waits up to `drainSeconds` for requests in flight, then stops only what it started for the fleet: lent `rpc-server` processes and jobs launched with `lend: true`. A lent job is failed with "<machine> took its GPU back: <reason>". The `reason` field says in plain words why a machine is or is not lending.
 
 ### Routing
 
-The gateway ranks every live copy of a model by load: lent machines that took their GPU back last, then requests queued or running (from the engine's metrics or the controller's own count), KV cache use, decode speed, local before remote, and fewer hops. A connection error, a 502, 503 or 504, or a streaming request that sends no headers within `failoverMs` moves the request to the next copy, and the response carries `x-local-studio-failover`. A non-streaming request is not retried after a timeout, so a generation never runs twice.
+The gateway ranks every live copy of a model by load: lent machines that took their GPU back last, then requests queued or running (from the engine's metrics or the controller's own count), KV cache use, decode speed, local before remote, and fewer hops. A streaming request moves to the next copy on any error, on a 502, 503 or 504, or when no headers arrive within `failoverMs`. A non-streaming request moves only when no engine could have started it: a connection that was refused or never opened, a 503 from a local engine, or a peer answer marked `x-local-studio-retry: 1`. Any other error or timeout returns 502 or 504 at once, so a generation never runs twice. A response that moved carries `x-local-studio-failover`.
 
 ### Pooled models
 
 `GET /api/cluster` lists the GGUF models in `modelsDir` and the Hugging Face cache, with `fitsOne` (fits the largest single machine's free GPU memory) and `fitsPool` (fits the pooled free memory of lending machines). `POST /api/cluster/pool` with a GGUF `model` asks every lending machine (or `members`) for an `rpc-server`, then runs `llama-server -m <model> --rpc <endpoints> -ngl 999 --metrics` on a port in 18100 to 18299. `"dryRun": true` returns the argv without starting anything. The pooled model is served through the gateway like any local engine.
 
-Each lent `rpc-server` listens on loopback only. A gate on the tailnet IP at `rpcPort` forwards connections from linked fleet controllers and drops every other address, because `rpc-server` has no authentication of its own. When a member reclaims, becomes unreachable or stops lending, the pool is torn down and shows why.
+Each lent `rpc-server` listens on loopback only. A gate on the tailnet IP at `rpcPort` forwards connections only from the address of the controller that asked for that server and drops every other address, because `rpc-server` has no authentication of its own. Programs run by other users on the lending machine can still reach the loopback port, so lend only from machines whose local accounts you trust. When a member reclaims, becomes unreachable or stops lending, the pool is torn down and shows why. When the controller gets SIGTERM or SIGINT it stops the `rpc-server` and pooled `llama-server` processes it started before it exits.
 

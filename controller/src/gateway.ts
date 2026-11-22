@@ -10,6 +10,8 @@ const PIN_HEADER = "x-local-studio-endpoint";
 const FORWARD = ["content-type", "accept", "anthropic-version", "anthropic-beta", "openai-beta", "openai-organization", "openai-project", "x-request-id", "idempotency-key", "user-agent"];
 const DROP = new Set(["content-length", "content-encoding", "transfer-encoding", "connection", "keep-alive", "upgrade", "proxy-authenticate", "trailer", "te"]);
 const RETRY = new Set([502, 503, 504]);
+const RETRY_HEADER = "x-local-studio-retry";
+const CONNECT = /refused|ECONNREFUSED|ConnectionRefused|FailedToOpenSocket|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|unable to connect/i;
 const HEADERS_MS = 30 * 60_000;
 const Body = Schema.Record(Schema.String, Schema.Unknown);
 
@@ -48,7 +50,7 @@ export const rank = (r: Route): number[] => {
   const l = r.endpoint.load;
   const queue = Math.max((l?.running ?? 0) + (l?.waiting ?? 0), l?.inFlight ?? 0, inFlight(r.endpoint.id));
   const away = r.endpoint.lent && r.cluster?.state === "reclaimed" ? 1 : 0;
-  return [away, queue, Math.round((l?.kvPercent ?? 0) / 10), -Math.round(l?.decodeTps ?? 0), r.peer ? 1 : 0, r.depth];
+  return [away, queue, Math.round((l?.kvPercent ?? 0) / 10), r.peer ? 1 : 0, r.depth, -Math.round(l?.decodeTps ?? 0)];
 };
 
 const byLoad = (a: Route, b: Route): number => {
@@ -84,6 +86,7 @@ export const passthrough = async (d: GatewayDeps, req: Request, path: string): P
   const cfg = d.config();
   const stream = body.stream === true;
   let lastError = "";
+  let unsent = true;
   for (const [i, r] of candidates.entries()) {
     const more = i < candidates.length - 1;
     const local = r.peer ? null : d.local().find((e) => e.id === r.endpoint.id) ?? null;
@@ -118,39 +121,64 @@ export const passthrough = async (d: GatewayDeps, req: Request, path: string): P
     } catch (e) {
       release();
       if (req.signal.aborted) return new Response(null, { status: 499 });
-      lastError = ac.signal.aborted ? String(ac.signal.reason instanceof Error ? ac.signal.reason.message : ac.signal.reason) : e instanceof Error ? e.message : String(e);
-      continue;
+      const timedOut = ac.signal.aborted;
+      lastError = timedOut ? String(ac.signal.reason instanceof Error ? ac.signal.reason.message : ac.signal.reason) : e instanceof Error ? e.message : String(e);
+      const connect = !timedOut && CONNECT.test(`${(e as { code?: string } | null)?.code ?? ""} ${lastError}`);
+      if (connect || stream) {
+        if (!connect) unsent = false;
+        continue;
+      }
+      return apiError(timedOut ? 504 : 502, "upstream_error", `${r.endpoint.id} did not finish: ${lastError}`);
     } finally {
       clearTimeout(timer);
     }
-    if (more && RETRY.has(res.status)) {
+    const safe = !r.peer ? res.status === 503 : res.headers.get(RETRY_HEADER) === "1";
+    if (more && RETRY.has(res.status) && (stream || safe)) {
       release();
+      if (!safe) unsent = false;
       lastError = `HTTP ${res.status} from ${r.endpoint.id}`;
       await res.body?.cancel().catch(() => undefined);
       continue;
     }
-    const out = new Headers([...res.headers].filter(([k]) => !DROP.has(k.toLowerCase())));
+    const out = new Headers([...res.headers].filter(([k]) => !DROP.has(k.toLowerCase()) && k.toLowerCase() !== RETRY_HEADER));
     out.set(PIN_HEADER, r.endpoint.id);
     out.set(LOCAL_STUDIO_CONTROLLER_HEADER, cfg.id);
     if (i > 0) out.set("x-local-studio-failover", String(i));
+    if (safe && unsent && RETRY.has(res.status)) out.set(RETRY_HEADER, "1");
     const count = res.ok && !r.peer;
     const usage = count ? observeUsage(res.headers.get("content-type") ?? "", path === "/v1/messages") : null;
-    const piped = res.body?.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-      transform(value, ctrl) {
-        usage?.push(value);
-        ctrl.enqueue(value);
-      },
-      flush() {
-        release();
-        if (count && !req.signal.aborted) d.record(model, usage?.finish());
-      },
-    }));
+    const reader = res.body?.getReader();
+    const piped = reader
+      ? new ReadableStream<Uint8Array>({
+          async pull(ctrl) {
+            try {
+              const { done, value } = await reader.read();
+              if (!done) {
+                usage?.push(value);
+                return ctrl.enqueue(value);
+              }
+              release();
+              if (count && !req.signal.aborted) d.record(model, usage?.finish());
+              ctrl.close();
+            } catch (e) {
+              release();
+              ctrl.error(e);
+            }
+          },
+          cancel(reason) {
+            release();
+            return reader.cancel(reason);
+          },
+        })
+      : null;
     req.signal.addEventListener("abort", release, { once: true });
     if (!piped) {
       release();
       if (count) d.record(model);
     }
-    return new Response(piped ?? null, { status: res.status, statusText: res.statusText, headers: out });
+    return new Response(piped, { status: res.status, statusText: res.statusText, headers: out });
   }
-  return apiError(502, "upstream_unreachable", `no endpoint for ${model} answered: ${lastError}`);
+  const failed = apiError(502, "upstream_unreachable", `no endpoint for ${model} answered: ${lastError}`);
+  if (unsent) failed.headers.set(RETRY_HEADER, "1");
+  return failed;
 };

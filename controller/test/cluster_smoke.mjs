@@ -80,7 +80,7 @@ try {
     [
       "#!/bin/sh",
       'case "$1" in',
-      '  --query-gpu=*) if [ -s "$FAKE_GPU_DIR/gpus.csv" ]; then cat "$FAKE_GPU_DIR/gpus.csv"; else echo "No devices were found"; exit 6; fi ;;',
+      '  --query-gpu=*) if [ -s "$FAKE_GPU_DIR/gpus.csv" ]; then cat "$FAKE_GPU_DIR/gpus.csv"; else echo "No devices were found"; exit 6; fi; if [ -f "$FAKE_GPU_DIR/lost" ]; then echo "Unable to determine the device handle for GPU0000:2C:00.0: Unknown Error"; exit 15; fi ;;',
       '  --query-compute-apps=*) cat "$FAKE_GPU_DIR/apps.csv" 2>/dev/null ;;',
       "esac",
       "",
@@ -191,7 +191,7 @@ try {
 
   const engineState = new Map();
   const engine = async (name) => {
-    engineState.set(name, { running: 0, mode: "ok" });
+    engineState.set(name, { running: 0, mode: "ok", hits: 0 });
     const born = Date.now();
     return listen(
       createServer(async (req, res) => {
@@ -218,7 +218,9 @@ try {
           res.writeHead(503, { "content-type": "application/json" });
           return res.end('{"error":{"type":"overloaded"}}');
         }
+        st.hits++;
         if (st.mode === "hang") return;
+        if (st.mode === "reset") return req.socket.destroy();
         const body = JSON.parse(raw);
         if (body.stream) {
           res.writeHead(200, { "content-type": "text/event-stream" });
@@ -426,6 +428,7 @@ try {
   const job = await (await call(A, "/api/recipes/rtx3090%2Ftiny/run", {})).json();
   assert.equal(job.job.gpus[0], 1, JSON.stringify(job));
   const unplugged = Date.now();
+  write(join(dirs.a.gpu, "lost"), "");
   write(join(dirs.a.gpu, "gpus.csv"), internalA);
   s = await waitFor(async () => {
     const x = await snap(A);
@@ -436,6 +439,7 @@ try {
   assert.match(s.jobs.find((j) => j.id === job.job.id).message, /NVIDIA GeForce RTX 3090 was unplugged/);
   assert(s.hardware.hotplug.some((h) => h.change === "removed"));
   assert(!s.hardware.gpus.some((g) => g.external));
+  rmSync(join(dirs.a.gpu, "lost"));
   write(join(dirs.a.gpu, "gpus.csv"), internalA + egpuA);
   s = await waitFor(async () => {
     const x = await snap(A);
@@ -472,6 +476,11 @@ try {
   assert.match(p.text, /"engine":"e2"/);
   assert(waited >= 1_400 && waited < 10_000, `failover after ${waited} ms`);
   console.log(`   stream failed over after ${waited} ms`);
+  engineState.get("e1").mode = "reset";
+  const before = engineState.get("e2").hits;
+  p = await pick();
+  assert.equal(p.status, 502, p.text);
+  assert.equal(engineState.get("e2").hits, before, "a request the engine already took is never sent to a second copy");
   engineState.get("e1").mode = "ok";
   engineState.get("e2").running = 0;
 
@@ -575,7 +584,15 @@ try {
   assert.equal(r.status, 409);
   assert.match((await r.json()).error.message, /not lending/);
 
-  console.log("PASS cluster_smoke: tailnet discovery with fleet-key handshake, Thunderbolt authorize, eGPU hot-plug and bandwidth, job failure on unplug, routing by load, failover on error and timeout, lending checks, pooled llama.cpp RPC launch through the gate, reclaim within 10 s, battery.");
+  step("an unlinked peer stays unlinked");
+  r = await call(A, "/api/peers", { url: `http://127.0.0.1:${B}`, remove: true });
+  assert.equal(r.status, 200);
+  await new Promise((r) => setTimeout(r, 20_000));
+  const after = JSON.parse(readFileSync(join(dirs.a.data, "config.json"), "utf8"));
+  assert(!after.peers.includes(`http://127.0.0.1:${B}`), "discovery must not link a peer the user removed");
+  assert(after.cluster.ignored.includes(`http://127.0.0.1:${B}`));
+
+  console.log("PASS cluster_smoke: tailnet discovery with fleet-key handshake, unlink kept, Thunderbolt authorize, eGPU hot-plug and bandwidth, job failure on clean and surprise unplug, routing by load, failover on error and timeout, no second run of a taken request, lending checks, pooled llama.cpp RPC launch through the gate, reclaim within 10 s, battery.");
 } catch (error) {
   for (const [i, c] of children.entries()) console.error(`--- controller ${["a", "b", "c", "d"][i]} log\n${c.log?.().slice(-3000)}`);
   throw error;

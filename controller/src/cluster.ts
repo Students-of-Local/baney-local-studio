@@ -22,7 +22,6 @@ export interface ClusterDeps {
   gpus: () => RawGpu[];
   graph: () => Promise<Graph>;
   invalidate: () => void;
-  endpoints: () => Endpoint[];
   jobs: Jobs;
   listenHost: string;
   port: number;
@@ -46,6 +45,8 @@ interface Rpc {
   forUrl: string;
   startedAt: string;
   gpus: number[];
+  gpuIds: string[];
+  internal: number;
 }
 
 interface Pool {
@@ -101,6 +102,16 @@ const command = (pid: number): string => {
     return readFileSync(`/proc/${pid}/comm`, "utf8").trim();
   } catch {
     return "a program";
+  }
+};
+
+const FLEET_ENV = "LOCAL_STUDIO_FLEET_OWNER";
+
+const taggedFor = (pid: number, owner: string): boolean => {
+  try {
+    return readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").includes(`${FLEET_ENV}=${owner}`);
+  } catch {
+    return false;
   }
 };
 
@@ -167,7 +178,7 @@ const ggufs = (dirs: string[]): { path: string; name: string; sizeBytes: number 
         continue;
       }
       if (st.isDirectory()) walk(p, depth + 1);
-      else if (/\.gguf$/i.test(e) && !/mmproj/i.test(e) && !/-0000[2-9]-of-|-000[1-9]\d-of-/.test(e)) {
+      else if (/\.gguf$/i.test(e) && !/mmproj/i.test(e) && !(/-\d{5}-of-\d{5}\.gguf$/i.test(e) && !/-00001-of-\d{5}\.gguf$/i.test(e))) {
         const parts = /-00001-of-(\d{5})\.gguf$/i.exec(e);
         let size = st.size;
         if (parts) for (let i = 2; i <= Number(parts[1]); i++) size += (() => { try { return statSync(p.replace(/-00001-of-/, `-${String(i).padStart(5, "0")}-of-`)).size; } catch { return 0; } })();
@@ -191,7 +202,7 @@ export const makeCluster = (d: ClusterDeps) => {
   let tailnetAt = 0;
   let models: { path: string; name: string; sizeBytes: number }[] = [];
   let modelsAt = 0;
-  let containers = { at: 0, ids: new Set<string>() };
+  let containers = { at: 0, key: "", ids: new Set<string>() };
   const discovered = new Map<string, { id: string; name: string; url: string; at: string }>();
   const listen = new Set<string>();
   const rpcs = new Map<string, Rpc>();
@@ -208,18 +219,16 @@ export const makeCluster = (d: ClusterDeps) => {
 
   const ownHosts = (): Set<string> => new Set([d.listenHost, ...(tailnetIp ? [tailnetIp] : []), URL.parse(d.config().url)?.hostname ?? ""].filter(Boolean));
 
-  const fleetHosts = async (): Promise<Set<string>> => {
-    const g = await d.graph();
-    return new Set(g.links.filter((l) => !l.self && l.reachable).flatMap((l) => (URL.parse(l.url)?.hostname ? [URL.parse(l.url)!.hostname] : [])));
-  };
-
   const spawnedPids = (): Set<number> => new Set([...[...rpcs.values()].map((r) => r.proc.pid), ...[...pools.values()].flatMap((p) => (p.proc ? [p.proc.pid] : []))]);
 
-  const fleetContainers = async (): Promise<Set<string>> => {
-    if (!d.jobs.active().length) return new Set();
-    if (Date.now() - containers.at > 30_000) {
-      const r = await Effect.runPromise(exec(["docker", "ps", "-q", "--no-trunc", "--filter", `label=local-studio-controller.controller=${d.config().id}`], 10_000));
-      containers = { at: Date.now(), ids: new Set(r.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) };
+  const fleetContainers = async (miss: boolean): Promise<Set<string>> => {
+    const names = d.jobs.active().filter((j) => j.lent).map((j) => j.container);
+    if (!names.length) return new Set();
+    const key = names.join(",");
+    const age = Date.now() - containers.at;
+    if (key !== containers.key || age > 30_000 || (miss && age > 2_000)) {
+      const r = await Effect.runPromise(exec(["docker", "inspect", "-f", "{{.Id}}", ...names], 10_000));
+      containers = { at: Date.now(), key, ids: new Set(r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^[0-9a-f]{64}$/.test(s))) };
     }
     return containers.ids;
   };
@@ -227,6 +236,7 @@ export const makeCluster = (d: ClusterDeps) => {
   const isFleet = (pid: number, roots: Set<number>, ids: Set<string>): boolean => {
     const c = containerOf(pid);
     if (c && ids.has(c)) return true;
+    if (taggedFor(pid, d.config().id)) return true;
     for (let p: number | null = pid, i = 0; p && p > 1 && i < 64; p = ppid(p), i++) if (roots.has(p)) return true;
     return false;
   };
@@ -236,8 +246,8 @@ export const makeCluster = (d: ClusterDeps) => {
     const r = await Effect.runPromise(exec([MEDIA(), "status"], 10_000));
     const s = r.code === 0 ? decodeJson(MediaStatus, r.stdout) : undefined;
     if (!s) return { name: "parish-media", ok: false, detail: `parish-media status did not answer: ${r.stderr.trim().split("\n").pop() || r.code}` };
-    const foreign = (s.compute_pids ?? []).map(Number).filter((p) => p > 0 && !fleet(p));
-    const ok = !s.not_ready || (s.ac_online !== false && !(s.active_jobs ?? []).length && !foreign.length);
+    const pids = (s.compute_pids ?? []).map(Number).filter((p) => p > 0);
+    const ok = !s.not_ready || (s.ac_online !== false && !(s.active_jobs ?? []).length && pids.length > 0 && pids.every(fleet));
     return { name: "parish-media", ok, detail: ok ? "parish-media says the GPU is free." : `parish-media: ${s.not_ready}` };
   };
 
@@ -252,8 +262,9 @@ export const makeCluster = (d: ClusterDeps) => {
 
   const evaluate = async (): Promise<Check[]> => {
     const gpus = d.gpus();
-    const roots = new Set([...spawnedPids(), ...d.endpoints().flatMap((e) => (e.pid ? [e.pid] : []))]);
-    const ids = await fleetContainers();
+    const roots = spawnedPids();
+    let ids = await fleetContainers(false);
+    if (gpus.some((g) => g.pids.some((p) => { const c = containerOf(p); return !!c && !ids.has(c); }))) ids = await fleetContainers(true);
     const fleet = (pid: number) => isFleet(pid, roots, ids);
     const foreign = gpus.flatMap((g) => g.pids.filter((p) => !fleet(p)).map((p) => ({ g, p })));
     const busy = gpus.filter((g) => (g.utilization ?? 0) >= 10 && !g.pids.some(fleet));
@@ -334,10 +345,12 @@ export const makeCluster = (d: ClusterDeps) => {
     return reclaiming;
   };
 
-  const startRpc = (from: { id: string; name: string; url: string }) =>
+  const startRpc = (from: { id: string; name: string; url: string }, peer: string | null) =>
     Effect.gen(function* () {
       const s = set();
-      if (state !== "lent") return yield* fail(409, "NOT_LENDING", `${d.config().name} is not lending its GPU: ${reason}`);
+      if (state !== "lent" || draining) return yield* fail(409, "NOT_LENDING", `${d.config().name} is not lending its GPU: ${reason}`);
+      const borrower = plainIp(peer ?? "");
+      if (!borrower) return yield* fail(400, "NO_PEER", "could not tell which machine asked for the GPU");
       const existing = [...rpcs.values()][0];
       if (existing && existing.forId === from.id) return { id: existing.id, endpoint: existing.endpoint };
       if (existing) return yield* fail(409, "RPC_BUSY", `${d.config().name} is already lending its GPU to ${existing.forName}.`);
@@ -346,13 +359,15 @@ export const makeCluster = (d: ClusterDeps) => {
       const host = yield* Effect.promise(ip);
       if (!host) return yield* fail(409, "NO_TAILNET", `${d.config().name} has no tailnet address, so it cannot lend its GPU safely.`);
       const internal = yield* Effect.promise(freePort);
-      const gpus = d.gpus().filter((g) => !g.pids.length).map((g) => g.index);
+      const free = d.gpus().filter((g) => !g.pids.length);
+      const gpus = free.map((g) => g.index);
+      if (d.gpus().length && !gpus.length) return yield* fail(409, "GPU_BUSY", `Every GPU on ${d.config().name} is already in use.`);
       const id = randomBytes(5).toString("hex");
       const log = join(home, `rpc-${id}.log`);
       const fd = openSync(log, "w", 0o600);
       const proc = Bun.spawn([bin, "-H", "127.0.0.1", "-p", String(internal)], {
         stdin: "ignore", stdout: fd, stderr: fd,
-        env: { ...process.env, CUDA_DEVICE_ORDER: "PCI_BUS_ID", ...(d.gpus().length ? { CUDA_VISIBLE_DEVICES: gpus.join(",") } : {}) },
+        env: { ...process.env, [FLEET_ENV]: d.config().id, CUDA_DEVICE_ORDER: "PCI_BUS_ID", ...(d.gpus().length ? { CUDA_VISIBLE_DEVICES: gpus.join(",") } : {}) },
       });
       closeSync(fd);
       const ready = Date.now() + 15_000;
@@ -363,23 +378,20 @@ export const makeCluster = (d: ClusterDeps) => {
       }
       const conns = new Set<Socket>();
       const gate = createServer({ pauseOnConnect: true }, (sock) => {
-        const peer = plainIp(sock.remoteAddress);
-        void fleetHosts().then((allowed) => {
-          if (!allowed.has(peer)) return sock.destroy();
-          const up = connect(internal, "127.0.0.1");
-          conns.add(sock);
-          const close = () => {
-            conns.delete(sock);
-            sock.destroy();
-            up.destroy();
-          };
-          up.on("error", close).on("close", close);
-          sock.on("error", close).on("close", close);
-          up.setNoDelay(true);
-          sock.setNoDelay(true);
-          sock.pipe(up).pipe(sock);
-          sock.resume();
-        }, () => sock.destroy());
+        if (plainIp(sock.remoteAddress) !== borrower) return sock.destroy();
+        const up = connect(internal, "127.0.0.1");
+        conns.add(sock);
+        const close = () => {
+          conns.delete(sock);
+          sock.destroy();
+          up.destroy();
+        };
+        up.on("error", close).on("close", close);
+        sock.on("error", close).on("close", close);
+        up.setNoDelay(true);
+        sock.setNoDelay(true);
+        sock.pipe(up).pipe(sock);
+        sock.resume();
       });
       const bound = yield* Effect.promise(() => new Promise<string | null>((resolve) => {
         gate.once("error", (e) => resolve(String(e)));
@@ -389,7 +401,14 @@ export const makeCluster = (d: ClusterDeps) => {
         yield* Effect.promise(() => kill(proc));
         return yield* fail(409, "RPC_PORT", `port ${s.rpcPort} on ${host} is taken: ${bound}`);
       }
-      const r: Rpc = { id, proc, gate, conns, endpoint: `${host}:${s.rpcPort}`, forId: from.id, forName: from.name, forUrl: normUrl(from.url), startedAt: now(), gpus };
+      if (state !== "lent" || draining) {
+        gate.close();
+        yield* Effect.promise(() => kill(proc));
+        return yield* fail(409, "NOT_LENDING", `${d.config().name} took its GPU back: ${reason}`);
+      }
+      const back = URL.parse(from.url);
+      const forUrl = `${back?.protocol ?? "http:"}//${borrower.includes(":") ? `[${borrower}]` : borrower}:${back?.port || "18091"}`;
+      const r: Rpc = { id, proc, gate, conns, endpoint: `${host}:${s.rpcPort}`, forId: from.id, forName: from.name, forUrl, startedAt: now(), gpus, gpuIds: free.map((g) => g.uuid), internal };
       rpcs.set(id, r);
       void proc.exited.then(() => {
         if (rpcs.get(id) === r) {
@@ -444,7 +463,7 @@ export const makeCluster = (d: ClusterDeps) => {
       const bin = Bun.which(s.llamaServer);
       if (!bin) return yield* fail(409, "LLAMA_MISSING", `llama-server from llama.cpp is not installed on ${me.name}.`);
       const all = yield* Effect.promise(machines);
-      const lenders = all.filter((m) => m.state === "lent" && m.rpc && m.rpcEndpoint && (!req.members?.length || req.members.includes(m.id)));
+      const lenders = all.filter((m) => m.state === "lent" && m.rpc && m.rpcEndpoint && (m.gpus === 0 || m.freeMiB > 0) && (!req.members?.length || req.members.includes(m.id)));
       if (!lenders.length) {
         const why = all.map((m) => `${m.name}: ${m.reason}`).join("; ");
         return yield* fail(409, "NO_LENDERS", `No machine in the fleet is lending its GPU right now${why ? ` (${why})` : ""}.`);
@@ -466,12 +485,13 @@ export const makeCluster = (d: ClusterDeps) => {
           return ok?._tag === "Some" ? { m, endpoint: ok.value.endpoint } : { m, error: (body as { error?: { message?: string } } | null)?.error?.message ?? `HTTP ${r.status}` };
         }), { concurrency: 8 });
       const ok = granted.flatMap((g) => ("endpoint" in g && g.endpoint ? [{ m: g.m, endpoint: g.endpoint }] : []));
+      for (const g of granted) if ("error" in g) void post(g.m.url, "/api/cluster/rpc/stop", { id: me.id, name: me.name, url: me.url }, 5_000).catch(() => undefined);
       if (!ok.length) return yield* fail(502, "RPC_UNAVAILABLE", granted.map((g) => `${g.m.name}: ${"error" in g ? g.error : ""}`).join("; "));
       const id = randomBytes(5).toString("hex");
       const argv = argvFor(ok.map((g) => g.endpoint));
       const log = join(home, `pool-${id}.log`);
       const fd = openSync(log, "w", 0o600);
-      const proc = Bun.spawn(argv, { stdin: "ignore", stdout: fd, stderr: fd });
+      const proc = Bun.spawn(argv, { stdin: "ignore", stdout: fd, stderr: fd, env: { ...process.env, [FLEET_ENV]: me.id } });
       closeSync(fd);
       const info: LocalPool = { id, model: req.model, alias, port, members: ok.map((g) => ({ controllerId: g.m.id, name: g.m.name, endpoint: g.endpoint })), phase: "starting", message: null, argv, startedAt: now() };
       const pool: Pool = { info, proc, urls: new Map(ok.map((g) => [g.m.id, g.m.url])) };
@@ -486,6 +506,7 @@ export const makeCluster = (d: ClusterDeps) => {
           if (r._tag === "Some" && r.value.status === 200 && pool.info.phase === "starting") pool.info = { ...pool.info, phase: "ready" };
           else await Bun.sleep(1_000);
         }
+        if (pool.info.phase === "starting") await teardown(id, "llama-server did not become ready within 30 minutes.");
       })();
       return { pool: info, argv, members: info.members.map((m) => m.name) };
     });
@@ -498,7 +519,8 @@ export const makeCluster = (d: ClusterDeps) => {
     if (!peers) return;
     await ip();
     const own = ownHosts();
-    const known = new Set(me.peers.map(normUrl));
+    const ignored = new Set(me.cluster?.ignored ?? []);
+    const known = new Set([...me.peers.map(normUrl), ...ignored]);
     const targets = [...new Set(peers.flatMap((p) => p.TailscaleIPs.filter((a) => !a.includes(":")).slice(0, 1)))]
       .flatMap((host) => s.ports.map((p) => `http://${host}:${p}`))
       .filter((u) => !known.has(u) && !(own.has(URL.parse(u)?.hostname ?? "") && URL.parse(u)?.port === String(d.port)));
@@ -509,7 +531,7 @@ export const makeCluster = (d: ClusterDeps) => {
       const nonce = randomBytes(24).toString("base64url");
       const r = await fetch(`${url}/api/cluster/hello`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: me.id, nonce, target: url }), signal: AbortSignal.timeout(3_000), redirect: "manual" }).catch(() => null);
       const hello = r?.ok ? decodeHello(await r.json().catch(() => null)) : null;
-      if (hello?._tag !== "Some" || hello.value.id !== health.value.id) return null;
+      if (hello?._tag !== "Some" || hello.value.id !== health.value.id || ignored.has(hello.value.id)) return null;
       return same(hello.value.proof, proof(me.fleetKey, nonce, hello.value.id, url)) ? { id: hello.value.id, name: hello.value.name, url, at: now() } : null;
     }));
     const fresh = found.filter((f): f is NonNullable<typeof f> => !!f);
@@ -592,9 +614,15 @@ export const makeCluster = (d: ClusterDeps) => {
       return { released: hit.map((p) => p.info.id) };
     }),
     watchPools,
+    rpcPorts: () => [set().rpcPort, ...[...rpcs.values()].map((r) => r.internal)],
+    shutdown: async () => {
+      await Promise.all([...pools.values()].flatMap((p) => (p.proc ? [kill(p.proc)] : [])));
+      await Promise.all([...rpcs.keys()].map(stopRpc));
+    },
+    poolPorts: () => [...pools.values()].filter((p) => p.info.phase === "starting" || p.info.phase === "ready").map((p) => p.info.port),
     poolPort: (port: number) => [...pools.values()].find((p) => p.info.port === port && (p.info.phase === "starting" || p.info.phase === "ready"))?.info.id ?? null,
-    gpuGone: async (index: number, why: string) => {
-      for (const r of [...rpcs.values()].filter((r) => r.gpus.includes(index))) {
+    gpuGone: async (uuid: string, why: string) => {
+      for (const r of [...rpcs.values()].filter((r) => r.gpuIds.includes(uuid))) {
         await post(r.forUrl, "/api/cluster/release", { controllerId: d.config().id, reason: why }, 3_000).catch(() => undefined);
         await stopRpc(r.id);
       }

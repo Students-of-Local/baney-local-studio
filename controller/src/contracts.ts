@@ -140,6 +140,7 @@ export const LocalJob = Schema.Struct({
   startedAt: Schema.String,
   updatedAt: Schema.String,
   lent: Schema.optionalKey(Schema.Boolean),
+  gpuUuids: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type LocalJob = typeof LocalJob.Type;
 

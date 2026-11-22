@@ -40,7 +40,14 @@ const byCard = (all: boolean): Map<string, number[]> => {
 };
 const freeGpus = () => byCard(false);
 
-const jobs = makeJobs({ config: () => config, catalog: () => catalog, freeGpus, listening: () => Effect.map(listeners, (ls) => new Set((ls ?? []).map((l) => l.port))) });
+const jobs = makeJobs({
+  config: () => config,
+  catalog: () => catalog,
+  freeGpus,
+  listening: () => Effect.map(listeners, (ls) => new Set([...(ls ?? []).map((l) => l.port), ...cluster.poolPorts()])),
+  uuids: (indices) => indices.flatMap((i) => rawGpus.filter((g) => g.index === i).map((g) => g.uuid)),
+  indexOf: (uuid) => rawGpus.find((g) => g.uuid === uuid)?.index ?? null,
+});
 const scanner = makeScanner(config.id, (p) => jobs.jobPort(p) ?? cluster.poolPort(p));
 
 const localEndpoints = (): Endpoint[] => {
@@ -70,7 +77,6 @@ const cluster = makeCluster({
   gpus: () => rawGpus,
   graph: () => graph.get(),
   invalidate: () => graph.invalidate(),
-  endpoints: () => scanner.current(),
   jobs,
   listenHost: host,
   port,
@@ -79,7 +85,7 @@ const cluster = makeCluster({
 const gw = { config: () => config, local: localEndpoints, usage: () => usage.list(), graph: () => graph.get(), record: usage.record, cluster: () => cluster.node(), failoverMs: () => cluster.failoverMs(), refuse: (ep: Endpoint) => cluster.refuse(ep) };
 
 const excluded = (): Set<number> => {
-  const out = new Set([port, ...config.excludePorts]);
+  const out = new Set([port, ...config.excludePorts, ...cluster.rpcPorts()]);
   for (const p of config.peers) {
     const u = URL.parse(p);
     if (u && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(u.hostname)) out.add(Number(u.port || 80));
@@ -112,8 +118,8 @@ const watchHardware = Effect.gen(function* () {
   for (const [uuid, g] of prev) {
     if (known.has(uuid)) continue;
     const why = `${g.name} was unplugged.`;
-    for (const j of jobs.active().filter((j) => j.gpus.includes(g.index))) yield* Effect.result(jobs.stop(j.id, why));
-    yield* Effect.promise(() => cluster.gpuGone(g.index, why));
+    for (const j of jobs.onGpu(uuid, g.index)) yield* Effect.result(jobs.stop(j.id, why));
+    yield* Effect.promise(() => cluster.gpuGone(uuid, why));
     note({ change: "removed", gpu: g.name, memoryTotalMiB: g.memoryTotalMiB, external: !!g.external, message: why, suggestions: [] });
   }
   for (const g of next) {
@@ -163,6 +169,8 @@ const unload = (p: number) =>
   Effect.gen(function* () {
     const ep = scanner.current().find((e) => e.port === p && e.live);
     if (!ep) return yield* fail(404, "NOT_RUNNING", `nothing is serving on port ${p}`);
+    const pool = cluster.poolPort(p);
+    if (pool) return yield* cluster.stopPool(pool);
     if (ep.jobId) return yield* jobs.stop(ep.jobId);
     const published = (yield* exec(["docker", "ps", "-q", "--filter", `publish=${p}`], 10_000)).stdout.split("\n").filter(Boolean);
     const ids = [...published, containerOf(ep.pid)].filter((id): id is string => !!id);
@@ -236,13 +244,16 @@ const saved = <A>(next: typeof config, result: A) => {
   return json(result);
 };
 
-const handle = async (req: Request): Promise<Response> => {
+const handle = async (req: Request, peer: string | null): Promise<Response> => {
   const url = new URL(req.url);
   const p = url.pathname;
   const post = req.method === "POST";
   const match = (re: RegExp) => (post ? re.exec(p)?.[1] : undefined);
   if (req.method === "GET" && p === "/api/health") return json({ ok: true, id: config.id, name: config.name, version: VERSION, api: 2, cluster: clusterSettings(config).discover });
-  if (post && p === "/api/cluster/hello") return json(await run(cluster.hello(await body(req, LocalHelloRequest))));
+  if (post && p === "/api/cluster/hello") {
+    if (!clusterSettings(config).discover || Number(req.headers.get("content-length") ?? 0) > 4096) return json({ error: { code: "NOT_FOUND", message: `${req.method} ${p}` } }, 404);
+    return json(await run(cluster.hello(await body(req, LocalHelloRequest))));
+  }
   if (!authorized(req)) return json({ error: { code: "UNAUTHORIZED", message: "fleet key required" } }, 401);
   if (req.method === "GET" && (p === "/v1/models" || p === "/models")) return listModels(gw);
   if (post && /^\/v1\/(chat\/completions|completions|messages|responses)$/.test(p)) return passthrough(gw, req, p);
@@ -280,7 +291,7 @@ const handle = async (req: Request): Promise<Response> => {
     graph.invalidate();
     return json(await cluster.view());
   }
-  if (post && p === "/api/cluster/rpc") return json(await run(cluster.startRpc(await body(req, LocalRpcRequest))));
+  if (post && p === "/api/cluster/rpc") return json(await run(cluster.startRpc(await body(req, LocalRpcRequest), peer)));
   if (post && p === "/api/cluster/rpc/stop") return json(await run(cluster.stopRpcFor((await body(req, LocalRpcRequest)).id)));
   if (post && p === "/api/cluster/release") {
     const r = await body(req, LocalReleaseRequest);
@@ -304,7 +315,10 @@ const handle = async (req: Request): Promise<Response> => {
     if (!/^https?:\/\/[^/]+$/.test(u)) throw httpError(400, "BAD_URL", "peer url must be http(s)://host:port");
     if (u === normUrl(config.url)) throw httpError(400, "SELF_PEER", "a controller cannot peer with itself");
     const peers = b.remove ? config.peers.filter((x) => normUrl(x) !== u) : [...new Set([...config.peers.map(normUrl), u])];
-    return saved({ ...config, peers }, { peers });
+    const id = b.remove ? (await graph.get()).links.find((l) => normUrl(l.url) === u && !l.self)?.id : undefined;
+    const was = (config.cluster?.ignored ?? []).filter((x) => x !== u);
+    const ignored = b.remove ? [...new Set([...was, u, ...(id ? [id] : [])])] : was;
+    return saved({ ...config, peers, ...(config.cluster || b.remove ? { cluster: { ...config.cluster, ignored } } : {}) }, { peers });
   }
   return json({ error: { code: "NOT_FOUND", message: `${req.method} ${p}` } }, 404);
 };
@@ -315,8 +329,8 @@ const serve = (hostname: string) =>
     hostname,
     idleTimeout: 0,
     maxRequestBodySize: 256 * 1024 * 1024,
-    fetch: async (req) => {
-      const res = await handle(req).catch(errorResponse);
+    fetch: async (req, server) => {
+      const res = await handle(req, server.requestIP(req)?.address ?? null).catch(errorResponse);
       res.headers.set(LOCAL_STUDIO_CONTROLLER_HEADER, config.id);
       return res;
     },
@@ -339,6 +353,8 @@ const listenTailnet = async () => {
     console.error(`could not listen on the tailnet address ${want}:${port}: ${String(e)}`);
   }
 };
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => void cluster.shutdown().finally(() => process.exit(0)));
 
 const loop = async (ms: number, f: () => Promise<unknown>) => {
   for (;;) {
