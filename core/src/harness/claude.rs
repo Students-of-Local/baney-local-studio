@@ -15,7 +15,7 @@ use super::{
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption};
 
-const MODELS: [(&str, &str, &str); 8] = [
+const MODELS: [(&str, &str, &str); 9] = [
     ("opus", "Opus (Claude Code)", "claude-opus-5-5"),
     ("sonnet", "Sonnet (Claude Code)", "claude-sonnet-5-5"),
     ("haiku", "Haiku (Claude Code)", "claude-haiku-5-5"),
@@ -24,6 +24,7 @@ const MODELS: [(&str, &str, &str); 8] = [
     ("claude-sonnet-5-5", "Claude Sonnet 5.5 (Claude Code)", ""),
     ("claude-haiku-5-5", "Claude Haiku 5.5 (Claude Code)", ""),
     ("claude-fable-5-2", "Claude Fable 5.2 (Claude Code)", ""),
+    ("claude-fable-5-1", "Claude Fable 5.1 (Claude Code)", ""),
 ];
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const CONTEXT_WINDOW: u64 = 200_000;

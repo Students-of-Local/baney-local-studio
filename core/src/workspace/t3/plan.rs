@@ -275,10 +275,9 @@ fn custom_themes(settings: &Settings) -> Vec<Value> {
 
 fn trim_color(value: &str) -> String {
     let value = value.trim();
-    if value.len() == 9 && value.starts_with('#') {
-        value[..7].to_string()
-    } else {
-        value.to_string()
+    match value.get(..7) {
+        Some(color) if value.len() == 9 && value.starts_with('#') => color.to_string(),
+        _ => value.to_string(),
     }
 }
 
