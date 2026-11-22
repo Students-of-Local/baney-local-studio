@@ -439,6 +439,13 @@ enum Command {
         request: String,
         outcome: Result<String, String>,
     },
+    ListPlugins,
+    SetPluginPermission {
+        request: String,
+        plugin: String,
+        capability: String,
+        on: bool,
+    },
     ListArchived {
         request: String,
     },
@@ -681,6 +688,7 @@ impl Studio {
             generation: 0,
             codex_models: Vec::new(),
             plugin_consent: Vec::new(),
+            plugin_list: Vec::new(),
             ask_socket,
             ask_task,
             ask_tokens,
@@ -880,6 +888,14 @@ impl Studio {
 
     pub fn answer_consent(&self, request: String, answer: ConsentAnswer) {
         self.send_command(Command::AnswerConsent { request, answer });
+    }
+
+    pub fn list_plugins(&self) {
+        self.send_command(Command::ListPlugins);
+    }
+
+    pub fn set_plugin_permission(&self, request: String, plugin: String, capability: String, on: bool) {
+        self.send_command(Command::SetPluginPermission { request, plugin, capability, on });
     }
 
     pub fn list_archived(&self, request: String) {
@@ -1168,6 +1184,7 @@ struct Actor {
     generation: u64,
     codex_models: Vec<ModelOption>,
     plugin_consent: Vec<String>,
+    plugin_list: Vec<crate::model::PluginInfo>,
     ask_socket: Option<PathBuf>,
     ask_task: Option<tokio::task::JoinHandle<()>>,
     ask_tokens: plugins::ask::Tokens,
@@ -1679,7 +1696,24 @@ impl Actor {
             }
             Command::InstallPlugin { request, source } => self.install_plugin(request, source),
             Command::AnswerConsent { request, answer } => self.answer_consent(request, answer),
+            Command::ListPlugins => {
+                self.plugins();
+                self.mailbox.push(Update::Plugins { plugins: self.plugin_list.clone() });
+            }
+            Command::SetPluginPermission { request, plugin, capability, on } => {
+                let Some(root) = self.plugins_dir.clone() else {
+                    let message = "No plugins folder: HOME is not set".to_string();
+                    self.mailbox.push(Update::RequestFailed { request, message });
+                    return;
+                };
+                let itself = self.itself.clone();
+                tokio::task::spawn_blocking(move || {
+                    let outcome = plugins::set_permission(&root, &plugin, &capability, on);
+                    itself.send(Command::PluginsDone { request, outcome });
+                });
+            }
             Command::PluginsDone { request, outcome } => {
+                self.plugin_list.clear();
                 self.plugins();
                 self.mailbox.push(match outcome {
                     Ok(message) => Update::RequestDone { request, message },
@@ -2637,10 +2671,14 @@ impl Actor {
         let ready = plugins::ready(&scan.plugins, &grants);
         for (plugin, consent) in &ready {
             match consent {
-                plugins::Consent::Ready => {}
+                plugins::Consent::Ready { .. } => {}
                 plugins::Consent::NeedsConsent { missing } => {
                     offers.push((plugin, missing.clone()));
-                    let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+                    let names: Vec<&str> = missing
+                        .iter()
+                        .filter(|capability| !capability.sensitive())
+                        .map(|capability| capability.name())
+                        .collect();
                     notes.push(format!(
                         "{} needs consent for {}, so its MCP server is off",
                         plugin.id,
@@ -2656,6 +2694,12 @@ impl Actor {
             if let Err(error) = plugins::sync_mcp_servers(dir, &agent, &ready) {
                 notes.push(error);
             }
+        }
+        let list: Vec<crate::model::PluginInfo> =
+            ready.iter().map(|(plugin, consent)| plugins::listing(plugin, consent)).collect();
+        if list != self.plugin_list {
+            self.mailbox.push(Update::Plugins { plugins: list.clone() });
+            self.plugin_list = list;
         }
         let mut pendings = self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut offered = false;

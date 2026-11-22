@@ -1,14 +1,25 @@
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
-use local_studio_core::{ColorScheme, ConsentAnswer, ConsentNeed, ConsentRequest, ConsentRow, Settings, Update};
+use local_studio_core::{
+    ColorScheme, ConsentAnswer, ConsentNeed, ConsentRequest, ConsentRow, PluginInfo, Settings, Update,
+};
 
 use crate::app::App;
 use crate::format;
 use crate::icons;
 
-pub const SCENES: [&str; 4] = ["consent-install", "consent-install-light", "consent-findings", "consent-update-light"];
+pub const SCENES: [&str; 6] = [
+    "consent-install",
+    "consent-install-light",
+    "consent-findings",
+    "consent-update-light",
+    "consent-settings",
+    "consent-settings-light",
+];
+
+const TRUSTED: &str = "Local Studio tells the plugin which sensitive permissions are on. It does not block them itself, so the plugin is trusted to honor a switch you leave off.";
 
 thread_local! {
     static SHOWN: RefCell<Option<(String, adw::Dialog)>> = const { RefCell::new(None) };
@@ -71,14 +82,11 @@ fn title(consent: &ConsentRequest) -> String {
 
 fn confirm(consent: &ConsentRequest, count: usize) -> String {
     let noun = if count == 1 { "permission" } else { "permissions" };
-    let off = count < consent.rows.len();
     if !consent.install {
-        return if off { format!("Allow {count} {noun}, tools off") } else { format!("Allow {count} {noun}") };
+        return format!("Allow {count} {noun}");
     }
     let verb = if consent.update_from.is_some() { "Update" } else { "Install" };
-    if off {
-        format!("{verb} with tools off")
-    } else if count == 0 {
+    if count == 0 {
         format!("{verb} with no new permissions")
     } else {
         format!("{verb} with {count} {noun}")
@@ -86,16 +94,79 @@ fn confirm(consent: &ConsentRequest, count: usize) -> String {
 }
 
 fn row_subtitle(row: &ConsentRow) -> String {
-    format!("{}  <tt>{}</tt>", format::escape(&row.scope), format::escape(&row.id))
+    let line = format!("{}  <tt>{}</tt>", format::escape(&row.scope), format::escape(&row.id));
+    match (&row.need, &row.gates) {
+        (ConsentNeed::Sensitive, Some(gates)) => format!("{line}\nOff means no {}.", format::escape(gates)),
+        _ => line,
+    }
 }
 
-fn stays_off(consent: &ConsentRequest) -> Option<String> {
-    consent.rows.iter().any(|row| row.need == ConsentNeed::Sensitive).then(|| {
-        format!(
-            "The plugin's tools stay off until every permission it asks for is on. To grant one later, run local-studio plugin grant {} <capability>.",
-            consent.plugin
-        )
-    })
+fn starts_off(consent: &ConsentRequest) -> Option<String> {
+    consent
+        .rows
+        .iter()
+        .any(|row| row.need == ConsentNeed::Sensitive)
+        .then(|| format!("Sensitive permissions start off. Change any of them later in Settings, Plugins. {TRUSTED}"))
+}
+
+fn tag(text: &str, class: &str) -> gtk::Label {
+    let tag = gtk::Label::new(Some(text));
+    tag.add_css_class(class);
+    tag.set_valign(gtk::Align::Center);
+    tag
+}
+
+pub fn plugin_groups(app: &Weak<App>, plugins: &[PluginInfo]) -> Vec<adw::PreferencesGroup> {
+    if plugins.is_empty() {
+        let group = adw::PreferencesGroup::new();
+        let status = adw::StatusPage::builder()
+            .icon_name(icons::PLUGIN)
+            .title("No plugins installed")
+            .description("A plugin you install shows here with its permissions.")
+            .build();
+        status.add_css_class("compact");
+        group.add(&status);
+        return vec![group];
+    }
+    let intro = adw::PreferencesGroup::builder().description(format!("Sensitive permissions start off. {TRUSTED} A change reaches a plugin's tools the next time its server starts, such as in a new thread.")).build();
+    let mut groups = vec![intro];
+    for plugin in plugins {
+        let group = adw::PreferencesGroup::builder()
+            .title(format::escape(&format!("{} {}", plugin.name, plugin.version)))
+            .description(format::escape(&format!(
+                "{}. {}",
+                plugin.status,
+                plugin.description.trim_end_matches(['.', ' '])
+            )))
+            .build();
+        for row in &plugin.rows {
+            let on = plugin.granted.contains(&row.id);
+            if row.need == ConsentNeed::Sensitive {
+                let switch = adw::SwitchRow::builder()
+                    .title(format::escape(&row.sentence))
+                    .subtitle(row_subtitle(row))
+                    .active(on)
+                    .sensitive(plugin.ready)
+                    .build();
+                switch.add_suffix(&tag("Sensitive", "ls-consent-tag"));
+                let (weak, id, capability) = (app.clone(), plugin.id.clone(), row.id.clone());
+                switch.connect_active_notify(move |switch| {
+                    let Some(app) = weak.upgrade() else { return };
+                    let (id, capability, on) = (id.clone(), capability.clone(), switch.is_active());
+                    let request = app.core.request();
+                    app.core.run(move |studio| studio.set_plugin_permission(request, id, capability, on));
+                });
+                group.add(&switch);
+            } else {
+                let action =
+                    adw::ActionRow::builder().title(format::escape(&row.sentence)).subtitle(row_subtitle(row)).build();
+                action.add_suffix(&tag(if on { "Needed" } else { "Needed, not granted" }, "ls-consent-secondary"));
+                group.add(&action);
+            }
+        }
+        groups.push(group);
+    }
+    groups
 }
 
 fn header(consent: &ConsentRequest) -> gtk::Box {
@@ -170,17 +241,12 @@ fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
         let subtitle = row_subtitle(row);
         if row.need == ConsentNeed::Sensitive {
             let switch = adw::SwitchRow::builder().title(format::escape(&row.sentence)).subtitle(subtitle).build();
-            let tag = gtk::Label::new(Some("Sensitive"));
-            tag.add_css_class("ls-consent-tag");
-            tag.set_valign(gtk::Align::Center);
-            switch.add_suffix(&tag);
+            switch.add_suffix(&tag("Sensitive", "ls-consent-tag"));
             list.append(&switch);
             switches.borrow_mut().push((row.id.clone(), switch));
         } else {
             let action = adw::ActionRow::builder().title(format::escape(&row.sentence)).subtitle(subtitle).build();
-            let tag = gtk::Label::new(Some("Needed"));
-            tag.add_css_class("ls-consent-secondary");
-            action.add_suffix(&tag);
+            action.add_suffix(&tag("Needed", "ls-consent-secondary"));
             list.append(&action);
         }
     }
@@ -189,7 +255,7 @@ fn present(app: &Rc<App>, consent: &ConsentRequest, findings_open: bool) {
     column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let footer = gtk::Box::new(gtk::Orientation::Vertical, 12);
     footer.add_css_class("ls-consent-footer");
-    if let Some(text) = stays_off(consent) {
+    if let Some(text) = starts_off(consent) {
         footer.append(&label(&text, "ls-consent-secondary"));
     }
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -326,6 +392,33 @@ fn fixture_rows() -> Vec<ConsentRow> {
     ]
 }
 
+fn fixture_plugins() -> Vec<PluginInfo> {
+    vec![
+        PluginInfo {
+            id: "field-notes".to_string(),
+            name: "Field Notes".to_string(),
+            icon: None,
+            version: "1.4.0".to_string(),
+            description: "Reads pages in its own tabs and keeps notes for a thread".to_string(),
+            ready: true,
+            status: "On without site-secrets".to_string(),
+            rows: fixture_rows(),
+            granted: vec!["mcp-server".to_string(), "ask-user".to_string(), "screen-capture".to_string()],
+        },
+        PluginInfo {
+            id: "clipper".to_string(),
+            name: "Clipper".to_string(),
+            icon: None,
+            version: "0.3.1".to_string(),
+            description: "Clips pages into notes".to_string(),
+            ready: false,
+            status: "Off until it has mcp-server (local-studio plugin grant clipper mcp-server)".to_string(),
+            rows: fixture_rows().into_iter().filter(|row| row.id != "ask-user").collect(),
+            granted: Vec::new(),
+        },
+    ]
+}
+
 pub fn stage(app: &Rc<App>, scene: &str) -> bool {
     if !SCENES.contains(&scene) {
         return false;
@@ -336,6 +429,10 @@ pub fn stage(app: &Rc<App>, scene: &str) -> bool {
         app.apply(vec![Update::Settings { settings }]);
     }
     match scene.trim_end_matches("-light") {
+        "consent-settings" => {
+            app.open_settings(Some("plugins"));
+            app.apply(vec![Update::Plugins { plugins: fixture_plugins() }]);
+        }
         "consent-findings" => present(
             app,
             &fixture(

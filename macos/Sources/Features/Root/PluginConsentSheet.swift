@@ -153,6 +153,12 @@ struct PluginConsentSheet: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                if row.need == .sensitive, let gates = row.gates {
+                    Text("Off means no \(gates).")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 8)
             if row.need == .sensitive {
@@ -180,9 +186,7 @@ struct PluginConsentSheet: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 12) {
             if consent.rows.contains(where: { $0.need == .sensitive }) {
-                Text(
-                    "The plugin's tools stay off until every permission it asks for is on. To grant one later, run \(Text("local-studio plugin grant \(consent.plugin) <capability>").font(.system(size: 11, design: .monospaced)))."
-                )
+                Text("Sensitive permissions start off. Change any of them later in Settings, Plugins. \(PluginTrust.text)")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -213,14 +217,10 @@ struct PluginConsentSheet: View {
         let needed = consent.rows.filter { $0.need == .needed }.count
         let count = needed + chosen.count
         let noun = count == 1 ? "permission" : "permissions"
-        let off = count < consent.rows.count
         if !consent.install {
-            return off ? "Allow \(count) \(noun), tools off" : "Allow \(count) \(noun)"
+            return "Allow \(count) \(noun)"
         }
         let verb = consent.updateFrom == nil ? "Install" : "Update"
-        if off {
-            return "\(verb) with tools off"
-        }
         return count == 0 ? "\(verb) with no new permissions" : "\(verb) with \(count) \(noun)"
     }
 
@@ -236,6 +236,10 @@ struct PluginConsentSheet: View {
             }
         )
     }
+}
+
+enum PluginTrust {
+    static let text = "Local Studio tells the plugin which sensitive permissions are on. It does not block them itself, so the plugin is trusted to honor a switch you leave off."
 }
 
 extension ConsentRequest: Identifiable {

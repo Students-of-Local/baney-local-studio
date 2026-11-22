@@ -13,7 +13,7 @@ mod install;
 #[cfg(all(test, unix))]
 mod tests;
 
-pub use consent::{answer, offer_grant, offer_install, Offer, Pending, Pendings};
+pub use consent::{answer, listing, offer_grant, offer_install, set_permission, Offer, Pending, Pendings};
 pub use grants::{Consent, Grants, GRANTS};
 pub use install::{install, stage, tree_hash, Catalog, CatalogEntry, Installed, Source, Staged, MAX_FILE};
 
@@ -23,6 +23,7 @@ pub const MCP_TAG: &str = "localStudioPlugin";
 /// Eukhe's settings take env values only as host variable names; Python needs any non-empty value, and every kernel has PATH.
 pub const NO_BYTECODE: (&str, &str) = ("PYTHONDONTWRITEBYTECODE", "PATH");
 pub const LOCAL_ONLY_ENV: &str = "LOCAL_STUDIO_LOCAL_ONLY";
+pub const GRANTED_ENV: &str = "LOCAL_STUDIO_GRANTED_";
 pub const LOCAL_ONLY_LABEL: &str = "Runs only on local models";
 pub const SESSION_OWNER: &str = "local-studio";
 
@@ -109,6 +110,11 @@ impl Capability {
             Capability::SiteSecrets => "Reads one saved login per site, after you allow that site.",
             Capability::Accessibility => "Uses the system accessibility API; macOS asks you separately.",
         }
+    }
+
+    #[must_use]
+    pub fn env(self) -> String {
+        format!("{GRANTED_ENV}{}", self.name().to_ascii_uppercase().replace('-', "_"))
     }
 
     #[must_use]
@@ -447,6 +453,9 @@ fn mcp_in(dir: &Path, id: &str, mcp: ManifestMcp, errors: &mut Vec<String>) -> O
         if !valid_env_name(name) {
             errors.push(format!("[mcp] env: bad variable name: {name:?}"));
         }
+        if name.starts_with(GRANTED_ENV) {
+            errors.push(format!("[mcp] env {name}: Local Studio sets the {GRANTED_ENV}* variables itself"));
+        }
         if !valid_env_name(host) || !host.starts_with(&prefix) {
             errors.push(format!("[mcp] env {name}: the host variable must start with {prefix}, not {host:?}"));
         }
@@ -472,16 +481,16 @@ pub fn ready<'a>(plugins: &'a [Plugin], grants: &Grants) -> Vec<(&'a Plugin, Con
 fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
     ready
         .iter()
-        .filter(|(plugin, consent)| {
-            !plugin.local_only && *consent == Consent::Ready && plugin.asks(Capability::McpServer)
-        })
-        .map(|(plugin, _)| *plugin)
-        .filter_map(|plugin| {
+        .filter(|(plugin, consent)| !plugin.local_only && consent.ready() && plugin.asks(Capability::McpServer))
+        .filter_map(|(plugin, consent)| {
             let mcp = plugin.mcp.as_ref()?;
             let dir = absolute(&plugin.dir);
             let mut env: Map<String, Value> =
                 mcp.env.iter().map(|(name, host)| (name.clone(), json!({ "env": host }))).collect();
             env.insert(NO_BYTECODE.0.to_string(), json!({ "env": NO_BYTECODE.1 }));
+            for capability in consent.sensitive() {
+                env.insert(capability.env(), json!({ "env": NO_BYTECODE.1 }));
+            }
             let mut entry = json!({
                 "type": "stdio",
                 "command": absolute(&mcp.command).to_string_lossy(),
@@ -499,9 +508,10 @@ fn mcp_servers(ready: &[(&Plugin, Consent)]) -> Map<String, Value> {
 pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
     plugins
         .iter()
-        .filter(|plugin| plugin.local_only)
-        .filter(|plugin| grants.consent(plugin) == Consent::Ready && plugin.asks(Capability::McpServer))
-        .filter_map(|plugin| {
+        .filter(|plugin| plugin.local_only && plugin.asks(Capability::McpServer))
+        .map(|plugin| (plugin, grants.consent(plugin)))
+        .filter(|(_, consent)| consent.ready())
+        .filter_map(|(plugin, consent)| {
             let mcp = plugin.mcp.as_ref()?;
             let mut env: Map<String, Value> = mcp
                 .env
@@ -510,6 +520,9 @@ pub fn session_servers(plugins: &[Plugin], grants: &Grants) -> Vec<Value> {
                 .collect();
             env.insert(NO_BYTECODE.0.to_string(), json!("1"));
             env.insert(LOCAL_ONLY_ENV.to_string(), json!("1"));
+            for capability in consent.sensitive() {
+                env.insert(capability.env(), json!("1"));
+            }
             Some(json!({
                 "type": "stdio",
                 "name": plugin.mcp_name(),

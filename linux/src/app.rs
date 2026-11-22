@@ -456,6 +456,10 @@ impl App {
                 }
             }
             Update::Consents { consents } => crate::consent::show(self, &consents),
+            Update::Plugins { plugins } => {
+                self.state.borrow_mut().plugins = plugins;
+                dirty.settings = true;
+            }
             Update::Approvals { thread, approvals } => {
                 let mut state = self.state.borrow_mut();
                 if state.selected.as_deref() == Some(thread.as_str()) {
@@ -1006,6 +1010,7 @@ impl App {
         self.core.run(|studio| {
             studio.load_providers();
             studio.list_paired_devices();
+            studio.list_plugins();
         });
         let request = self.core.request();
         self.core.run(|studio| studio.list_archived(request));

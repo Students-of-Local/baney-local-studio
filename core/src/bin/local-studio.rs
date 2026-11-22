@@ -152,10 +152,26 @@ fn consent_line(plugin: &Plugin, grants: &Grants) -> String {
 
 fn consent_text(plugin: &Plugin, consent: &Consent) -> String {
     match consent {
-        Consent::Ready => "ready".to_string(),
+        Consent::Ready { sensitive } => {
+            let off: Vec<&str> = plugin
+                .capabilities
+                .iter()
+                .filter(|capability| capability.sensitive() && !sensitive.contains(capability))
+                .map(|capability| capability.name())
+                .collect();
+            if off.is_empty() {
+                "ready".to_string()
+            } else {
+                format!("ready, without {} (local-studio plugin grant {} {})", off.join(", "), plugin.id, off.join(" "))
+            }
+        }
         Consent::Refused { reason } => format!("refused, so it gets no capabilities: {reason}"),
         Consent::NeedsConsent { missing } => {
-            let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+            let names: Vec<&str> = missing
+                .iter()
+                .filter(|capability| !capability.sensitive())
+                .map(|capability| capability.name())
+                .collect();
             format!(
                 "needs consent for {} (local-studio plugin grant {} {})",
                 names.join(", "),

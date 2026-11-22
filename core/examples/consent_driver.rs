@@ -3,7 +3,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
-use local_studio_core::{ConsentAnswer, ConsentNeed, ConsentRequest, Studio, StudioConfig, Update, Waker};
+use local_studio_core::{ConsentAnswer, ConsentNeed, ConsentRequest, PluginInfo, Studio, StudioConfig, Update, Waker};
 
 #[derive(Default)]
 struct Signal {
@@ -23,6 +23,7 @@ struct Driver {
     signal: Arc<Signal>,
     open: Vec<ConsentRequest>,
     outcomes: BTreeMap<String, Result<String, String>>,
+    plugins: Option<Vec<PluginInfo>>,
 }
 
 impl Driver {
@@ -32,6 +33,7 @@ impl Driver {
             for update in self.studio.tick() {
                 match update {
                     Update::Consents { consents } => self.open = consents,
+                    Update::Plugins { plugins } => self.plugins = Some(plugins),
                     Update::RequestDone { request, message } => drop(self.outcomes.insert(request, Ok(message))),
                     Update::RequestFailed { request, message } => drop(self.outcomes.insert(request, Err(message))),
                     _ => {}
@@ -83,6 +85,61 @@ fn print_sheet(sheet: &ConsentRequest) {
     }
 }
 
+fn print_plugins(label: &str, plugins: &[PluginInfo]) {
+    for plugin in plugins {
+        println!(
+            "{label} {} {} ready={} granted={} status={}",
+            plugin.id,
+            plugin.version,
+            plugin.ready,
+            plugin.granted.join(","),
+            plugin.status
+        );
+        for row in &plugin.rows {
+            let need = if row.need == ConsentNeed::Sensitive { "sensitive" } else { "needed" };
+            let on = plugin.granted.contains(&row.id);
+            println!(
+                "{label}-ROW {} {} {need} on={on} gates={}",
+                plugin.id,
+                row.id,
+                row.gates.as_deref().unwrap_or("-")
+            );
+        }
+    }
+}
+
+fn settings_rows(driver: &mut Driver, studio: &Studio, switches: &[String]) -> anyhow::Result<i32> {
+    let listed = |driver: &mut Driver, label: &str| -> anyhow::Result<()> {
+        driver.plugins = None;
+        studio.list_plugins();
+        if !driver.pump(|driver| driver.plugins.is_some(), Duration::from_mins(1)) {
+            bail!("no plugin list within a minute");
+        }
+        print_plugins(label, driver.plugins.as_deref().unwrap_or_default());
+        Ok(())
+    };
+    listed(driver, "PLUGIN")?;
+    let mut code = 0;
+    for (index, switch) in switches.iter().enumerate() {
+        let (target, state) = switch.split_once('=').context("switches are <id>:<capability>=on|off")?;
+        let (plugin, capability) = target.split_once(':').context("switches are <id>:<capability>=on|off")?;
+        let request = format!("switch-{index}");
+        studio.set_plugin_permission(request.clone(), plugin.to_string(), capability.to_string(), state == "on");
+        if !driver.pump(|driver| driver.outcomes.contains_key(&request), Duration::from_mins(1)) {
+            bail!("no answer to {switch} within a minute");
+        }
+        match &driver.outcomes[&request] {
+            Ok(message) => println!("SWITCH {switch}: {message}"),
+            Err(message) => {
+                println!("SWITCH-FAILED {switch}: {message}");
+                code = 1;
+            }
+        }
+    }
+    listed(driver, "AFTER")?;
+    Ok(code)
+}
+
 fn parse(answer: &str) -> anyhow::Result<ConsentAnswer> {
     Ok(match answer.split_once(':') {
         _ if answer == "cancel" => ConsentAnswer::Cancel,
@@ -92,33 +149,44 @@ fn parse(answer: &str) -> anyhow::Result<ConsentAnswer> {
     })
 }
 
-fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let [data, socket, source, answers @ ..] = args.as_slice() else {
-        bail!("usage: consent_driver <data dir> <socket> <plugin source | scan> <cancel|install[:sensitive,...] | scan: request=answer ...>");
-    };
-    let scan = source == "scan";
-    let answers: Vec<(String, String)> = if scan {
-        answers
-            .iter()
-            .map(|pair| pair.split_once('=').map(|(request, answer)| (request.to_string(), answer.to_string())))
-            .collect::<Option<_>>()
-            .context("scan answers are request=answer")?
-    } else {
-        let [answer] = answers else { bail!("one answer for an install") };
-        vec![("consent-driver".to_string(), answer.clone())]
-    };
+fn open(data: &str, socket: &str) -> anyhow::Result<Driver> {
     let config = StudioConfig {
-        socket_path: Some(socket.clone()),
+        socket_path: Some(socket.to_string()),
         session_dir: None,
-        data_dir: Some(data.clone()),
+        data_dir: Some(data.to_string()),
         launch: None,
         controller_main: None,
         take_over_serve: false,
     };
     let signal = Arc::new(Signal::default());
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>).context("start Studio")?;
-    let mut driver = Driver { studio: Arc::clone(&studio), signal, open: Vec::new(), outcomes: BTreeMap::new() };
+    Ok(Driver { studio, signal, open: Vec::new(), outcomes: BTreeMap::new(), plugins: None })
+}
+
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let [data, socket, source, rest @ ..] = args.as_slice() else {
+        bail!("usage: consent_driver <data dir> <socket> <plugin source | scan | plugins> <cancel|install[:sensitive,...] | scan: request=answer ... | plugins: id:capability=on|off ...>");
+    };
+    if source == "plugins" {
+        let mut driver = open(data, socket)?;
+        let studio = Arc::clone(&driver.studio);
+        let code = settings_rows(&mut driver, &studio, rest)?;
+        studio.shutdown();
+        std::process::exit(code);
+    }
+    let scan = source == "scan";
+    let answers: Vec<(String, String)> = if scan {
+        rest.iter()
+            .map(|pair| pair.split_once('=').map(|(request, answer)| (request.to_string(), answer.to_string())))
+            .collect::<Option<_>>()
+            .context("scan answers are request=answer")?
+    } else {
+        let [answer] = rest else { bail!("one answer for an install") };
+        vec![("consent-driver".to_string(), answer.clone())]
+    };
+    let mut driver = open(data, socket)?;
+    let studio = Arc::clone(&driver.studio);
     if !scan {
         studio.install_plugin(answers[0].0.clone(), source.clone());
     }

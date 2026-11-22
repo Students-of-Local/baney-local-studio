@@ -494,6 +494,21 @@ pub struct ConsentRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    pub icon: Option<String>,
+    pub version: String,
+    pub description: String,
+    pub ready: bool,
+    pub status: String,
+    pub rows: Vec<ConsentRow>,
+    pub granted: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "wire",
     derive(serde::Serialize, serde::Deserialize),
@@ -657,6 +672,9 @@ pub enum Update {
     },
     Consents {
         consents: Vec<ConsentRequest>,
+    },
+    Plugins {
+        plugins: Vec<PluginInfo>,
     },
     Queue {
         thread: String,

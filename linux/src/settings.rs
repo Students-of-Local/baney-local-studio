@@ -29,6 +29,9 @@ struct Inner {
     keys: RefCell<Vec<adw::PreferencesGroup>>,
     archive_page: adw::PreferencesPage,
     archive: RefCell<Vec<adw::PreferencesGroup>>,
+    plugins_page: adw::PreferencesPage,
+    plugins: RefCell<Vec<adw::PreferencesGroup>>,
+    plugins_shown: RefCell<String>,
     connections_page: adw::PreferencesPage,
     connections: RefCell<Vec<adw::PreferencesGroup>>,
     connections_shown: RefCell<String>,
@@ -70,6 +73,8 @@ impl SettingsDialog {
         dialog.add(&local_page(&weak, &fleet));
         let connections_page = page("connections", "Connections", icons::CONNECTIONS);
         dialog.add(&connections_page);
+        let plugins_page = page("plugins", "Plugins", icons::PLUGIN);
+        dialog.add(&plugins_page);
         let archive_page = page("archive", "Archive", icons::ARCHIVE);
         dialog.add(&archive_page);
         drop(state);
@@ -83,6 +88,9 @@ impl SettingsDialog {
                 keys: RefCell::new(Vec::new()),
                 archive_page,
                 archive: RefCell::new(Vec::new()),
+                plugins_page,
+                plugins: RefCell::new(Vec::new()),
+                plugins_shown: RefCell::new(String::new()),
                 connections_page,
                 connections: RefCell::new(Vec::new()),
                 connections_shown: RefCell::new(String::new()),
@@ -124,6 +132,7 @@ impl SettingsDialog {
         self.refresh_providers(&weak, &state);
         self.refresh_keys(&weak, &state);
         self.refresh_archive(&state);
+        self.refresh_plugins(&weak, &state);
         self.refresh_kernel(&state);
         self.refresh_connections(&weak, &state);
     }
@@ -326,6 +335,22 @@ impl SettingsDialog {
         self.inner.keys_page.add(&group);
         let stored = vec![group];
         self.inner.keys.replace(stored);
+    }
+
+    fn refresh_plugins(&self, app: &Weak<App>, state: &State) {
+        let shown = format!("{:?}", state.plugins);
+        if *self.inner.plugins_shown.borrow() == shown && !self.inner.plugins.borrow().is_empty() {
+            return;
+        }
+        self.inner.plugins_shown.replace(shown);
+        for group in self.inner.plugins.take() {
+            self.inner.plugins_page.remove(&group);
+        }
+        let groups = crate::consent::plugin_groups(app, &state.plugins);
+        for group in &groups {
+            self.inner.plugins_page.add(group);
+        }
+        self.inner.plugins.replace(groups);
     }
 
     fn refresh_archive(&self, state: &State) {

@@ -80,6 +80,7 @@ pub struct State {
     pub effective: HashMap<String, Settings>,
     pub providers: Vec<ProviderStatus>,
     pub archived: Vec<ThreadRow>,
+    pub plugins: Vec<local_studio_core::PluginInfo>,
     pub git: HashMap<String, GitStatus>,
     pub filter: Option<String>,
     pub search: String,

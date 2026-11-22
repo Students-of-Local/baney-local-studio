@@ -33,9 +33,24 @@ struct Grant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Consent {
-    Ready,
+    Ready { sensitive: Vec<Capability> },
     NeedsConsent { missing: Vec<Capability> },
     Refused { reason: String },
+}
+
+impl Consent {
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        matches!(self, Consent::Ready { .. })
+    }
+
+    #[must_use]
+    pub fn sensitive(&self) -> &[Capability] {
+        match self {
+            Consent::Ready { sensitive } => sensitive,
+            _ => &[],
+        }
+    }
 }
 
 impl Grants {
@@ -62,7 +77,7 @@ impl Grants {
     #[must_use]
     pub fn consent(&self, plugin: &Plugin) -> Consent {
         if plugin.capabilities.is_empty() {
-            return Consent::Ready;
+            return Consent::Ready { sensitive: Vec::new() };
         }
         let live = match Live::check(&plugin.dir) {
             Ok(live) => live,
@@ -84,11 +99,16 @@ impl Grants {
             .copied()
             .filter(|capability| !granted.is_some_and(|granted| granted.contains(capability.name())))
             .collect();
-        if missing.is_empty() {
-            Consent::Ready
-        } else {
-            Consent::NeedsConsent { missing }
+        if missing.iter().any(|capability| !capability.sensitive()) {
+            return Consent::NeedsConsent { missing };
         }
+        let sensitive = plugin
+            .capabilities
+            .iter()
+            .copied()
+            .filter(|capability| capability.sensitive() && !missing.contains(capability))
+            .collect();
+        Consent::Ready { sensitive }
     }
 
     #[must_use]
@@ -96,6 +116,11 @@ impl Grants {
         self.plugins.get(id).map(|grant| {
             (grant.version.as_str(), grant.source.as_str(), grant.capabilities.iter().map(String::as_str).collect())
         })
+    }
+
+    #[must_use]
+    pub fn tree(&self, id: &str) -> Option<&str> {
+        self.plugins.get(id).map(|grant| grant.tree.as_str()).filter(|tree| !tree.is_empty())
     }
 
     pub fn installed(&mut self, plugin: &Plugin, tree: &str, source: &str) -> Option<String> {

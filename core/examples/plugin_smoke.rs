@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
-use local_studio_core::plugins::{self as plugin_store, Capability, Catalog, Consent, Grants, Source};
+use local_studio_core::plugins::{self as plugin_store, Capability, Catalog, Grants, Source};
 use local_studio_core::{
     AccessMode, CommandKind, Connection, DaemonLaunch, Delivery, Item, ItemKind, ModelKey, Project, PromptDraft,
     SkillEntry, SlashCommand, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, ToolState, TranscriptOp,
@@ -345,7 +345,7 @@ fn install_from_catalog(plugins: &Path, id: &str, target: &Target) -> anyhow::Re
         .map_err(|errors| anyhow::anyhow!("catalog install refused: {}", errors.join("; ")))?;
     ensure!(installed.tree == entry.tree, "installed tree {} is not the pinned {}", installed.tree, entry.tree);
     ensure!(installed.plugin.dir == plugins.join(id), "installed into {}", installed.plugin.dir.display());
-    ensure!(installed.consent == Consent::Ready, "{id} needs consent: {:?}", installed.consent);
+    ensure!(installed.consent.ready(), "{id} needs consent: {:?}", installed.consent);
     println!(
         "ok   check 1: {id} {} installed through the catalog at {} ({} files, {})",
         installed.plugin.version,

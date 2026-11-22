@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
-use super::{Capability, Consent, Grants, Plugin};
+use super::{Capability, Grants, Plugin};
 
 pub const SOCKET_ENV: &str = "LOCAL_STUDIO_ASK";
 pub const TOKEN_ENV: &str = "LOCAL_STUDIO_ASK_TOKEN";
@@ -158,7 +158,7 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 
 #[must_use]
 pub fn asks(plugin: &Plugin, grants: &Grants) -> bool {
-    plugin.asks(Capability::AskUser) && plugin.asks(Capability::McpServer) && grants.consent(plugin) == Consent::Ready
+    plugin.asks(Capability::AskUser) && plugin.asks(Capability::McpServer) && grants.consent(plugin).ready()
 }
 
 #[must_use]
@@ -191,13 +191,18 @@ pub fn acp_servers(
                 continue;
             }
         };
-        let env = json!({
+        let mut env = json!({
             super::NO_BYTECODE.0: "1",
             SOCKET_ENV: socket.to_string_lossy(),
             TOKEN_ENV: token,
             THREAD_ENV: thread,
             PID_ENV: std::process::id().to_string(),
         });
+        for granted in entry["env"].as_object().into_iter().flat_map(Map::keys) {
+            if granted.starts_with(super::GRANTED_ENV) {
+                env[granted] = json!("1");
+            }
+        }
         servers.push(json!({
             "type": "stdio",
             "name": name,

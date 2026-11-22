@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::install::{live_hash, survey};
-use super::{load, stage, Capability, Catalog, Consent, Grants, Plugin, Source, Staged};
-use crate::model::{ConsentNeed, ConsentRequest, ConsentRow};
+use super::{load, stage, valid_id, Capability, Catalog, Consent, Grants, Plugin, Source, Staged};
+use crate::model::{ConsentNeed, ConsentRequest, ConsentRow, PluginInfo};
 
 pub enum Offer {
     Installed(String),
@@ -172,17 +172,115 @@ fn summary(plugin: &Plugin, consent: &Consent, install: bool, granted: usize) ->
         format!("{} {} has {count}", plugin.name, plugin.version)
     };
     match consent {
-        Consent::Ready => done,
+        Consent::Ready { .. } => match off(plugin, consent).as_slice() {
+            [] => done,
+            names => format!(
+                "{done}; it runs without {} until you turn {} on in Settings, Plugins",
+                names.join(", "),
+                if names.len() == 1 { "it" } else { "them" }
+            ),
+        },
         Consent::NeedsConsent { missing } => {
-            let names: Vec<&str> = missing.iter().map(|capability| capability.name()).collect();
+            let names: Vec<&str> = missing
+                .iter()
+                .filter(|capability| !capability.sensitive())
+                .map(|capability| capability.name())
+                .collect();
             format!(
-                "{done}, but it is off: its tools stay off until every permission it asks for is on (local-studio plugin grant {} {})",
+                "{done}, but it is off until it has {} (local-studio plugin grant {} {})",
+                names.join(", "),
                 plugin.id,
                 names.join(" ")
             )
         }
         Consent::Refused { reason } => format!("{done}, but it is off: {reason}"),
     }
+}
+
+fn off(plugin: &Plugin, consent: &Consent) -> Vec<&'static str> {
+    plugin
+        .capabilities
+        .iter()
+        .filter(|capability| capability.sensitive() && !consent.sensitive().contains(capability))
+        .map(|capability| capability.name())
+        .collect()
+}
+
+#[must_use]
+pub fn listing(plugin: &Plugin, consent: &Consent) -> PluginInfo {
+    let granted: Vec<String> = match consent {
+        Consent::Ready { sensitive } => plugin
+            .capabilities
+            .iter()
+            .filter(|capability| !capability.sensitive() || sensitive.contains(capability))
+            .map(|capability| capability.name().to_string())
+            .collect(),
+        Consent::NeedsConsent { missing } => plugin
+            .capabilities
+            .iter()
+            .filter(|capability| !missing.contains(capability))
+            .map(|capability| capability.name().to_string())
+            .collect(),
+        Consent::Refused { .. } => Vec::new(),
+    };
+    let status = match consent {
+        Consent::Ready { .. } => match off(plugin, consent).as_slice() {
+            [] => "On".to_string(),
+            names => format!("On without {}", names.join(", ")),
+        },
+        Consent::NeedsConsent { missing } => {
+            let names: Vec<&str> = missing
+                .iter()
+                .filter(|capability| !capability.sensitive())
+                .map(|capability| capability.name())
+                .collect();
+            format!(
+                "Off until it has {} (local-studio plugin grant {} {})",
+                names.join(", "),
+                plugin.id,
+                names.join(" ")
+            )
+        }
+        Consent::Refused { reason } => format!("Off: {reason}"),
+    };
+    PluginInfo {
+        id: plugin.id.clone(),
+        name: plugin.name.clone(),
+        icon: plugin.icon.as_ref().map(|icon| icon.to_string_lossy().into_owned()),
+        version: plugin.version.clone(),
+        description: plugin.description.clone(),
+        ready: consent.ready(),
+        status,
+        rows: rows(plugin, &plugin.capabilities),
+        granted,
+    }
+}
+
+pub fn set_permission(root: &Path, id: &str, name: &str, on: bool) -> Result<String, String> {
+    let capability = Capability::parse(name)
+        .filter(|capability| capability.sensitive())
+        .ok_or_else(|| format!("{name} is not a sensitive permission"))?;
+    if !valid_id(id) {
+        return Err(format!("no plugin {id:?}"));
+    }
+    let _lock = Grants::lock(root)?;
+    let mut grants = Grants::load(root)?;
+    if !on {
+        grants.revoke(id, &[capability]);
+        grants.save(root)?;
+        return Ok(format!("{name} is off for {id}; a server already running keeps it until it starts again"));
+    }
+    let plugin = load(&root.join(id)).map_err(|errors| errors.join("; "))?;
+    if !plugin.asks(capability) {
+        return Err(format!("{} {} does not ask for {name}", plugin.id, plugin.version));
+    }
+    if !grants.consent(&plugin).ready() {
+        return Err(format!("{} is off until it has its needed permissions, so {name} stays off", plugin.name));
+    }
+    let tree = grants.tree(&plugin.id).map(str::to_string);
+    grants.grant(&plugin, &[capability], tree.as_deref())?;
+    grants.save(root)?;
+    Ok(format!("{name} is on for {}; its server gets it the next time it starts", plugin.name))
 }
 
 fn scanned(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
@@ -202,20 +300,6 @@ fn sheet(
     findings: Vec<String>,
     asked: &[Capability],
 ) -> ConsentRequest {
-    let command = plugin.mcp.as_ref().map(|mcp| {
-        let name = mcp.command.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        std::iter::once(name).chain(mcp.args.iter().cloned()).collect::<Vec<_>>().join(" ")
-    });
-    let rows = asked
-        .iter()
-        .map(|capability| ConsentRow {
-            id: capability.name().to_string(),
-            need: if capability.sensitive() { ConsentNeed::Sensitive } else { ConsentNeed::Needed },
-            sentence: capability.sentence().to_string(),
-            scope: capability.scope().replace("{command}", command.as_deref().unwrap_or("its server")),
-            gates: plugin.gates.get(capability).cloned(),
-        })
-        .collect();
     ConsentRequest {
         request,
         plugin: plugin.id.clone(),
@@ -229,6 +313,23 @@ fn sheet(
         pin: pin.map(|rev| rev.chars().take(7).collect()),
         files: files as u64,
         findings,
-        rows,
+        rows: rows(plugin, asked),
     }
+}
+
+fn rows(plugin: &Plugin, asked: &[Capability]) -> Vec<ConsentRow> {
+    let command = plugin.mcp.as_ref().map(|mcp| {
+        let name = mcp.command.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        std::iter::once(name).chain(mcp.args.iter().cloned()).collect::<Vec<_>>().join(" ")
+    });
+    asked
+        .iter()
+        .map(|capability| ConsentRow {
+            id: capability.name().to_string(),
+            need: if capability.sensitive() { ConsentNeed::Sensitive } else { ConsentNeed::Needed },
+            sentence: capability.sentence().to_string(),
+            scope: capability.scope().replace("{command}", command.as_deref().unwrap_or("its server")),
+            gates: plugin.gates.get(capability).cloned(),
+        })
+        .collect()
 }

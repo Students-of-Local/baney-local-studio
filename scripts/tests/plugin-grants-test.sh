@@ -606,12 +606,12 @@ else
   out=$(drive "$S/src/sheet" install:screen-capture)
   echo "$out" | grep -v '^ROW' | sed 's/^/  /'
   echo "  after Install with screen-capture on: grants $(granted sheet); plugin list: $(status sheet)"
-  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 3 new permissions, but it is off: its tools stay off until every permission it asks for is on (local-studio plugin grant sheet site-secrets)$' \
+  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 3 new permissions; it runs without site-secrets until you turn it on in Settings, Plugins$' \
     && [ "$(granted sheet)" = "ask-user,mcp-server,screen-capture" ] \
-    && [ "$(status sheet)" = "needs consent for site-secrets (local-studio plugin grant sheet site-secrets)" ]; then
-    pass "#14 / second-G1 Install grants the needed capabilities plus the one switched on and says the plugin is installed but off"
+    && [ "$(status sheet)" = "ready, without site-secrets (local-studio plugin grant sheet site-secrets)" ]; then
+    pass "#14 / #67 Install grants the needed capabilities plus the one switched on and says the plugin runs without the one left off"
   else
-    fail "#14 / second-G1 Install grants the needed capabilities plus the one switched on and says the plugin is installed but off"
+    fail "#14 / #67 Install grants the needed capabilities plus the one switched on and says the plugin runs without the one left off"
   fi
   sheeted 2.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets", "synthetic-input"'
   out=$(drive "$S/src/sheet" install:site-secrets)
@@ -759,11 +759,11 @@ if [ -x "$DRIVER" ]; then
   else
     fail "first-F1 a plugin installed with plugin install gets a consent:<id>@<version> sheet at startup"
   fi
-  if echo "$out" | grep -q '^DONE consent:granter@1.0.0: Granter 1.0.0 has 2 new permissions, but it is off: .*(local-studio plugin grant granter screen-capture)$' \
+  if echo "$out" | grep -q '^DONE consent:granter@1.0.0: Granter 1.0.0 has 2 new permissions; it runs without screen-capture until you turn it on in Settings, Plugins$' \
     && [ "$(granted granter)" = "ask-user,mcp-server" ]; then
-    pass "first-F1 Install on the scan sheet grants the needed rows and says the plugin stays off"
+    pass "first-F1 / #67 Install on the scan sheet grants the needed rows and says the plugin runs without screen-capture"
   else
-    fail "first-F1 Install on the scan sheet grants the needed rows and says the plugin stays off"
+    fail "first-F1 / #67 Install on the scan sheet grants the needed rows and says the plugin runs without screen-capture"
   fi
   if echo "$out" | grep -q '^FAILED consent:edited@1.0.0: edited changed after the sheet opened, so nothing was granted$' \
     && [ "$(granted edited)" = none ]; then
@@ -809,6 +809,91 @@ if [ -x "$DRIVER" ]; then
       fail "sol-F1 a staged copy that gets an $change while the sheet is open is refused, nothing installed or granted"
     fi
   done
+fi
+
+echo "== #67: sensitive capabilities left off, the granted variables and the Settings, Plugins rows"
+granted_env() {
+  python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1])).get("mcpServers",{}).get(sys.argv[2],{}).get("env",{}); print(",".join(sorted(k + "=" + json.dumps(v, separators=(",", ":")) for k, v in e.items() if k.startswith("LOCAL_STUDIO_GRANTED"))) or "none")' \
+    "$A/settings.json" "$1"
+}
+fresh spoof
+P=$D/plugins/spoof
+manifest "$P"
+script "$P/bin/server" spoof
+sed -i.bak 's/^capabilities = .*/capabilities = ["mcp-server", "screen-capture"]/' "$P/plugin.toml" && rm -f "$P/plugin.toml.bak"
+printf '[mcp.env]\nLOCAL_STUDIO_GRANTED_SCREEN_CAPTURE = "LOCAL_STUDIO_PLUGIN_SPOOF__ON"\n' >> "$P/plugin.toml"
+line=$(ls_ plugin validate "$P" 2>&1 | grep -i 'LOCAL_STUDIO_GRANTED' | head -1)
+echo "  plugin validate: ${line:-no error about LOCAL_STUDIO_GRANTED}; plugin list: $(status spoof)"
+if [ -n "$line" ] && [ "$(status spoof)" = "did not load" ]; then
+  pass "#67 a manifest cannot set a LOCAL_STUDIO_GRANTED_* variable itself"
+else
+  fail "#67 a manifest cannot set a LOCAL_STUDIO_GRANTED_* variable itself"
+fi
+if [ ! -x "$DRIVER" ]; then
+  skip "#67 Studio cases (build the consent_driver example beside $BIN)"
+else
+  fresh g67
+  sheeted 1.0.0 '"mcp-server", "ask-user", "screen-capture", "site-secrets"'
+  out=$(drive "$S/src/sheet" install)
+  echo "$out" | grep -v '^ROW' | sed 's/^/  /'
+  echo "  grants $(granted sheet); plugin list: $(status sheet); plugin-sheet in mcpServers: $(entry "$A" plugin-sheet); granted variables: $(granted_env plugin-sheet)"
+  if echo "$out" | grep -q '^DONE Installed Sheet 1.0.0 with 2 new permissions; it runs without screen-capture, site-secrets until you turn them on in Settings, Plugins$' \
+    && [ "$(granted sheet)" = "ask-user,mcp-server" ] \
+    && [ "$(status sheet)" = "ready, without screen-capture, site-secrets (local-studio plugin grant sheet screen-capture site-secrets)" ] \
+    && [ "$(entry "$A" plugin-sheet)" = yes ] && [ "$(granted_env plugin-sheet)" = none ]; then
+    pass "#67 a plugin with only its needed grants runs: its MCP server is on and its entry holds no granted variable"
+  else
+    fail "#67 a plugin with only its needed grants runs: its MCP server is on and its entry holds no granted variable"
+  fi
+  ls_ plugin grant sheet screen-capture > /dev/null 2>&1
+  echo "  after plugin grant sheet screen-capture: granted variables $(granted_env plugin-sheet)"
+  if [ "$(granted_env plugin-sheet)" = 'LOCAL_STUDIO_GRANTED_SCREEN_CAPTURE={"env":"PATH"}' ]; then
+    pass "#67 granting one sensitive capability puts its variable, and only its, in the entry on the next sync"
+  else
+    fail "#67 granting one sensitive capability puts its variable, and only its, in the entry on the next sync"
+  fi
+  out=$(drive plugins sheet:site-secrets=on sheet:screen-capture=off)
+  echo "$out" | sed 's/^/  /'
+  echo "  grants $(granted sheet); granted variables $(granted_env plugin-sheet)"
+  if echo "$out" | grep -q '^PLUGIN sheet 1.0.0 ready=true granted=mcp-server,ask-user,screen-capture status=On without site-secrets$' \
+    && echo "$out" | grep -q '^PLUGIN-ROW sheet mcp-server needed on=true gates=-$' \
+    && echo "$out" | grep -q '^PLUGIN-ROW sheet screen-capture sensitive on=true gates=page screenshots$' \
+    && echo "$out" | grep -q '^PLUGIN-ROW sheet site-secrets sensitive on=false gates=-$' \
+    && echo "$out" | grep -q '^SWITCH sheet:site-secrets=on: site-secrets is on for Sheet; ' \
+    && echo "$out" | grep -q '^SWITCH sheet:screen-capture=off: screen-capture is off for sheet; ' \
+    && echo "$out" | grep -q '^AFTER sheet 1.0.0 ready=true granted=mcp-server,ask-user,site-secrets status=On without screen-capture$' \
+    && [ "$(granted sheet)" = "ask-user,mcp-server,site-secrets" ] \
+    && [ "$(granted_env plugin-sheet)" = 'LOCAL_STUDIO_GRANTED_SITE_SECRETS={"env":"PATH"}' ]; then
+    pass "#67 the Settings, Plugins rows list every capability, and their switches grant and revoke through Studio and resync the entry"
+  else
+    fail "#67 the Settings, Plugins rows list every capability, and their switches grant and revoke through Studio and resync the entry"
+  fi
+  out=$(drive plugins sheet:mcp-server=off ../g67:screen-capture=on sheet:native-host=on)
+  echo "$out" | grep '^SWITCH' | sed 's/^/  /'
+  if echo "$out" | grep -q '^SWITCH-FAILED sheet:mcp-server=off: mcp-server is not a sensitive permission$' \
+    && echo "$out" | grep -q '^SWITCH-FAILED ../g67:screen-capture=on: no plugin "../g67"$' \
+    && echo "$out" | grep -q '^SWITCH-FAILED sheet:native-host=on: native-host is not a sensitive permission$' \
+    && [ "$(granted sheet)" = "ask-user,mcp-server,site-secrets" ]; then
+    pass "#67 a needed capability has no switch, and a switch names only a plugin in the plugins folder"
+  else
+    fail "#67 a needed capability has no switch, and a switch names only a plugin in the plugins folder"
+  fi
+  mkdir -p "$S/src/waiting/bin"
+  printf 'id = "waiting"\nversion = "1.0.0"\ndescription = "Installed and never granted"\ncapabilities = ["mcp-server", "screen-capture"]\n[mcp]\ncommand = "bin/server"\n' > "$S/src/waiting/plugin.toml"
+  script "$S/src/waiting/bin/server" waiting
+  ls_ plugin install "$S/src/waiting" > /dev/null
+  script "$D/plugins/sheet/bin/server" swapped
+  out=$(drive plugins waiting:screen-capture=on sheet:screen-capture=on)
+  echo "$out" | grep -v -- '-ROW' | sed 's/^/  /'
+  echo "  grants: waiting '$(granted waiting)', sheet '$(granted sheet)'; plugin-sheet in mcpServers: $(entry "$A" plugin-sheet)"
+  if echo "$out" | grep -q '^PLUGIN waiting 1.0.0 ready=false granted= status=Off until it has mcp-server (local-studio plugin grant waiting mcp-server)$' \
+    && echo "$out" | grep -q '^SWITCH-FAILED waiting:screen-capture=on: waiting is off until it has its needed permissions, so screen-capture stays off$' \
+    && echo "$out" | grep -q '^SWITCH-FAILED sheet:screen-capture=on: Sheet is off until it has its needed permissions, so screen-capture stays off$' \
+    && [ -z "$(granted waiting)" ] && [ "$(granted sheet)" = "ask-user,mcp-server,site-secrets" ] && [ "$(entry "$A" plugin-sheet)" = no ]; then
+    pass "#67 a switch cannot turn on a sensitive capability for a plugin missing a needed grant or changed in place"
+  else
+    fail "#67 a switch cannot turn on a sensitive capability for a plugin missing a needed grant or changed in place"
+  fi
 fi
 
 echo "failures: $failures"

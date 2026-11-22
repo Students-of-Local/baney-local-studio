@@ -151,7 +151,7 @@ fn a_same_id_install_from_another_source_needs_consent_and_gets_no_mcp_entry() {
 
     installed(&root, &Source::Catalog("toolbox".to_string()), &pinned);
     grant(&root, "toolbox", &[Capability::McpServer]);
-    assert_eq!(consent(&root, "toolbox"), Consent::Ready);
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready { sensitive: Vec::new() });
     sync(&root, &agent);
     assert!(servers(&agent).get("plugin-toolbox").is_some());
     write(&root.join("toolbox/bin/server"), "#!/bin/sh\necho swapped\n");
@@ -170,7 +170,7 @@ fn a_reinstall_of_the_same_tree_keeps_its_grant() {
     installed(&root, &Source::Catalog("toolbox".to_string()), &pinned);
     grant(&root, "toolbox", &[Capability::McpServer]);
     let (_, again) = installed(&root, &Source::Catalog("toolbox".to_string()), &pinned);
-    assert_eq!(again, Consent::Ready);
+    assert_eq!(again, Consent::Ready { sensitive: Vec::new() });
 }
 
 #[test]
@@ -183,19 +183,21 @@ fn a_capability_dropped_and_added_back_asks_again() {
     served(&source, "toolbox", "1.0.0", &both, "one");
     installed(&root, &Source::Dir(source.clone()), &Catalog::default());
     grant(&root, "toolbox", &[Capability::McpServer, Capability::ScreenCapture]);
-    assert_eq!(consent(&root, "toolbox"), Consent::Ready);
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready { sensitive: vec![Capability::ScreenCapture] });
 
     served(&source, "toolbox", "2.0.0", &["mcp-server"], "two");
     let (_, two) = installed(&root, &Source::Dir(source.clone()), &Catalog::default());
-    assert_eq!(two, Consent::Ready, "an update from the same source that asks for nothing new asked again");
+    assert_eq!(
+        two,
+        Consent::Ready { sensitive: Vec::new() },
+        "an update from the same source that asks for nothing new asked again"
+    );
 
     served(&source, "toolbox", "3.0.0", &both, "three");
     let (_, three) = installed(&root, &Source::Dir(source.clone()), &Catalog::default());
-    assert_eq!(three, needs(&[Capability::ScreenCapture]), "a capability granted to 1.0.0 carried over to 3.0.0");
-    grant(&root, "toolbox", &[Capability::McpServer]);
-    assert_eq!(consent(&root, "toolbox"), needs(&[Capability::ScreenCapture]));
+    assert_eq!(three, Consent::Ready { sensitive: Vec::new() }, "a capability granted to 1.0.0 carried over to 3.0.0");
     grant(&root, "toolbox", &[Capability::ScreenCapture]);
-    assert_eq!(consent(&root, "toolbox"), Consent::Ready);
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready { sensitive: vec![Capability::ScreenCapture] });
 }
 
 #[test]
@@ -320,7 +322,7 @@ fn files_the_runtime_or_finder_write_do_not_end_consent() {
     grant(&root, "toolbox", &[Capability::McpServer]);
     write(&root.join("toolbox/.DS_Store"), "finder");
     write(&root.join("toolbox/bin/.DS_Store"), "finder");
-    assert_eq!(consent(&root, "toolbox"), Consent::Ready, "a .DS_Store file ended consent");
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready { sensitive: Vec::new() }, "a .DS_Store file ended consent");
     sync(&root, &agent);
     assert_eq!(servers(&agent)["plugin-toolbox"]["env"]["PYTHONDONTWRITEBYTECODE"], json!({"env": "PATH"}));
 
@@ -340,7 +342,7 @@ fn a_command_inside_dot_git_is_covered_by_consent() {
     write(&dir.join("plugin.toml"), &text.replace("bin/server", ".git/server"));
     write(&dir.join(".git/server"), "#!/bin/sh\necho reviewed\n");
     grant(&root, "toolbox", &[Capability::McpServer]);
-    assert_eq!(consent(&root, "toolbox"), Consent::Ready);
+    assert_eq!(consent(&root, "toolbox"), Consent::Ready { sensitive: Vec::new() });
     write(&dir.join(".git/server"), "#!/bin/sh\necho swapped\n");
     assert_eq!(consent(&root, "toolbox"), needs(&[Capability::McpServer]), "an edit inside .git kept consent");
 }
@@ -360,7 +362,7 @@ fn a_slice_two_grant_renewed_once_survives_a_catalog_update() {
     write(&root.join("grants.json"), slice_two);
     grant(&root, "toolbox", &[Capability::McpServer]);
     let (_, updated) = installed(&root, &Source::Catalog("toolbox".to_string()), &two);
-    assert_eq!(updated, Consent::Ready, "a slice 2 grant asked twice");
+    assert_eq!(updated, Consent::Ready { sensitive: Vec::new() }, "a slice 2 grant asked twice");
 
     write(&root.join("grants.json"), slice_two);
     grant(&root, "toolbox", &[Capability::McpServer]);

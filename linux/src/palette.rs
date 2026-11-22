@@ -303,6 +303,7 @@ fn entries(state: &State) -> Vec<Entry> {
         ("source-control", "Source Control"),
         ("storage", "Storage"),
         ("local", "Local"),
+        ("plugins", "Plugins"),
         ("archive", "Archive"),
     ] {
         entries.push(Entry::new("Settings", title, "Settings", "settings-page", Some(name.to_string())));

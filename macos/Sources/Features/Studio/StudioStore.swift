@@ -12,6 +12,7 @@ final class StudioStore {
     var kernelNoticeHidden = false
     private(set) var daemonMismatch: DaemonMismatch?
     private(set) var consents: [ConsentRequest] = []
+    private(set) var plugins: [PluginInfo] = []
 
     let inbox: InboxStore
     let conversation: ConversationStore
@@ -147,6 +148,20 @@ final class StudioStore {
         core.run { $0.answerConsent(request: consent.request, answer: answer) }
     }
 
+    func listPlugins() {
+        core.run { $0.listPlugins() }
+    }
+
+    func setPluginPermission(_ plugin: String, _ capability: String, _ on: Bool) {
+        let request = requests.issue { [weak self] outcome in
+            switch outcome {
+            case .done(let message): self?.post(.info, message)
+            case .failed(let message): self?.post(.error, message)
+            }
+        }
+        core.run { $0.setPluginPermission(request: request, plugin: plugin, capability: capability, on: on) }
+    }
+
     func post(_ level: NoticeLevel, _ text: String) {
         notice = StudioNotice(level: level, text: text)
     }
@@ -206,6 +221,8 @@ final class StudioStore {
             }
         case .consents(let consents):
             self.consents = consents
+        case .plugins(let plugins):
+            self.plugins = plugins
         case .approvals(let thread, let approvals):
             conversation.setApprovals(thread: thread, approvals: approvals)
         case .questions(let thread, let request, let source, let questions):

@@ -7,9 +7,9 @@ What a capability grant covers, when it carries over to an update, and which `mc
 `<data dir>/plugins/grants.json` holds one record per plugin id: the version, the granted capabilities, the installed tree hash (`tree`, the same sha256 as `local-studio plugin hash`) and the source the code came from (`catalog <id>`, `git <url>` or `folder <path>`). A plugin that asks for no capabilities is always ready. A plugin that asks for any is ready only when:
 
 - the record's `tree` equals the hash of the plugin folder as it is now, and
-- every capability it asks for is in the record.
+- every needed capability it asks for (`mcp-server`, `native-host`, `ask-user`) is in the record.
 
-Anything else is "needs consent": its skills, prompts and commands still work, and it gets no MCP server. Local Studio hashes the folder each time it checks consent (once per scan) for a plugin whose record holds a capability it asks for; with no such record there is nothing to compare, so it skips the hash. A folder changed in place, or replaced by hand, needs consent again. The change takes effect at the next sync, not at the moment of the edit: until then, sessions can still start the old entry. These sync: a Studio scan, `plugin list`, `plugin install`, `plugin grant` and `plugin revoke`. `plugin validate`, `plugin hash` and `plugin capabilities` do not. A plugin that keeps state should keep it outside its own folder; Local Studio's entry for its server sets `PYTHONDONTWRITEBYTECODE`, so Python writes no `__pycache__` there.
+A sensitive capability (`screen-capture`, `synthetic-input`, `site-secrets`, `accessibility`) left out of the record does not keep the plugin off: it runs with that capability off, and its server is told which sensitive capabilities are on (see "Sensitive capabilities" below). Anything else is "needs consent": its skills, prompts and commands still work, and it gets no MCP server. Local Studio hashes the folder each time it checks consent (once per scan) for a plugin whose record holds a capability it asks for; with no such record there is nothing to compare, so it skips the hash. A folder changed in place, or replaced by hand, needs consent again. The change takes effect at the next sync, not at the moment of the edit: until then, sessions can still start the old entry. These sync: a Studio scan, `plugin list`, `plugin install`, `plugin grant` and `plugin revoke`. `plugin validate`, `plugin hash` and `plugin capabilities` do not. A plugin that keeps state should keep it outside its own folder; Local Studio's entry for its server sets `PYTHONDONTWRITEBYTECODE`, so Python writes no `__pycache__` there.
 
 The consent hash covers the whole folder, `.git` included, and skips only `.DS_Store` files (in any letter case), which Finder writes and no runtime loads. Git rewrites its own state (`.git/index`, `FETCH_HEAD`, `logs/`, `objects/`, refs) during `git status`, `git fetch`, `git commit` and the rest, so any git command in a checkout plugin can end consent. A file that disappears while consent reads the folder (git's `index.lock`, say) counts as absent: consent ends if the folder changed, with no error.
 
@@ -47,7 +47,7 @@ Which rows a sheet lists:
 - An update whose grant carries over (same tree or same source, per the rules above): only the capabilities the new version asks for that the installed version did not. An update that asks for nothing new, including one that drops a capability, installs without a sheet.
 - A plugin that is already installed but lacks a needed capability (copied in by hand, changed in place, or installed by `plugin install` and never granted): Studio offers a sheet with its missing capabilities when it scans the plugins folder, at most once per plugin version while Studio runs. Its Install grants; Cancel leaves the plugin as it was. Studio hashes the folder when it offers the sheet and again before it grants, and refuses the grant if the folder changed in between.
 
-Needed capabilities (`mcp-server`, `native-host`, `ask-user`) have no switch: the plugin cannot work without them, so declining means Cancel. Sensitive capabilities (`screen-capture`, `synthetic-input`, `site-secrets`, `accessibility`) each have a switch that starts off. The grant rules above are unchanged: a plugin whose sensitive capability stays off counts as needing consent for it, so its MCP server stays off until that capability is granted with `local-studio plugin grant`. Studio does not offer the sheet again for a plugin that lacks only sensitive capabilities. The sheet says this plainly: when it lists a sensitive row, its footer says the plugin's tools stay off until every permission it asks for is on and names `local-studio plugin grant <id> <capability>`, and Install reads "Install with tools off" while a switch is off. The answer's `RequestDone` says the plugin is installed but off, with the grant command for what is missing.
+Needed capabilities (`mcp-server`, `native-host`, `ask-user`) have no switch: the plugin cannot work without them, so declining means Cancel. Sensitive capabilities (`screen-capture`, `synthetic-input`, `site-secrets`, `accessibility`) each have a switch that starts off. A switch left off does not keep the plugin off: it installs and runs without that capability. Studio does not offer the sheet again for a plugin that lacks only sensitive capabilities. When the sheet lists a sensitive row, that row says "Off means no ..." with the plugin's `[gates]` text for it, and the footer says sensitive permissions start off, can be changed later in Settings, Plugins, and that Local Studio does not enforce them (the plugin is trusted to honor a switch left off). Install reads "Install with N permissions" or "Install with no new permissions". The answer's `RequestDone` names the sensitive capabilities the plugin runs without and where to turn them on.
 
 Each row carries the capability id, `needed` or `sensitive`, a plain sentence of what it allows and one scope line, both fixed per capability in `Capability::sentence` and `Capability::scope` (`mcp-server`'s scope names the `[mcp]` command and its args). The sheet also carries the plugin's name, icon, description and version, the version it updates, the source (the Local Studio catalog with its commit, a git URL with its commit, or a local folder), the file count and the scan's findings: each executable the plugin ships besides its `[mcp]` command. Install stays off until the person opens the findings.
 
@@ -62,11 +62,35 @@ screen-capture = "page screenshots for the agent"
 synthetic-input = "clicking and typing in its own tabs"
 ```
 
-`name` is the display name (the id when absent). `icon` is a path inside the plugin to the image the sheet shows. `gates` names, for each sensitive capability, the features it turns on; a key that is not a sensitive capability the plugin asks for is an error. The sheet does not show it yet, because under the current grant rule a switch left off keeps the whole plugin off; it is kept for a later change to that rule.
+`name` is the display name (the id when absent). `icon` is a path inside the plugin to the image the sheet shows. `gates` names, for each sensitive capability, the features it turns on; a key that is not a sensitive capability the plugin asks for is an error. The sheet and Settings, Plugins show it under that capability's switch as "Off means no <gates>."
+
+## Sensitive capabilities
+
+Local Studio enforces none of the four sensitive capabilities. It does not sandbox the plugin's server, so a server can take screenshots, send input, read site secrets or use accessibility whatever its switches say. What Local Studio does is tell the server which ones are on, and the plugin is trusted to honor a switch left off. The sheet and Settings, Plugins both say so.
+
+| Capability | Enforced by |
+| --- | --- |
+| `screen-capture` | the plugin (trusted) |
+| `synthetic-input` | the plugin (trusted) |
+| `site-secrets` | the plugin (trusted) |
+| `accessibility` | the plugin (trusted) |
+
+The server learns its granted sensitive capabilities from its environment: one variable per granted capability, `LOCAL_STUDIO_GRANTED_` and the capability id in upper case with `_` for `-` (`LOCAL_STUDIO_GRANTED_SCREEN_CAPTURE`, `LOCAL_STUDIO_GRANTED_SYNTHETIC_INPUT`, `LOCAL_STUDIO_GRANTED_SITE_SECRETS`, `LOCAL_STUDIO_GRANTED_ACCESSIBILITY`). A capability is on exactly when its variable is set and non-empty; read nothing into the value. With none set, the plugin has no sensitive capability. One variable each, rather than one list, because Eukhe takes `settings.json` env values only as host variable names (`{"env": "PATH"}`), so Local Studio cannot write a literal list there. A plugin checks them like this:
+
+```python
+import os
+
+granted = {name for name in ("screen-capture", "synthetic-input", "site-secrets", "accessibility")
+           if os.environ.get("LOCAL_STUDIO_GRANTED_" + name.upper().replace("-", "_"))}
+```
+
+The `settings.json` entry, the ACP entry for an asking plugin and the session-only entry for a local-only plugin all carry the same variables. A manifest `[mcp.env]` name that starts with `LOCAL_STUDIO_GRANTED_` is an error, so a plugin cannot claim a capability it was not given.
+
+Settings, Plugins lists each installed plugin with its status and a row per capability it asks for: needed ones show "Needed" (or "Needed, not granted"), sensitive ones a switch. A switch is off while the plugin lacks a needed grant or its folder changed since its grant. Turning one on grants it through the same code as `plugin grant` and turning one off revokes it; either way Local Studio syncs at once, so the next server start gets the new variables. A server that is already running keeps the environment it started with until it starts again, such as in a new thread. The Studio methods are `list_plugins()` (answered with `Update::Plugins`) and `set_plugin_permission(request, plugin, capability, on)`; the CLI equivalents are `local-studio plugin grant` and `plugin revoke`. A phone attached over the client protocol does not get the plugins update or the switch yet.
 
 ## MCP server entries
 
-Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true` and `"PYTHONDONTWRITEBYTECODE": {"env": "PATH"}` in its `env` (Eukhe takes env values only as host variable names, and Python needs any non-empty value). Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
+Local Studio writes each ready plugin's server into `<agent dir>/settings.json` `mcpServers` as `plugin-<id>` with `"localStudioPlugin": true` and `"PYTHONDONTWRITEBYTECODE": {"env": "PATH"}` and a `"LOCAL_STUDIO_GRANTED_<CAPABILITY>": {"env": "PATH"}` per granted sensitive capability in its `env` (Eukhe takes env values only as host variable names, and Python needs any non-empty value). Eukhe ignores the extra field. On each sync Local Studio removes or rewrites only entries it wrote:
 
 - an entry tagged `"localStudioPlugin": true`, or
 - an untagged entry named `plugin-<name>` whose `command` is an absolute path inside the plugins folder, with no `..` (entries from before the tag, including one whose plugin moved its command or no longer loads). Its `cwd` does not count: Local Studio never writes a command outside the plugins folder.
@@ -135,7 +159,7 @@ In that thread Local Studio also:
 
 - refuses to run while the session lists any MCP server from `settings.json` (connected or not), or any other connected MCP server, other than local-only plugins' servers, and names them. Eukhe exposes web fetch and search only through MCP servers, and it fixes `mcpServers` from `settings.json` when a session opens, so remove them there and start a new thread.
 - sets the session's side models (tiny, judge, translate, auxiliary, subagents, workers, RLM queries, images, the backup model) to the thread's local model, clears their fallback chains, and turns off failover, chat memory and automatic titles. Regenerating a title uses the text generation model only when it is local; otherwise it asks the thread's own model.
-- starts the plugin's MCP server for that session only, with `LOCAL_STUDIO_LOCAL_ONLY=1` in its environment. A local-only plugin's server is never written to `settings.json`, so other sessions do not get it.
+- starts the plugin's MCP server for that session only, with `LOCAL_STUDIO_LOCAL_ONLY=1` and its `LOCAL_STUDIO_GRANTED_*` variables in its environment. A local-only plugin's server is never written to `settings.json`, so other sessions do not get it.
 
 This keeps the plugin's prompts and the thread off cloud models. It does not stop the model's tools from reaching the network: bash, the kernel and the plugin's own server can still open connections. Blocking that is upstream Eukhe work (#33). Another Eukhe client attached to the same session can still change its model.
 

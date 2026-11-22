@@ -1617,6 +1617,7 @@ dependencies = [
  "hkdf",
  "ignore",
  "image",
+ "libc",
  "libghostty-vt",
  "local-studio-version",
  "notify",

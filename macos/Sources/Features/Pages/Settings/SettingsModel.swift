@@ -10,6 +10,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case providers
     case local
     case connections
+    case plugins
     case project
     case sourceControl
     case storage
@@ -17,7 +18,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
 
     static let groups: [[SettingsPane]] = [
         [.general, .appearance, .keybindings, .snapshots],
-        [.providers, .local, .connections],
+        [.providers, .local, .connections, .plugins],
         [.project, .sourceControl, .storage, .archive],
     ]
 
@@ -35,6 +36,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .storage: "Storage"
         case .local: "Local"
         case .connections: "Connections"
+        case .plugins: "Plugins"
         case .archive: "Archive"
         }
     }
@@ -51,6 +53,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .storage: "internaldrive.fill"
         case .local: "server.rack"
         case .connections: "network"
+        case .plugins: "puzzlepiece.extension.fill"
         case .archive: "archivebox.fill"
         }
     }
@@ -61,7 +64,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .providers, .connections: .systemBlue
         case .local: .systemPurple
         case .sourceControl: .systemOrange
-        case .general, .keybindings, .snapshots, .project, .storage, .archive: .systemGray
+        case .general, .keybindings, .snapshots, .project, .storage, .plugins, .archive: .systemGray
         }
     }
 
@@ -77,6 +80,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .storage: "Worktree cleanup and the data Local Studio keeps."
         case .local: "The Local controller on this Mac and the machines in your fleet."
         case .connections: "The Eukhe agent daemon, devices paired with this Mac and your other machines."
+        case .plugins: "Installed plugins and the permissions each one holds."
         case .archive: "Archived threads, grouped by project."
         }
     }
@@ -113,6 +117,7 @@ enum SettingsGroup: Hashable {
     case daemon
     case pairedDevices
     case otherMachines
+    case installedPlugins
     case archived
 
     var title: String {
@@ -147,6 +152,7 @@ enum SettingsGroup: Hashable {
         case .daemon: "Agent Daemon"
         case .pairedDevices: "Paired Devices"
         case .otherMachines: "Other Machines"
+        case .installedPlugins: "Installed Plugins"
         case .archived: "Archived Threads"
         }
     }
@@ -162,6 +168,7 @@ enum SettingsGroup: Hashable {
         case .worktrees, .data: .storage
         case .controller, .fleet: .local
         case .daemon, .pairedDevices, .otherMachines: .connections
+        case .installedPlugins: .plugins
         case .archived: .archive
         }
     }
@@ -194,6 +201,7 @@ enum SettingKey: CaseIterable {
     case machines, registry, localUsage
     case daemonStatus, pairDevice, pairedDevices, otherMachines, addMachine
     case archivedThreads
+    case pluginPermissions
     case snapshotEnabled, snapshotShortcut, snapshotIncludeText, snapshotPermission
     case snapshotSound, snapshotFlash, snapshotAnimations
 
@@ -228,6 +236,7 @@ enum SettingKey: CaseIterable {
         case .pairDevice, .pairedDevices: .pairedDevices
         case .otherMachines, .addMachine: .otherMachines
         case .archivedThreads: .archived
+        case .pluginPermissions: .installedPlugins
         case .snapshotEnabled, .snapshotShortcut, .snapshotIncludeText, .snapshotPermission: .snapshotCapture
         case .snapshotSound, .snapshotFlash, .snapshotAnimations: .snapshotFeedback
         }
@@ -315,6 +324,7 @@ enum SettingKey: CaseIterable {
         case .otherMachines: "Other machines"
         case .addMachine: "Add a machine"
         case .archivedThreads: "Archived threads"
+        case .pluginPermissions: "Plugin permissions"
         case .snapshotEnabled: "Enable SnapShots"
         case .snapshotShortcut: "Capture shortcut"
         case .snapshotIncludeText: "Include app text"
@@ -394,6 +404,7 @@ enum SettingKey: CaseIterable {
         case .otherMachines: "remote linux mac forget linked"
         case .addMachine: "pairing link connect remote"
         case .archivedThreads: "unarchive restore"
+        case .pluginPermissions: "plugin permission sensitive screen capture input site secrets accessibility grant revoke"
         case .snapshotEnabled, .snapshotShortcut, .snapshotPermission: "screenshot capture window screen recording"
         case .snapshotIncludeText: "accessibility text context"
         case .snapshotSound, .snapshotFlash, .snapshotAnimations: "screenshot feedback"
