@@ -104,7 +104,11 @@ impl fmt::Display for StudioError {
             Self::Config { message } => write!(formatter, "invalid Local Studio configuration: {message}"),
             Self::Owned { pid, path, waited } => {
                 let by = pid.map(|pid| format!(" (process {pid})")).unwrap_or_default();
-                let waited = if *waited { " and did not hand it over" } else { "" };
+                let waited = if *waited {
+                    format!(" and did not hand it over within {} s", TAKEOVER_WAIT.as_secs())
+                } else {
+                    String::new()
+                };
                 write!(
                     formatter,
                     "another Local Studio{by} already has {path} open{waited}: quit it, or give this one its own data dir"

@@ -16,7 +16,8 @@ enum DataOwner {
             next(false)
             return
         }
-        guard let pid, let other = NSRunningApplication(processIdentifier: pid_t(pid)), !other.isTerminated else {
+        guard let pid, let other = NSRunningApplication(processIdentifier: pid_t(pid)), !other.isTerminated,
+              other.bundleIdentifier?.hasPrefix("org.local.studio.macos") == true else {
             let alert = NSAlert()
             alert.messageText = "Your Local Studio data is in use"
             alert.informativeText = pid.map { "Process \($0) has \(path) open. Quit it, then try again." } ?? "Another process has \(path) open. Quit it, then try again."
@@ -35,26 +36,37 @@ enum DataOwner {
         alert.addButton(withTitle: same ? "Quit the Other Copy" : "Quit \(theirs) and Open \(appName)")
         alert.addButton(withTitle: "Keep \(theirs)")
         guard alert.runModal() == .alertFirstButtonReturn else {
-            other.activate()
+            raise(other)
             next(false)
             return
         }
         other.terminate()
-        let started = Date.now
-        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             MainActor.assumeIsolated {
-                let waited = Date.now.timeIntervalSince(started)
-                if !other.isTerminated, waited < quitWait {
-                    if waited >= 1, waited < 1.25, !other.isActive {
-                        other.activate()
-                    }
-                    return
+                if !other.isTerminated {
+                    raise(other)
                 }
-                timer.invalidate()
-                NSApp.activate()
-                next(true)
             }
         }
+        wait(for: other, since: .now, then: next)
+    }
+
+    static func wait(for other: NSRunningApplication, since started: Date, then next: @escaping @MainActor @Sendable (_ retry: Bool) -> Void) {
+        guard !other.isTerminated, Date.now.timeIntervalSince(started) < quitWait else {
+            NSApp.activate()
+            next(true)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            MainActor.assumeIsolated {
+                wait(for: other, since: started, then: next)
+            }
+        }
+    }
+
+    static func raise(_ other: NSRunningApplication) {
+        NSApp.yieldActivation(to: other)
+        other.activate()
     }
 
     static var appName: String {
@@ -65,9 +77,7 @@ enum DataOwner {
         switch error as? StudioError {
         case .Runtime(let message)?, .Config(let message)?:
             return message
-        case .Owned(_, let path, _)?:
-            return "Another Local Studio has \(path) open."
-        case nil:
+        default:
             return error.localizedDescription
         }
     }
