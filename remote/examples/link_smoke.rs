@@ -516,7 +516,8 @@ async fn wire(
 ) {
     let (mut sink, mut stream) = socket.split();
     let mut joiner = noise::Joiner::default();
-    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    let mut ping =
+        tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(20), Duration::from_secs(20));
     loop {
         let text = tokio::select! {
             text = out.recv() => {
@@ -607,6 +608,38 @@ impl Phone {
             ensure!(started.elapsed() < bound, "{}: timed out after {} s: {step}", self.label, bound.as_secs());
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    async fn linked_ops(&mut self, remote: &str, remote_project: &str) -> anyhow::Result<()> {
+        let text = json!({ "text": PING, "images": [], "files": [] });
+        self.refused("watch", json!({ "thread": remote }), "unknown_thread").await?;
+        self.refused(
+            "send",
+            json!({ "request": "p-send", "thread": remote, "prompt": text, "delivery": "default" }),
+            "unknown_thread",
+        )
+        .await?;
+        self.refused("load_earlier", json!({ "thread": remote }), "unknown_thread").await?;
+        self.refused("mark_unread", json!({ "thread": remote, "unread": true }), "unknown_thread").await?;
+        self.refused(
+            "start_thread",
+            json!({ "draft": "p-draft", "project": remote_project, "prompt": text, "settings": null }),
+            "unknown_project",
+        )
+        .await?;
+        let asks = [
+            ("search_threads", json!({ "request": "p-search", "query": "Reply", "limit": 50 }), "thread_search"),
+            ("list_archived", json!({ "request": "p-archived" }), "archived_threads"),
+        ];
+        for (op, args, kind) in asks {
+            self.next += 1;
+            self.out.send(json!({ "id": self.next, "op": op, "args": args }).to_string()).ok();
+            self.until(&format!("{op} answers with {kind}"), QUICK, |frames| {
+                wire_updates(frames).iter().any(|update| update["type"] == kind)
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     async fn refused(&mut self, op: &str, args: Value, code: &str) -> anyhow::Result<()> {
@@ -724,6 +757,8 @@ fn phone_checks(run: &mut Run, b: &mut Desk, machine: &str, remote: &str) -> any
     host.stop();
     println!("ok   B's in-process host stopped");
     checked?;
+    let revoked = run.serve.run(&run.a, &["revoke", "phone-on-a"])?;
+    println!("ok   A revokes the smoke phone so its device list holds only B again: {}", revoked.trim());
     b.studio.load_usage("usage-b".to_string(), UsagePeriod::Day);
     b.until("B's usage report loads", SETUP, |view| view.usage.is_some() || view.failed.contains_key("usage-b"))?;
     real_model::check_usage(b.view.usage.as_ref().context("B's usage report failed")?)?;
@@ -769,24 +804,7 @@ fn phones(
         .context("B lists no project from A")?
         .id
         .clone();
-    let text = json!({ "text": PING, "images": [], "files": [] });
-    runtime.block_on(async {
-        on_b.refused("watch", json!({ "thread": remote }), "unknown_thread").await?;
-        on_b.refused(
-            "send",
-            json!({ "request": "p-send", "thread": remote, "prompt": text, "delivery": "default" }),
-            "unknown_thread",
-        )
-        .await?;
-        on_b.refused("load_earlier", json!({ "thread": remote }), "unknown_thread").await?;
-        on_b.refused("mark_unread", json!({ "thread": remote, "unread": true }), "unknown_thread").await?;
-        on_b.refused(
-            "start_thread",
-            json!({ "draft": "p-draft", "project": remote_project, "prompt": text, "settings": null }),
-            "unknown_project",
-        )
-        .await
-    })?;
+    runtime.block_on(on_b.linked_ops(remote, &remote_project))?;
 
     let seen = threads_updates(&on_b.frames());
     let replies = b.view.replies(remote);

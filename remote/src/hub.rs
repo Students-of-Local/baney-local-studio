@@ -750,6 +750,13 @@ impl Hub {
             Update::Projects { projects } => Update::Projects {
                 projects: projects.into_iter().filter(|project| local(&project.id, project.machine.as_ref())).collect(),
             },
+            Update::ArchivedThreads { request, threads } => Update::ArchivedThreads {
+                request,
+                threads: threads.into_iter().filter(|row| local(&row.id, row.machine.as_ref())).collect(),
+            },
+            Update::ThreadSearch { request, hits } => {
+                Update::ThreadSearch { request, hits: hits.into_iter().filter(|hit| !linked(&hit.thread)).collect() }
+            }
             update => update,
         };
         let value = match serde_json::to_value(&update) {
@@ -1373,7 +1380,7 @@ fn unknown(key: &str, id: &str) -> Result<(), OpError> {
         return Ok(());
     }
     let code = if key == "project" { "unknown_project" } else { "unknown_thread" };
-    Err(OpError::new(code, format!("this machine has no {key} {id}")))
+    Err(OpError::new(code, format!("this machine has no such {key}")))
 }
 
 fn kind_of_file(value: &Value) -> &str {
