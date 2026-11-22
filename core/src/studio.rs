@@ -1112,6 +1112,7 @@ struct Thread {
     pending_at: Option<i64>,
     stopping: Option<Instant>,
     retired: Option<u64>,
+    retired_turn: Option<cli::Asked>,
     reopen: bool,
     ended_by_events: bool,
     allowed_effects: Vec<String>,

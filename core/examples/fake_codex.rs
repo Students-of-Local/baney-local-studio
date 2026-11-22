@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -14,6 +14,10 @@ const RESUME_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_RESUME_MS";
 const START_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_START_MS";
 const STOP_WORDS: &str = "You've hit your usage limit.";
 const SKILL_READ: &str = "cat ~/.codex/skills/writing/SKILL.md";
+const LIMITED: &str = "limited";
+const LIMIT_WORDS: &str = "You've hit your usage limit. Try again later.";
+const RESET_SECONDS: u64 = 2 * 60 * 60;
+const ROLLOUT_DAY: &str = "2026/11/21";
 
 #[derive(Default)]
 struct Shared {
@@ -79,10 +83,20 @@ impl Shared {
     }
 
     fn store(thread: &str) -> Option<PathBuf> {
-        let root = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
-        Some(root.join("fake-threads").join(format!("{thread}.jsonl")))
+        let sessions = account()?.join("sessions");
+        let suffix = format!("-{thread}.jsonl");
+        let mut pending = vec![sessions.clone()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if entry.file_name().to_string_lossy().ends_with(&suffix) {
+                    return Some(path);
+                }
+            }
+        }
+        Some(sessions.join(ROLLOUT_DAY).join(format!("rollout-2026-11-21T00-00-00{suffix}")))
     }
 
     fn remember(&self, turn: &Value) {
@@ -113,6 +127,17 @@ impl Shared {
         let error = error.map_or(Value::Null, |message| json!({ "message": message }));
         self.notify("turn/completed", &json!({ "turn": { "id": turn, "status": status, "error": error } }));
     }
+}
+
+fn account() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+}
+
+fn limited() -> bool {
+    account().is_some_and(|dir| dir.join(LIMITED).is_file())
 }
 
 fn input_text(params: &Value) -> String {
@@ -152,6 +177,18 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
     }
     if text.contains("exit") {
         std::process::exit(1);
+    }
+    if text.contains("limit") && limited() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+        shared.notify(
+            "account/rateLimits/updated",
+            &json!({ "rateLimits": { "primary": { "usedPercent": 100.0, "windowDurationMins": 300, "resetsAt": now + RESET_SECONDS } } }),
+        );
+        let error = json!({ "message": LIMIT_WORDS, "codexErrorInfo": "usageLimitExceeded" });
+        shared.notify("error", &json!({ "error": error, "willRetry": false }));
+        shared.idle();
+        shared.notify("turn/completed", &json!({ "turn": { "id": turn, "status": "failed", "error": error } }));
+        return;
     }
     if text.contains("quota-error") {
         shared.notify("error", &json!({ "error": { "message": STOP_WORDS }, "willRetry": false }));

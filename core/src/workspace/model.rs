@@ -697,6 +697,16 @@ pub struct Settings {
     pub snapshot_sound: SnapshotSound,
     pub snapshot_flash: bool,
     pub snapshot_animations: bool,
+    pub harness_accounts: HarnessAccounts,
+    pub switch_accounts_on_limit: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(default, rename_all = "camelCase")]
+pub struct HarnessAccounts {
+    pub claude: Vec<String>,
+    pub codex: Vec<String>,
 }
 
 impl Default for Settings {
@@ -777,6 +787,8 @@ impl Default for Settings {
             snapshot_sound: SnapshotSound::SoftPop,
             snapshot_flash: true,
             snapshot_animations: true,
+            harness_accounts: HarnessAccounts::default(),
+            switch_accounts_on_limit: true,
         }
     }
 }

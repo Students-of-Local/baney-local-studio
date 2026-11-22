@@ -8,10 +8,10 @@ use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
-    AccessMode, Connection, DaemonLaunch, Delivery, ItemKind, NoticeLevel, NotificationKind, PromptDraft, Studio,
-    StudioConfig, ThreadSettings, TranscriptOp, Update, Waker, WorktreeChoice,
+    AccessMode, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel, NotificationKind,
+    PromptDraft, Settings, Studio, StudioConfig, ThreadSettings, TranscriptOp, Update, Waker, WorktreeChoice,
 };
-use serde_json::Map;
+use serde_json::{Map, Value};
 
 #[allow(dead_code)]
 #[path = "support/harness.rs"]
@@ -44,6 +44,7 @@ struct Watch {
     failed: Vec<(String, String)>,
     refused: Vec<String>,
     misses: Vec<String>,
+    settings: Option<Settings>,
 }
 
 impl Watch {
@@ -107,6 +108,7 @@ fn apply(watch: &mut Watch, update: Update) {
             watch.thinking = info.thinking_level;
         }
         Update::Connection { state } => watch.connection = Some(state),
+        Update::Settings { settings } => watch.settings = Some(settings),
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
         Update::Threads { threads } => watch.rows = threads.into_iter().map(|row| row.id).collect(),
         Update::ThreadStarted { draft, thread } => {
@@ -204,6 +206,12 @@ impl Run {
         self.sent += 1;
         println!("     send {text:?}");
         self.studio.send(format!("send-{}", self.sent), self.thread(), prompt(text), Delivery::Queue);
+    }
+
+    fn steer(&mut self, text: &str) {
+        self.sent += 1;
+        println!("     steer {text:?}");
+        self.studio.send(format!("send-{}", self.sent), self.thread(), prompt(text), Delivery::Steer);
     }
 
     fn start(&mut self, label: &str, (provider, model): (&str, &str), thinking: Option<&str>) -> anyhow::Result<()> {
@@ -432,7 +440,247 @@ fn codex_stall_keeps_others(run: &mut Run) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn scenarios(run: &mut Run) -> anyhow::Result<()> {
+fn thread_flag(root: &Path, thread: &str, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("data").join("state.json")).ok()?;
+    let state: Value = serde_json::from_str(&text).ok()?;
+    state["threads"][thread][key].as_str().map(str::to_string)
+}
+
+fn holds(dir: &Path, suffix: &str) -> bool {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if entry.file_name().to_string_lossy().ends_with(suffix) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+struct Account<'a> {
+    root: &'a Path,
+    label: &'a str,
+    model: (&'a str, &'a str),
+    thinking: Option<&'a str>,
+    first: PathBuf,
+    second: PathBuf,
+}
+
+impl Account<'_> {
+    fn on(&self, run: &mut Run, step: &str, thread: &str, dir: &Path) {
+        let (root, thread, want) = (self.root.to_path_buf(), thread.to_string(), dir.to_string_lossy().into_owned());
+        run.check(step, |_| thread_flag(&root, &thread, "account").as_deref() == Some(want.as_str()));
+    }
+
+    fn session_in(&self, thread: &str, dir: &Path) -> bool {
+        if self.model.0 == "codex" {
+            thread_flag(self.root, thread, "nativeSession")
+                .is_some_and(|native| holds(&dir.join("sessions"), &format!("-{native}.jsonl")))
+        } else {
+            holds(&dir.join("projects"), &format!("{thread}.jsonl"))
+        }
+    }
+}
+
+fn account_switch(run: &mut Run, account: &Account) -> anyhow::Result<()> {
+    let label = account.label;
+    let (first, second) = (&account.first, &account.second);
+    let (from, to) = (name_of(first), name_of(second));
+    std::fs::create_dir_all(first)?;
+    std::fs::create_dir_all(second)?;
+    std::fs::write(first.join("limited"), "")?;
+    run.start(&format!("{label}-switch"), account.model, account.thinking)?;
+    let thread = run.thread();
+    account.on(run, &format!("{label}: a new thread starts on the first account {from}"), &thread, first);
+    let failed = run.watch.failed.len();
+    run.send("limit alpha");
+    run.check(&format!("{label}: a turn that hits the usage limit on {from} is answered on {to}"), |watch| {
+        watch.replied("reply to limit alpha").is_some() && !watch.busy
+    });
+    let notice = format!("{from} reached its usage limit until ");
+    let next = format!("; continuing on {to}.");
+    run.check(&format!("{label}: the transcript says the thread moved from {from} to {to}"), |watch| {
+        watch.notices.values().any(|text| text.contains(&notice) && text.contains(&next))
+    });
+    account.on(run, &format!("{label}: the thread now runs on {to}"), &thread, second);
+    if account.session_in(&thread, second) {
+        println!("ok   {label}: the session file is in {to}");
+    } else {
+        run.watch.miss(format!("{label}: no session file for the thread in {to}"));
+    }
+    let raised: Vec<String> =
+        run.watch.failed[failed..].iter().filter(|(id, _)| *id == thread).map(|(_, body)| body.clone()).collect();
+    if raised.is_empty() {
+        println!("ok   {label}: the switch raised no Failed notification");
+    } else {
+        run.watch.miss(format!("{label}: the switch raised a Failed notification: {raised:?}"));
+    }
+    run.start(&format!("{label}-after"), account.model, account.thinking)?;
+    let after = run.thread();
+    account.on(run, &format!("{label}: a new thread after the switch starts on {to}"), &after, second);
+    run.focus(&thread);
+    run.send("echo on b");
+    run.check(&format!("{label}: a turn on {to} is answered"), |watch| {
+        watch.replied("reply to echo on b").is_some() && !watch.busy
+    });
+    std::fs::remove_file(first.join("limited"))?;
+    unpark(account.root, first)?;
+    std::fs::write(second.join("limited"), "")?;
+    run.send("limit golf");
+    run.check(&format!("{label}: switching back to {from} keeps the turn done on {to}"), |watch| {
+        watch.replied("reply to limit golf").is_some() && watch.replied("reply to echo on b").is_some() && !watch.busy
+    });
+    account.on(run, &format!("{label}: the thread runs on {from} again"), &thread, first);
+    std::fs::write(first.join("limited"), "")?;
+    run.focus(&thread);
+    let (errors, failed) = (run.watch.errors.len(), run.watch.failed.len());
+    run.send("limit bravo");
+    run.check(&format!("{label}: with every account limited the error names when the first one resets"), |watch| {
+        watch.errors[errors..]
+            .iter()
+            .any(|error| error.contains("account problem") && error.contains("at its usage limit until"))
+    });
+    run.check(&format!("{label}: with every account limited a Failed notification names the reset"), |watch| {
+        watch.failed[failed..].iter().any(|(id, body)| *id == thread && body.contains("at its usage limit until"))
+    });
+    Ok(())
+}
+
+fn unpark(root: &Path, dir: &Path) -> anyhow::Result<()> {
+    let path = root.join("data").join("harness").join("accounts.json");
+    let mut parks: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    if let Some(parked) = parks["parked"].as_object_mut() {
+        parked.remove(&dir.to_string_lossy().into_owned());
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&parks)?)?;
+    Ok(())
+}
+
+fn fresh_accounts(account: &Account) -> anyhow::Result<()> {
+    for dir in [&account.first, &account.second] {
+        std::fs::remove_file(dir.join("limited")).ok();
+        unpark(account.root, dir)?;
+    }
+    std::fs::write(account.first.join("limited"), "")?;
+    Ok(())
+}
+
+fn limit_resend(
+    run: &mut Run,
+    account: &Account,
+    case: &str,
+    before: impl FnOnce(&mut Run) -> anyhow::Result<()>,
+    (limited, stale): (&str, Option<&str>),
+) -> anyhow::Result<()> {
+    let label = account.label;
+    let to = name_of(&account.second);
+    fresh_accounts(account)?;
+    run.start(&format!("{label}-{case}"), account.model, account.thinking)?;
+    let thread = run.thread();
+    before(run)?;
+    let reply = format!("reply to {limited}");
+    run.check(&format!("{label}: {case}: the limit turn's own message is sent again and answered on {to}"), |watch| {
+        watch.replied(&reply).is_some() && !watch.busy
+    });
+    if let Some(stale) = stale.filter(|stale| run.watch.replied(&format!("reply to {stale}")).is_some()) {
+        run.watch.miss(format!("{label}: {case}: the switch sent {stale:?} again instead of {limited:?}"));
+    }
+    account.on(run, &format!("{label}: {case}: the thread runs on {to}"), &thread, &account.second);
+    Ok(())
+}
+
+fn claude_resend_cases(run: &mut Run, account: &Account) -> anyhow::Result<()> {
+    let drop = |run: &mut Run| {
+        run.slow("slow discard echo three")?;
+        run.send("foxtrot three");
+        run.studio.abort(run.thread());
+        run.setup("the stopped turn ended", |watch| !watch.busy)?;
+        run.until(Duration::from_secs(1), |_| false);
+        run.send("limit golf three");
+        Ok(())
+    };
+    limit_resend(run, account, "after a message Stop dropped", drop, ("limit golf three", Some("foxtrot three")))?;
+    let steer = |run: &mut Run| {
+        run.slow("slow hotel three")?;
+        run.steer("india three");
+        run.send("limit juliet three");
+        Ok(())
+    };
+    limit_resend(run, account, "after a steered follow-up", steer, ("limit juliet three", None))?;
+    let effort = |run: &mut Run| {
+        run.slow("slow limit kilo four")?;
+        run.studio.set_thinking_level(run.thread(), "medium".to_string());
+        Ok(())
+    };
+    limit_resend(run, account, "after an effort change during the turn", effort, ("slow limit kilo four", None))?;
+    let text = |run: &mut Run| {
+        run.send("limit-text november four");
+        Ok(())
+    };
+    limit_resend(run, account, "after a limit named only in the result text", text, ("limit-text november four", None))
+}
+
+fn codex_resend_cases(run: &mut Run, account: &Account) -> anyhow::Result<()> {
+    let refused = |run: &mut Run| {
+        run.slow("slow kilo three")?;
+        run.send("reject lima three");
+        run.send("limit mike three");
+        Ok(())
+    };
+    limit_resend(
+        run,
+        account,
+        "after a held message Codex refused",
+        refused,
+        ("limit mike three", Some("reject lima three")),
+    )
+}
+
+fn name_of(dir: &Path) -> String {
+    dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+fn account_scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
+    let home = root.join("home");
+    let dirs = |base: &str| (home.join(format!("{base}-a")), home.join(format!("{base}-b")));
+    let (claude_a, claude_b) = dirs(".claude");
+    let (codex_a, codex_b) = dirs(".codex");
+    let path = |dir: &PathBuf| dir.to_string_lossy().into_owned();
+    let mut settings = run.watch.settings.clone().unwrap_or_default();
+    settings.harness_accounts =
+        HarnessAccounts { claude: vec![path(&claude_a), path(&claude_b)], codex: vec![path(&codex_a), path(&codex_b)] };
+    settings.switch_accounts_on_limit = true;
+    run.studio.update_settings(settings);
+    run.setup("two scratch accounts are listed for each CLI", |watch| {
+        watch.settings.as_ref().is_some_and(|settings| settings.harness_accounts.codex.len() == 2)
+    })?;
+    let claude = Account {
+        root,
+        label: "claude-account",
+        model: ("claude-code", "haiku"),
+        thinking: Some("low"),
+        first: claude_a,
+        second: claude_b,
+    };
+    account_switch(run, &claude)?;
+    claude_resend_cases(run, &claude)?;
+    let codex = Account {
+        root,
+        label: "codex-account",
+        model: ("codex", "fake-mini"),
+        thinking: None,
+        first: codex_a,
+        second: codex_b,
+    };
+    account_switch(run, &codex)?;
+    codex_resend_cases(run, &codex)
+}
+
+fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_stall_keeps_others(run)?;
     claude_restart_keeps_message(run)?;
     claude_effort_during_open(run)?;
@@ -445,7 +693,8 @@ fn scenarios(run: &mut Run) -> anyhow::Result<()> {
     codex_drop(run, "codex-start-exit", "slow romeo", "crash sierra")?;
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
-    codex_unexpected_approval(run)
+    codex_unexpected_approval(run)?;
+    account_scenarios(run, root)
 }
 
 fn fakes_running(name: &str) -> usize {
@@ -641,7 +890,7 @@ fn main() -> anyhow::Result<()> {
         run.setup("daemon connected", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
         studio.add_project(work.to_string_lossy().into_owned());
         run.setup("project added", |watch| watch.projects.len() == 1)?;
-        scenarios(&mut run)
+        scenarios(&mut run, &root)
     })();
     studio.shutdown();
     let mut misses = std::mem::take(&mut run.watch.misses);

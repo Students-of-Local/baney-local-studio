@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -12,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, user,
-    Agent, Event, Failure, Image, Launch, Sink, Spend, CODEX_PROVIDER,
+    Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -202,6 +203,10 @@ fn report_dropped(sink: &Sink, held: VecDeque<Value>, lead: &str) {
     }
 }
 
+fn usage_limit(error: &Value) -> bool {
+    error.get("codexErrorInfo").and_then(Value::as_str) == Some("usageLimitExceeded")
+}
+
 fn held_text(params: &Value) -> String {
     params["input"]
         .as_array()
@@ -265,6 +270,7 @@ fn reviewer(access: AccessMode) -> &'static str {
 #[allow(clippy::too_many_lines)]
 fn start(
     cwd: &str,
+    account: Option<&Path>,
     sink: Option<Sink>,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
     turns: SharedTurns,
@@ -272,6 +278,9 @@ fn start(
     let binary = program("LOCAL_STUDIO_CODEX_BIN", "codex");
     let mut command = command(&binary, cwd);
     command.arg("app-server");
+    if let Some(account) = account {
+        command.env("CODEX_HOME", account);
+    }
     let mut agent =
         Agent::new(command.spawn().map_err(|error| format!("Could not start {}: {error}", binary.display()))?, &binary);
     let stdin = agent.child.stdin.take().ok_or_else(|| "Codex has no input pipe.".to_string())?;
@@ -379,7 +388,7 @@ async fn initialize(rpc: &Rpc) -> Result<(), String> {
 
 pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
     let home = crate::platform::home_or_root();
-    let mut process = start(&home, None, Arc::default(), Arc::default())?;
+    let mut process = start(&home, None, None, Arc::default(), Arc::default())?;
     let listed = async {
         initialize(&process.rpc).await?;
         process.rpc.call("model/list", json!({})).await
@@ -418,8 +427,8 @@ pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
         .collect())
 }
 
-pub(crate) async fn read(cwd: &str, thread: &str) -> Result<Vec<AgentMessage>, String> {
-    let mut process = start(cwd, None, Arc::default(), Arc::default())?;
+pub(crate) async fn read(account: Option<&Path>, cwd: &str, thread: &str) -> Result<Vec<AgentMessage>, String> {
+    let mut process = start(cwd, account, None, Arc::default(), Arc::default())?;
     let read = async {
         initialize(&process.rpc).await?;
         process.rpc.call("thread/read", json!({ "threadId": thread, "includeTurns": true })).await
@@ -435,7 +444,13 @@ impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
         let approvals = Arc::new(Mutex::new(HashMap::new()));
         let turns = SharedTurns::default();
-        let mut process = start(&launch.cwd, Some(sink.clone()), Arc::clone(&approvals), Arc::clone(&turns))?;
+        let mut process = start(
+            &launch.cwd,
+            launch.account.as_deref(),
+            Some(sink.clone()),
+            Arc::clone(&approvals),
+            Arc::clone(&turns),
+        )?;
         let opened = async {
             initialize(&process.rpc).await?;
             let mut params = json!({
@@ -663,6 +678,7 @@ struct Translator {
     failure: Option<String>,
     total: Option<Spend>,
     stopped: bool,
+    resets: Option<u64>,
 }
 
 impl Translator {
@@ -679,6 +695,7 @@ impl Translator {
             failure: None,
             total: None,
             stopped: false,
+            resets: None,
         }
     }
 
@@ -705,18 +722,35 @@ impl Translator {
         self.sink.session(SessionEvent::AgentEnd { messages: Vec::new() });
     }
 
-    fn stop(&mut self, reason: String) {
+    fn stop(&mut self, reason: String, limit: bool) {
         if self.stopped {
             return;
         }
         self.stopped = true;
+        let mut stop = Stop::from_reason(reason);
+        stop.limit |= limit;
+        if stop.limit {
+            stop.resets = self.resets;
+        }
         let dropped = self.turns.lock().unwrap_or_else(PoisonError::into_inner).forget();
-        if let Some(message) = notice(&reason, now_ms()) {
+        if let Some(message) = notice(&stop.reason, now_ms()) {
             emit_message(&self.sink, message);
         }
         report_dropped(&self.sink, dropped, "The account stop dropped");
-        self.end(Some(reason.clone()));
-        self.sink.send(Event::Stopped(reason));
+        self.end((!stop.limit).then(|| stop.reason.clone()));
+        self.sink.send(Event::Stopped(stop));
+    }
+
+    fn rate_limits(&mut self, limits: Option<&Value>) {
+        let resets = ["primary", "secondary"]
+            .iter()
+            .filter_map(|window| limits.and_then(|limits| limits.get(*window)))
+            .filter(|window| window.get("usedPercent").and_then(Value::as_f64).is_some_and(|used| used >= 100.0))
+            .filter_map(|window| window.get("resetsAt").and_then(Value::as_u64))
+            .max();
+        if let Some(seconds) = resets {
+            self.resets = Some(seconds.saturating_mul(1000));
+        }
     }
 
     fn finish(&mut self) {
@@ -758,15 +792,17 @@ impl Translator {
                 let turn = params.get("turn");
                 let id = turn.and_then(|turn| turn.get("id")).and_then(Value::as_str);
                 let status = text(turn, "status");
-                let error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null()).map(|error| {
+                let turn_error = turn.and_then(|turn| turn.get("error")).filter(|error| !error.is_null());
+                let limit = turn_error.is_some_and(usage_limit);
+                let error = turn_error.map(|error| {
                     error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_string)
                 });
                 let failure = if status == "failed" {
                     let reason = error
                         .or_else(|| self.failure.take())
                         .unwrap_or_else(|| "Codex ended the turn with an error.".to_string());
-                    if let Some(stop) = stop_reason(&reason) {
-                        self.stop(stop);
+                    if let Some(stop) = stop_reason(&reason).or_else(|| limit.then(|| reason.clone())) {
+                        self.stop(stop, limit);
                         return;
                     }
                     Some(reason)
@@ -816,24 +852,28 @@ impl Translator {
                 });
             }
             "thread/tokenUsage/updated" => self.usage(params.get("tokenUsage")),
-            "error" => {
-                let message = params
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex reported an error.")
-                    .to_string();
-                if params.get("willRetry").and_then(Value::as_bool) == Some(true) {
-                    return;
-                }
-                if let Some(reason) = stop_reason(&message) {
-                    self.stop(reason);
-                    return;
-                }
-                self.failure = Some(message);
-            }
+            "account/rateLimits/updated" => self.rate_limits(params.get("rateLimits")),
+            "error" => self.error(params),
             _ => {}
         }
+    }
+
+    fn error(&mut self, params: &Value) {
+        let limit = params.get("error").is_some_and(usage_limit);
+        let message = params
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("Codex reported an error.")
+            .to_string();
+        if params.get("willRetry").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        if let Some(reason) = stop_reason(&message).or_else(|| limit.then(|| message.clone())) {
+            self.stop(reason, limit);
+            return;
+        }
+        self.failure = Some(message);
     }
 
     fn item_started(&mut self, item: Option<&Value>) {

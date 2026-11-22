@@ -39,8 +39,8 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 ## Account rules (hard)
 
 - The CLIs run on Donovan's own sign-in. The driver removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `OPENAI_API_KEY` from the child environment and never sets any key. Never pass `--max-budget-usd` or any flag that implies API billing.
-- If a CLI prints a quota, billing or sign-in prompt, surface it as a thread error and stop. Never retry on another account or provider.
-- Never read `~/.claude/.credentials.json`, `~/.codex/auth.json` or any other auth file.
+- If a CLI prints a quota, billing or sign-in prompt, surface it as a thread error and stop. Never retry on another provider. The one exception is a usage limit, which moves the thread to another signed-in account of the same CLI (see Account switching below).
+- Never read `~/.claude/.credentials.json`, `~/.codex/auth.json` or any other auth file. Account discovery only checks that the file exists.
 
 ## Done check
 
@@ -70,7 +70,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 
 - `LOCAL_STUDIO_CLAUDE_BIN` and `LOCAL_STUDIO_CODEX_BIN` override the programs; otherwise `claude` and `codex` come from `PATH`.
 - Every child loses `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`.
-- Error frames, failed results and Codex `error` notifications are matched against sign-in, billing and quota words (`/login`, `not logged in`, `authentication_error`, `refresh token`, `unauthorized`, `credit balance`, `billing`, `usage limit`, `quota` and similar). A match ends the turn with that error, kills the process, raises a failed notification and sends nothing more until Donovan sends again. The notice and notification show even when a thinking level change restarted the process as that turn ended: Studio remembers the generation it retired and still takes that process's stop. Raw stderr is never matched (an MCP server logging an expired OAuth login is not an account problem); it only feeds the exit message.
+- Error frames, failed results and Codex `error` notifications are matched against sign-in, billing and quota words (`/login`, `not logged in`, `authentication_error`, `refresh token`, `unauthorized`, `credit balance`, `billing`, `usage limit`, `quota` and similar, plus the usage-limit words `hit your limit` and `out of extra usage`). A match ends the turn with that error, kills the process, raises a failed notification and sends nothing more until Donovan sends again. The notice and notification show even when a thinking level change restarted the process as that turn ended: Studio remembers the generation it retired and still takes that process's stop. Raw stderr is never matched (an MCP server logging an expired OAuth login is not an account problem); it only feeds the exit message.
 
 ### Claude Code 2.1.328 frames
 
@@ -104,7 +104,7 @@ We read:
 - `control_request` with subtype `can_use_tool` (`tool_name`, `input`, `description`, `permission_suggestions`, `tool_use_id`): becomes an approval. The card always shows the tool and the real `command`, `file_path`, `path`, `url` or `pattern` from `input`; a `description` or `title` is only a second line under it. Other subtypes get an error response.
 - `control_cancel_request`: settles that approval.
 - `result`: ends the turn and settles any approval still pending. Local commands such as `/compact` and `/clear` replay no user message and start no turn, so a `result` with no turn running only ends the pending send. `terminal_reason` containing `abort` marks the turn aborted. `total_cost_usd` and `modelUsage` are cumulative for the life of the process, so the driver records the difference from the previous result per model. `usage` (the last call only) plus `modelUsage[*].contextWindow` give the context meter.
-- `rate_limit_event` with a rejected status: treated as a quota stop.
+- `rate_limit_event` with a rejected status: a usage-limit stop. `rate_limit_info.resetsAt` (unix epoch seconds, per the CLI's own schema for `rate_limit_info`: `status`, `resetsAt`, `rateLimitType`) is when the account frees up.
 
 History on reopen comes from `~/.claude/projects/<cwd with every non-alphanumeric character as '-'>/<session>.jsonl` (`CLAUDE_CONFIG_DIR` is respected). Assistant lines are merged by `message.id`; sidechain and meta lines, the CLI's own wrappers (`<local-command`, `<command-`, `<system-reminder`, `<task-notification`, the same list the live replay filter uses) and `[Request interrupted` lines are skipped. A user message that merely starts with `<`, such as pasted HTML, stays.
 
@@ -123,7 +123,7 @@ Access modes follow T3, except Supervised:
 
 T3 runs Supervised in a `read-only` sandbox. There, `gpt-6-luna` sometimes refuses to write instead of asking, so a Supervised user gets no approval to grant (issue #55). Supervised here keeps `untrusted`, so Codex still asks before every file change and before every command outside its trusted read-only list, and uses `workspace-write` so the model knows a write can happen once approved. `harness_codex_smoke` holds that change to three checks on the real CLI: a file edit asks first (deny leaves no file, approve writes it), `touch touched.txt` asks first and deny leaves no file, and a write to a path outside the thread's cwd asks or is refused and never lands after a deny. If any of these fails, Supervised goes back to `read-only`.
 
-Notifications we read: `turn/started`, `turn/completed`, `serverRequest/resolved`, `item/started`, `item/completed`, `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `thread/tokenUsage/updated`, `error` (skipped while `willRetry` is true).
+Notifications we read: `turn/started`, `turn/completed`, `serverRequest/resolved`, `item/started`, `item/completed`, `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `thread/tokenUsage/updated`, `account/rateLimits/updated` (the latest `resetsAt`, unix seconds, of a `primary` or `secondary` window at 100 or more `usedPercent`, read as a number whether Codex sends an integer or a float, is the reset of a usage limit), `error` (skipped while `willRetry` is true). An `error` or failed turn whose `codexErrorInfo` is `usageLimitExceeded`, or whose text says `usage limit`, is a usage-limit stop.
 
 Items map to the Eukhe shapes: `userMessage` to a user message, `agentMessage` to assistant text, `reasoning` to thinking, `commandExecution` to a `bash` tool call with `command`, `fileChange` to an `edit` tool call with the diff, `mcpToolCall` to `server.tool`, `dynamicToolCall` to its tool name, `webSearch` to `web_search`.
 
@@ -132,6 +132,14 @@ Items map to the Eukhe shapes: `userMessage` to a user message, `agentMessage` t
 Server requests we answer: `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept`, `acceptForSession` or `decline`; the legacy `execCommandApproval` and `applyPatchApproval` with `approved`, `approved_for_session` or `denied`. Every other server request (`item/permissions/requestApproval`, `tool/requestUserInput`, `mcpServer/elicitation` and so on) gets a JSON-RPC error.
 
 Token use comes from `thread/tokenUsage/updated`: the driver records the difference of `total` between updates (`last` for the first update after a resume). Codex reports no cost, so Codex rows show tokens with a cost of 0.
+
+### Account switching
+
+A CLI account is a config dir: Claude Code reads `CLAUDE_CONFIG_DIR` (default `~/.claude`), Codex reads `CODEX_HOME` (default `~/.codex`). The accounts of a CLI are `~/.claude` plus every `~/.claude-*` dir holding `.credentials.json` (on macOS, where Claude Code keeps its sign-in in the Keychain, a dir holding `.claude.json` instead), or `~/.codex` plus every `~/.codex-*` holding `auth.json`, default first and then by name. The settings `harnessAccounts.claude` and `harnessAccounts.codex` replace that list when not empty; `switchAccountsOnLimit` (on by default) turns the switch off.
+
+Each CLI thread keeps its account in `ThreadFlags.account` (absent for the default dir). The driver sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for the child, and reads history and finds the session file in that dir. A new thread starts on the first account that is not parked.
+
+A usage-limit stop parks the account until its reset (one hour when the CLI names none) in `<data dir>/harness/accounts.json` (mode 0600, folder 0700); parks expire on their own. When another account of that CLI is free, Local Studio copies the thread's session file to the same relative path in the new dir (Claude Code: `projects/<escaped cwd>/<session>.jsonl`; Codex: the `sessions/**/rollout-*-<thread>.jsonl` file, or the rollout of that thread the new dir already holds). The copy always replaces an older copy there, written to a temporary file (0600) in the target folder and renamed over it, since the thread owns its session id and an older copy would drop the turns done since. Local Studio then moves the thread to that account, resumes it there and sends the message that hit the limit again. The transcript says `<old dir name> reached its usage limit until <local time>; continuing on <new dir name>.` and no Failed notification is raised. When every account is parked, the thread stops as with any account problem, and the error and Failed notification say when the first account resets. The message sent again is the user message the CLI itself started the limited turn with (Claude Code's replayed user message, Codex's `userMessage` item), with the images it was sent with; it is kept even when a thinking level change retired the process as that turn ended. When no user message was seen for the turn, nothing is sent again, no switch is reported and the Failed notification is raised. Messages queued behind it are dropped as with any account stop.
 
 ### Usage
 
