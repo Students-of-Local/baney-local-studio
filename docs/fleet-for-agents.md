@@ -83,7 +83,7 @@ local-studio fleet status --json
 | `power.present`    | Whether someone is using the machine now (`null` when it can't tell or lending is off)        |
 | `power.presenceSource` | How that was read (macOS input idle time, a logind session, or why it can't tell)         |
 | `power.capW`       | The cap in force now, or `null`                                                               |
-| `power.lever`      | `nvidia-limit` (real NVIDIA power limit), `duty-cycle` (fleet work paused in short bursts) or `none` |
+| `power.lever`      | `nvidia-limit` (real NVIDIA power limit, only while the person is away), `duty-cycle` (fleet work paused in short bursts; always while they are present) or `none` |
 | `power.measured`, `power.measuredW` | Whether fleet draw is measured, and the draw now in watts                    |
 | `power.helper`     | `installed`, `missing` (run `fleet power-helper`) or `unsupported` (no NVIDIA, or not Linux)  |
 | `peers`            | Each linked machine with its `state`, `lend` and `reason`                                     |

@@ -325,7 +325,7 @@ export const makeCluster = (d: ClusterDeps) => {
   const tick = async () => {
     await decide();
     const s = set();
-    await lever.set(state === "lent" ? capFor(s) : null, fleetGpus());
+    await lever.set(state === "lent" ? capFor(s) : null, fleetGpus(), owner.present === false);
     const note = lever.note();
     if (note && (state === "lent" || /restore/.test(note))) reason = `${base} ${note}`;
   };
@@ -348,6 +348,7 @@ export const makeCluster = (d: ClusterDeps) => {
     }
     if (!hasGpu()) {
       checks = [];
+      owner = off;
       return move("off", "This machine has no GPU to lend.");
     }
     if (s.lend === "always") {

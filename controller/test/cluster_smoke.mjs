@@ -665,24 +665,46 @@ try {
   assert.equal(s.power.awayWatts, null);
   assert.deepEqual(JSON.parse(readFileSync(join(dirs.b.data, "config.json"), "utf8")).cluster.power, { activeWatts: 60 });
   const lentReason = s.reason;
+  const plStart = plLog("b").length;
   present(true);
   s = await waitFor(async () => {
     const x = await cl(B);
-    return x.state === "lent" && x.power.present === true && x.power.lever === "nvidia-limit" ? x : null;
-  }, "B keeps lending at 60 W through the NVIDIA limit while its owner is present", 10_000);
+    return x.state === "lent" && x.power.present === true && x.power.lever === "duty-cycle" ? x : null;
+  }, "B keeps lending at 60 W through the duty cycle while its owner is present", 10_000);
   console.log(`   present: ${s.reason} (was: ${lentReason})`);
   assert.equal(s.reason, "In use, so it lends at up to 60 W.");
   assert.notEqual(s.reason, lentReason);
   assert.equal(s.power.capW, 60);
-  assert.deepEqual(s.power.gpus, [{ uuid: "GPU-b-0", index: 0, lever: "nvidia-limit", limitW: 60, originalW: 200 }]);
-  assert.equal(plLog("b").at(-1), "-i 0 -pl 60");
-  assert.deepEqual(JSON.parse(readFileSync(restoreB, "utf8")), { "GPU-b-0": { index: 0, originalW: 200 } });
+  assert.deepEqual(s.power.gpus, [{ uuid: "GPU-b-0", index: 0, lever: "duty-cycle", limitW: null, originalW: null }]);
+  assert.equal(plLog("b").length, plStart, "a board-wide limit would throttle the owner's own work, so none is set while present");
+  assert(!existsSync(restoreB));
   assert(s.checks.some((c) => c.name === "Owner" && c.ok && /up to 60 W/.test(c.detail)), JSON.stringify(s.checks));
+
+  step("power budget while the owner is away uses the NVIDIA limit");
+  r = await call(B, "/api/cluster", { power: { awayWatts: 100 } });
+  assert.equal(r.status, 200, await r.clone().text());
+  present(false);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === false && x.power.lever === "nvidia-limit" ? x : null;
+  }, "away, B caps the GPU at 100 W through the NVIDIA limit", 10_000);
+  assert.equal(s.reason, "Idle, so its GPU is lent to the fleet, at up to 100 W.");
+  assert.deepEqual(s.power.gpus, [{ uuid: "GPU-b-0", index: 0, lever: "nvidia-limit", limitW: 100, originalW: 200 }]);
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 100");
+  assert.deepEqual(JSON.parse(readFileSync(restoreB, "utf8")), { "GPU-b-0": { index: 0, originalW: 200 } });
+  present(true);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === true && x.power.lever === "duty-cycle" && !existsSync(restoreB) ? x : null;
+  }, "the owner comes back: the GPU gets its own limit back and the duty cycle takes over", 10_000);
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 200");
+  r = await call(B, "/api/cluster", { power: { awayWatts: null } });
+  assert.equal(r.status, 200);
   present(false);
   s = await waitFor(async () => {
     const x = await cl(B);
     return x.power.present === false && x.power.lever === "none" ? x : null;
-  }, "away with no away cap restores the limit", 10_000);
+  }, "away with no away cap pulls no lever", 10_000);
   assert.equal(s.reason, "Idle, so its GPU is lent to the fleet.");
   assert.equal(plLog("b").at(-1), "-i 0 -pl 200");
   assert(!existsSync(restoreB), "the restore record is removed once the original limit is back");
@@ -694,9 +716,9 @@ try {
   s = await waitFor(async () => {
     const x = await cl(B);
     return x.power.present === true && x.power.capW === 40 && x.power.lever === "duty-cycle" && x.power.measuredW === 120 ? x : null;
-  }, "without sudo B falls back to the duty cycle on measured draw", 10_000);
+  }, "present, B duty-cycles on measured draw", 10_000);
   console.log(`   duty cycle: ${s.reason}`);
-  assert.match(s.reason, /^In use, so it lends at up to 40 W\. sudo needs a password/);
+  assert.equal(s.reason, "In use, so it lends at up to 40 W.");
   assert.equal(s.power.measured, true);
   assert(!existsSync(restoreB), "a refused limit leaves no restore record");
   const bystander = spawn("sleep", ["120"], { stdio: "ignore" });
@@ -725,12 +747,20 @@ try {
   write(join(dirs.b.gpu, "draw.csv"), "GPU-b-0, 120.00\n");
 
   step("installing the helper later switches to the NVIDIA limit without a new request");
+  r = await call(B, "/api/cluster", { power: { awayWatts: 100 } });
+  assert.equal(r.status, 200);
+  present(false);
+  s = await waitFor(async () => {
+    const x = await cl(B);
+    return x.power.present === false && x.power.lever === "duty-cycle" && /sudo needs a password/.test(x.reason) ? x : null;
+  }, "away without sudo, B falls back to the duty cycle and says why", 10_000);
+  console.log(`   no helper: ${s.reason}`);
   write(join(dirs.b.gpu, "sudo-allow"), "");
   s = await waitFor(async () => {
     const x = await cl(B);
     return x.power.lever === "nvidia-limit" && x.power.helper === "installed" ? x : null;
   }, "B retries sudo and sets the limit", 15_000);
-  assert.equal(plLog("b").at(-1), "-i 0 -pl 50", "40 W is below the GPU's 50 W floor, so it is clamped");
+  assert.equal(plLog("b").at(-1), "-i 0 -pl 100");
   assert.deepEqual([...(await seen(bStub.pid, 1_500))], ["running"], "the duty cycle stops once the limit holds");
 
   step("reclaim when the owner returns");
@@ -765,7 +795,6 @@ try {
   const plBefore = plLog("b").length;
   await new Promise((r) => setTimeout(r, 3_000));
   s = await cl(B);
-  assert.equal(s.power.present, true);
   assert.equal(s.power.lever, "none", "nothing is borrowed, so no lever is pulled");
   assert.equal(plLog("b").length, plBefore, "an idle lent GPU keeps its own power limit");
   write(join(dirs.b.sys, "class/power_supply/AC/online"), "0\n");

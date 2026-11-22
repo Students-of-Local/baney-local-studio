@@ -218,7 +218,12 @@ export const makePower = (d: PowerDeps) => {
           drawAt = Date.now();
         }
       } else {
-        const v = num(String((JSON.parse(line.trim() || "{}") as { gpu_power?: unknown }).gpu_power ?? ""));
+        let v: number | null = null;
+        try {
+          v = num(String((JSON.parse(line.trim() || "{}") as { gpu_power?: unknown }).gpu_power ?? ""));
+        } catch {
+          v = null; // a banner or partial line, not a reading
+        }
         if (v !== null) {
           draws.set("apple", v);
           drawAt = Date.now();
@@ -226,6 +231,7 @@ export const makePower = (d: PowerDeps) => {
       }
     }).catch(() => undefined).finally(() => {
       if (stream === proc) stream = null;
+      if (proc.exitCode === null) proc.kill("SIGTERM");
     });
   };
 
@@ -362,8 +368,18 @@ export const makePower = (d: PowerDeps) => {
     perGpu.clear();
   };
 
-  const apply = async (want: number, fleetUuids: string[]) => {
+  // `away` is true only when presence was read and nobody is there. An NVIDIA power limit is board-wide: set
+  // while the owner is present (or presence is unknown) it would throttle their own games and apps too, so then
+  // only the duty cycle, which pauses nothing but the processes the controller started, holds the cap.
+  const apply = async (want: number, fleetUuids: string[], away: boolean) => {
     cap = want;
+    // Nothing borrowed yet: no lever. Limiting idle GPUs would only slow the owner's own work.
+    if (!fleetUuids.length && !d.pids().length && !d.containers().length) {
+      await stopDuty();
+      note = await restoreLimits();
+      perGpu.clear();
+      return;
+    }
     const nv = d.gpus().filter((g) => !g.stale);
     if (!nv.length) {
       perGpu.clear();
@@ -375,13 +391,6 @@ export const makePower = (d: PowerDeps) => {
         note = `It can't read this machine's power draw (macmon is not installed), so it runs fleet work ${pct}% of the time instead.`;
         startDuty(want, [], "fixed");
       }
-      return;
-    }
-    // Nothing borrowed yet: no lever. Limiting idle GPUs would only slow the owner's own work.
-    if (!fleetUuids.length && !d.pids().length && !d.containers().length) {
-      await stopDuty();
-      note = await restoreLimits();
-      perGpu.clear();
       return;
     }
     if (sudoFailed && Date.now() - sudoFailed.at > HELPER_TTL_MS) sudoFailed = null;
@@ -402,7 +411,7 @@ export const makePower = (d: PowerDeps) => {
         notes.push(`${g.name} does not report an adjustable power limit, so it pauses fleet work in short bursts instead.`);
         continue;
       }
-      if (sudoFailed) {
+      if (!away) {
         dutyFor.push(g);
         continue;
       }
@@ -413,10 +422,17 @@ export const makePower = (d: PowerDeps) => {
         if (floor) notes.push(floor);
         continue;
       }
+      // sudo failed lately: a GPU already held at a limit stays there rather than being capped twice.
+      if (sudoFailed) {
+        if (had?.lever !== "nvidia-limit") dutyFor.push(g);
+        continue;
+      }
       const rec = readRestore();
       const fresh = !rec[g.uuid];
       if (fresh) {
-        rec[g.uuid] = { index: l.index, originalW: l.limitW };
+        // Read the limit now, not from the cache: a cached value may be a cap this controller set.
+        const now = (await limits(true))?.find((x) => x.uuid === g.uuid)?.limitW ?? l.limitW;
+        rec[g.uuid] = { index: l.index, originalW: now };
         saveRestore(rec);
       }
       const failed = await setLimit(l.index, w);
@@ -426,27 +442,30 @@ export const makePower = (d: PowerDeps) => {
           delete rec[g.uuid];
           saveRestore(rec);
         }
-        dutyFor.push(g);
+        if (had?.lever !== "nvidia-limit") dutyFor.push(g);
         continue;
       }
+      limitsCache.at = 0;
       if (floor) notes.push(floor);
       perGpu.set(g.uuid, { uuid: g.uuid, index: l.index, lever: "nvidia-limit", limitW: w, originalW: rec[g.uuid]!.originalW });
     }
-    if (sudoFailed && dutyFor.length) notes.unshift(sudoNote(sudoFailed.why));
-    for (const [uuid, g] of [...perGpu]) {
-      if (list.some((x) => x.uuid === uuid) || dutyFor.some((x) => x.uuid === uuid)) continue;
-      // A GPU that no longer carries fleet work gets its own limit back.
-      if (g.lever === "nvidia-limit" && g.originalW !== null) {
-        const failed = await setLimit(g.index, g.originalW);
-        if (failed) notes.push(`Could not restore GPU ${g.index}'s original power limit; it stays recorded in ${restorePath()}.`);
-        else {
-          const rec = readRestore();
-          delete rec[uuid];
-          saveRestore(rec);
-        }
+    if (sudoFailed && dutyFor.length && away) notes.unshift(sudoNote(sudoFailed.why));
+    // Every recorded GPU that is not held at a limit right now gets its own limit back: one that left fleet
+    // work, or one that moved to the duty cycle because the owner came back.
+    const held = new Set(list.filter((g) => !dutyFor.includes(g) && perGpu.get(g.uuid)?.lever === "nvidia-limit").map((g) => g.uuid));
+    const rec = readRestore();
+    for (const [uuid, r] of Object.entries(rec)) {
+      if (held.has(uuid)) continue;
+      const index = nv.find((g) => g.uuid === uuid)?.index ?? r.index;
+      const failed = await setLimit(index, r.originalW);
+      if (failed) notes.push(`Could not restore GPU ${index}'s original power limit; it stays recorded in ${restorePath()}.`);
+      else {
+        delete rec[uuid];
+        limitsCache.at = 0;
       }
-      perGpu.delete(uuid);
     }
+    saveRestore(rec);
+    for (const uuid of [...perGpu.keys()]) if (!held.has(uuid)) perGpu.delete(uuid);
     for (const g of dutyFor) perGpu.set(g.uuid, { uuid: g.uuid, index: g.index, lever: "duty-cycle", limitW: null, originalW: null });
     note = notes.length ? [...new Set(notes)].join(" ") : null;
     if (dutyFor.length) startDuty(each * dutyFor.length, dutyFor.map((g) => g.uuid), "nvidia", dutyFor.reduce((n, g) => n + nominal(g), 0));
@@ -485,7 +504,7 @@ export const makePower = (d: PowerDeps) => {
   };
 
   return {
-    set: (want: number | null, fleetUuids: string[]) => serial(() => (want === null ? (cap === null && !duty && !Object.keys(readRestore()).length ? Promise.resolve() : release()) : apply(want, fleetUuids))),
+    set: (want: number | null, fleetUuids: string[], away = false) => serial(() => (want === null ? (cap === null && !duty && !Object.keys(readRestore()).length ? Promise.resolve() : release()) : apply(want, fleetUuids, away))),
     stop: () => serial(release),
     recover: () => serial(async () => {
       await continueLeftovers();
