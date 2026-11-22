@@ -15,7 +15,8 @@ pub(super) struct Watch {
     print: Option<Fingerprint>,
     dir: Option<PathBuf>,
     reading: bool,
-    pending: Option<Option<T3Choices>>,
+    pending: bool,
+    pending_import: Option<T3Choices>,
 }
 
 fn imported(report: &T3Report) -> usize {
@@ -48,7 +49,8 @@ impl Actor {
     pub(super) fn t3_poll(&mut self, force: bool, import: Option<T3Choices>) {
         if self.t3.reading {
             if force {
-                self.t3.pending = Some(import);
+                self.t3.pending = true;
+                self.t3.pending_import = import.or(self.t3.pending_import.take());
             }
             return;
         }
@@ -96,7 +98,7 @@ impl Actor {
         }
     }
 
-    fn t3_write(&mut self, before: Ls, after: Ls) {
+    fn t3_write(&mut self, before: &Ls, after: Ls) {
         if after.settings != before.settings {
             self.workspace.apply_settings(after.settings);
         }
@@ -138,7 +140,7 @@ impl Actor {
             let report = if state.enabled {
                 let before = ls.clone();
                 let report = t3::run(&data, &mut ls, &mut state, true);
-                self.t3_write(before, ls);
+                self.t3_write(&before, ls);
                 report
             } else {
                 let mut scratch = state.clone();
@@ -156,8 +158,9 @@ impl Actor {
             self.mailbox.push(Update::T3Sync { report });
         }
         self.t3_keep(state);
-        if let Some(pending) = self.t3.pending.take() {
-            self.t3_poll(true, pending);
+        if std::mem::take(&mut self.t3.pending) {
+            let import = self.t3.pending_import.take();
+            self.t3_poll(true, import);
         }
     }
 

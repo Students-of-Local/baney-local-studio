@@ -278,6 +278,49 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
+fn instance(id: String, instance: InstanceFile) -> Instance {
+    let config = instance.config;
+    let mut secrets = Vec::new();
+    for (present, name) in
+        [(config.api_key, "API key"), (config.server_password, "server password"), (config.token, "token")]
+    {
+        if present.0 {
+            secrets.push(name);
+        }
+    }
+    let launch_args = match config.launch_args {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        _ => false,
+    };
+    Instance {
+        id,
+        driver: instance.driver,
+        display_name: non_empty(instance.display_name),
+        enabled: instance.enabled,
+        accent: non_empty(instance.accent_color),
+        home_path: non_empty(config.home_path),
+        launch_args,
+        secrets,
+    }
+}
+
+fn read_themes(dir: &Path, problems: &mut Vec<String>) -> BTreeMap<String, ThemeFile> {
+    let mut themes = BTreeMap::new();
+    for entry in std::fs::read_dir(dir.join("themes")).into_iter().flatten().filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { continue };
+        let file: ThemeFile = read_json(&path, problems);
+        if !file.colors.is_empty() {
+            themes.insert(id, file);
+        }
+    }
+    themes
+}
+
 pub(crate) fn read(dir: &Path) -> T3Data {
     let mut problems = Vec::new();
     let settings: SettingsFile = read_json(&dir.join("settings.json"), &mut problems);
@@ -287,36 +330,7 @@ pub(crate) fn read(dir: &Path) -> T3Data {
         _ => serde_json::Map::new(),
     };
     let bindings: Vec<BindingFile> = read_json(&dir.join("keybindings.json"), &mut problems);
-    let instances = settings
-        .provider_instances
-        .into_iter()
-        .map(|(id, instance)| {
-            let config = instance.config;
-            let mut secrets = Vec::new();
-            for (present, name) in
-                [(config.api_key, "API key"), (config.server_password, "server password"), (config.token, "token")]
-            {
-                if present.0 {
-                    secrets.push(name);
-                }
-            }
-            let launch_args = match config.launch_args {
-                Some(Value::String(text)) => !text.trim().is_empty(),
-                Some(Value::Array(items)) => !items.is_empty(),
-                _ => false,
-            };
-            Instance {
-                id,
-                driver: instance.driver,
-                display_name: non_empty(instance.display_name),
-                enabled: instance.enabled,
-                accent: non_empty(instance.accent_color),
-                home_path: non_empty(config.home_path),
-                launch_args,
-                secrets,
-            }
-        })
-        .collect();
+    let instances = settings.provider_instances.into_iter().map(|(id, file)| instance(id, file)).collect();
     let mut favorites = settings.favorites;
     if let Some(Value::Array(extra)) = client.get("favorites") {
         for favorite in extra.iter().filter_map(|value| serde_json::from_value::<Favorite>(value.clone()).ok()) {
@@ -349,18 +363,7 @@ pub(crate) fn read(dir: &Path) -> T3Data {
         }
     }
     let theme = non_empty(settings.default_theme);
-    let mut themes = BTreeMap::new();
-    for entry in std::fs::read_dir(dir.join("themes")).into_iter().flatten().filter_map(Result::ok) {
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { continue };
-        let file: ThemeFile = read_json(&path, &mut problems);
-        if !file.colors.is_empty() {
-            themes.insert(id, file);
-        }
-    }
+    let themes = read_themes(dir, &mut problems);
     let (projects, projects_read) = match read_projects(dir) {
         Ok(Some(projects)) => (projects, true),
         Ok(None) => (Vec::new(), false),

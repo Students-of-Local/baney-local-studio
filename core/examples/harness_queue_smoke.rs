@@ -651,8 +651,11 @@ fn account_scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     let (codex_a, codex_b) = dirs(".codex");
     let path = |dir: &PathBuf| dir.to_string_lossy().into_owned();
     let mut settings = run.watch.settings.clone().unwrap_or_default();
-    settings.harness_accounts =
-        HarnessAccounts { claude: vec![path(&claude_a), path(&claude_b)], codex: vec![path(&codex_a), path(&codex_b)] };
+    settings.harness_accounts = HarnessAccounts {
+        claude: vec![path(&claude_a), path(&claude_b)],
+        codex: vec![path(&codex_a), path(&codex_b)],
+        labels: Vec::new(),
+    };
     settings.switch_accounts_on_limit = true;
     run.studio.update_settings(settings);
     run.setup("two scratch accounts are listed for each CLI", |watch| {

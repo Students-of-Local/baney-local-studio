@@ -145,6 +145,7 @@ impl Harness {
             | Update::ProviderModels { .. }
             | Update::Settings { .. }
             | Update::Keybindings { .. }
+            | Update::T3Sync { .. }
             | Update::ProjectScripts { .. }
             | Update::ProjectSettings { .. }
             | Update::WorktreeSetup { .. }

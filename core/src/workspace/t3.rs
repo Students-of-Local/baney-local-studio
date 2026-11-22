@@ -162,9 +162,9 @@ pub fn import_from_t3(data_dir: Option<&str>, dry_run: bool) -> Result<T3Report,
         settings::save_json(&data_dir.join("keybindings.json"), &ls.keybindings)?;
     }
     if ls.projects != before.projects || ls.favorites != before.favorites || ls.hidden != before.hidden {
-        store.projects = ls.projects.clone();
-        store.favorites = ls.favorites.clone();
-        store.hidden = ls.hidden.clone();
+        store.projects.clone_from(&ls.projects);
+        store.favorites.clone_from(&ls.favorites);
+        store.hidden.clone_from(&ls.hidden);
         store.save().map_err(|error| format!("{error:#}"))?;
     }
     if ls.project_settings != before.project_settings {

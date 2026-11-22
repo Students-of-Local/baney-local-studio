@@ -202,7 +202,7 @@ fn build(scratch: &Path) -> Result<Fixture> {
          CREATE TABLE auth_sessions (id TEXT, token TEXT);",
     )?;
     database.execute("INSERT INTO auth_sessions VALUES ('s', ?1)", [CANARY])?;
-    let rows: [(&str, &str, String, &str, Option<&str>, Option<&str>); 5] = [
+    let rows: [ProjectRow; 5] = [
         ("p-alpha", "Alpha App", fixture.alpha.to_string_lossy().into_owned(), "2026-11-20", None, None),
         ("p-beta", "beta", fixture.beta.to_string_lossy().into_owned(), "2026-11-19", None, None),
         ("p-gamma", "Gamma", gamma.to_string_lossy().into_owned(), "2026-11-18", None, Some("2026-11-01")),
@@ -218,6 +218,8 @@ fn build(scratch: &Path) -> Result<Fixture> {
     drop(database);
     Ok(fixture)
 }
+
+type ProjectRow<'a> = (&'a str, &'a str, String, &'a str, Option<&'a str>, Option<&'a str>);
 
 fn tree(root: &Path) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
@@ -401,6 +403,36 @@ fn check_first(fixture: &Fixture, data: &Path, first: &T3Report) -> Result<()> {
     ensure!(keys["chat.new"] == "cmd+shift+o", "chat.new is {}", keys["chat.new"]);
     ensure!(keys["usage.open"] == "cmd+option+u", "usage.open is {}", keys["usage.open"]);
     ensure!(keys.get("sidebar.toggle").is_none(), "a T3 binding equal to the default was written as an override");
+    check_lists(fixture, data)?;
+    for (key, word) in
+        [("account:cursor", "API key set in T3 Code"), ("account:opencode", "server password set in T3 Code")]
+    {
+        expect_state(first, key, T3ItemState::Unsupported)?;
+        let detail = item_detail(first, key);
+        ensure!(detail.contains("Not supported yet") && detail.contains(word), "{key}: {detail}");
+    }
+    expect_state(first, "project:p-gone", T3ItemState::Unsupported).or_else(|_| {
+        let gone = first
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .any(|item| item.label == "Gone" && item.state == T3ItemState::Unsupported);
+        ensure!(gone, "the missing project folder is not reported");
+        Ok(())
+    })?;
+    expect_state(first, "keybinding:unknown", T3ItemState::Unsupported)?;
+    expect_state(first, "hidden:unlisted", T3ItemState::Unsupported)?;
+    for dir in [&fixture.personal, &fixture.work, &fixture.codex] {
+        ensure!(
+            !data.join(dir.file_name().unwrap_or_default()).exists(),
+            "{} was copied into the data dir",
+            dir.display()
+        );
+    }
+    no_canary(data)
+}
+
+fn check_lists(fixture: &Fixture, data: &Path) -> Result<()> {
     let state = read_json(&data.join("state.json"))?;
     let projects: Vec<(String, String)> = state["projects"]
         .as_array()
@@ -445,32 +477,7 @@ fn check_first(fixture: &Fixture, data: &Path, first: &T3Report) -> Result<()> {
             && alpha["defaultThinkingLevel"] == "medium",
         "the Alpha project default model is {alpha}"
     );
-    for (key, word) in
-        [("account:cursor", "API key set in T3 Code"), ("account:opencode", "server password set in T3 Code")]
-    {
-        expect_state(first, key, T3ItemState::Unsupported)?;
-        let detail = item_detail(first, key);
-        ensure!(detail.contains("Not supported yet") && detail.contains(word), "{key}: {detail}");
-    }
-    expect_state(first, "project:p-gone", T3ItemState::Unsupported).or_else(|_| {
-        let gone = first
-            .groups
-            .iter()
-            .flat_map(|group| &group.items)
-            .any(|item| item.label == "Gone" && item.state == T3ItemState::Unsupported);
-        ensure!(gone, "the missing project folder is not reported");
-        Ok(())
-    })?;
-    expect_state(first, "keybinding:unknown", T3ItemState::Unsupported)?;
-    expect_state(first, "hidden:unlisted", T3ItemState::Unsupported)?;
-    for dir in [&fixture.personal, &fixture.work, &fixture.codex] {
-        ensure!(
-            !data.join(dir.file_name().unwrap_or_default()).exists(),
-            "{} was copied into the data dir",
-            dir.display()
-        );
-    }
-    no_canary(data)
+    Ok(())
 }
 
 fn files(data: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -588,7 +595,7 @@ impl App {
                     Update::T3Sync { report } => self.report = Some(report),
                     Update::Settings { settings } => self.settings = Some(settings),
                     Update::Projects { projects } => {
-                        self.projects = projects.into_iter().map(|project| project.path).collect()
+                        self.projects = projects.into_iter().map(|project| project.path).collect();
                     }
                     _ => {}
                 }

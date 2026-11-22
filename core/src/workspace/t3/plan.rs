@@ -77,7 +77,7 @@ const PREFERENCES: [(&str, &str, &str); 22] = [
     ("snapshotAnimations", "snapShotAnimations", "SnapShot animations"),
 ];
 
-fn chosen(choices: &T3Choices, kind: T3Kind) -> bool {
+fn chosen(choices: T3Choices, kind: T3Kind) -> bool {
     match kind {
         T3Kind::Accounts => choices.accounts,
         T3Kind::Projects => choices.projects,
@@ -113,7 +113,7 @@ struct Engine<'a> {
 
 impl Engine<'_> {
     fn live(&self, kind: T3Kind) -> bool {
-        self.apply && chosen(&self.choices, kind)
+        self.apply && chosen(self.choices, kind)
     }
 
     fn scalar(&mut self, kind: T3Kind, key: &str, desired: &Value, current: &Value, default: &Value) -> T3ItemState {
@@ -381,7 +381,7 @@ pub(crate) fn sync(t3: &T3Data, ls: &mut Ls, state: &mut SyncState, apply: bool)
     .map(|kind| T3Group {
         kind,
         title: title(kind).to_string(),
-        chosen: chosen(&choices, kind),
+        chosen: chosen(choices, kind),
         items: engine.groups.remove(&kind).unwrap_or_default(),
     })
     .collect();
@@ -514,7 +514,7 @@ fn projects_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls, problems: &
     }
 }
 
-fn selection_value(mapped: &Mapped, thinking: Option<String>, with_thinking: bool) -> Value {
+fn selection_value(mapped: &Mapped, thinking: Option<&str>, with_thinking: bool) -> Value {
     if with_thinking {
         json!({ "provider": mapped.provider, "model": mapped.model, "thinking": thinking })
     } else {
@@ -523,6 +523,12 @@ fn selection_value(mapped: &Mapped, thinking: Option<String>, with_thinking: boo
 }
 
 fn models_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
+    model_picks(engine, t3, ls);
+    model_lists(engine, t3, ls);
+    project_models(engine, t3, ls);
+}
+
+fn model_picks(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
     let kind = T3Kind::Models;
     let picks: [(&str, &str, Option<&Selection>, bool); 3] = [
         ("model.default", "Default model", t3.default_model.as_ref(), true),
@@ -546,7 +552,7 @@ fn models_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
             }
         };
         let thinking = selection.effort();
-        let desired = selection_value(&mapped, thinking.clone(), with_thinking);
+        let desired = selection_value(&mapped, thinking.as_deref(), with_thinking);
         let settings = &ls.settings;
         let current = match key {
             "model.default" => json!({
@@ -589,6 +595,10 @@ fn models_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
         };
         engine.item(kind, key.to_string(), label.to_string(), detail, state);
     }
+}
+
+fn model_lists(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
+    let kind = T3Kind::Models;
     let mut seen = BTreeSet::new();
     for favorite in &t3.favorites {
         let shown_model = model_label(t3, &favorite.provider, &favorite.model);
@@ -613,12 +623,9 @@ fn models_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
     }
     let mut skipped: Vec<String> = Vec::new();
     for (instance, model) in &t3.hidden {
-        let mapped = match map_model(t3, instance, model) {
-            Ok(mapped) => mapped,
-            Err(_) => {
-                skipped.push(model.clone());
-                continue;
-            }
+        let Ok(mapped) = map_model(t3, instance, model) else {
+            skipped.push(model.clone());
+            continue;
         };
         let model_key = ModelKey { provider: mapped.provider.clone(), model: mapped.model.clone() };
         let key = format!("hidden:{}/{}", mapped.provider, mapped.model);
@@ -651,7 +658,6 @@ fn models_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
             T3ItemState::Unsupported,
         );
     }
-    project_models(engine, t3, ls);
 }
 
 fn project_models(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
@@ -674,7 +680,7 @@ fn project_models(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
             }
         };
         let thinking = selection.effort();
-        let desired = selection_value(&mapped, thinking.clone(), true);
+        let desired = selection_value(&mapped, thinking.as_deref(), true);
         let entry = ls.project_settings.get(&canonical).cloned().unwrap_or_default();
         let current = json!({ "provider": entry.default_provider, "model": entry.default_model, "thinking": entry.default_thinking_level });
         let default = json!({ "provider": null, "model": null, "thinking": null });
