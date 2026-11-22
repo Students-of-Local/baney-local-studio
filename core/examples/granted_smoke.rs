@@ -193,27 +193,39 @@ fn write_private(path: &Path, text: &str, mode: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn starts(log: &Path) -> Vec<Vec<String>> {
-    std::fs::read_to_string(log)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .map(|row| {
-            row["granted"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
-        })
-        .collect()
-}
-
-fn wait_start(log: &Path, count: usize) -> anyhow::Result<Vec<String>> {
-    let deadline = Instant::now() + STEP;
-    loop {
-        let seen = starts(log);
-        if let Some(last) = seen.get(count - 1) {
-            return Ok(last.clone());
-        }
-        ensure!(Instant::now() < deadline, "the plugin server started {} times, not {count}", seen.len());
-        std::thread::sleep(Duration::from_millis(250));
+fn run_entry(agent: &Path, log: &Path) -> anyhow::Result<Vec<String>> {
+    let settings: Value = serde_json::from_slice(&std::fs::read(agent.join("settings.json"))?)?;
+    let entry = settings.pointer(&format!("/mcpServers/plugin-{ID}")).context("no plugin entry in settings.json")?;
+    let command = entry["command"].as_str().context("entry command")?;
+    let args: Vec<&str> = entry["args"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let mut child = Command::new(command);
+    child.args(&args).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    if let Some(cwd) = entry["cwd"].as_str() {
+        child.current_dir(cwd);
     }
+    for (name, value) in entry["env"].as_object().into_iter().flatten() {
+        let host = value["env"].as_str().with_context(|| format!("env {name} is not a host variable reference"))?;
+        child.env(name, std::env::var_os(host).unwrap_or_default());
+    }
+    let before = std::fs::read_to_string(log).unwrap_or_default().lines().count();
+    let mut child = child.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn()?;
+    let mut stdin = child.stdin.take().context("stdin")?;
+    stdin.write_all(
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"granted_report\"}}\n",
+    )?;
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    ensure!(output.status.success(), "the server from the entry exited with {}", output.status);
+    let reply: Value = serde_json::from_slice(output.stdout.split(|b| *b == b'\n').next().unwrap_or_default())?;
+    let text = reply.pointer("/result/content/0/text").and_then(Value::as_str).context("no tool reply")?;
+    let lines: Vec<String> = std::fs::read_to_string(log)?.lines().skip(before).map(str::to_string).collect();
+    ensure!(lines.len() == 1, "the server logged {} starts, not 1", lines.len());
+    let row: Value = serde_json::from_str(&lines[0])?;
+    let seen: Vec<String> =
+        row["granted"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+    let told: Vec<String> = text.split(',').filter(|name| !name.is_empty()).map(str::to_string).collect();
+    ensure!(seen == told, "the server's start log {seen:?} and its tool reply {told:?} differ");
+    Ok(seen)
 }
 
 fn entry_env(agent: &Path) -> anyhow::Result<Vec<String>> {
@@ -274,34 +286,31 @@ fn drive(harness: &mut Harness, agent: &Path, work: &Path, log: &Path) -> anyhow
     ensure!(env.is_empty(), "the settings.json entry has granted variables before any grant: {env:?}");
     println!("ok   plugin-{ID} is in settings.json with no LOCAL_STUDIO_GRANTED_* variable");
 
-    let mark = starts(log).len();
     harness.turn("none", &project)?;
-    let seen = wait_start(log, mark + 1)?;
+    let seen = run_entry(agent, log)?;
     ensure!(seen.is_empty(), "with no sensitive grant the server saw {seen:?}");
-    println!("ok   the plugin server Eukhe started for the first thread runs and sees an empty granted list");
+    println!("ok   the plugin server started from the core's settings.json entry runs and sees an empty granted list");
 
     let message = harness.switch("screen-capture", true)?;
     println!("     {message}");
     let env = entry_env(agent)?;
     ensure!(env == ["LOCAL_STUDIO_GRANTED_SCREEN_CAPTURE"], "after the switch the entry has {env:?}");
-    let mark = starts(log).len();
     harness.turn("screen", &project)?;
-    let seen = wait_start(log, mark + 1)?;
+    let seen = run_entry(agent, log)?;
     ensure!(
         seen == ["LOCAL_STUDIO_GRANTED_SCREEN_CAPTURE"],
         "after screen-capture was granted the new server saw {seen:?}"
     );
-    println!("ok   after Settings turned screen-capture on, the next thread's server sees only LOCAL_STUDIO_GRANTED_SCREEN_CAPTURE");
+    println!("ok   after Settings turned screen-capture on, the server started from the entry sees only LOCAL_STUDIO_GRANTED_SCREEN_CAPTURE");
 
     let message = harness.switch("screen-capture", false)?;
     println!("     {message}");
     ensure!(entry_env(agent)?.is_empty(), "after the switch went off the entry still has a granted variable");
-    let mark = starts(log).len();
     harness.turn("off", &project)?;
-    let seen = wait_start(log, mark + 1)?;
+    let seen = run_entry(agent, log)?;
     ensure!(seen.is_empty(), "after screen-capture was turned off the new server saw {seen:?}");
     println!(
-        "ok   after Settings turned screen-capture off, the next thread's server sees an empty granted list again"
+        "ok   after Settings turned screen-capture off, the server started from the entry sees an empty granted list again"
     );
 
     harness.studio.load_usage("usage".to_string(), UsagePeriod::Day);
