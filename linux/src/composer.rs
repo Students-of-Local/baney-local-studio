@@ -383,6 +383,11 @@ impl Composer {
         self.view.buffer().set_text(text);
     }
 
+    pub fn set_draft(&self, draft: PromptDraft) {
+        self.set_text(&draft.text);
+        self.extras.restore(draft.images, draft.files);
+    }
+
     pub fn view(&self) -> gtk::TextView {
         self.view.clone()
     }

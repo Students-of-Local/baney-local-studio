@@ -69,6 +69,8 @@ mod local_only;
 mod remote;
 mod t3;
 
+use local_only::Gate;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DaemonLaunch {
@@ -1251,8 +1253,7 @@ struct Thread {
     resources: Option<Resources>,
     rlm_children: Vec<Subagent>,
     refused: Option<PromptDraft>,
-    held: Vec<(PromptDraft, Delivery, Option<String>)>,
-    served: Option<String>,
+    served: Option<(String, Vec<String>)>,
 }
 
 struct Actor {
@@ -1509,6 +1510,9 @@ impl Actor {
             if let Err(error) = self.ensure_open(&id).await {
                 self.mailbox.notice(NoticeLevel::Error, error);
             }
+        }
+        for id in self.held_threads() {
+            self.itself.send(Command::SendHeld { thread: id });
         }
         let waiting = std::mem::take(&mut self.models_waiting);
         if !waiting.is_empty() {
@@ -2755,6 +2759,18 @@ impl Actor {
         delivery: Delivery,
         request: Option<String>,
     ) -> Result<(), String> {
+        self.send_prompt_from(id, prompt, delivery, request, false).await.map(|_| ())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn send_prompt_from(
+        &mut self,
+        id: &str,
+        prompt: PromptDraft,
+        delivery: Delivery,
+        request: Option<String>,
+        again: bool,
+    ) -> Result<Gate, String> {
         if !self.known(id) {
             return Err(format!("Unknown thread {id}."));
         }
@@ -2771,9 +2787,8 @@ impl Actor {
             self.thread_refuses(id, &active).await?;
             active
         };
-        if self.running(id) && self.threads.get(id).is_some_and(|thread| !thread.held.is_empty()) {
-            self.hold(id, &prompt, delivery, request);
-            return Ok(());
+        if !again && self.hold_behind(id, &prompt, delivery, request.clone()) {
+            return Ok(Gate::Held);
         }
         let expansion = if !(message.starts_with('/') || message.contains('$')) {
             Expansion { text: message.clone(), plugins: Vec::new() }
@@ -2782,8 +2797,10 @@ impl Actor {
         } else {
             self.resources(id, &active).await.expand(&message)
         };
-        if !self.local_only_gate(id, &active, &expansion.plugins, &prompt, delivery, request.clone()).await? {
-            return Ok(());
+        let gate =
+            self.local_only_gate(id, &active, &expansion.plugins, &prompt, delivery, request.clone(), again).await?;
+        if gate != Gate::Send {
+            return Ok(gate);
         }
         let message = if cli { message } else { expansion.text };
         let images = (!prompt.images.is_empty()).then(|| {
@@ -2852,7 +2869,7 @@ impl Actor {
             self.emit_info(id);
             return Err(error);
         }
-        Ok(())
+        Ok(Gate::Send)
     }
 
     /// Refuses a model call on the Eukhe thread `id` (open as `active`) whose model is `anthropic` on the Claude

@@ -222,6 +222,8 @@ final class StudioStore {
             conversation.setQueue(thread: thread, queued: queued)
         case .composerText(let thread, let text):
             conversation.setComposerText(thread: thread, text: text)
+        case .composerDraft(let thread, let draft):
+            conversation.setComposerDraft(thread: thread, draft: draft)
         case .models(let models, let favorites, let hidden):
             conversation.setModels(models, favorites: favorites, hidden: hidden)
         case .daemonDefault(let model, let thinkingLevel):

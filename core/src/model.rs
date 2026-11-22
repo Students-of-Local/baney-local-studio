@@ -757,6 +757,10 @@ pub enum Update {
         thread: String,
         text: String,
     },
+    ComposerDraft {
+        thread: String,
+        draft: PromptDraft,
+    },
     Models {
         models: Vec<ModelOption>,
         favorites: Vec<ModelKey>,

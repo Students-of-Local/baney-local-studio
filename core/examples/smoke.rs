@@ -187,7 +187,8 @@ impl Harness {
             Update::Thread { thread, info } => {
                 self.view.access.insert(thread, info.access);
             }
-            Update::Questions { .. }
+            Update::ComposerDraft { .. }
+            | Update::Questions { .. }
             | Update::QuestionsSettled { .. }
             | Update::Subagents { .. }
             | Update::GitStatus { .. }

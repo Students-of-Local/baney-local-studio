@@ -43,7 +43,7 @@ pub use studio::{
 };
 pub use workspace::model::*;
 pub use workspace::t3::import_from_t3;
-pub use workspace::{configured_providers, endpoint_presets, terminal_preview, Provider};
+pub use workspace::{endpoint_presets, terminal_preview};
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 #[must_use]

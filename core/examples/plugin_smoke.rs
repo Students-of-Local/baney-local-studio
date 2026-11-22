@@ -104,6 +104,7 @@ struct View {
     refusals: Vec<(String, String, Option<ModelKey>)>,
     usage: Option<UsageReport>,
     composer: Vec<(String, String)>,
+    other: Vec<String>,
 }
 
 impl View {
@@ -175,7 +176,7 @@ impl Harness {
                 self.view.composer.retain(|(key, _)| *key != thread);
                 self.view.composer.push((thread, text));
             }
-            _ => {}
+            other => self.view.other.push(format!("{other:?}")),
         }
         Ok(())
     }
@@ -487,8 +488,7 @@ fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
     })
 }
 
-const LOCAL_USAGE: &str =
-    "usage: plugin_smoke --local-only <eukhe> <scratch dir> (needs Ollama on 127.0.0.1:11434 with the LFM2.5 8B model)";
+const LOCAL_USAGE: &str = "usage: plugin_smoke --local-only <eukhe> <scratch dir> (needs a local model: LOCAL_STUDIO_SMOKE_MODEL=<provider>/<model> at LOCAL_STUDIO_SMOKE_BASE_URL, default the LFM2.5 8B model on 127.0.0.1:11434)";
 
 mod local_only {
     use super::{
@@ -497,8 +497,52 @@ mod local_only {
         Instant, Map, OpenOptionsExt, Ordering, Path, PathBuf, Read, Signal, Studio, StudioConfig, TcpListener,
         ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MAX_TOKENS, MID, STEP,
     };
+    use local_studio_core::{ImageAttachment, PromptDraft};
+    use std::sync::OnceLock;
 
     const LOCAL: &str = "ollama-local";
+    const DRIFT: &str = "drift-stub";
+    const LEDGER_ENV: &str = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT";
+    const CASES: [(&str, &str, bool); 12] = [
+        ("case-v6-loopback", "http://[::1]:11434/v1", true),
+        ("case-v6-mapped", "http://[::ffff:127.0.0.1]:11434/v1", true),
+        ("case-v6-ula", "http://[fd00::1]:11434/v1", true),
+        ("case-172-15", "http://172.15.0.1:11434/v1", false),
+        ("case-172-16", "http://172.16.0.1:11434/v1", true),
+        ("case-100-63", "http://100.63.0.1:11434/v1", false),
+        ("case-100-64", "http://100.64.0.1:11434/v1", true),
+        ("case-100-128", "http://100.128.0.1:11434/v1", false),
+        ("case-localhost-dot", "http://localhost.:11434/v1", false),
+        ("openai", "http://127.0.0.1:11434/v1", false),
+        ("case-ftp", "ftp://127.0.0.1:11434/v1", false),
+        ("case-no-base-url", "", false),
+    ];
+    const CASE_MODEL: &str = "case-1";
+    static LOCAL_MODEL: OnceLock<(String, String)> = OnceLock::new();
+
+    fn mid() -> &'static str {
+        LOCAL_MODEL.get().map_or(MID, |(model, _)| model.as_str())
+    }
+
+    fn base() -> &'static str {
+        LOCAL_MODEL.get().map_or("http://127.0.0.1:11434/v1", |(_, base)| base.as_str())
+    }
+
+    fn pick_model() -> anyhow::Result<()> {
+        let model = match std::env::var("LOCAL_STUDIO_SMOKE_MODEL").ok().filter(|value| !value.is_empty()) {
+            Some(value) => value
+                .split_once('/')
+                .map(|(_, model)| model.to_string())
+                .context("LOCAL_STUDIO_SMOKE_MODEL is not <provider>/<model>")?,
+            None => MID.to_string(),
+        };
+        let base = std::env::var("LOCAL_STUDIO_SMOKE_BASE_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
+        let _ = LOCAL_MODEL.set((model, base));
+        Ok(())
+    }
     const CLOUD: &str = "cloud-stub";
     const CLOUD_MODEL: &str = "stub-1";
     const CLOUD_HOST: &str = "localtest.me";
@@ -550,7 +594,9 @@ for line in sys.stdin:
                 counter.fetch_add(1, Ordering::SeqCst);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let mut buffer = vec![0_u8; 65_536];
-                let _ = stream.read(&mut buffer);
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buffer[..read]);
+                println!("     stub {port} got {:?}", head.lines().next().unwrap_or_default());
                 let _ = stream
                     .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             }
@@ -558,29 +604,51 @@ for line in sys.stdin:
         Ok((port, hits))
     }
 
-    fn agent(root: &Path, port: u16, web: &Path) -> anyhow::Result<PathBuf> {
-        let agent = root.join("agent");
-        std::fs::create_dir_all(&agent)?;
-        let models = json!({ "providers": {
-            LOCAL: {
+    fn stub_provider(name: &str, base: &str, model: &str) -> Value {
+        let mut entry = json!({
+            "name": name,
+            "api": "openai-completions",
+            "apiKey": "none",
+            "models": [{ "id": model, "name": model, "contextWindow": 32768, "maxTokens": 1024 }],
+        });
+        if !base.is_empty() {
+            entry["baseUrl"] = json!(base);
+        }
+        entry
+    }
+
+    fn write_models(agent: &Path, port: u16, drift: &str) -> anyhow::Result<()> {
+        let mut providers = Map::new();
+        providers.insert(
+            LOCAL.to_string(),
+            json!({
                 "name": "Ollama on this machine",
-                "baseUrl": "http://127.0.0.1:11434/v1",
+                "baseUrl": base(),
                 "api": "openai-completions",
                 "apiKey": "ollama",
-                "models": [{ "id": MID, "name": "LFM2.5 8B", "contextWindow": 32768, "maxTokens": MAX_TOKENS }],
-            },
-            CLOUD: {
-                "name": "Cloud stub",
-                "baseUrl": format!("http://{CLOUD_HOST}:{port}/v1"),
-                "api": "openai-completions",
-                "apiKey": "none",
-                "models": [{ "id": CLOUD_MODEL, "name": "Stub", "contextWindow": 32768, "maxTokens": 1024 }],
-            },
-        }});
+                "models": [{ "id": mid(), "name": mid(), "contextWindow": 32768, "maxTokens": MAX_TOKENS }],
+            }),
+        );
+        providers.insert(
+            CLOUD.to_string(),
+            stub_provider("Cloud stub", &format!("http://{CLOUD_HOST}:{port}/v1"), CLOUD_MODEL),
+        );
+        providers.insert(DRIFT.to_string(), stub_provider("Drift stub", drift, CLOUD_MODEL));
+        for (id, base, _) in CASES {
+            providers.insert(id.to_string(), stub_provider(id, base, CASE_MODEL));
+        }
+        let models = json!({ "providers": providers });
         write_private(&agent.join("models.json"), &serde_json::to_vec_pretty(&models)?)?;
+        Ok(())
+    }
+
+    fn agent(root: &Path, port: u16, drift: &str, web: &Path) -> anyhow::Result<PathBuf> {
+        let agent = root.join("agent");
+        std::fs::create_dir_all(&agent)?;
+        write_models(&agent, port, drift)?;
         let settings = json!({
             "defaultProvider": LOCAL,
-            "defaultModel": MID,
+            "defaultModel": mid(),
             "mcpServers": { "web-search": {
                 "type": "stdio",
                 "command": web.join("server.py").to_string_lossy(),
@@ -590,8 +658,10 @@ for line in sys.stdin:
         write_private(&agent.join("settings.json"), &serde_json::to_vec_pretty(&settings)?)?;
         write_private(&agent.join("auth.json"), b"{}")?;
         println!(
-            "     scratch agent dir {}: {LOCAL} at 127.0.0.1:11434, {CLOUD} at {CLOUD_HOST}:{port}, auth.json is {{}}",
-            agent.display()
+            "     scratch agent dir {}: {LOCAL} ({}) at {}, {CLOUD} at {CLOUD_HOST}:{port}, auth.json is {{}}",
+            agent.display(),
+            mid(),
+            base()
         );
         Ok(agent)
     }
@@ -605,6 +675,33 @@ for line in sys.stdin:
             None => servers.remove(name),
         };
         write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
+        Ok(())
+    }
+
+    fn vault(plugins: &Path, out: &Path) -> anyhow::Result<()> {
+        let dir = plugins.join("vault");
+        std::fs::create_dir_all(dir.join("skills").join("vault"))?;
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "id = \"vault\"\nversion = \"0.1.0\"\ndescription = \"Second local-only fixture\"\nlocal_only = true\ncapabilities = [\"mcp-server\"]\n\n[[commands]]\nname = \"vault\"\ndescription = \"Open the vault\"\nskill = \"vault\"\n\n[mcp]\ncommand = \"server.py\"\nargs = [\"plugin-vault\", {}]\n",
+                serde_json::to_string(&out.to_string_lossy())?
+            ),
+        )?;
+        std::fs::write(
+            dir.join("skills").join("vault").join("SKILL.md"),
+            "---\nname: vault\ndescription: Open the vault.\n---\n\n# vault\n\nReply with only the word open.\n",
+        )?;
+        executable(&dir.join("server.py"), SERVER)?;
+        grant(plugins, &dir)
+    }
+
+    fn grant(plugins: &Path, dir: &Path) -> anyhow::Result<()> {
+        let loaded = plugin_store::load(dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+        ensure!(loaded.local_only, "the fixture {} did not load as local_only", loaded.id);
+        let mut grants = Grants::load(plugins).map_err(anyhow::Error::msg)?;
+        grants.grant(&loaded, &[Capability::McpServer], None).map_err(anyhow::Error::msg)?;
+        grants.save(plugins).map_err(anyhow::Error::msg)?;
         Ok(())
     }
 
@@ -643,12 +740,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             format!("---\nname: ledger\ndescription: File a private ledger entry.\n---\n\n# ledger {MARK}\n\nRun this once in the Python tool: `print(await mcp.call_tool(\"plugin-ledger\", \"plugin_ledger\"))`. Then reply with only the word filed.\n"),
         )?;
         executable(&dir.join("server.py"), SERVER)?;
-        let loaded = plugin_store::load(&dir).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
-        ensure!(loaded.local_only, "the fixture did not load as local_only");
-        let mut grants = Grants::load(plugins).map_err(anyhow::Error::msg)?;
-        grants.grant(&loaded, &[Capability::McpServer], None).map_err(anyhow::Error::msg)?;
-        grants.save(plugins).map_err(anyhow::Error::msg)?;
-        Ok(())
+        grant(plugins, &dir)
     }
 
     fn settings(provider: &str, model: &str) -> ThreadSettings {
@@ -754,11 +846,22 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         text: &str,
         on: ThreadSettings,
         hits: &AtomicUsize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
+        refused_draft(harness, key, prompt(text), on, hits)
+    }
+
+    fn refused_draft(
+        harness: &mut Harness,
+        key: &str,
+        draft: PromptDraft,
+        on: ThreadSettings,
+        hits: &AtomicUsize,
+    ) -> anyhow::Result<String> {
+        let text = draft.text.clone();
         let studio = Arc::clone(&harness.studio);
         let (start, before) = (hits.load(Ordering::SeqCst), cloud_tokens(&usage(harness, &format!("{key}-before"))?));
         let project = harness.view.projects[0].id.clone();
-        studio.start_thread(key.to_string(), Some(project), prompt(text), on);
+        studio.start_thread(key.to_string(), Some(project), draft, on);
         harness.pump_until(&format!("{key} thread started"), STEP, |view| view.thread(key).is_some())?;
         let thread = harness.view.thread(key).context("thread")?;
         let refused = harness.pump_until(&format!("{key} refused"), Duration::from_secs(20), |view| {
@@ -775,6 +878,114 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             "{text:?}: refusal {message:?}, {sent} connections to {CLOUD_HOST}, {CLOUD} usage {before:?} -> {after:?}"
         );
         println!("     {key}: {message:?}");
+        Ok(message.cloned().unwrap_or_default())
+    }
+
+    fn naming(result: anyhow::Result<String>, needle: &str) -> anyhow::Result<()> {
+        let message = result?;
+        ensure!(message.contains(needle), "the refusal does not name {needle}: {message}");
+        Ok(())
+    }
+
+    fn image_draft(text: &str) -> PromptDraft {
+        let png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4];
+        PromptDraft {
+            text: text.to_string(),
+            images: vec![ImageAttachment { mime_type: "image/png".to_string(), data: png }],
+            files: vec!["notes.txt".to_string()],
+        }
+    }
+
+    fn draft_returned(harness: &mut Harness, hits: &AtomicUsize) -> anyhow::Result<()> {
+        let before = harness.view.other.len();
+        refused_draft(harness, "draft", image_draft(ASK), settings(CLOUD, CLOUD_MODEL), hits)?;
+        let thread = harness.view.thread("draft").context("draft thread")?;
+        let back = harness.view.other[before..].iter().find(|update| {
+            update.starts_with("ComposerDraft")
+                && update.contains(&format!("{thread:?}"))
+                && update.contains("image/png")
+                && update.contains("notes.txt")
+        });
+        ensure!(
+            back.is_some(),
+            "the refused draft's image and file did not come back to the composer; composer text {:?}",
+            harness.view.composer.iter().find(|(key, _)| *key == thread)
+        );
+        Ok(())
+    }
+
+    fn drifted(
+        harness: &mut Harness,
+        agent: &Path,
+        port: u16,
+        drift_port: u16,
+        drift_hits: &AtomicUsize,
+    ) -> anyhow::Result<()> {
+        let studio = Arc::clone(&harness.studio);
+        let project = harness.view.projects[0].id.clone();
+        studio.start_thread("drift".to_string(), Some(project), prompt(ASK), settings(DRIFT, CLOUD_MODEL));
+        harness.pump_until("drift thread started", STEP, |view| view.thread("drift").is_some())?;
+        let thread = harness.view.thread("drift").context("drift thread")?;
+        harness.pump_until("drift refused while models.json lists it as cloud", Duration::from_secs(20), |view| {
+            view.refusals.iter().any(|(id, _, _)| *id == thread)
+        })?;
+        write_models(agent, port, &format!("http://127.0.0.1:{drift_port}/v1"))?;
+        println!("     models.json now lists {DRIFT} at 127.0.0.1:{drift_port}; the session still has {CLOUD_HOST}");
+        studio.send("drift-again".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
+        let second =
+            harness.pump_until("drift refused on the session's own provider", Duration::from_secs(20), |view| {
+                view.refusals.iter().filter(|(id, _, _)| *id == thread).count() == 2
+            });
+        std::thread::sleep(Duration::from_secs(3));
+        for update in studio.tick() {
+            harness.apply(update)?;
+        }
+        studio.abort(thread.clone());
+        harness.pump_until("drift thread stopped", STEP, |view| view.idle(&thread))?;
+        write_models(agent, port, &format!("http://{CLOUD_HOST}:{drift_port}/v1"))?;
+        let message =
+            harness.view.refusals.iter().rev().find(|(id, _, _)| *id == thread).map(|(_, text, _)| text.clone());
+        let sent = drift_hits.load(Ordering::SeqCst);
+        ensure!(
+            second.is_ok() && sent == 0 && message.as_deref().is_some_and(|text| text.contains(CLOUD_HOST)),
+            "after models.json moved {DRIFT} to a local address: refusal {message:?}, {sent} connections to the drift stub"
+        );
+        println!("     drift: {message:?}");
+        Ok(())
+    }
+
+    fn url_cases(harness: &mut Harness, thread: &str) -> anyhow::Result<()> {
+        let studio = Arc::clone(&harness.studio);
+        let mut wrong = Vec::new();
+        for (id, base, local) in CASES {
+            let notices = harness.view.notices.len();
+            studio.set_model(thread.to_string(), id.to_string(), CASE_MODEL.to_string());
+            let refusal = format!("Start a new thread to use {id}.");
+            let outcome = harness.pump_until(&format!("{id} ({base:?}) decided"), Duration::from_secs(20), |view| {
+                view.notices[notices..].iter().any(|notice| notice.contains(&refusal))
+                    || view.threads.iter().any(|row| row.id == thread && row.provider.as_deref() == Some(id))
+            });
+            let switched =
+                harness.view.threads.iter().any(|row| row.id == thread && row.provider.as_deref() == Some(id));
+            if outcome.is_err() || switched != local {
+                wrong.push(format!(
+                    "{id} {base:?}: expected {}, got {}",
+                    if local { "local" } else { "cloud" },
+                    if switched { "local" } else { "cloud" }
+                ));
+            }
+            println!(
+                "     {id} {base:?}: {}",
+                if switched { "local, the thread switched" } else { "cloud, the switch was refused" }
+            );
+            if switched {
+                studio.set_model(thread.to_string(), LOCAL.to_string(), mid().to_string());
+                harness.pump_until("back on the local model", Duration::from_secs(20), |view| {
+                    view.threads.iter().any(|row| row.id == thread && row.provider.as_deref() == Some(LOCAL))
+                })?;
+            }
+        }
+        ensure!(wrong.is_empty(), "misclassified: {}", wrong.join("; "));
         Ok(())
     }
 
@@ -783,7 +994,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let project = harness.view.projects[0].id.clone();
         let before = server_starts(ledger_out, "plugin-ledger").len();
         let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
-        studio.start_thread("busy".to_string(), Some(project), prompt(long), settings(LOCAL, MID));
+        studio.start_thread("busy".to_string(), Some(project), prompt(long), settings(LOCAL, mid()));
         harness.pump_until("busy thread started", STEP, |view| view.thread("busy").is_some())?;
         let thread = harness.view.thread("busy").context("busy thread")?;
         studio.select_thread(Some(thread.clone()));
@@ -803,6 +1014,46 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(())
     }
 
+    fn held_across_restart(harness: &mut Harness, config: &StudioConfig, data: &Path) -> anyhow::Result<()> {
+        let studio = Arc::clone(&harness.studio);
+        let project = harness.view.projects[0].id.clone();
+        let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
+        studio.start_thread("restart".to_string(), Some(project), prompt(long), settings(LOCAL, mid()));
+        harness.pump_until("restart thread started", STEP, |view| view.thread("restart").is_some())?;
+        let thread = harness.view.thread("restart").context("restart thread")?;
+        studio.select_thread(Some(thread.clone()));
+        harness.pump_until("restart thread working", STEP, |view| !view.idle(&thread))?;
+        let notices = harness.view.notices.len();
+        studio.send("held".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
+        harness.pump_until("the /ledger is held behind the turn", Duration::from_secs(20), |view| {
+            view.notices[notices..].iter().any(|notice| notice.contains("waits for the current turn"))
+        })?;
+        ensure!(!harness.view.idle(&thread), "the turn ended before the app quit, so nothing was held across it");
+        harness.studio.shutdown();
+        println!("ok   the app quit with the /ledger held and the turn still running");
+        harness.studio = Studio::new(config.clone(), Arc::clone(&harness.signal) as Arc<dyn Waker>)?;
+        harness.view = View::default();
+        harness
+            .pump_until("reopened app connected", STEP, |view| matches!(view.connection, Some(Connection::Ready)))?;
+        harness.pump_until("reopened app lists the thread", STEP, |view| {
+            view.threads.iter().any(|row| row.id == thread)
+        })?;
+        let studio = Arc::clone(&harness.studio);
+        studio.select_thread(Some(thread.clone()));
+        let after = "Reply with only the word after.";
+        studio.send("after".to_string(), thread.clone(), prompt(after), Delivery::Queue);
+        harness.pump_until("the held /ledger ran before the later message", STEP * 5, |view| {
+            let sent = user_text(view.items(&thread));
+            let ledger = sent.iter().position(|text| text.contains(MARK));
+            let later = sent.iter().position(|text| text.contains(after));
+            view.idle(&thread) && ledger.zip(later).is_some_and(|(ledger, later)| ledger < later)
+        })?;
+        let state: Value = serde_json::from_slice(&std::fs::read(data.join("state.json"))?)?;
+        let left = state.pointer(&format!("/threads/{thread}/held")).cloned();
+        ensure!(left.is_none(), "state.json still holds {left:?} after the daemon took the messages");
+        Ok(())
+    }
+
     fn cloud_tokens(report: &UsageReport) -> (u64, u64) {
         report
             .by_model
@@ -812,7 +1063,9 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
     }
 
     pub(super) fn run(daemon: &Path, root: &Path) -> anyhow::Result<()> {
+        pick_model()?;
         let (port, hits) = listen()?;
+        let (drift_port, drift_hits) = listen()?;
         let resolved: Vec<std::net::SocketAddr> =
             std::net::ToSocketAddrs::to_socket_addrs(&(CLOUD_HOST, port)).map(Iterator::collect).unwrap_or_default();
         ensure!(
@@ -822,17 +1075,18 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let web = root.join("web");
         std::fs::create_dir_all(&web)?;
         executable(&web.join("server.py"), SERVER)?;
-        let agent = agent(root, port, &web)?;
+        let agent = agent(root, port, &format!("http://{CLOUD_HOST}:{drift_port}/v1"), &web)?;
         let data = root.join("data");
         let plugins = data.join("plugins");
-        plugin(&plugins)?;
         let ledger_out = root.join("ledger.jsonl");
+        plugin(&plugins)?;
+        vault(&plugins, &ledger_out)?;
         let work = root.join("work");
         std::fs::create_dir_all(&work)?;
         Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&work).status()?;
         std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
         std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
-        std::env::set_var("LOCAL_STUDIO_PLUGIN_LEDGER__OUT", &ledger_out);
+        std::env::set_var(LEDGER_ENV, &ledger_out);
         let socket = root.join("d.sock");
         let config = StudioConfig {
             socket_path: Some(socket.to_string_lossy().into_owned()),
@@ -843,15 +1097,33 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             take_over_serve: false,
         };
         let signal = Arc::new(Signal::default());
-        let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+        let studio = Studio::new(config.clone(), Arc::clone(&signal) as Arc<dyn Waker>)?;
         let mut harness = Harness { studio, signal, view: View::default(), step: STEP };
-        let outcome = drive(&mut harness, &work, &agent, &socket, &ledger_out, &hits);
+        let stubs = Stubs { port, hits: &hits, drift_port, drift_hits: &drift_hits };
+        let outcome = drive(&mut harness, &work, &agent, &socket, &ledger_out, &stubs).and_then(|mut failed| {
+            match held_across_restart(&mut harness, &config, &data) {
+                Ok(()) => println!("ok   scenario restart"),
+                Err(error) => {
+                    println!("FAIL scenario restart: {error:#}");
+                    failed.push("restart".to_string());
+                }
+            }
+            ensure!(failed.is_empty(), "failed scenarios: {}", failed.join(", "));
+            Ok(())
+        });
         harness.studio.shutdown();
         let stopped = stop_daemon(&socket);
         outcome?;
         stopped?;
         println!("PASS local-only plugin smoke");
         Ok(())
+    }
+
+    struct Stubs<'a> {
+        port: u16,
+        hits: &'a AtomicUsize,
+        drift_port: u16,
+        drift_hits: &'a AtomicUsize,
     }
 
     #[allow(clippy::too_many_lines)]
@@ -861,8 +1133,9 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         agent: &Path,
         socket: &Path,
         ledger_out: &Path,
-        hits: &AtomicUsize,
-    ) -> anyhow::Result<()> {
+        stubs: &Stubs,
+    ) -> anyhow::Result<Vec<String>> {
+        let hits = stubs.hits;
         let studio = Arc::clone(&harness.studio);
         let step = STEP;
         let ask = ASK;
@@ -885,7 +1158,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         );
         println!("ok   the local-only plugin's MCP server is not in the global settings.json");
 
-        studio.start_thread("web".to_string(), Some(project.clone()), prompt(ask), settings(LOCAL, MID));
+        studio.start_thread("web".to_string(), Some(project.clone()), prompt(ask), settings(LOCAL, mid()));
         harness.pump_until("local thread with web-search started", step, |view| view.thread("web").is_some())?;
         let web_thread = harness.view.thread("web").context("web thread")?;
         harness.pump_until("refused while web-search is connected", step, |view| {
@@ -903,7 +1176,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let (_, message, local) =
             harness.view.refusals.iter().find(|(thread, _, _)| *thread == cloud).cloned().context("refusal")?;
         let local = local.context("the refusal offered no local model")?;
-        ensure!(local.provider == LOCAL && local.model == MID, "offered {local:?}");
+        ensure!(local.provider == LOCAL && local.model == mid(), "offered {local:?}");
         ensure!(message.contains("runs only on local models"), "plain refusal text missing: {message}");
         studio.select_thread(Some(cloud.clone()));
         harness.pump_until("cloud thread selected", step, |view| view.threads.iter().any(|row| row.id == cloud))?;
@@ -938,10 +1211,18 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         fence(socket, &cloud, false)?;
         harness.pump_until("composer settled", Duration::from_secs(3), |_| false).ok();
         let text = harness.view.composer.iter().find(|(key, _)| *key == cloud).map(|(_, text)| text.clone());
+        let draft = harness
+            .view
+            .other
+            .iter()
+            .rev()
+            .find(|update| update.starts_with("ComposerDraft") && update.contains(&format!("{cloud:?}")));
+        let holds =
+            text.as_deref() == Some(ask) || draft.is_some_and(|draft| draft.contains(&format!("text: {ask:?}")));
         record(
             "run-local-error",
             fenced.and_then(|()| {
-                ensure!(text.as_deref() == Some(ask), "after the failed RunLocal the composer holds {text:?}");
+                ensure!(holds, "after the failed RunLocal the composer holds {text:?}, draft {draft:?}");
                 Ok(())
             }),
         );
@@ -951,18 +1232,26 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             ("quoted", "Use \"$ledger\" for this."),
             ("apostrophe", "Check $ledger's last entry."),
         ] {
-            record(key, refused(harness, key, text, settings(CLOUD, CLOUD_MODEL), hits));
+            record(key, refused(harness, key, text, settings(CLOUD, CLOUD_MODEL), hits).map(|_| ()));
         }
         let off = json!({ "type": "stdio", "command": "/usr/bin/true", "enabled": false });
         put_server(agent, "web-off", Some(off))?;
-        record("server-off", refused(harness, "off", ask, settings(LOCAL, MID), hits));
+        record("server-off", refused(harness, "off", ask, settings(LOCAL, mid()), hits).map(|_| ()));
         put_server(agent, "web-off", None)?;
+        let clash = json!({ "type": "stdio", "command": "/usr/bin/true" });
+        put_server(agent, "plugin-ledger", Some(clash))?;
+        record("clash", naming(refused(harness, "clash", ask, settings(LOCAL, mid()), hits), "plugin-ledger"));
+        put_server(agent, "plugin-ledger", None)?;
+        std::env::remove_var(LEDGER_ENV);
+        record("env", naming(refused(harness, "env", ask, settings(LOCAL, mid()), hits), LEDGER_ENV));
+        std::env::set_var(LEDGER_ENV, ledger_out);
+        record("draft", draft_returned(harness, hits));
+        record("drift", drifted(harness, agent, stubs.port, stubs.drift_port, stubs.drift_hits));
         record("queued", queued_during_run(harness, ledger_out));
-        ensure!(failed.is_empty(), "failed scenarios: {}", failed.join(", "));
         studio.run_local(cloud.clone(), local.clone());
         harness.pump_until("switched to the local model and running", step, |view| {
             view.threads.iter().any(|row| {
-                row.id == cloud && row.model.as_deref() == Some(MID) && matches!(row.status, ThreadStatus::Working)
+                row.id == cloud && row.model.as_deref() == Some(mid()) && matches!(row.status, ThreadStatus::Working)
             })
         })?;
         studio.set_model(cloud.clone(), CLOUD.to_string(), CLOUD_MODEL.to_string());
@@ -976,7 +1265,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let sent = user_text(harness.view.items(&cloud));
         ensure!(sent.iter().any(|text| text.contains(MARK)), "/ledger did not expand: {sent:?}");
         let row = harness.view.threads.iter().find(|row| row.id == cloud).context("row")?;
-        ensure!(row.provider.as_deref() == Some(LOCAL) && row.model.as_deref() == Some(MID), "model moved: {row:?}");
+        ensure!(row.provider.as_deref() == Some(LOCAL) && row.model.as_deref() == Some(mid()), "model moved: {row:?}");
         for item in harness.view.items(&cloud).iter().rev().take(2) {
             println!("     last item {:.300}", format!("{:?}", item.kind));
         }
@@ -985,7 +1274,18 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         ensure!(local_tokens > 0, "no local tokens counted");
         ensure!(cloud_tokens(&report) == (0, 0), "{CLOUD} usage after the local run");
         ensure!(hits.load(Ordering::SeqCst) == 0, "the cloud endpoint got a connection");
-        println!("ok   check 2: the same /ledger completed on {LOCAL}/{MID} ({local_tokens} tokens), still on {MID}");
+        println!("ok   check 2: the same /ledger completed on {LOCAL}/{} ({local_tokens} tokens), still on it", mid());
+
+        let vault = server_starts(ledger_out, "plugin-vault");
+        record(
+            "only-invoked",
+            if vault.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("plugin-vault started in sessions that never ran /vault: {vault:?}"))
+            },
+        );
+        record("url-cases", url_cases(harness, &cloud));
 
         let ledger = server_starts(ledger_out, "plugin-ledger");
         ensure!(
@@ -1025,7 +1325,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             "ok   control: a plain prompt on {CLOUD} reached the endpoint ({} connections), so the refusal's 0 means nothing was sent",
             hits.load(Ordering::SeqCst)
         );
-        Ok(())
+        Ok(failed)
     }
 }
 
