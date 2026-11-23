@@ -11,7 +11,7 @@ ffi = ["dep:uniffi"]
 wire = []
 # Pause points for scripts/tests/plugin-grants-test.sh. Never on in a shipped build.
 test-hooks = []
-link = ["wire", "dep:snow", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:webpki-roots"]
+link = ["wire", "dep:snow", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:webpki-roots", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dependencies]
 eukhe-client.workspace = true
@@ -46,6 +46,9 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "1", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

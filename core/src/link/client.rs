@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use serde_json::{json, Value};
 use snow::HandshakeState;
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
@@ -61,6 +63,8 @@ struct Saved {
     version: String,
     #[serde(default)]
     channel: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fleet: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -69,10 +73,25 @@ struct Ledger {
     machines: Vec<Saved>,
 }
 
-enum Out {
+pub(super) enum Piece {
+    Data(Vec<u8>),
+    End(Option<String>),
+}
+
+pub(super) type Answered = Result<Value, (String, String)>;
+
+pub(super) enum Out {
     Request { op: String, args: Value, prompt: Option<PromptDraft>, request: Option<String> },
     Watch(String),
     Unwatch(String),
+    Fleet { args: Value, stream: Option<(String, mpsc::UnboundedSender<Piece>)>, answer: oneshot::Sender<Answered> },
+    FleetCancel(String),
+}
+
+pub(super) enum Lookup {
+    Unknown,
+    Down(String),
+    Up(String, mpsc::UnboundedSender<Out>),
 }
 
 struct Link {
@@ -130,6 +149,7 @@ struct State {
     machines: Vec<Link>,
     selected: Option<(String, String)>,
     offer: Option<(String, Offer)>,
+    proxy: Option<JoinHandle<()>>,
 }
 
 impl State {
@@ -148,10 +168,11 @@ impl State {
     }
 }
 
-struct Inner {
+pub(super) struct Inner {
     handle: Handle,
     mailbox: Arc<Mailbox>,
     path: PathBuf,
+    pub(super) data_dir: PathBuf,
     state: Mutex<State>,
     minting: Mutex<()>,
 }
@@ -168,8 +189,14 @@ impl Links {
             }),
             Err(_) => Ledger::default(),
         };
-        let inner =
-            Arc::new(Inner { handle, mailbox, path, state: Mutex::new(State::default()), minting: Mutex::new(()) });
+        let inner = Arc::new(Inner {
+            handle,
+            mailbox,
+            path,
+            data_dir: data_dir.to_path_buf(),
+            state: Mutex::new(State::default()),
+            minting: Mutex::new(()),
+        });
         {
             let mut state = inner.lock();
             for saved in ledger.machines {
@@ -181,6 +208,7 @@ impl Links {
             if !state.machines.is_empty() {
                 inner.publish(&state);
             }
+            inner.proxy(&mut state);
         }
         Self(inner)
     }
@@ -188,9 +216,20 @@ impl Links {
     pub(crate) fn pair(&self, text: &str) {
         match pairing::parse(text, crate::CHANNEL) {
             Ok(link) => {
-                self.0.handle.spawn(pair_task(Arc::clone(&self.0), link));
+                self.0.handle.spawn(pair_task(Arc::clone(&self.0), link, None));
             }
             Err(message) => self.0.mailbox.notice(NoticeLevel::Error, format!("Could not pair: {message}")),
+        }
+    }
+
+    pub(crate) fn join_fleet(&self, request: String, text: &str) {
+        match pairing::parse(text, crate::CHANNEL) {
+            Ok(link) => {
+                self.0.handle.spawn(pair_task(Arc::clone(&self.0), link, Some(request)));
+            }
+            Err(message) => {
+                self.0.mailbox.push(Update::RequestFailed { request, message: format!("Could not pair: {message}") });
+            }
         }
     }
 
@@ -210,8 +249,12 @@ impl Links {
         }
         self.0.save(&state);
         self.0.publish(&state);
+        self.0.proxy(&mut state);
         drop(state);
         self.0.mailbox.forget_rows(machine);
+        if link.saved.fleet {
+            self.0.handle.spawn(unpeer(Arc::clone(&self.0), machine.to_string(), link.saved.name));
+        }
     }
 
     pub(crate) fn name(&self, machine: &str) -> String {
@@ -356,6 +399,9 @@ impl Links {
 
     pub(crate) fn shutdown(&self) {
         let mut state = self.0.lock();
+        if let Some(proxy) = state.proxy.take() {
+            proxy.abort();
+        }
         for link in &mut state.machines {
             link.tx = None;
             if let Some(task) = link.task.take() {
@@ -368,6 +414,34 @@ impl Links {
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn warn(&self, text: String) {
+        self.mailbox.notice(NoticeLevel::Warning, text);
+    }
+
+    pub(super) fn fleet_link(&self, machine: &str) -> Lookup {
+        let state = self.lock();
+        let Some(link) = state.machines.iter().find(|link| link.saved.fleet && link.saved.id == machine) else {
+            return Lookup::Unknown;
+        };
+        match (&link.state, &link.tx) {
+            (MachineState::Connected, Some(tx)) => Lookup::Up(link.saved.name.clone(), tx.clone()),
+            _ => Lookup::Down(link.saved.name.clone()),
+        }
+    }
+
+    fn proxy(self: &Arc<Self>, state: &mut State) {
+        let wanted = state.machines.iter().any(|link| link.saved.fleet);
+        match (&state.proxy, wanted) {
+            (None, true) => state.proxy = Some(self.handle.spawn(super::proxy::serve(Arc::clone(self)))),
+            (Some(_), false) => {
+                if let Some(proxy) = state.proxy.take() {
+                    proxy.abort();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn name(&self, machine: &str) -> String {
@@ -499,6 +573,7 @@ impl Inner {
         state.machines.push(link);
         self.save(&state);
         self.publish(&state);
+        self.proxy(&mut state);
     }
 }
 
@@ -735,13 +810,21 @@ async fn pair_open(link: &PairLink) -> Result<(Saved, Opened), Failure> {
         os: said("os").to_string(),
         version: said("version").to_string(),
         channel: said("channel").to_string(),
+        fleet: false,
     };
     Ok((saved, opened))
 }
 
-async fn pair_task(inner: Arc<Inner>, link: PairLink) {
+async fn pair_task(inner: Arc<Inner>, link: PairLink, fleet: Option<String>) {
     match pair_open(&link).await {
-        Ok((saved, opened)) => inner.adopt(saved, opened),
+        Ok((mut saved, opened)) => {
+            saved.fleet = fleet.is_some();
+            let id = saved.id.clone();
+            inner.adopt(saved, opened);
+            if let Some(request) = fleet {
+                inner.mailbox.push(Update::RequestDone { request, message: id });
+            }
+        }
         Err(failure) => {
             let reason = match failure {
                 Failure::Closed(Some(UNPAIRED)) => {
@@ -750,8 +833,39 @@ async fn pair_task(inner: Arc<Inner>, link: PairLink) {
                 }
                 other => other.describe(),
             };
-            inner.mailbox.notice(NoticeLevel::Error, format!("Pairing with {} failed: {reason}", link.name));
+            let message = format!("Pairing with {} failed: {reason}", link.name);
+            match fleet {
+                Some(request) => inner.mailbox.push(Update::RequestFailed { request, message }),
+                None => inner.mailbox.notice(NoticeLevel::Error, message),
+            }
         }
+    }
+}
+
+async fn unpeer(inner: Arc<Inner>, machine: String, name: String) {
+    let base = crate::fleet::controller_url(&inner.data_dir);
+    let body = json!({ "url": super::proxy::peer_url(&machine), "via": "link", "remove": true });
+    let removed = async {
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| error.to_string())?;
+        let mut request = http.post(format!("{base}/api/peers")).json(&body);
+        if let Some(key) = crate::fleet::key(&inner.data_dir) {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await.map_err(|error| error.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("it answered {}", response.status()))
+        }
+    }
+    .await;
+    if let Err(error) = removed {
+        inner.warn(format!("Could not remove {name} from the Local controller at {base}: {error}"));
     }
 }
 
@@ -828,6 +942,7 @@ enum Pending {
     Earlier(String),
     Blob,
     Watch(String),
+    Fleet { answer: oneshot::Sender<Answered>, stream: Option<String> },
 }
 
 struct Paging {
@@ -849,6 +964,7 @@ struct Session<'a> {
     pinged: Option<Instant>,
     epoch: Option<String>,
     seq: u64,
+    streams: HashMap<String, mpsc::UnboundedSender<Piece>>,
 }
 
 struct Abort(tokio::task::AbortHandle);
@@ -905,6 +1021,7 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
         pinged: None,
         epoch: hello.get("epoch").and_then(Value::as_str).map(str::to_string),
         seq: hello.get("seq").and_then(Value::as_u64).unwrap_or_default(),
+        streams: HashMap::new(),
     };
     for update in hello.get("snapshot").and_then(Value::as_array).cloned().unwrap_or_default() {
         session.update(update);
@@ -943,7 +1060,7 @@ async fn run(inner: &Arc<Inner>, machine: &str, opened: Opened) -> End {
                 let Some(out) = out else { break End::Forgotten };
                 let request = match &out {
                     Out::Request { request, .. } => request.clone(),
-                    Out::Watch(_) | Out::Unwatch(_) => None,
+                    Out::Watch(_) | Out::Unwatch(_) | Out::Fleet { .. } | Out::FleetCancel(_) => None,
                 };
                 if !session.out(out) {
                     unsent = request;
@@ -1013,11 +1130,16 @@ impl Session<'_> {
         let mut failed: Vec<String> = unsent.into_iter().collect();
         let pending = self.pending.drain().filter_map(|(_, pending)| match pending {
             Pending::Request { request, .. } => request,
-            Pending::Earlier(_) | Pending::Blob | Pending::Watch(_) => None,
+            Pending::Earlier(_) | Pending::Blob | Pending::Watch(_) | Pending::Fleet { .. } => None,
         });
+        let name = self.name.clone();
         let queued = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|out| match out {
             Out::Request { request, .. } => request,
-            Out::Watch(_) | Out::Unwatch(_) => None,
+            Out::Fleet { answer, .. } => {
+                answer.send(Err(("unsent".to_string(), format!("{name} disconnected")))).ok();
+                None
+            }
+            Out::Watch(_) | Out::Unwatch(_) | Out::FleetCancel(_) => None,
         });
         for request in pending.chain(queued).collect::<Vec<_>>() {
             if !failed.contains(&request) {
@@ -1063,6 +1185,19 @@ impl Session<'_> {
                 self.paging.remove(&thread);
                 self.ask("unwatch", json!({ "thread": thread }), Pending::Watch(thread.clone()))
             }
+            Out::Fleet { mut args, stream, answer } => {
+                let stream = stream.map(|(id, pieces)| {
+                    args["stream"] = Value::String(id.clone());
+                    self.streams.insert(id.clone(), pieces);
+                    id
+                });
+                self.ask("fleet_http", args, Pending::Fleet { answer, stream })
+            }
+            Out::FleetCancel(stream) => {
+                self.streams.remove(&stream);
+                self.next += 1;
+                self.send(&json!({ "id": self.next, "op": "fleet_cancel", "args": { "stream": stream } }))
+            }
             Out::Request { op, mut args, prompt, request } => {
                 if let Some(prompt) = prompt {
                     let mut images = Vec::new();
@@ -1100,6 +1235,11 @@ impl Session<'_> {
                     return self.update(update);
                 }
             }
+            Some("fleet") => {
+                if let Some(update) = frame.get("update") {
+                    self.fleet(update);
+                }
+            }
             Some("pong") => {
                 if let Some(sent) = self.pinged.take() {
                     let latency = u32::try_from(sent.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -1115,8 +1255,48 @@ impl Session<'_> {
         true
     }
 
+    fn fleet(&mut self, update: &Value) {
+        let Some(stream) = update.get("stream").and_then(Value::as_str) else { return };
+        match update.get("type").and_then(Value::as_str) {
+            Some("fleet_chunk") => {
+                let Some(pieces) = self.streams.get(stream) else { return };
+                let piece = match update.get("data").and_then(Value::as_str).map(|data| STANDARD.decode(data)) {
+                    Some(Ok(data)) => Piece::Data(data),
+                    _ => Piece::End(Some(format!("{} sent a fleet chunk that is not base64", self.name))),
+                };
+                let ended = matches!(piece, Piece::End(_));
+                if pieces.send(piece).is_err() || ended {
+                    self.streams.remove(stream);
+                }
+            }
+            Some("fleet_end") => {
+                if let Some(pieces) = self.streams.remove(stream) {
+                    let error = update.get("error").and_then(Value::as_str).map(str::to_string);
+                    pieces.send(Piece::End(error)).ok();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn answer(&mut self, id: u64, frame: &Value) -> bool {
         let Some(pending) = self.pending.remove(&id) else { return true };
+        if let Pending::Fleet { answer, stream } = pending {
+            let answered = match frame.get("error") {
+                Some(error) => {
+                    let text = |key: &str| error.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+                    Err((text("code"), text("message")))
+                }
+                None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
+            };
+            if let Some(stream) = stream {
+                if !matches!(&answered, Ok(result) if result.get("stream").is_some()) {
+                    self.streams.remove(&stream);
+                }
+            }
+            answer.send(answered).ok();
+            return true;
+        }
         let error = frame.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
         match pending {
             Pending::Earlier(thread) => {
@@ -1165,6 +1345,7 @@ impl Session<'_> {
                 }
                 true
             }
+            Pending::Fleet { .. } => true,
         }
     }
 
