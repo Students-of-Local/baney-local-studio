@@ -45,5 +45,3 @@ Rejected:
 1. Core: put the Unix-only code behind `cfg`, with a Windows path for each item in point 2. Check with `cargo check --target x86_64-pc-windows-msvc`, where every remaining error must come from Eukhe's crates.
 2. Eukhe: Windows support as listed in point 1, in the eukhe repo.
 3. `windows/`: the WinUI 3 app, screen by screen against `macos/`. It starts with the window, sidebar, timeline and composer, and gets Windows CI in its own workflow.
-
-Until step 2 lands, the Windows job in CI records the failure without blocking, and nothing Windows-specific ships.
