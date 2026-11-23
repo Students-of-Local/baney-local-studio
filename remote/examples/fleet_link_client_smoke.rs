@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -520,7 +521,11 @@ fn test_ca(root: &Path) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-async fn terminator(tls: &Path, upstream: u16) -> anyhow::Result<(u16, tokio::task::JoinHandle<()>)> {
+async fn terminator(
+    tls: &Path,
+    upstream: u16,
+    delay: Arc<AtomicU64>,
+) -> anyhow::Result<(u16, tokio::task::JoinHandle<()>)> {
     use tokio_rustls::rustls;
     use tokio_rustls::rustls::pki_types::pem::PemObject;
     let certs =
@@ -537,8 +542,10 @@ async fn terminator(tls: &Path, upstream: u16) -> anyhow::Result<(u16, tokio::ta
         loop {
             let Ok((tcp, _)) = listener.accept().await else { continue };
             let acceptor = acceptor.clone();
+            let wait = Duration::from_millis(delay.load(Ordering::SeqCst));
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                tokio::time::sleep(wait).await;
                 let Ok(mut upstream) = TcpStream::connect(("127.0.0.1", upstream)).await else { return };
                 tokio::io::copy_bidirectional(&mut tls, &mut upstream).await.ok();
             });
@@ -759,6 +766,35 @@ async fn squat(listener: TcpListener, heard: Arc<Mutex<Vec<(String, String)>>>) 
     }
 }
 
+fn pending(data: &Path) -> anyhow::Result<Vec<Value>> {
+    let folder = data.join("remote").join("requests");
+    let Ok(entries) = std::fs::read_dir(&folder) else { return Ok(Vec::new()) };
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+        if path.extension().is_some_and(|extension| extension == "json") && !stem.contains('.') {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            found.push(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+        }
+    }
+    Ok(found)
+}
+
+fn fleet_devices(data: &Path) -> anyhow::Result<Vec<String>> {
+    let Ok(bytes) = std::fs::read(data.join("remote").join("devices.json")) else { return Ok(Vec::new()) };
+    let ledger: Value = serde_json::from_slice(&bytes)?;
+    Ok(ledger["devices"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row["scopes"] == json!(["fleet"]))
+                .filter_map(|row| row["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 struct Signal {
     pending: Mutex<bool>,
     ready: Condvar,
@@ -847,7 +883,8 @@ struct World {
 async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> anyhow::Result<()> {
     let World { a, b, serve_bin, studio_bin, a_port, b_port, b_url, key_a, key_b, stub_a, stub_c, tls } = world;
     let http = reqwest::Client::builder().no_proxy().build()?;
-    let (term_port, term) = terminator(tls, *a_port).await?;
+    let delay = Arc::new(AtomicU64::new(0));
+    let (term_port, term) = terminator(tls, *a_port, Arc::clone(&delay)).await?;
     let wss = format!("wss://localhost:{term_port}/v1/ws");
     a.ok(serve_bin, &["allow-host", "localhost", "--data-dir", &a.data_arg()])?;
 
@@ -871,19 +908,61 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     *b_serve = Some(Proc::spawn("B serve", command, log)?);
     healthy(*b_port, "/v1/health", "B serve").await?;
 
+    let b_pid = b_serve.as_ref().and_then(|serve| serve.child.as_ref()).map(Child::id).context("no B serve pid")?;
+    Command::new("kill").args(["-STOP", &b_pid.to_string()]).status()?;
+    let waited = Instant::now();
+    let frozen = b.run(studio_bin, &["fleet", "join", &link, "--json"]);
+    Command::new("kill").args(["-CONT", &b_pid.to_string()]).status()?;
+    let frozen = frozen?;
+    let printed = String::from_utf8_lossy(&frozen.stdout).into_owned();
+    ensure!(
+        !frozen.status.success() && printed.contains("withdrawn"),
+        "fleet join with a frozen owner printed {printed}"
+    );
+    ensure!(
+        pending(&b.data)?.is_empty(),
+        "fleet join left its request behind after giving up: {:?}",
+        pending(&b.data)?
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    ensure!(fleet_devices(&a.data)?.is_empty(), "the owner paired from a request the CLI had withdrawn");
+    println!(
+        "ok   B: fleet join with a frozen owner gives up after {} s, withdraws its request and leaves the invite unused",
+        waited.elapsed().as_secs()
+    );
+
+    delay.store(3000, Ordering::SeqCst);
     let started = Instant::now();
-    let joined: Value = serde_json::from_str(b.ok(studio_bin, &["fleet", "join", &link, "--json"])?.trim())?;
+    let mut command = Command::new(studio_bin);
+    b.isolate(&mut command);
+    let mut cli = command
+        .args(["fleet", "join", &link, "--json"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + QUICK;
+    while !pending(&b.data)?.iter().any(|request| request["applied"] == true) {
+        ensure!(Instant::now() < deadline, "B's owner never took up the fleet join request");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    ensure!(cli.try_wait()?.is_none(), "the CLI finished before the delayed pairing could");
+    Command::new("kill").args(["-TERM", &cli.id().to_string()]).status()?;
+    cli.wait()?;
+    delay.store(0, Ordering::SeqCst);
     let ledger: Value = serde_json::from_slice(&std::fs::read(a.data.join("remote").join("devices.json"))?)?;
     let machine = ledger["machineId"].as_str().context("A's devices.json has no machine id")?.to_string();
     let peer = proxy::peer_url(&machine);
-    ensure!(joined["state"] == "joined", "fleet join printed {joined}");
-    ensure!(joined["machine"]["id"] == machine.as_str(), "fleet join named {} not A's {machine}", joined["machine"]);
-    ensure!(joined["peer"] == peer.as_str(), "fleet join added {} not {peer}", joined["peer"]);
-    ensure!(
-        linked_peers(&b.controller)? == json!([peer]),
-        "B's controller holds linkPeers {}",
-        linked_peers(&b.controller)?
-    );
+    let deadline = Instant::now() + QUICK;
+    while linked_peers(&b.controller)? != json!([peer]) {
+        ensure!(
+            Instant::now() < deadline,
+            "the join finished after the CLI was gone, but B's controller holds linkPeers {}",
+            linked_peers(&b.controller)?
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let ledger: Value = serde_json::from_slice(&std::fs::read(a.data.join("remote").join("devices.json"))?)?;
+    println!("ok   B: a fleet join that outlived its killed CLI still added {peer} as a link peer, from the owner");
     let config: Value = serde_json::from_slice(&std::fs::read(b.controller.join("config.json"))?)?;
     ensure!(!config["peers"].to_string().contains(&machine), "the link peer leaked into B's tailnet peers");
     let links: Value = serde_json::from_slice(&std::fs::read(b.data.join("remote").join("links.json"))?)?;

@@ -821,18 +821,29 @@ async fn pair_open(link: &PairLink) -> Result<(Saved, Opened), Failure> {
 async fn pair_task(inner: Arc<Inner>, link: PairLink, fleet: Option<String>) {
     match pair_open(&link).await {
         Ok((mut saved, opened)) => {
-            if let Some(request) = &fleet {
-                if let Err(error) = super::proxy::mint_token(&inner.data_dir) {
+            let token = match fleet.as_ref().map(|_| super::proxy::mint_token(&inner.data_dir)).transpose() {
+                Ok(token) => token,
+                Err(error) => {
                     let message = format!("Could not create the fleet proxy token: {error:#}");
-                    inner.mailbox.push(Update::RequestFailed { request: request.clone(), message });
+                    if let Some(request) = fleet {
+                        inner.mailbox.push(Update::RequestFailed { request, message });
+                    }
                     return;
                 }
-            }
+            };
             saved.fleet = fleet.is_some();
-            let id = saved.id.clone();
+            let (id, name) = (saved.id.clone(), saved.name.clone());
             inner.adopt(saved, opened);
-            if let Some(request) = fleet {
-                inner.mailbox.push(Update::RequestDone { request, message: id });
+            let (Some(request), Some(token)) = (fleet, token) else { return };
+            let body = json!({ "url": super::proxy::peer_url(&id), "via": "link", "token": token });
+            match controller_peers(&inner, &body).await {
+                Ok(()) => inner.mailbox.push(Update::RequestDone { request, message: id }),
+                Err(error) => {
+                    let base = crate::fleet::controller_url(&inner.data_dir);
+                    let message = format!("Paired with {name}, but the Local controller at {base} did not add it as a fleet peer: {error}. Run `local-studio fleet join` again with a new invite once the controller runs.");
+                    inner.warn(message.clone());
+                    inner.mailbox.push(Update::RequestFailed { request, message });
+                }
             }
         }
         Err(failure) => {
@@ -852,29 +863,30 @@ async fn pair_task(inner: Arc<Inner>, link: PairLink, fleet: Option<String>) {
     }
 }
 
-async fn unpeer(inner: Arc<Inner>, machine: String, name: String) {
+async fn controller_peers(inner: &Inner, body: &Value) -> Result<(), String> {
     let base = crate::fleet::controller_url(&inner.data_dir);
-    let body = json!({ "url": super::proxy::peer_url(&machine), "via": "link", "remove": true });
-    let removed = async {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| error.to_string())?;
-        let mut request = http.post(format!("{base}/api/peers")).json(&body);
-        if let Some(key) = crate::fleet::key(&inner.data_dir) {
-            request = request.bearer_auth(key);
-        }
-        let response = request.send().await.map_err(|error| error.to_string())?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!("it answered {}", response.status()))
-        }
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = http.post(format!("{base}/api/peers")).json(body);
+    if let Some(key) = crate::fleet::key(&inner.data_dir) {
+        request = request.bearer_auth(key);
     }
-    .await;
-    if let Err(error) = removed {
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("it answered {}", response.status()))
+    }
+}
+
+async fn unpeer(inner: Arc<Inner>, machine: String, name: String) {
+    let body = json!({ "url": super::proxy::peer_url(&machine), "via": "link", "remove": true });
+    if let Err(error) = controller_peers(&inner, &body).await {
+        let base = crate::fleet::controller_url(&inner.data_dir);
         inner.warn(format!("Could not remove {name} from the Local controller at {base}: {error}"));
     }
 }

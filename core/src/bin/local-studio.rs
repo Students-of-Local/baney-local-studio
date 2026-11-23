@@ -892,8 +892,9 @@ fn fleet_join(link: &str, as_json: bool) -> Result<(), String> {
             break serde_json::from_slice(&bytes).map_err(|error| format!("unreadable answer: {error}"))?;
         }
         if std::time::Instant::now() >= deadline {
+            std::fs::remove_file(&request).ok();
             return Err(format!(
-                "The process that owns {} has not answered within 30 s. The pairing with {} may still land; the app answers only while it serves (serve.json). Run `local-studio fleet join` again with a new invite if the machine does not show up.",
+                "The process that owns {} has not answered within 30 s, so this request was withdrawn. If it had already started pairing with {}, it finishes and adds the machine to the fleet itself. The app answers only while it serves (serve.json); otherwise run this again with the same invite while it is still valid.",
                 data.display(),
                 parsed.name
             ));
@@ -907,12 +908,6 @@ fn fleet_join(link: &str, as_json: bool) -> Result<(), String> {
     let machine_id = json_text(&machine, "id").ok_or("the owner answered without a machine id")?;
     let name = json_text(&machine, "name").unwrap_or_else(|| machine_id.clone());
     let peer = proxy::peer_url(&machine_id);
-    let token =
-        proxy::token(&data).ok_or_else(|| format!("Paired with {name}, but the fleet proxy token is missing"))?;
-    let asked = serde_json::json!({ "url": peer, "via": "link", "token": token });
-    controller_call("/api/peers", Some(&asked)).map_err(|message| {
-        format!("Paired with {name}, but the Local controller did not add it as a peer: {message}. Run fleet join again with a new invite.")
-    })?;
     if as_json {
         println!(
             "{}",
