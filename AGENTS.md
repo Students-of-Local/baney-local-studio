@@ -18,7 +18,7 @@ Native desktop clients for local LLM work. The agent core is [Eukhe](https://git
 - Least maintenance wins: every line here is ours to maintain. Reuse Eukhe, ACP adapters and existing crates before writing code; never copy another project's code in. One change per PR, rebased on main; features outside the app (release channels, hosted services, phone apps) live in their own repos.
 - Logic needed by both GUIs goes in `core/`; platform behavior (windows, menus, toolbars, notifications) stays in the GUI. Never port core logic into Swift or GTK code.
 - Eukhe changes land in the eukhe repo, not as copies or patches here. Both workspaces pin `eukhe-client` and `eukhe-types` to one Eukhe release tag (git dependencies, root `Cargo.toml`); the apps bundle the `eukhe` binary of that same release (`eukhe.nu`: downloaded from the GitHub release and checked against its `SHA256SUMS` into `<target>/eukhe/<tag>/`, or `EUKHE_BIN=<eukhe built from the tag>`). Move both together.
-- Verify end to end: build and run the real binaries. No new unit tests.
+- Verify a change by building the real binaries and using the app. Add no new tests of any kind: no unit tests, smoke examples, fixtures, snapshot scenes, test scripts or Bend proofs.
 - Add no code comments.
 - Never stop processes, controllers, engines, or GPU jobs this work did not start. Kill only PIDs you spawned.
 - Controller: keep native inference requests as passthrough. Never disable CUDA graphs, enforce eager, or set output caps on vLLM/SGLang. New controllers use port 18091 and a separate data root.
