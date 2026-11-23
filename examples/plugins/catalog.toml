@@ -15,8 +15,8 @@ description = "Design 3D printable parts with a local model, plan orientation, s
 capabilities = ["mcp-server", "ask-user"]
 git = "https://github.com/baney75/Gantrel"
 rev = "fcfcb25e0477f4ccb965c89c06cdf00ed88c2ae2"
-tree = "sha256:822c1e92cee2b7b8ca10b88e0c286bb57842a4f5dec9cceddb60b33ffa2e6f8d"
-exclude = ["scripts", "tests"]
+tree = "sha256:994085c1eaaaf5b03b9b99e95021c7ded358e5525269cd4e141d86eebc465ae5"
+exclude = ["benchmarks", "plugins", "scripts", "tests"]
 
 [[plugin]]
 id = "hildegard"
