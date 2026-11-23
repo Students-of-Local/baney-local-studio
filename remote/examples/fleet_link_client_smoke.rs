@@ -14,7 +14,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use local_studio_core::link::proxy::{self, FLEET_BODY, PORT};
 use local_studio_core::link::snow::{self, TransportState};
-use local_studio_core::{Studio, StudioConfig, Update, Waker};
+use local_studio_core::{MachineState, Studio, StudioConfig, Update, Waker};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -807,7 +807,21 @@ impl Waker for Signal {
     }
 }
 
-fn forget_in_app(b: &Side, machine: &str) -> anyhow::Result<()> {
+fn proxy_get(path: &str, token: &str) -> anyhow::Result<(u16, String)> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", PORT))?;
+    stream.set_read_timeout(Some(QUICK))?;
+    let ask = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(ask.as_bytes())?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer)?;
+    let status = answer.split(' ').nth(1).and_then(|status| status.parse().ok()).unwrap_or(0);
+    Ok((status, answer))
+}
+
+fn forget_in_app(b: &Side, machine: &str, again: &str, token: &str) -> anyhow::Result<()> {
     let signal = Arc::new(Signal { pending: Mutex::new(false), ready: Condvar::new() });
     let config = StudioConfig {
         socket_path: Some(b.root.join("d.sock").to_string_lossy().into_owned()),
@@ -831,6 +845,37 @@ fn forget_in_app(b: &Side, machine: &str) -> anyhow::Result<()> {
             ensure!(Instant::now() < deadline, "the app on B never listed {machine}");
             std::thread::sleep(Duration::from_millis(100));
         }
+        studio.pair_machine(again.to_string());
+        let deadline = Instant::now() + QUICK;
+        let mut connected = false;
+        while !connected {
+            for update in studio.tick() {
+                if let Update::Machines { machines } = update {
+                    connected = machines.iter().any(|row| row.id == machine && row.state == MachineState::Connected);
+                }
+            }
+            ensure!(Instant::now() < deadline, "the app on B never re-paired with {machine}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let links: Value = serde_json::from_slice(&std::fs::read(b.data.join("remote").join("links.json"))?)?;
+        let row = links["machines"].as_array().and_then(|rows| rows.iter().find(|row| row["id"] == machine));
+        ensure!(
+            row.is_some_and(|row| row["fleet"] == true),
+            "re-pairing {machine} the ordinary way dropped its fleet flag"
+        );
+        let deadline = Instant::now() + QUICK;
+        let (status, answer) = loop {
+            match proxy_get(&format!("/m/{machine}/api/node"), token) {
+                Ok(got) => break got,
+                Err(error) => ensure!(Instant::now() < deadline, "the app's proxy never listened: {error}"),
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        ensure!(
+            status == 403 && answer.contains("forbidden"),
+            "after an ordinary re-pair the proxy answered {status}: {answer}"
+        );
+        println!("ok   B: an ordinary re-pair of A keeps the fleet flag, so the proxy still routes to A (A answers forbidden)");
         studio.forget_machine(machine.to_string());
         let deadline = Instant::now() + QUICK;
         loop {
@@ -1288,11 +1333,15 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
         "ok   with the proxy off, a squatter on port {PORT} saw {} requests from B's controller, all with the proxy token and none with the fleet key",
         heard.len()
     );
+    let minted: Value =
+        serde_json::from_str(a.ok(serve_bin, &["pair", "--json", "--url", &wss, "--data-dir", &a.data_arg()])?.trim())?;
+    let again = minted["link"].as_str().context("A minted no ordinary link")?.to_string();
     let side = b.clone();
     let id = machine.clone();
-    std::thread::spawn(move || forget_in_app(&side, &id))
-        .join()
-        .map_err(|_| anyhow::anyhow!("the forget check panicked"))??;
+    let held = token.clone();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || done.send(forget_in_app(&side, &id, &again, &held)).ok());
+    finished.await.map_err(|_| anyhow::anyhow!("the forget check panicked"))??;
     println!("ok   forget_machine on B removes A's link peer, rotates the proxy token away on both sides and frees port {PORT}");
 
     term.abort();

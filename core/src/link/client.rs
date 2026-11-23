@@ -561,11 +561,12 @@ impl Inner {
         }
     }
 
-    fn adopt(self: &Arc<Self>, saved: Saved, opened: Opened) {
+    fn adopt(self: &Arc<Self>, mut saved: Saved, opened: Opened) {
         let id = saved.id.clone();
         let mut state = self.lock();
         if let Some(old) = state.machines.iter().position(|link| link.saved.id == id) {
             let old = state.machines.remove(old);
+            saved.fleet |= old.saved.fleet;
             if let Some(task) = old.task {
                 task.abort();
             }
