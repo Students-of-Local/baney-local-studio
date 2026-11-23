@@ -165,7 +165,9 @@ fn a_claude_code_plugin_translates_into_skills_commands_and_one_launched_server(
     let scopes: Vec<&str> = request.rows.iter().map(|row| row.scope.as_str()).collect();
     assert_eq!(
         scopes,
-        vec!["Starts .local-studio/mcp (from .mcp.json: node ${CLAUDE_PLUGIN_ROOT}/server.js) when a thread uses it."]
+        vec![
+            "Starts .local-studio/mcp (from .mcp.json: DATA_DIR=${CLAUDE_PLUGIN_DATA} MODE=fast node ${CLAUDE_PLUGIN_ROOT}/server.js) when a thread uses it."
+        ]
     );
 }
 
@@ -316,7 +318,7 @@ fn servers_only(dir: &Path, name: &str, servers: &Value) {
 
 #[test]
 fn servers_that_fetch_run_remotely_leave_the_plugin_or_come_in_pairs_are_listed_and_not_set_up() {
-    let cases: [(&str, Value, Vec<String>); 5] = [
+    let cases: [(&str, Value, Vec<String>); 8] = [
         (
             "fetchy",
             json!({"fetch": {"command": "npx", "args": ["-y", "@acme/mcp"]}}),
@@ -354,6 +356,34 @@ fn servers_that_fetch_run_remotely_leave_the_plugin_or_come_in_pairs_are_listed_
             "absolute",
             json!({"abs": {"command": "/usr/bin/python3", "args": ["a.py"]}}),
             vec!["MCP server abs: it runs /usr/bin/python3, which is not a file inside the plugin".to_string()],
+        ),
+        (
+            "pathy",
+            json!({"p": {"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/a.js"], "env": {"PATH": "/tmp/x:/usr/bin"}}}),
+            vec![
+                "MCP server p: it sets PATH, which changes what code starts with it, and the tree hash can't cover that"
+                    .to_string(),
+            ],
+        ),
+        (
+            "noder",
+            json!({"n": {
+                "command": "node",
+                "args": ["${CLAUDE_PLUGIN_ROOT}/a.js"],
+                "env": {"NODE_OPTIONS": "--require /home/u/.cache/a.js"}
+            }}),
+            vec![
+                "MCP server n: it sets NODE_OPTIONS, which changes what code starts with it, and the tree hash can't cover that"
+                    .to_string(),
+            ],
+        ),
+        (
+            "preload",
+            json!({"l": {"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/a.js"], "env": {"LD_PRELOAD": "${HOOK}"}}}),
+            vec![
+                "MCP server l: it sets LD_PRELOAD, which changes what code starts with it, and the tree hash can't cover that"
+                    .to_string(),
+            ],
         ),
     ];
     for (name, servers, not_used) in cases {
