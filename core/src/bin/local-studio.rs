@@ -28,7 +28,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel cloudflared [--yes] [--json]
        local-studio tunnel byo
        local-studio fleet status [--json]
-       local-studio fleet join [--json]
+       local-studio fleet join [<link>] [--json]
        local-studio fleet invite [--url <wss url>] [--json]
        local-studio fleet share [--active <watts|off>] [--away <watts|max>] [--json]
        local-studio fleet stop-sharing [--json]
@@ -109,6 +109,7 @@ fn main() -> ExitCode {
         ["tunnel", "byo"] => byo(),
         ["fleet", "status"] => fleet_status(json),
         ["fleet", "join"] => fleet_set(&serde_json::json!({ "discover": true }), json),
+        ["fleet", "join", link] => fleet_join(link, json).map_err(|message| fleet_failed(message, json)),
         ["fleet", "invite"] => fleet_invite(None, json).map_err(|message| fleet_failed(message, json)),
         ["fleet", "invite", "--url", url] => {
             fleet_invite(Some((*url).to_string()), json).map_err(|message| fleet_failed(message, json))
@@ -749,6 +750,10 @@ fn fleet_open() -> Result<Fleet, String> {
 }
 
 fn fleet_call(body: Option<&Value>) -> Result<Value, String> {
+    controller_call("/api/cluster", body)
+}
+
+fn controller_call(path: &str, body: Option<&Value>) -> Result<Value, String> {
     let fleet = fleet_open()?;
     let runtime =
         tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
@@ -759,7 +764,7 @@ fn fleet_call(body: Option<&Value>) -> Result<Value, String> {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
-        let url = format!("{}/api/cluster", fleet.base);
+        let url = format!("{}{path}", fleet.base);
         let mut request = match body {
             Some(body) => http.post(&url).json(body),
             None => http.get(&url),
@@ -852,6 +857,81 @@ fn public_route_url(data: &std::path::Path) -> Option<String> {
         !host.is_empty() && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
     })?;
     public.then(|| format!("wss://{host}/v1/ws"))
+}
+
+#[cfg(feature = "link")]
+fn fleet_join(link: &str, as_json: bool) -> Result<(), String> {
+    use local_studio_core::link::{devices, pairing, proxy};
+    let data = local_studio_core::data_dir(None)?;
+    let parsed =
+        pairing::parse(link, local_studio_core::CHANNEL).map_err(|message| format!("Could not pair: {message}"))?;
+    controller_call("/api/node", None)?;
+    if !data_dir_owned(&data) {
+        return Err(format!(
+            "Nothing owns {} right now. Open Local Studio or start `local-studio-serve serve`: the process that owns the data folder keeps the link open and runs the fleet proxy. Then run this again.",
+            data.display()
+        ));
+    }
+    let folder = data.join("remote").join("requests");
+    std::fs::create_dir_all(&folder).map_err(|error| format!("create {}: {error}", folder.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("protect {}: {error}", folder.display()))?;
+    }
+    let id = devices::random::<16>().map(|bytes| devices::hex(&bytes)).map_err(|error| error.to_string())?;
+    let request = folder.join(format!("{id}.json"));
+    let asked = serde_json::json!({ "op": "fleet_join", "link": link.trim() });
+    devices::write_private(&request, asked.to_string().as_bytes()).map_err(|error| format!("{error:#}"))?;
+    let done = folder.join(format!("{id}.done.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let answer: Value = loop {
+        if let Ok(bytes) = std::fs::read(&done) {
+            std::fs::remove_file(&done).ok();
+            break serde_json::from_slice(&bytes).map_err(|error| format!("unreadable answer: {error}"))?;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "The process that owns {} has not answered within 30 s. The pairing with {} may still land; the app answers only while it serves (serve.json). Run `local-studio fleet join` again with a new invite if the machine does not show up.",
+                data.display(),
+                parsed.name
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    if answer.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(json_text(&answer, "message").unwrap_or_else(|| "the pairing failed".to_string()));
+    }
+    let machine = answer.get("machine").cloned().unwrap_or(Value::Null);
+    let machine_id = json_text(&machine, "id").ok_or("the owner answered without a machine id")?;
+    let name = json_text(&machine, "name").unwrap_or_else(|| machine_id.clone());
+    let peer = proxy::peer_url(&machine_id);
+    controller_call("/api/peers", Some(&serde_json::json!({ "url": peer, "via": "link" }))).map_err(|message| {
+        format!("Paired with {name}, but the Local controller did not add it as a peer: {message}. Add it with POST /api/peers {{\"url\": \"{peer}\", \"via\": \"link\"}}.")
+    })?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::json!({ "state": "joined", "machine": { "id": machine_id, "name": name }, "peer": peer })
+        );
+    } else {
+        println!("Joined {name}: its models are in this machine's fleet through {peer}.");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "link")]
+fn data_dir_owned(data: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(data.join("studio.lock")) else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
+#[cfg(not(feature = "link"))]
+fn fleet_join(_link: &str, _as_json: bool) -> Result<(), String> {
+    Err("This local-studio was built without desktop links (the core's link feature), so it cannot join a fleet over a link.".to_string())
 }
 
 #[cfg(not(feature = "link"))]
