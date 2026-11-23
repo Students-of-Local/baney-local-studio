@@ -88,7 +88,11 @@ On the wire these are two optional fields of `ConsentRequest`: `translated` (tha
 
 ## Text findings, for every plugin
 
-The ClawHub incident ran through instructions, not code: a skill told the person, or the agent, to paste a command. So the scan reads every `SKILL.md`, prompt and command file (and any `*.md` a skill folder holds) and lists, with the file and line:
+The ClawHub incident ran through instructions, not code: a skill told the person, or the agent, to paste a command. So the scan reads every `SKILL.md`, prompt and command file (and any `*.md` a skill folder holds) and lists, with the file and line, the lines below.
+
+The loader and the scan read these files through one shared rule, so the scan covers exactly what the agent gets. A file that is a symlink is read only when it resolves to a regular file inside the plugin, at most 10 MB; the scan then reads that target's text and names both ("skills/setup/SKILL.md -> skills/setup/notes.txt"). A symlink that leaves the plugin or points nowhere is a finding of its own, and the loader skips that skill, prompt or command. A symlinked folder inside a skill folder is followed when it stays inside the plugin.
+
+The patterns:
 
 - a download piped or fed to a shell or interpreter: `curl` or `wget` into `sh`, `bash`, `zsh`, `python`, `node`, `iex`; `bash <(curl ...)`; `irm ... | iex`;
 - decoding into a shell: `base64 -d`, `xxd -r`, `openssl enc -d` piped into a shell;

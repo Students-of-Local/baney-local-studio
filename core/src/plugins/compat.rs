@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use super::install::MAX_FILE;
-use super::{env_prefix, frontmatter, inside, valid_command_name, valid_env_name, valid_semver, CommandTarget, Plugin};
+use super::{
+    env_prefix, frontmatter, inside, instruction, valid_command_name, valid_env_name, valid_semver, CommandTarget,
+    Plugin,
+};
 use super::{CALLER_ENV, CALLER_NAME_ENV, MANIFEST};
 
 pub const STUDIO_DIR: &str = ".local-studio";
@@ -113,7 +115,9 @@ impl Finding {
 
 impl std::fmt::Display for Finding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.text.is_empty() {
+        if self.line == 0 {
+            write!(formatter, "{}: {}", self.file, self.what)
+        } else if self.text.is_empty() {
             write!(formatter, "{}:{}: {}", self.file, self.line, self.what)
         } else {
             write!(formatter, "{}:{}: {}: {}", self.file, self.line, self.what, self.text)
@@ -443,17 +447,13 @@ fn text(fields: &Map<String, Value>, key: &str) -> Option<String> {
     fields.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
 }
 
-fn read_text(path: &Path) -> Option<String> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_FILE {
-        return None;
-    }
-    std::fs::read(path).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+fn read_text(dir: &Path, path: &Path) -> Option<String> {
+    instruction(dir, path).ok().flatten()
 }
 
 fn json_object(dir: &Path, relative: &str) -> Result<Option<Map<String, Value>>, String> {
     let path = dir.join(relative);
-    let Some(text) = read_text(&path) else { return Ok(None) };
+    let Some(text) = read_text(dir, &path) else { return Ok(None) };
     match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(object)) => Ok(Some(object)),
         Ok(_) => Err(format!("{relative} is not a JSON object")),
@@ -633,7 +633,13 @@ fn commands(
             not_used.push(format!("command {file}: another command is already named {name}"));
             continue;
         }
-        let content = read_text(&dir.join(&file)).unwrap_or_default();
+        let content = match instruction(dir, &dir.join(&file)) {
+            Ok(content) => content.unwrap_or_default(),
+            Err(reason) => {
+                not_used.push(format!("command {file}: {reason}"));
+                continue;
+            }
+        };
         for (index, line) in content.lines().enumerate() {
             for ran in shell_lines(line) {
                 findings.push(Finding {
@@ -763,13 +769,13 @@ fn monitors_in(dir: &Path, listed: Option<&Value>, not_used: &mut Vec<String>) {
     let items: Vec<Value> = match listed {
         Some(Value::Array(items)) => items.clone(),
         Some(Value::String(path)) => match local_file(dir, path) {
-            Some(relative) => read_text(&dir.join(relative))
+            Some(relative) => read_text(dir, &dir.join(relative))
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .and_then(|value| value.as_array().cloned())
                 .unwrap_or_else(|| vec![Value::String(path.clone())]),
             None => vec![Value::String(path.clone())],
         },
-        _ => read_text(&dir.join("monitors/monitors.json"))
+        _ => read_text(dir, &dir.join("monitors/monitors.json"))
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
             .and_then(|value| value.as_array().cloned())
             .unwrap_or_default(),
@@ -921,7 +927,7 @@ fn dir_in(dir: &Path, parts: &[Part]) -> Option<String> {
 }
 
 fn shebang(dir: &Path, relative: &str) -> Option<String> {
-    let text = read_text(&dir.join(relative))?;
+    let text = read_text(dir, &dir.join(relative))?;
     let line = text.lines().next()?.strip_prefix("#!")?.trim();
     let mut words = line.split_whitespace();
     let first = words.next()?;
@@ -1272,10 +1278,12 @@ fn clear_executables(dir: &Path, relative: &Path) -> Result<(), String> {
 /// Lines in a plugin's instructions that tell someone to run risky commands, with the file and line.
 #[must_use]
 pub fn text_findings(plugin: &Plugin) -> Vec<Finding> {
+    let base = plugin.dir.canonicalize().unwrap_or_else(|_| plugin.dir.clone());
     let mut files: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     for skill in &plugin.skills {
         if let Some(folder) = skill.path.parent() {
-            markdown_under(folder, &mut files);
+            markdown_under(&base, folder, &mut files, &mut seen);
         }
         files.insert(skill.path.clone());
     }
@@ -1285,10 +1293,18 @@ pub fn text_findings(plugin: &Plugin) -> Vec<Finding> {
             files.insert(path.clone());
         }
     }
+    files.extend(plugin.skipped.iter().cloned());
     let mut findings: Vec<Finding> = Vec::new();
     for path in files {
-        let Some(content) = read_text(&path) else { continue };
-        let file = relative_to(&plugin.dir, &path);
+        let file = label(&plugin.dir, &base, &path);
+        let content = match instruction(&plugin.dir, &path) {
+            Ok(Some(content)) => content,
+            Ok(None) => continue,
+            Err(reason) => {
+                findings.push(Finding { file, line: 0, what: reason, text: String::new() });
+                continue;
+            }
+        };
         for (index, line) in content.lines().enumerate() {
             let reasons = reasons(line);
             if !reasons.is_empty() {
@@ -1300,14 +1316,41 @@ pub fn text_findings(plugin: &Plugin) -> Vec<Finding> {
     findings
 }
 
-fn markdown_under(folder: &Path, files: &mut BTreeSet<PathBuf>) {
+fn label(dir: &Path, base: &Path, path: &Path) -> String {
+    let file = relative_to(dir, path);
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return file;
+    }
+    match path.canonicalize().ok().and_then(|real| real.strip_prefix(base).ok().map(Path::to_path_buf)) {
+        Some(real) => format!("{file} -> {}", real.to_string_lossy().replace('\\', "/")),
+        None => file,
+    }
+}
+
+fn markdown_under(base: &Path, folder: &Path, files: &mut BTreeSet<PathBuf>, seen: &mut BTreeSet<PathBuf>) {
+    if let Ok(real) = folder.canonicalize() {
+        if !seen.insert(real) {
+            return;
+        }
+    }
     for path in sorted(folder) {
-        match std::fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_dir() => markdown_under(&path, files),
-            Ok(meta) if meta.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) => {
-                files.insert(path);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        let markdown = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+        if meta.is_dir() {
+            markdown_under(base, &path, files, seen);
+        } else if meta.file_type().is_symlink() {
+            match path.canonicalize() {
+                Ok(real) if real.is_dir() && real.starts_with(base) => markdown_under(base, &path, files, seen),
+                Ok(real) if real.is_dir() => {
+                    files.insert(path);
+                }
+                _ if markdown => {
+                    files.insert(path);
+                }
+                _ => {}
             }
-            _ => {}
+        } else if meta.is_file() && markdown {
+            files.insert(path);
         }
     }
 }
