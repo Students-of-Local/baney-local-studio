@@ -11,22 +11,22 @@ tree = "sha256:46e84a10126c4e5a86e549b420a63ab6989646ec9680f28850ca4ee0afa01267"
 [[plugin]]
 id = "gantrel"
 name = "Gantrel"
-description = "Design 3D printable parts with a local model, then slice, upload and watch them on your printers"
-capabilities = []
+description = "Design 3D printable parts with a local model, plan orientation, supports and settings, then slice, upload and start prints you confirm, and share tuned printer setups"
+capabilities = ["mcp-server", "ask-user"]
 git = "https://github.com/baney75/Gantrel"
-rev = "5cdd0899732ccf87a892bd602b8fda45bc09489e"
-tree = "sha256:c66f4c35b2c3f556d5e4fc3cfa7fbcf380006142726764dddd19ffc6095ff025"
-exclude = ["scripts", "tests"]
+rev = "fcfcb25e0477f4ccb965c89c06cdf00ed88c2ae2"
+tree = "sha256:994085c1eaaaf5b03b9b99e95021c7ded358e5525269cd4e141d86eebc465ae5"
+exclude = ["benchmarks", "plugins", "scripts", "tests"]
 
 [[plugin]]
 id = "hildegard"
 name = "Hildegard"
-description = "Make images, video, speech, designed voices and cleaned audio on your own GPU, each one checked before you see it"
-capabilities = []
+description = "Make images, film, sound, 3D, web and writing with Hildegard's craft skills and tools, on your own GPU, each one checked before you see it"
+capabilities = ["mcp-server"]
 git = "https://github.com/baney75/hildegard"
-rev = "504d94904cb998fbf2471fc8fb058ff403b66e1b"
+rev = "ce4284c742cb9aba79474e9368be511e0bbfbd29"
 subdir = "local-studio/hildegard"
-tree = "sha256:4e10076fc0e358312b6a6ea907801342a2ac4f8dd2662948b668d1b2f98e00b4"
+tree = "sha256:76b07693b90c1dd5f6223db97d8ade0a950c036cac61191647f1166847e6bc59"
 
 [[plugin]]
 id = "tychicus-browser"
