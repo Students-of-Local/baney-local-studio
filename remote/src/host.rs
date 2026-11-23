@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
-use local_studio_core::{NoticeLevel, Project, Studio, Subscription, Update};
+use local_studio_core::{Machine, NoticeLevel, Project, Studio, Subscription, Update};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -31,6 +31,7 @@ const REQUEST_EVERY: Duration = Duration::from_millis(500);
 const ANSWER_WITHIN: Duration = Duration::from_secs(25);
 const ANSWERS_KEPT: Duration = Duration::from_secs(600);
 const FAILURES_KEPT: usize = 64;
+pub(crate) const JOINING: &str = "fleet-join-";
 const GOING_AWAY: u16 = 1001;
 const RESTARTING: u16 = 1012;
 
@@ -298,6 +299,8 @@ struct Request {
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
+    link: Option<String>,
+    #[serde(default)]
     applied: bool,
 }
 
@@ -344,12 +347,18 @@ struct Requests {
     notify: Arc<Notify>,
     projects: Vec<Project>,
     failures: VecDeque<String>,
+    machines: Vec<Machine>,
+    answers: VecDeque<(String, Result<String, String>)>,
+    joining: Vec<String>,
 }
 
 impl Requests {
     fn drain(&mut self) {
         for update in self.subscription.tick() {
             match update {
+                Update::Machines { machines } => self.machines = machines,
+                Update::RequestDone { request, message } => self.answered(request, Ok(message)),
+                Update::RequestFailed { request, message } => self.answered(request, Err(message)),
                 Update::Projects { projects } => {
                     self.projects = projects.into_iter().filter(|project| project.machine.is_none()).collect();
                 }
@@ -401,8 +410,64 @@ impl Requests {
         }
     }
 
+    fn answered(&mut self, request: String, outcome: Result<String, String>) {
+        if !self.joining.contains(&request) {
+            return;
+        }
+        if self.answers.len() == FAILURES_KEPT {
+            self.answers.pop_front();
+        }
+        self.answers.push_back((request, outcome));
+    }
+
+    async fn join_fleet(&mut self, file: &Path, request: Request) -> Option<Value> {
+        let stem = file.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+        let id = format!("{JOINING}{stem}");
+        let answered = |ok: bool, message: String, machine: Value| {
+            Some(json!({ "ok": ok, "message": message, "projects": [], "machine": machine }))
+        };
+        if request.applied && !self.joining.contains(&id) {
+            let message = "the owner restarted while pairing, so the outcome is unknown; check Settings, Machines, and if the machine is not there mint a new invite";
+            return answered(false, message.to_string(), Value::Null);
+        }
+        if !request.applied {
+            let Some(link) = request.link.filter(|link| !link.trim().is_empty()) else {
+                return answered(false, "the request holds no link".to_string(), Value::Null);
+            };
+            mark_applied(file, &request.op, "");
+            self.joining.push(id.clone());
+            self.studio.join_fleet(id.clone(), link.trim());
+        }
+        let deadline = tokio::time::Instant::now() + ANSWER_WITHIN;
+        loop {
+            self.drain();
+            if let Some((_, outcome)) =
+                self.answers.iter().position(|(request, _)| *request == id).and_then(|at| self.answers.remove(at))
+            {
+                self.joining.retain(|joining| *joining != id);
+                return match outcome {
+                    Ok(machine) => {
+                        let name = self
+                            .machines
+                            .iter()
+                            .find(|known| known.id == machine)
+                            .map_or_else(|| machine.clone(), |known| known.name.clone());
+                        answered(true, format!("paired with {name}"), json!({ "id": machine, "name": name }))
+                    }
+                    Err(message) => answered(false, message, Value::Null),
+                };
+            }
+            if tokio::time::timeout_at(deadline, self.notify.notified()).await.is_err() {
+                return None;
+            }
+        }
+    }
+
     async fn answer(&mut self, file: &Path, request: Request) -> Option<Value> {
         self.drain();
+        if request.op == "fleet_join" {
+            return self.join_fleet(file, request).await;
+        }
         let again = request.applied;
         let path = request.path.unwrap_or_default();
         let wait = if again { Duration::ZERO } else { ANSWER_WITHIN };
@@ -471,6 +536,9 @@ async fn answer_requests(studio: Arc<Studio>, data_dir: PathBuf) {
         notify,
         projects: Vec::new(),
         failures: VecDeque::new(),
+        machines: Vec::new(),
+        answers: VecDeque::new(),
+        joining: Vec::new(),
     };
     loop {
         tokio::time::sleep(REQUEST_EVERY).await;

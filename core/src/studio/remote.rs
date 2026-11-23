@@ -88,6 +88,13 @@ impl Mailbox {
     }
 }
 
+#[cfg(feature = "link")]
+impl Studio {
+    pub fn join_fleet(&self, request: String, link: &str) {
+        self.links.join_fleet(request, link);
+    }
+}
+
 #[cfg_attr(feature = "ffi", uniffi::export)]
 #[allow(clippy::needless_pass_by_value)]
 impl Studio {

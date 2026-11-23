@@ -50,7 +50,7 @@ export const rank = (r: Route): number[] => {
   const l = r.endpoint.load;
   const queue = Math.max((l?.running ?? 0) + (l?.waiting ?? 0), l?.inFlight ?? 0, inFlight(r.endpoint.id));
   const away = r.endpoint.lent && r.cluster?.state === "reclaimed" ? 1 : 0;
-  return [away, queue, Math.round((l?.kvPercent ?? 0) / 10), r.peer ? 1 : 0, r.depth, -Math.round(l?.decodeTps ?? 0)];
+  return [away, queue, Math.round((l?.kvPercent ?? 0) / 10), r.peer ? 1 : 0, r.link ? 1 : 0, r.depth, -Math.round(l?.decodeTps ?? 0)];
 };
 
 const byLoad = (a: Route, b: Route): number => {
@@ -96,7 +96,7 @@ export const passthrough = async (d: GatewayDeps, req: Request, path: string): P
       continue;
     }
     const headers = new Headers(FORWARD.flatMap((h) => { const v = req.headers.get(h); return v ? [[h, v] as [string, string]] : []; }));
-    const key = r.peer ? cfg.fleetKey : cfg.engineKeys[String(r.endpoint.port)];
+    const key = r.link ? cfg.linkToken : r.peer ? cfg.fleetKey : cfg.engineKeys[String(r.endpoint.port)];
     if (key) headers.set("authorization", `Bearer ${key}`);
     if (r.peer) {
       headers.set(HOP_HEADER, "1");

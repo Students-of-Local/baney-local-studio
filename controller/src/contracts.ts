@@ -117,6 +117,7 @@ export const LocalControllerLink = Schema.Struct({
   error: OptionalString,
   seenAt: Schema.optionalKey(OptionalString),
   usage: Schema.optionalKey(Schema.Array(LocalUsage)),
+  via: Schema.optionalKey(Schema.Literals(["link"])),
 });
 export type LocalControllerLink = typeof LocalControllerLink.Type;
 
@@ -284,6 +285,8 @@ export type LocalRunRequest = typeof LocalRunRequest.Type;
 export const LocalPeerRequest = Schema.Struct({
   url: Schema.String,
   remove: Schema.optionalKey(Schema.Boolean),
+  via: Schema.optionalKey(Schema.Literals(["link"])),
+  token: Schema.optionalKey(Schema.String),
 });
 export const LocalDeployRequest = Schema.Struct({
   ip: Schema.String,

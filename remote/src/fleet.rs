@@ -29,6 +29,7 @@ const ROUTES: [(&str, &str, bool); 6] = [
 ];
 const PASSED: [&str; 3] = ["content-type", "accept", "x-local-studio-endpoint"];
 const HOP: &str = "x-local-studio-hop";
+const RETRY: &str = "x-local-studio-retry";
 const MAX_QUERY: usize = 4096;
 const MAX_HEADER: usize = 1024;
 const MAX_STREAM_ID: usize = 64;
@@ -81,6 +82,14 @@ impl Reply {
         self.send(&json!({
             "status": status,
             "headers": { "content-type": "text/plain; charset=utf-8" },
+            "body": STANDARD.encode(message.as_bytes()),
+        }));
+    }
+
+    fn unsent(&self, status: u16, message: &str) {
+        self.send(&json!({
+            "status": status,
+            "headers": { "content-type": "text/plain; charset=utf-8", RETRY: "1" },
             "body": STANDARD.encode(message.as_bytes()),
         }));
     }
@@ -195,6 +204,9 @@ fn shown_headers(response: &reqwest::Response) -> Value {
     if let Some(kind) = response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()) {
         shown.insert("content-type".to_string(), json!(kind));
     }
+    if response.headers().get(RETRY).is_some_and(|value| value.as_bytes() == b"1") {
+        shown.insert(RETRY.to_string(), json!("1"));
+    }
     Value::Object(shown)
 }
 
@@ -250,12 +262,12 @@ impl Fleet {
         let streams = mine.calls.values().filter(|call| call.stream.is_some()).count();
         if mine.recent.len() >= FLEET_PER_MINUTE {
             drop(usage);
-            reply.status(429, &format!("at most {FLEET_PER_MINUTE} fleet requests a minute from one device"));
+            reply.unsent(429, &format!("at most {FLEET_PER_MINUTE} fleet requests a minute from one device"));
             return Ok(());
         }
         if asked.stream && streams >= FLEET_STREAMS {
             drop(usage);
-            reply.status(429, &format!("at most {FLEET_STREAMS} fleet streams at once from one device"));
+            reply.unsent(429, &format!("at most {FLEET_STREAMS} fleet streams at once from one device"));
             return Ok(());
         }
         if let Some(id) = &asked.stream_id {
@@ -366,7 +378,7 @@ impl Fleet {
         let request = match self.request(asked) {
             Ok(request) => request,
             Err(message) => {
-                reply.status(503, &message);
+                reply.unsent(503, &message);
                 return;
             }
         };
@@ -383,9 +395,17 @@ impl Fleet {
                 return;
             }
         };
-        let Ok(mut response) = sent else {
-            reply.status(503, &format!("the Local controller on {} did not answer", self.controller));
-            return;
+        let mut response = match sent {
+            Ok(response) => response,
+            Err(error) => {
+                let message = format!("the Local controller on {} did not answer", self.controller);
+                if error.is_connect() {
+                    reply.unsent(503, &message);
+                } else {
+                    reply.status(503, &message);
+                }
+                return;
+            }
         };
         let status = response.status().as_u16();
         let headers = shown_headers(&response);

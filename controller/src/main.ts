@@ -7,7 +7,7 @@ import { LOCAL_STUDIO_CONTROLLER_HEADER, LocalAuthorizeRequest, LocalClusterRequ
 import { decodeJson, errorResponse, exec, fail, type HttpError, httpError, json, loadConfig, now, port, saveConfig, VERSION } from "./core.ts";
 import { type Endpoint, listeners, makeScanner } from "./discovery.ts";
 import { autoModel, HOP_HEADER, inFlight, listModels, passthrough, routes } from "./gateway.ts";
-import { graphUsage, makeGraph, makeUsage, normUrl } from "./graph.ts";
+import { graphUsage, LINK_PORT, LINK_URL, makeGraph, makeUsage, normUrl } from "./graph.ts";
 import { authorize, hardware, type RawGpu, readGpuList, readGpus, readThunderbolt } from "./hardware.ts";
 import { makeJobs } from "./jobs.ts";
 import { browse, detect, download, type Library, loadLibrary, matchHardware, record } from "./library.ts";
@@ -85,7 +85,7 @@ const cluster = makeCluster({
 const gw = { config: () => config, local: localEndpoints, usage: () => usage.list(), graph: () => graph.get(), record: usage.record, cluster: () => cluster.node(), failoverMs: () => cluster.failoverMs(), refuse: (ep: Endpoint) => cluster.refuse(ep) };
 
 const excluded = (): Set<number> => {
-  const out = new Set([port, ...config.excludePorts, ...cluster.rpcPorts()]);
+  const out = new Set([port, ...config.excludePorts, ...cluster.rpcPorts(), LINK_PORT]);
   for (const p of config.peers) {
     const u = URL.parse(p);
     if (u && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(u.hostname)) out.add(Number(u.port || 80));
@@ -207,7 +207,7 @@ const share = (port: number) =>
     if (!ep) return yield* fail(404, "NOT_RUNNING", `nothing is serving on port ${port}`);
     const recipeId = jobs.list().find((j) => j.id === ep.jobId)?.recipeId;
     const l = yield* lib();
-    const preview = yield* previewShare(l, ep, (recipeId && catalog.recipes.get(recipeId)) || null, yield* matches(l), secretValues([config.fleetKey, ...Object.values(config.engineKeys)]), config.engineKeys[String(port)]);
+    const preview = yield* previewShare(l, ep, (recipeId && catalog.recipes.get(recipeId)) || null, yield* matches(l), secretValues([config.fleetKey, ...(config.linkToken ? [config.linkToken] : []), ...Object.values(config.engineKeys)]), config.engineKeys[String(port)]);
     shares.set(port, { preview, at: Date.now() });
     return preview;
   });
@@ -313,6 +313,20 @@ const handle = async (req: Request, peer: string | null): Promise<Response> => {
   if (post && p === "/api/peers") {
     const b = await body(req, LocalPeerRequest);
     const u = normUrl(b.url);
+    if (b.via === "link") {
+      if (!LINK_URL.test(u)) throw httpError(400, "BAD_URL", `a link peer url must be http://127.0.0.1:${LINK_PORT}/m/<machine id>`);
+      if (b.token !== undefined && !/^[0-9a-f]{64}$/.test(b.token)) throw httpError(400, "BAD_TOKEN", "a link token is 64 hex digits");
+      const was = (config.linkPeers ?? []).map(normUrl);
+      if (b.remove) {
+        const linkPeers = was.filter((x) => x !== u);
+        const { linkToken: _dropped, ...rest } = config;
+        return saved(linkPeers.length ? { ...config, linkPeers } : { ...rest, linkPeers }, { linkPeers });
+      }
+      const linkToken = b.token ?? config.linkToken;
+      if (!linkToken) throw httpError(400, "NO_TOKEN", "a link peer needs the fleet proxy token that local-studio fleet join sends");
+      const linkPeers = [...new Set([...was, u])];
+      return saved({ ...config, linkPeers, linkToken }, { linkPeers });
+    }
     if (!/^https?:\/\/[^/]+$/.test(u)) throw httpError(400, "BAD_URL", "peer url must be http(s)://host:port");
     if (u === normUrl(config.url)) throw httpError(400, "SELF_PEER", "a controller cannot peer with itself");
     const peers = b.remove ? config.peers.filter((x) => normUrl(x) !== u) : [...new Set([...config.peers.map(normUrl), u])];

@@ -20,7 +20,9 @@ The controller is a small Bun service (`controller/`). It watches the inference 
 | `url`                   | The URL other controllers use to reach this one                                  |
 | `fleetKey`              | Shared secret; every request except `/api/health` must send it as a bearer token |
 | `peers`                 | URLs of linked controllers                                                       |
-| `excludePorts`          | Local ports never treated as inference servers                                   |
+| `linkPeers`             | Optional. Machines reached over a desktop link; a node poll they answer 503 `busy` is not a miss. See [docs/fleet-links.md](fleet-links.md) |
+| `linkToken`             | Optional. The bearer sent to link peers instead of `fleetKey`; dropped with the last link peer |
+| `excludePorts`          | Local ports never treated as inference servers (18095, the link proxy, always is) |
 | `engineKeys`            | API keys for local engines, by port                                              |
 | `registry`, `modelsDir` | Recipe registry checkout and weights directory                                   |
 | `cluster`               | Optional. Tailnet discovery, GPU lending and pooled models; see [Clustering](#clustering) |

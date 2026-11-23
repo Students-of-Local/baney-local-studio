@@ -934,6 +934,10 @@ impl Hub {
                         }
                     }
                     None if kind == "thread_started" => state.broadcast(&text_of(&value)),
+                    None if value
+                        .get("request")
+                        .and_then(Value::as_str)
+                        .is_some_and(|tag| tag.starts_with(crate::host::JOINING)) => {}
                     None => eprintln!("local-studio-serve: dropped a {kind} for a request no phone owns"),
                 },
                 "notice" => state.broadcast(&text_of(&value)),

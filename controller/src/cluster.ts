@@ -494,7 +494,7 @@ export const makeCluster = (d: ClusterDeps) => {
 
   const machines = async () => {
     const g = await d.graph();
-    return g.nodes.flatMap((n) => (n.node.cluster ? [{ id: n.node.controller.id, name: n.node.controller.name, url: n.url, ...n.node.cluster }] : []));
+    return g.nodes.flatMap((n) => (n.node.cluster && !n.link ? [{ id: n.node.controller.id, name: n.node.controller.name, url: n.url, ...n.node.cluster }] : []));
   };
 
   const watchPools = async () => {
