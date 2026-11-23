@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 const LINK_PORT = 18095;
 const root = mkdtempSync(join(tmpdir(), "local-studio-link-peers-"));
 const key = randomBytes(24).toString("hex");
+const token = randomBytes(32).toString("hex");
 const machine = randomBytes(16).toString("hex");
 const linkUrl = `http://127.0.0.1:${LINK_PORT}/m/${machine}`;
 const auth = { authorization: `Bearer ${key}`, "content-type": "application/json" };
@@ -192,10 +193,15 @@ try {
   assert.equal((await call("/api/peers", { url: linkUrl })).status, 400, "a link url was accepted as a tailnet peer");
   assert.equal((await call("/api/peers", { url: linkUrl, via: "tunnel" })).status, 400);
   assert.equal(config().linkPeers, undefined, "a refused link peer was stored");
-  const added = await call("/api/peers", { url: `${linkUrl}/`, via: "link" });
+  assert.equal((await call("/api/peers", { url: linkUrl, via: "link" })).status, 400, "a link peer was added without a proxy token");
+  assert.equal((await call("/api/peers", { url: linkUrl, via: "link", token: "short" })).status, 400, "a malformed proxy token was accepted");
+  assert.equal(config().linkPeers, undefined, "a link peer without a token was stored");
+  const added = await call("/api/peers", { url: `${linkUrl}/`, via: "link", token });
   assert.equal(added.status, 200);
   assert.deepEqual((await added.json()).linkPeers, [linkUrl]);
   assert.deepEqual(config().linkPeers, [linkUrl]);
+  assert.equal(config().linkToken, token, "the proxy token was not kept next to linkPeers");
+  assert.equal(statSync(join(home, "config.json")).mode & 0o777, 0o600, "the controller config is not 0600");
   assert.deepEqual(config().peers, [tailnetUrl], "the link peer leaked into peers");
   assert.deepEqual((await get("/api/node")).peers, [tailnetUrl], "the link peer is advertised to other controllers");
 
@@ -207,7 +213,7 @@ try {
   assert(nodeReads.length > 0, "the link peer's /api/node was never read");
   for (const h of nodeReads) {
     assert.equal(h.method, "GET");
-    assert.equal(h.headers.authorization, `Bearer ${key}`, "the link peer was not read with this machine's fleet key");
+    assert.equal(h.headers.authorization, `Bearer ${token}`, "the link peer was not read with the proxy token");
   }
 
   await waitFor(async () => hits.control > 0, "a tailnet peer's own peers are crawled (control)");
@@ -244,7 +250,8 @@ try {
   state.tailnetRunning = 3;
   await waitFor(async () => (await chat()) === "link", "the link copy serves once the tailnet copy is busier");
   const routed = hits.link.findLast((h) => h.url === `/m/${machine}/v1/chat/completions`);
-  assert.equal(routed.headers.authorization, `Bearer ${key}`);
+  assert.equal(routed.headers.authorization, `Bearer ${token}`, "a chat to the link peer did not carry the proxy token");
+  assert(!JSON.stringify(hits.link.map((h) => h.headers)).includes(key), "the fleet key reached the link proxy");
   assert.equal(routed.headers["x-local-studio-hop"], "1");
   assert.equal(routed.headers["x-local-studio-endpoint"], "link-a:9000");
   const only = await call("/v1/chat/completions", { model: "link-only", messages: [] });
@@ -253,11 +260,12 @@ try {
   const removed = await call("/api/peers", { url: linkUrl, via: "link", remove: true });
   assert.equal(removed.status, 200);
   assert.deepEqual(config().linkPeers, []);
+  assert.equal(config().linkToken, undefined, "the proxy token outlived the last link peer");
   assert.deepEqual(config().peers, [tailnetUrl]);
   assert(!(config().cluster?.ignored ?? []).includes(linkUrl), "removing a link peer touched the tailnet ignore list");
   await waitFor(async () => !(await get("/v1/models")).data.some((m) => m.id === "link-only"), "a removed link peer leaves the gateway");
   console.log(
-    "PASS link peers: exact link urls only, a separate linkPeers list, leaf crawl, no pool, rpc or lending, ranked after tailnet copies at equal load, latency through the link.",
+    "PASS link peers: exact link urls only, a separate linkPeers list, the proxy token and never the fleet key on link requests, leaf crawl, no pool, rpc or lending, ranked after tailnet copies at equal load, latency through the link.",
   );
 } finally {
   for (const child of children) child.kill("SIGTERM");

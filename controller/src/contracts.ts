@@ -286,6 +286,7 @@ export const LocalPeerRequest = Schema.Struct({
   url: Schema.String,
   remove: Schema.optionalKey(Schema.Boolean),
   via: Schema.optionalKey(Schema.Literals(["link"])),
+  token: Schema.optionalKey(Schema.String),
 });
 export const LocalDeployRequest = Schema.Struct({
   ip: Schema.String,

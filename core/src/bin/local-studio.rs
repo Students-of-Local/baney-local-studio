@@ -907,8 +907,11 @@ fn fleet_join(link: &str, as_json: bool) -> Result<(), String> {
     let machine_id = json_text(&machine, "id").ok_or("the owner answered without a machine id")?;
     let name = json_text(&machine, "name").unwrap_or_else(|| machine_id.clone());
     let peer = proxy::peer_url(&machine_id);
-    controller_call("/api/peers", Some(&serde_json::json!({ "url": peer, "via": "link" }))).map_err(|message| {
-        format!("Paired with {name}, but the Local controller did not add it as a peer: {message}. Add it with POST /api/peers {{\"url\": \"{peer}\", \"via\": \"link\"}}.")
+    let token =
+        proxy::token(&data).ok_or_else(|| format!("Paired with {name}, but the fleet proxy token is missing"))?;
+    let asked = serde_json::json!({ "url": peer, "via": "link", "token": token });
+    controller_call("/api/peers", Some(&asked)).map_err(|message| {
+        format!("Paired with {name}, but the Local controller did not add it as a peer: {message}. Run fleet join again with a new invite.")
     })?;
     if as_json {
         println!(

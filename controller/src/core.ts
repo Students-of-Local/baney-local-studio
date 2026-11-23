@@ -15,6 +15,7 @@ export const Config = Schema.Struct({
   fleetKey: Schema.String,
   peers: Schema.Array(Schema.String),
   linkPeers: Schema.optionalKey(Schema.Array(Schema.String)),
+  linkToken: Schema.optionalKey(Schema.String),
   excludePorts: Schema.Array(Schema.Number),
   engineKeys: Schema.Record(Schema.String, Schema.String),
   registry: Schema.Struct({ url: Schema.String, dir: Schema.String, ref: Schema.String }),

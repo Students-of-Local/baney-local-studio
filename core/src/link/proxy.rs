@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -19,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
 use super::client::{Inner, Lookup, Out, Piece};
-use super::devices::{hex, random};
+use super::devices::{hex, random, write_private};
 
 pub const PORT: u16 = 18095;
 pub const FLEET_BODY: usize = ((8 << 20) - (4 << 10)) / 4 * 3;
@@ -34,7 +35,39 @@ pub fn peer_url(machine: &str) -> String {
     format!("http://127.0.0.1:{PORT}/m/{machine}")
 }
 
+fn token_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("remote").join("fleet-proxy-token")
+}
+
+#[must_use]
+pub fn token(data_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(token_path(data_dir)).ok()?;
+    let token = text.trim();
+    (token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| token.to_string())
+}
+
+pub(crate) fn mint_token(data_dir: &Path) -> anyhow::Result<String> {
+    if let Some(token) = token(data_dir) {
+        return Ok(token);
+    }
+    let token = hex(&random::<32>()?);
+    write_private(&token_path(data_dir), token.as_bytes())?;
+    Ok(token)
+}
+
+pub(crate) fn drop_token(data_dir: &Path) {
+    std::fs::remove_file(token_path(data_dir)).ok();
+}
+
 pub(super) async fn serve(inner: Arc<Inner>) {
+    let Some(token) = token(&inner.data_dir) else {
+        inner.warn(format!(
+            "The fleet link proxy has no token in {}, so it stays off; run `local-studio fleet join` again",
+            token_path(&inner.data_dir).display()
+        ));
+        return;
+    };
+    let token: Arc<str> = Arc::from(token);
     let mut told = false;
     let listener = loop {
         match TcpListener::bind(("127.0.0.1", PORT)).await {
@@ -56,10 +89,12 @@ pub(super) async fn serve(inner: Arc<Inner>) {
             continue;
         };
         let inner = Arc::clone(&inner);
+        let token = Arc::clone(&token);
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 let inner = Arc::clone(&inner);
-                async move { Ok::<_, Infallible>(handle(&inner, request).await) }
+                let token = Arc::clone(&token);
+                async move { Ok::<_, Infallible>(handle(&inner, &token, request).await) }
             });
             http1::Builder::new()
                 .timer(TokioTimer::new())
@@ -172,8 +207,7 @@ fn unsent(mut response: Reply) -> Reply {
     response
 }
 
-fn authorized(inner: &Inner, headers: &HeaderMap) -> bool {
-    let Some(key) = crate::fleet::key(&inner.data_dir) else { return false };
+fn authorized(key: &str, headers: &HeaderMap) -> bool {
     let Some(given) = headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()) else { return false };
     let Some(given) = given.get(..7).filter(|scheme| scheme.eq_ignore_ascii_case("bearer ")).map(|_| given[7..].trim())
     else {
@@ -190,9 +224,13 @@ fn route(path: &str) -> Option<(&str, &str)> {
     (!machine.is_empty()).then_some((machine, path))
 }
 
-async fn handle(inner: &Inner, request: Request<Incoming>) -> Reply {
-    if !authorized(inner, request.headers()) {
-        return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "send this machine's fleet key as a bearer token");
+async fn handle(inner: &Inner, token: &str, request: Request<Incoming>) -> Reply {
+    if !authorized(token, request.headers()) {
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "send this machine's fleet proxy token as a bearer token",
+        );
     }
     let target = request.uri().path().to_string();
     let Some((machine, path)) = route(&target) else {

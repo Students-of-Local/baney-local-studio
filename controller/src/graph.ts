@@ -47,9 +47,10 @@ export const makeGraph = (config: () => Config, self: () => LocalNode) => {
   let cache: { at: number; value: Promise<Graph> } | null = null;
   const seen = new Map<string, { node: LocalNode; at: string; misses: number }>();
 
-  const fetchNode = (url: string) => {
+  const fetchNode = (url: string, link: boolean) => {
     const started = performance.now();
-    return fetchJson(`${url}/api/node`, 8_000, { authorization: `Bearer ${config().fleetKey}` }).pipe(
+    const key = link ? config().linkToken : config().fleetKey;
+    return fetchJson(`${url}/api/node`, 8_000, key ? { authorization: `Bearer ${key}` } : {}).pipe(
       Effect.flatMap((r) => {
         const n = decodeNode(r.body);
         return r.status !== 200 ? Effect.fail(`HTTP ${r.status}`) : n._tag === "Some" ? Effect.succeed(n.value) : Effect.fail("not a Local Studio controller");
@@ -72,7 +73,7 @@ export const makeGraph = (config: () => Config, self: () => LocalNode) => {
     for (let depth = 1; depth <= MAX_DEPTH && frontier.length && nodes.length < MAX_NODES; depth++) {
       const batch = [...new Set(frontier)].filter((u) => !urls.has(u)).slice(0, MAX_NODES - nodes.length);
       for (const u of batch) urls.add(u);
-      const got = yield* Effect.forEach(batch, (u) => fetchNode(u).pipe(Effect.map((r) => [u, r] as const)), { concurrency: 8 });
+      const got = yield* Effect.forEach(batch, (u) => fetchNode(u, depth === 1 && leaves.has(u)).pipe(Effect.map((r) => [u, r] as const)), { concurrency: 8 });
       frontier = [];
       for (const [url, r] of got) {
         const link = depth === 1 && leaves.has(url);

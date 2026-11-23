@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -743,6 +744,21 @@ fn linked_peers(controller: &Path) -> anyhow::Result<Value> {
     Ok(config.get("linkPeers").cloned().unwrap_or(Value::Null))
 }
 
+async fn squat(listener: TcpListener, heard: Arc<Mutex<Vec<(String, String)>>>) {
+    loop {
+        let Ok((mut socket, _)) = listener.accept().await else { continue };
+        let heard = Arc::clone(&heard);
+        tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            if let Ok(Some((seen, _))) = read_request(&mut socket, &mut buffer).await {
+                let authorization = seen.headers.get("authorization").cloned().unwrap_or_default();
+                lock(&heard).push((seen.target, authorization));
+                respond(&mut socket, 503, "application/json", b"{}").await.ok();
+            }
+        });
+    }
+}
+
 struct Signal {
     pending: Mutex<bool>,
     ready: Condvar,
@@ -792,6 +808,12 @@ fn forget_in_app(b: &Side, machine: &str) -> anyhow::Result<()> {
         let links: Value = serde_json::from_slice(&std::fs::read(b.data.join("remote").join("links.json"))?)?;
         let kept = links["machines"].as_array().map(|rows| rows.iter().any(|row| row["id"] == machine));
         ensure!(kept == Some(false), "links.json still holds {machine} after forget_machine");
+        ensure!(
+            !b.data.join("remote").join("fleet-proxy-token").exists(),
+            "the proxy token outlived the last fleet link"
+        );
+        let config: Value = serde_json::from_slice(&std::fs::read(b.controller.join("config.json"))?)?;
+        ensure!(config.get("linkToken").is_none(), "B's controller kept the proxy token after the last link peer left");
         let deadline = Instant::now() + QUICK;
         while std::net::TcpListener::bind(("127.0.0.1", PORT)).is_err() {
             ensure!(
@@ -873,6 +895,14 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
         .and_then(|row| row["id"].as_str())
         .context("A's devices.json has no fleet-scoped device")?
         .to_string();
+    let token_file = b.data.join("remote").join("fleet-proxy-token");
+    let token = std::fs::read_to_string(&token_file).context("B has no fleet proxy token")?.trim().to_string();
+    ensure!(token.len() == 64 && token != *key_b, "B's proxy token is not 32 random bytes in hex");
+    ensure!(config["linkToken"] == token.as_str(), "B's controller does not hold the proxy token next to linkPeers");
+    for file in [&token_file, &b.controller.join("config.json")] {
+        let mode = std::fs::metadata(file)?.permissions().mode() & 0o777;
+        ensure!(mode == 0o600, "{} has mode {mode:o}", file.display());
+    }
     println!(
         "ok   B: fleet join over {wss} paired in {} ms, marked A as a fleet link and added {peer} as a link peer only",
         started.elapsed().as_millis()
@@ -941,20 +971,21 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     let count = stub_a.count();
     let proxied = |method: reqwest::Method, path: &str| http.request(method, format!("{peer}{path}")).timeout(QUICK);
     let cluster =
-        answer(proxied(reqwest::Method::POST, "/api/cluster").bearer_auth(key_b).body("{}").send().await?).await?;
+        answer(proxied(reqwest::Method::POST, "/api/cluster").bearer_auth(&token).body("{}").send().await?).await?;
     ensure!(cluster.status == 403 && cluster.code() == Some("forbidden"), "POST /api/cluster gave {}", cluster.body);
-    let snapshot = answer(proxied(reqwest::Method::GET, "/api/snapshot").bearer_auth(key_b).send().await?).await?;
+    let snapshot = answer(proxied(reqwest::Method::GET, "/api/snapshot").bearer_auth(&token).send().await?).await?;
     ensure!(snapshot.status == 403 && snapshot.code() == Some("forbidden"), "GET /api/snapshot gave {}", snapshot.body);
     ensure!(stub_a.count() == count, "a refused path reached A's controller: {:?}", &stub_a.seen()[count..]);
     println!("ok   POST /api/cluster and GET /api/snapshot through B's proxy are refused by A's serve with forbidden");
 
-    let shapes: [(&str, Option<String>); 6] = [
+    let shapes: [(&str, Option<String>); 7] = [
         ("no authorization", None),
         ("a wrong bearer", Some("Bearer wrong".to_string())),
         ("A's own key", Some(format!("Bearer {key_a}"))),
-        ("B's key with a suffix", Some(format!("Bearer {key_b}x"))),
-        ("B's key cut short", Some(format!("Bearer {}", &key_b[..key_b.len() - 1]))),
-        ("B's key as Basic", Some(format!("Basic {key_b}"))),
+        ("B's own fleet key", Some(format!("Bearer {key_b}"))),
+        ("the token with a suffix", Some(format!("Bearer {token}x"))),
+        ("the token cut short", Some(format!("Bearer {}", &token[..token.len() - 1]))),
+        ("the token as Basic", Some(format!("Basic {token}"))),
     ];
     for (shape, header) in shapes {
         let mut asked = proxied(reqwest::Method::GET, "/v1/models");
@@ -967,7 +998,7 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     ensure!(stub_a.count() == count, "an unauthorized request reached A's controller");
     let unknown = answer(
         http.get(format!("http://127.0.0.1:{PORT}/m/nobody/v1/models"))
-            .bearer_auth(key_b)
+            .bearer_auth(&token)
             .timeout(QUICK)
             .send()
             .await?,
@@ -980,7 +1011,7 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     );
     let passed = answer(
         proxied(reqwest::Method::GET, "/v1/models")
-            .bearer_auth(key_b)
+            .bearer_auth(&token)
             .header("cookie", "session=nope")
             .header("x-forwarded-for", "10.0.0.1")
             .header("accept", "application/json")
@@ -1000,12 +1031,12 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     for dropped in ["cookie", "x-forwarded-for"] {
         ensure!(!last.headers.contains_key(dropped), "{dropped} passed the proxy");
     }
-    println!("ok   a missing, wrong or foreign bearer gets 401 from B's proxy and never reaches A; B's own key passes with the allowed headers only");
+    println!("ok   a missing, wrong or foreign bearer, B's own fleet key included, gets 401 from B's proxy and never reaches A; the proxy token passes with the allowed headers only");
 
     let count = stub_a.count();
     let over = answer(
         proxied(reqwest::Method::POST, "/v1/completions")
-            .bearer_auth(key_b)
+            .bearer_auth(&token)
             .header("content-type", "application/json")
             .body(vec![b'x'; FLEET_BODY + 1])
             .send()
@@ -1020,7 +1051,7 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     ensure!(stub_a.count() == count, "the oversized body reached A");
     let full = answer(
         proxied(reqwest::Method::POST, "/v1/completions")
-            .bearer_auth(key_b)
+            .bearer_auth(&token)
             .header("content-type", "application/json")
             .body(vec![b'x'; FLEET_BODY])
             .send()
@@ -1045,7 +1076,7 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     let mut held = Vec::new();
     for _ in 0..8 {
         let opened = proxied(reqwest::Method::POST, "/v1/chat/completions")
-            .bearer_auth(key_b)
+            .bearer_auth(&token)
             .header("content-type", "application/json")
             .body(chat("a-model", "hang"))
             .send()
@@ -1055,7 +1086,7 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     }
     let ninth = answer(
         proxied(reqwest::Method::POST, "/v1/chat/completions")
-            .bearer_auth(key_b)
+            .bearer_auth(&token)
             .header("content-type", "application/json")
             .body(chat("a-model", "hang"))
             .send()
@@ -1133,7 +1164,7 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     ensure!(stub_c.served().len() == served_c + 1, "C did not serve the chat");
     ensure!(stub_a.count() == count, "a request reached A after the revoke");
     let started = Instant::now();
-    let down = answer(proxied(reqwest::Method::GET, "/v1/models").bearer_auth(key_b).send().await?).await?;
+    let down = answer(proxied(reqwest::Method::GET, "/v1/models").bearer_auth(&token).send().await?).await?;
     let took = started.elapsed();
     ensure!(down.status == 503 && down.code() == Some("link_down"), "the proxy after the revoke gave {}", down.body);
     ensure!(down.header("x-local-studio-retry") == Some("1"), "the 503 does not say it is safe to retry");
@@ -1146,12 +1177,44 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     if let Some(mut serve) = b_serve.take() {
         serve.stop()?;
     }
+    let squatter = Arc::new(Mutex::new(Vec::new()));
+    let squatting = tokio::spawn(squat(TcpListener::bind(("127.0.0.1", PORT)).await?, Arc::clone(&squatter)));
+    let readded = http
+        .post(format!("{b_url}/api/peers"))
+        .bearer_auth(key_b)
+        .json(&json!({ "url": peer, "via": "link" }))
+        .timeout(QUICK)
+        .send()
+        .await?;
+    ensure!(readded.status() == 200, "re-adding the link peer without a token gave {}", readded.status());
+    http.get(format!("{b_url}/v1/models")).bearer_auth(key_b).timeout(QUICK).send().await?.bytes().await?;
+    http.post(format!("{b_url}/v1/chat/completions"))
+        .bearer_auth(key_b)
+        .header("content-type", "application/json")
+        .body(chat("a-model", "squatted"))
+        .timeout(QUICK)
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    squatting.abort();
+    squatting.await.ok();
+    let heard = lock(&squatter).clone();
+    ensure!(!heard.is_empty(), "B's controller sent nothing to 127.0.0.1:{PORT} while the proxy was off");
+    for (target, authorization) in &heard {
+        ensure!(!authorization.contains(key_b.as_str()), "B's controller sent its fleet key to a squatter on {target}");
+        ensure!(*authorization == format!("Bearer {token}"), "a squatter saw {target} with another credential");
+    }
+    println!(
+        "ok   with the proxy off, a squatter on port {PORT} saw {} requests from B's controller, all with the proxy token and none with the fleet key",
+        heard.len()
+    );
     let side = b.clone();
     let id = machine.clone();
     std::thread::spawn(move || forget_in_app(&side, &id))
         .join()
         .map_err(|_| anyhow::anyhow!("the forget check panicked"))??;
-    println!("ok   forget_machine on B removes A's link peer from B's controller and frees port {PORT}");
+    println!("ok   forget_machine on B removes A's link peer, rotates the proxy token away on both sides and frees port {PORT}");
 
     term.abort();
     let log = a_serve.log();

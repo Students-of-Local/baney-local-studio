@@ -253,6 +253,9 @@ impl Links {
         drop(state);
         self.0.mailbox.forget_rows(machine);
         if link.saved.fleet {
+            if !self.0.lock().machines.iter().any(|link| link.saved.fleet) {
+                super::proxy::drop_token(&self.0.data_dir);
+            }
             self.0.handle.spawn(unpeer(Arc::clone(&self.0), machine.to_string(), link.saved.name));
         }
     }
@@ -818,6 +821,13 @@ async fn pair_open(link: &PairLink) -> Result<(Saved, Opened), Failure> {
 async fn pair_task(inner: Arc<Inner>, link: PairLink, fleet: Option<String>) {
     match pair_open(&link).await {
         Ok((mut saved, opened)) => {
+            if let Some(request) = &fleet {
+                if let Err(error) = super::proxy::mint_token(&inner.data_dir) {
+                    let message = format!("Could not create the fleet proxy token: {error:#}");
+                    inner.mailbox.push(Update::RequestFailed { request: request.clone(), message });
+                    return;
+                }
+            }
             saved.fleet = fleet.is_some();
             let id = saved.id.clone();
             inner.adopt(saved, opened);

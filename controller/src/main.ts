@@ -207,7 +207,7 @@ const share = (port: number) =>
     if (!ep) return yield* fail(404, "NOT_RUNNING", `nothing is serving on port ${port}`);
     const recipeId = jobs.list().find((j) => j.id === ep.jobId)?.recipeId;
     const l = yield* lib();
-    const preview = yield* previewShare(l, ep, (recipeId && catalog.recipes.get(recipeId)) || null, yield* matches(l), secretValues([config.fleetKey, ...Object.values(config.engineKeys)]), config.engineKeys[String(port)]);
+    const preview = yield* previewShare(l, ep, (recipeId && catalog.recipes.get(recipeId)) || null, yield* matches(l), secretValues([config.fleetKey, ...(config.linkToken ? [config.linkToken] : []), ...Object.values(config.engineKeys)]), config.engineKeys[String(port)]);
     shares.set(port, { preview, at: Date.now() });
     return preview;
   });
@@ -315,9 +315,17 @@ const handle = async (req: Request, peer: string | null): Promise<Response> => {
     const u = normUrl(b.url);
     if (b.via === "link") {
       if (!LINK_URL.test(u)) throw httpError(400, "BAD_URL", `a link peer url must be http://127.0.0.1:${LINK_PORT}/m/<machine id>`);
+      if (b.token !== undefined && !/^[0-9a-f]{64}$/.test(b.token)) throw httpError(400, "BAD_TOKEN", "a link token is 64 hex digits");
       const was = (config.linkPeers ?? []).map(normUrl);
-      const linkPeers = b.remove ? was.filter((x) => x !== u) : [...new Set([...was, u])];
-      return saved({ ...config, linkPeers }, { linkPeers });
+      if (b.remove) {
+        const linkPeers = was.filter((x) => x !== u);
+        const { linkToken: _dropped, ...rest } = config;
+        return saved(linkPeers.length ? { ...config, linkPeers } : { ...rest, linkPeers }, { linkPeers });
+      }
+      const linkToken = b.token ?? config.linkToken;
+      if (!linkToken) throw httpError(400, "NO_TOKEN", "a link peer needs the fleet proxy token that local-studio fleet join sends");
+      const linkPeers = [...new Set([...was, u])];
+      return saved({ ...config, linkPeers, linkToken }, { linkPeers });
     }
     if (!/^https?:\/\/[^/]+$/.test(u)) throw httpError(400, "BAD_URL", "peer url must be http(s)://host:port");
     if (u === normUrl(config.url)) throw httpError(400, "SELF_PEER", "a controller cannot peer with itself");
