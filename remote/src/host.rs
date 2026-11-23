@@ -13,6 +13,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::devices::{self, Devices};
+use crate::fleet::Fleet;
 use crate::hub::{self, Feed, Hub};
 use crate::limits::Gate;
 use crate::pairing::host_name;
@@ -123,6 +124,7 @@ pub(crate) async fn run(launch: Launch, until: impl Future<Output = Stop>) -> an
         &devices::hex(&key.public)[..16]
     );
     let server = Arc::new(Server {
+        fleet: Fleet::new(Arc::clone(&hub), &data_dir)?,
         hub: Arc::clone(&hub),
         devices,
         key,

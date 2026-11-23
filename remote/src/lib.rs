@@ -1,5 +1,6 @@
 mod access;
 mod cli;
+mod fleet;
 pub mod host;
 mod hub;
 mod limits;

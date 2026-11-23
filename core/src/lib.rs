@@ -2,6 +2,7 @@
 
 mod access;
 mod daemon;
+pub mod fleet;
 mod harness;
 mod highlight;
 mod images;

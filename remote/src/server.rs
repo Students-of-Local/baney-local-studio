@@ -27,6 +27,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::devices::{hex, unhex, DeviceInfo, Devices, StaticKey};
+use crate::fleet::Fleet;
 use crate::hub::{self, ConnId, Hub, Out, Resume, Rx, Tx};
 use crate::limits::{self, Client, Gate, Listener};
 use crate::noise::{self, Channel, Inbound, Joiner};
@@ -50,6 +51,7 @@ pub struct Hosts {
 
 pub struct Server {
     pub hub: Arc<Hub>,
+    pub fleet: Arc<Fleet>,
     pub devices: Devices,
     pub key: StaticKey,
     pub port: u16,
@@ -585,6 +587,7 @@ async fn attached(
         tx.send(Out::Close(BROKEN, "protocol error".to_string()));
     }
     server.hub.detach(&opened.device, conn);
+    server.fleet.detach(&opened.device, conn);
     drop(tx);
     if writing && tokio::time::timeout(DRAIN, &mut writer).await.is_err() {
         writer.abort();
@@ -641,7 +644,7 @@ async fn read(
         match joiner.feed(record)? {
             None => {}
             Some(Inbound::Json(text)) => {
-                if let Some(reply) = answer(&server.hub, device, conn, &text) {
+                if let Some(reply) = answer(server, device, conn, tx, &text) {
                     tx.send(Out::Frame(reply.to_string()));
                 }
             }
@@ -654,7 +657,8 @@ async fn read(
     }
 }
 
-fn answer(hub: &Hub, device: &str, conn: ConnId, text: &str) -> Option<Value> {
+fn answer(server: &Arc<Server>, device: &str, conn: ConnId, tx: &Tx, text: &str) -> Option<Value> {
+    let hub = &server.hub;
     let Ok(frame) = serde_json::from_str::<Value>(text) else {
         return Some(
             json!({ "op": "error", "error": { "code": "bad_frame", "message": "a frame must be a JSON object" } }),
@@ -686,6 +690,11 @@ fn answer(hub: &Hub, device: &str, conn: ConnId, text: &str) -> Option<Value> {
             Ok(()) => return None,
             Err(error) => Err(error),
         },
+        "fleet_http" => match server.fleet.http(device, conn, tx, id.clone(), &args) {
+            Ok(()) => return None,
+            Err(error) => Err(error),
+        },
+        "fleet_cancel" => server.fleet.cancel(device, &args).map(|()| None),
         _ => match hub.request(device, conn, op, &args) {
             Ok(true) => return Some(json!({ "re": id, "ok": true, "duplicate": true })),
             Ok(false) => Ok(None),

@@ -121,16 +121,24 @@ pub struct Minted {
     pub link: String,
     pub url: String,
     pub expires_at: i64,
+    pub scopes: Vec<String>,
 }
 
-pub fn mint(data_dir: &Path, channel: &str, url: Option<String>, name: Option<String>) -> anyhow::Result<Minted> {
+pub fn mint(
+    data_dir: &Path,
+    channel: &str,
+    url: Option<String>,
+    name: Option<String>,
+    scopes: &[&str],
+) -> anyhow::Result<Minted> {
     let settings = serve_settings(data_dir);
     let url = url.or_else(tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{}/v1/ws", serve_port(data_dir)));
     let name = name
         .or_else(|| settings.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_string))
         .unwrap_or_else(host_name);
-    let (id, secret, expires_at) = Devices::new(data_dir).open_pairing()?;
-    Ok(Minted { link: link(channel, &url, &name, &id, &secret.0), id, url, expires_at })
+    let (id, secret, expires_at) = Devices::new(data_dir).open_pairing(scopes)?;
+    let scopes = scopes.iter().map(|scope| (*scope).to_string()).collect();
+    Ok(Minted { link: link(channel, &url, &name, &id, &secret.0), id, url, expires_at, scopes })
 }
 
 #[derive(Debug)]

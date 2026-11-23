@@ -8,7 +8,7 @@ use local_studio_core::{DaemonLaunch, Studio, StudioConfig};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
-use crate::devices::{hex, now_ms, random, Devices};
+use crate::devices::{self, hex, now_ms, random, Devices};
 use crate::host::{self, Launch, Stop};
 use crate::hub::{self, Feed};
 use crate::pairing::{self, host_name};
@@ -27,7 +27,7 @@ const ANSWER_POLL: Duration = Duration::from_millis(100);
 
 const USAGE: &str = "usage:
   local-studio-serve serve [--port 18093] [--tunnel-port 18094] [--allow-host <name>]... [--allow-tunnel-host <name>]... [--url <wss url>]... [--notify <url>]... [--eukhe <path>] [--name <name>] [--data-dir <dir>]
-  local-studio-serve pair [--url <wss url>] [--port 18093] [--name <name>] [--json] [--data-dir <dir>]
+  local-studio-serve pair [--fleet] [--url <wss url>] [--port 18093] [--name <name>] [--json] [--data-dir <dir>]
   local-studio-serve devices [--data-dir <dir>]
   local-studio-serve revoke (<device id, key fingerprint prefix (8+ hex) or name> | --all) [--data-dir <dir>]
   local-studio-serve allow-host [--remove] [--json] <name> [--data-dir <dir>]
@@ -38,6 +38,7 @@ const USAGE: &str = "usage:
   local-studio-serve project (add <path> | remove <path or project id> | list) [--json] [--data-dir <dir>]
 
 --json prints one object with a \"state\" field, and nothing else on stdout. No command ever prompts.
+pair --fleet mints a pairing with the fleet scope: the device it pairs may send fleet_http to this machine's controller (docs/fleet-links.md). The scope stays in the pending pairing here, never in the link.
 serve reads <data dir>/remote/serve.json and rereads it on SIGHUP and when it changes; flags add to its lists and replace its other fields for that run.
 project asks the process that owns the data dir (serve, or the app while it serves) to add or remove a project, and waits up to 30 s for its answer. It exits 1 when the owner refuses (failed) or nothing owns the data dir (no_owner), and 2 when the owner has not answered yet (queued: the request stays and may still land). list reads state.json when nothing owns it or the owner has not answered.";
 
@@ -556,15 +557,21 @@ fn picked_up(
 
 fn pair(mut args: Args) -> anyhow::Result<()> {
     let out = Out::new(&mut args);
+    let scopes: &[&str] = if args.switch("--fleet") { &[devices::FLEET] } else { &[] };
     let port = args.port()?;
     let url = args.take("--url")?;
     let name = args.take("--name")?.unwrap_or_else(pairing::host_name);
     let data_dir = args.data_dir()?;
     args.done()?;
     let url = url.or_else(pairing::tailscale_url).unwrap_or_else(|| format!("ws://127.0.0.1:{port}/v1/ws"));
-    let pairing::Minted { link, url, expires_at, .. } = pairing::mint(&data_dir, CHANNEL, Some(url), Some(name))?;
+    let pairing::Minted { link, url, expires_at, scopes, .. } =
+        pairing::mint(&data_dir, CHANNEL, Some(url), Some(name), scopes)?;
     if out.json {
-        out.object(&json!({ "state": "minted", "link": link, "url": url, "expiresAt": expires_at }));
+        let mut minted = json!({ "state": "minted", "link": link, "url": url, "expiresAt": expires_at });
+        if !scopes.is_empty() {
+            minted["scopes"] = json!(scopes);
+        }
+        out.object(&minted);
     } else {
         let code = qrcode::QrCode::new(link.as_bytes())?;
         let picture = code
@@ -578,6 +585,9 @@ fn pair(mut args: Args) -> anyhow::Result<()> {
         eprintln!(
             "Scan this with Local Studio on the phone within 10 minutes. It works once; a new code cancels this one."
         );
+        if !scopes.is_empty() {
+            eprintln!("The device it pairs gets the scopes: {}.", scopes.join(", "));
+        }
     }
     let host = url.strip_prefix("wss://").and_then(|rest| rest.split('/').next()).filter(|host| !host.is_empty());
     if let Some(host) = host {
@@ -617,8 +627,10 @@ fn list(mut args: Args) -> anyhow::Result<()> {
         println!("No paired devices. Run `local-studio-serve pair` to pair one.");
     }
     for device in devices {
+        let scopes =
+            if device.scopes.is_empty() { String::new() } else { format!("  scopes {}", device.scopes.join(",")) };
         println!(
-            "{}  {}  key {}  {} {} {}  paired {}, last seen {}",
+            "{}  {}  key {}  {} {} {}  paired {}, last seen {}{scopes}",
             device.info.id,
             device.info.name,
             device.key.get(..16).unwrap_or_default(),

@@ -1097,6 +1097,15 @@ impl Hub {
         }
     }
 
+    // Fleet stream frames go to one connection outside the update sequence: they are never
+    // buffered for resume, since the upstream request ends with the connection anyway.
+    pub fn deliver(&self, device: &str, conn: ConnId, update: &Value) -> bool {
+        let mut state = self.state();
+        let Ok(session) = state.live(device, conn) else { return false };
+        let Some((_, tx)) = session.conn.as_ref() else { return false };
+        tx.send(Out::Frame(json!({ "op": "fleet", "update": update }).to_string()))
+    }
+
     pub fn watch(&self, device: &str, conn: ConnId, thread: &str) -> Result<(), OpError> {
         unknown("thread", thread)?;
         let mut state = self.state();

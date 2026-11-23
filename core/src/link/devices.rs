@@ -10,6 +10,7 @@ use crate::platform::Mode;
 
 pub const PAIRING_TTL_MS: i64 = 10 * 60 * 1000;
 pub const KEY_BYTES: usize = 32;
+pub const FLEET: &str = "fleet";
 const PAIRING_ID_BYTES: usize = 8;
 
 pub struct Psk(pub [u8; KEY_BYTES]);
@@ -85,6 +86,15 @@ pub struct Device {
     pub key: String,
     pub first_seen: i64,
     pub last_seen: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+impl Device {
+    #[must_use]
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|held| held == scope)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -100,6 +110,8 @@ struct Pairing {
     id: String,
     secret: String,
     expires_at: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scopes: Vec<String>,
 }
 
 pub struct Devices {
@@ -202,12 +214,13 @@ impl Devices {
         }
     }
 
-    pub fn open_pairing(&self) -> anyhow::Result<(String, Psk, i64)> {
+    pub fn open_pairing(&self, scopes: &[&str]) -> anyhow::Result<(String, Psk, i64)> {
         let _held = self.hold()?;
         let id = hex(&random::<PAIRING_ID_BYTES>()?);
         let secret = random::<KEY_BYTES>()?;
         let expires_at = now_ms() + PAIRING_TTL_MS;
-        let pairing = Pairing { id: id.clone(), secret: hex(&secret), expires_at };
+        let scopes = scopes.iter().map(|scope| (*scope).to_string()).collect();
+        let pairing = Pairing { id: id.clone(), secret: hex(&secret), expires_at, scopes };
         write_private(&self.pairing, &serde_json::to_vec(&pairing)?)?;
         Ok((id, Psk(secret), expires_at))
     }
@@ -252,17 +265,17 @@ impl Devices {
             return Ok(Err("the device record names no usable device id"));
         }
         let _held = self.hold()?;
-        match self.open()? {
-            Some(pairing) if pairing.id == id && pairing.expires_at >= now_ms() => {}
+        let scopes = match self.open()? {
+            Some(pairing) if pairing.id == id && pairing.expires_at >= now_ms() => pairing.scopes,
             _ => return Ok(Err("the pairing was used or expired during the handshake")),
-        }
+        };
         let mut ledger = self.read()?;
         if ledger.devices.iter().any(|device| device.info.id == info.id) {
             return Ok(Err("a device with this id is already paired"));
         }
         std::fs::remove_file(&self.pairing).with_context(|| format!("remove {}", self.pairing.display()))?;
         let now = now_ms();
-        ledger.devices.push(Device { info, key: hex(key), first_seen: now, last_seen: now });
+        ledger.devices.push(Device { info, key: hex(key), first_seen: now, last_seen: now, scopes });
         write_private(&self.ledger, &serde_json::to_vec_pretty(&ledger)?)?;
         Ok(Ok(()))
     }
