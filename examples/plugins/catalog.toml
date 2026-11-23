@@ -11,11 +11,11 @@ tree = "sha256:46e84a10126c4e5a86e549b420a63ab6989646ec9680f28850ca4ee0afa01267"
 [[plugin]]
 id = "gantrel"
 name = "Gantrel"
-description = "Design 3D printable parts with a local model, plan orientation, supports and settings, then slice, upload and start prints you confirm"
+description = "Design 3D printable parts with a local model, plan orientation, supports and settings, then slice, upload and start prints you confirm, and share tuned printer setups"
 capabilities = ["mcp-server", "ask-user"]
 git = "https://github.com/baney75/Gantrel"
-rev = "825943860872569b9858c8a1b3051eb4adf9861f"
-tree = "sha256:3d05f51eccbe38cf1e27cd939140d9b27576101198c122169e07228195a48e3a"
+rev = "fcfcb25e0477f4ccb965c89c06cdf00ed88c2ae2"
+tree = "sha256:822c1e92cee2b7b8ca10b88e0c286bb57842a4f5dec9cceddb60b33ffa2e6f8d"
 exclude = ["scripts", "tests"]
 
 [[plugin]]
