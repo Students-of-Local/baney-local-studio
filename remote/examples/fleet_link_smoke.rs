@@ -52,6 +52,9 @@ struct Seen {
 
 #[derive(Default)]
 struct Stub {
+    // Serve always sends this key. A request without it is another program probing the port (a Local
+    // controller on this machine scans every listener for /v1/models), and is answered 404 unrecorded.
+    key: String,
     seen: Mutex<Vec<Seen>>,
     closed: Mutex<usize>,
     changed: Notify,
@@ -138,6 +141,10 @@ async fn stub_connection(mut socket: TcpStream, stub: Arc<Stub>) -> anyhow::Resu
     while let Some((seen, body)) = read_request(&mut socket, &mut buffer).await? {
         let text = String::from_utf8_lossy(&body).into_owned();
         let path = seen.target.split('?').next().unwrap_or_default().to_string();
+        if seen.headers.get("authorization") != Some(&format!("Bearer {}", stub.key)) {
+            respond(&mut socket, 404, "text/plain", b"not found").await?;
+            continue;
+        }
         lock(&stub.seen).push(seen);
         stub.changed.notify_waiters();
         match path.as_str() {
@@ -980,7 +987,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::write(controller.join("config.json"), json!({ "fleetKey": key }).to_string())?;
     let stub_listener = TcpListener::bind("127.0.0.1:0").await?;
     let controller_port = stub_listener.local_addr()?.port();
-    let stub = Arc::new(Stub::default());
+    let stub = Arc::new(Stub { key: key.clone(), ..Stub::default() });
     let stub_task = tokio::spawn(stub_serve(stub_listener, Arc::clone(&stub)));
     let scratch = Scratch { root: root.clone(), data: data.clone(), controller, controller_port };
     let port = free_port()?;
