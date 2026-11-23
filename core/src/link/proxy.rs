@@ -308,13 +308,15 @@ async fn handle(inner: &Inner, token: &str, request: Request<Incoming>) -> Reply
         .and_then(|status| StatusCode::from_u16(status).ok())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let kind = result.pointer("/headers/content-type").and_then(Value::as_str);
+    let retry = result.pointer(&format!("/headers/{RETRY}")).and_then(Value::as_str) == Some("1");
+    let marked = |response: Reply| if retry { unsent(response) } else { response };
     if result.get("stream").is_some() {
-        return reply(status, kind, Answer { full: None, pieces: Some(received), cancel: Some(cancel) });
+        return marked(reply(status, kind, Answer { full: None, pieces: Some(received), cancel: Some(cancel) }));
     }
     cancel.disarm();
     match result.get("body").and_then(Value::as_str).map(|body| STANDARD.decode(body)) {
-        None => reply(status, kind, Answer::full(Bytes::new())),
-        Some(Ok(body)) => reply(status, kind, Answer::full(body)),
+        None => marked(reply(status, kind, Answer::full(Bytes::new()))),
+        Some(Ok(body)) => marked(reply(status, kind, Answer::full(body))),
         Some(Err(_)) => {
             let message = format!("{name} answered with a body that is not base64");
             refuse(StatusCode::BAD_GATEWAY, "bad_answer", &message)

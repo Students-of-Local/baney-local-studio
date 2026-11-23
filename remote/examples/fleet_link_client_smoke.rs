@@ -76,6 +76,7 @@ struct Seen {
 
 struct Stub {
     label: &'static str,
+    refuse: &'static str,
     key: String,
     node: String,
     seen: Mutex<Vec<Seen>>,
@@ -85,9 +86,10 @@ struct Stub {
 }
 
 impl Stub {
-    fn new(label: &'static str, key: &str, node: &Value) -> Arc<Self> {
+    fn new(label: &'static str, refuse: &'static str, key: &str, node: &Value) -> Arc<Self> {
         Arc::new(Self {
             label,
+            refuse,
             key: key.to_string(),
             node: node.to_string(),
             seen: Mutex::new(Vec::new()),
@@ -193,6 +195,16 @@ async fn stub_connection(mut socket: TcpStream, stub: Arc<Stub>) -> anyhow::Resu
         match path.as_str() {
             "/api/node" => respond(&mut socket, 200, "application/json", stub.node.as_bytes()).await?,
             "/v1/models" => respond(&mut socket, 200, "application/json", MODELS.as_bytes()).await?,
+            "/v1/chat/completions" if text.contains(stub.refuse) => {
+                let body = br#"{"error":{"code":"upstream_error","message":"no engine took it"}}"#;
+                let head = format!(
+                    "HTTP/1.1 502 Stub\r\ncontent-type: application/json\r\nx-local-studio-retry: 1\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await?;
+                socket.write_all(body).await?;
+                socket.flush().await?;
+            }
             "/v1/chat/completions" if text.contains("hang") => {
                 socket.write_all(SSE_HEAD).await?;
                 socket.write_all(EVENTS[0].as_bytes()).await?;
@@ -1092,6 +1104,25 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
         .await?;
     println!("ok   closing B's client mid-stream cancelled A's request in {} ms", left.elapsed().as_millis());
 
+    let (count, served_c) = (stub_a.count(), stub_c.served().len());
+    let plain =
+        json!({ "model": "shared-model", "stream": false, "messages": [{ "role": "user", "content": "refuse-a" }] });
+    let moved =
+        http.post(format!("{b_url}/v1/chat/completions")).bearer_auth(key_b).json(&plain).timeout(QUICK).send().await?;
+    let failover = moved.headers().get("x-local-studio-failover").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let served = moved.headers().get("x-local-studio-endpoint").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let status = moved.status();
+    moved.bytes().await?;
+    ensure!(stub_a.count() == count + 1, "A's controller never saw the request it refuses");
+    ensure!(
+        status == 200 && failover.as_deref() == Some("1") && served.as_deref() == Some("stub-c:9001"),
+        "a non-streaming chat A refused with 502 and the retry header gave {status}, failover {failover:?}, served by {served:?}"
+    );
+    ensure!(stub_c.served().len() == served_c + 1, "C did not serve the moved request");
+    println!(
+        "ok   a non-streaming chat that A's controller answers 502 with x-local-studio-retry moves from the link to C"
+    );
+
     let count = stub_a.count();
     let proxied = |method: reqwest::Method, path: &str| http.request(method, format!("{peer}{path}")).timeout(QUICK);
     let cluster =
@@ -1409,6 +1440,7 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async move {
         let stub_a = Stub::new(
             "A's controller",
+            "refuse-a",
             &key_a,
             &node(
                 "stub-a",
@@ -1419,6 +1451,7 @@ fn main() -> anyhow::Result<()> {
         );
         let stub_c = Stub::new(
             "C's controller",
+            "refuse-c",
             &key_b,
             &node("stub-c", "Stub C", &c_url, &json!([endpoint("stub-c", 9001, &["shared-model"], 3)])),
         );
