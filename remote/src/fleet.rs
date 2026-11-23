@@ -14,7 +14,9 @@ use tokio::task::AbortHandle;
 
 use crate::devices::{Devices, FLEET};
 use crate::hub::{ConnId, Hub, Out, Tx};
-use crate::limits::{FLEET_BODY, FLEET_CHUNK, FLEET_CONNECT, FLEET_PER_MINUTE, FLEET_STREAMS, FLEET_WINDOW};
+use crate::limits::{
+    FLEET_ANSWER, FLEET_BODY, FLEET_CHUNK, FLEET_CONNECT, FLEET_IDLE, FLEET_PER_MINUTE, FLEET_STREAMS, FLEET_WINDOW,
+};
 use crate::ops::OpError;
 
 const ROUTES: [(&str, &str, bool); 6] = [
@@ -48,7 +50,7 @@ pub struct Fleet {
     hub: Arc<Hub>,
     devices: Devices,
     data_dir: std::path::PathBuf,
-    port: u16,
+    controller: String,
     http: reqwest::Client,
     next: AtomicU64,
     usage: Mutex<HashMap<String, Usage>>,
@@ -207,7 +209,7 @@ impl Fleet {
             hub,
             devices: Devices::new(data_dir),
             data_dir: data_dir.to_path_buf(),
-            port: local_studio_core::fleet::controller_port(),
+            controller: local_studio_core::fleet::controller_url(data_dir),
             http,
             next: AtomicU64::new(0),
             usage: Mutex::new(HashMap::new()),
@@ -264,7 +266,7 @@ impl Fleet {
         }
         mine.recent.push_back(now);
         let call = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let stream = asked.stream.then(|| asked.stream_id.clone().unwrap_or_else(|| format!("f{call}")));
+        let stream = asked.stream.then(|| asked.stream_id.clone().unwrap_or_else(|| format!("~{call}")));
         let (cancel, cancelled) = oneshot::channel();
         mine.calls.insert(call, Call { conn, stream: stream.clone(), cancel: Some(cancel), abort: None });
         let fleet = Arc::clone(self);
@@ -326,8 +328,12 @@ impl Fleet {
     }
 
     fn request(&self, asked: Asked) -> Result<reqwest::RequestBuilder, String> {
-        let mut url = Url::parse(&format!("http://127.0.0.1:{}{}", self.port, asked.path))
-            .map_err(|error| format!("the controller address is not valid: {error}"))?;
+        let mut url = Url::parse(&format!("{}{}", self.controller, asked.path))
+            .map_err(|error| format!("the controller address {} is not valid: {error}", self.controller))?;
+        // Fleet requests carry this machine's fleet key, so they only ever go to a controller on this machine.
+        if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) {
+            return Err(format!("the Local controller address {} is not on this machine", self.controller));
+        }
         if !asked.query.is_empty() {
             url.query_pairs_mut().extend_pairs(&asked.query);
         }
@@ -365,14 +371,20 @@ impl Fleet {
             }
         };
         let sent = tokio::select! {
-            sent = request.send() => sent,
+            sent = tokio::time::timeout(FLEET_ANSWER, request.send()) => {
+                let Ok(sent) = sent else {
+                    reply.status(504, "the Local controller did not answer in time");
+                    return;
+                };
+                sent
+            }
             _ = &mut cancelled => {
                 reply.status(499, "cancelled");
                 return;
             }
         };
         let Ok(mut response) = sent else {
-            reply.status(503, &format!("the Local controller on 127.0.0.1:{} did not answer", self.port));
+            reply.status(503, &format!("the Local controller on {} did not answer", self.controller));
             return;
         };
         let status = response.status().as_u16();
@@ -380,7 +392,11 @@ impl Fleet {
         let Some(stream) = stream else {
             let mut body = Vec::new();
             loop {
-                match response.chunk().await {
+                let Ok(next) = tokio::time::timeout(FLEET_IDLE, response.chunk()).await else {
+                    reply.status(504, "the Local controller's answer stalled");
+                    return;
+                };
+                match next {
                     Ok(Some(bytes)) => {
                         if body.len() + bytes.len() > FLEET_BODY {
                             reply.status(413, &format!("the controller's answer passed {FLEET_BODY} bytes"));
@@ -401,7 +417,10 @@ impl Fleet {
         reply.send(&json!({ "status": status, "headers": headers, "stream": stream }));
         let error = loop {
             let next = tokio::select! {
-                next = response.chunk() => next,
+                next = tokio::time::timeout(FLEET_IDLE, response.chunk()) => match next {
+                    Ok(next) => next,
+                    Err(_) => break Some("the Local controller's stream stalled".to_string()),
+                },
                 _ = &mut cancelled => break Some("cancelled".to_string()),
             };
             match next {

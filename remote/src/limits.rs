@@ -14,7 +14,12 @@ const BAN: Duration = Duration::from_secs(600);
 pub const FLEET_STREAMS: usize = 8;
 pub const FLEET_PER_MINUTE: usize = 32;
 pub const FLEET_WINDOW: Duration = Duration::from_secs(60);
-pub const FLEET_BODY: usize = 6 << 20;
+// A body travels base64 inside one JSON frame of at most 8 MiB, so 4 KiB is kept for the envelope
+// and the rest is base64's 3 bytes per 4: 6,288,384 bytes, just under 6 MiB.
+pub const FLEET_BODY: usize = ((8 << 20) - (4 << 10)) / 4 * 3;
+// A request whose controller sends no headers in this time, or a stream idle this long, ends with 504.
+pub const FLEET_ANSWER: Duration = Duration::from_secs(600);
+pub const FLEET_IDLE: Duration = Duration::from_secs(300);
 pub const FLEET_CHUNK: usize = 64 << 10;
 pub const FLEET_CONNECT: Duration = Duration::from_secs(3);
 

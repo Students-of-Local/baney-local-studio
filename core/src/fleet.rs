@@ -24,7 +24,7 @@ pub fn controller_url(data_dir: &Path) -> String {
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
         .or_else(|| text(&settings(data_dir), "localControllerUrl"))
-        .unwrap_or_else(|| format!("http://127.0.0.1:{DEFAULT_CONTROLLER_PORT}"))
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", controller_port()))
         .trim_end_matches('/')
         .to_string()
 }

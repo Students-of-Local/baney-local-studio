@@ -784,8 +784,10 @@ fn fleet_invite(url: Option<String>, as_json: bool) -> Result<(), String> {
         }
     }
     // Off the tailnet the other machine reaches this one through its public route, so that comes first.
-    let url = url.or_else(|| public_route_url(&data));
-    let minted = pairing::mint(&data, local_studio_core::CHANNEL, url, None, &[devices::FLEET])
+    let url = url.or_else(|| public_route_url(&data)).or_else(pairing::tailscale_url).ok_or_else(|| {
+        "No public route or tailnet name was found, so the other machine could not reach this one. Set one up with `local-studio tunnel setup`, or pass `--url wss://...`.".to_string()
+    })?;
+    let minted = pairing::mint(&data, local_studio_core::CHANNEL, Some(url), None, &[devices::FLEET])
         .map_err(|error| format!("Could not mint a fleet pairing: {error:#}"))?;
     if as_json {
         println!(

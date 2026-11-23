@@ -150,6 +150,7 @@ async fn stub_connection(mut socket: TcpStream, stub: Arc<Stub>) -> anyhow::Resu
         match path.as_str() {
             "/v1/models" => respond(&mut socket, 200, "application/json", MODELS.as_bytes()).await?,
             "/api/node" => respond(&mut socket, 200, "application/json", NODE.as_bytes()).await?,
+            "/v1/messages" | "/v1/responses" => respond(&mut socket, 200, "application/json", b"{}").await?,
             "/v1/chat/completions" if text.contains("silent") => {
                 let mut scratch = [0u8; 1024];
                 while matches!(socket.read(&mut scratch).await, Ok(read) if read > 0) {}
@@ -780,6 +781,20 @@ async fn stages(run_: Run<'_>, stub_task: tokio::task::JoinHandle<()>) -> anyhow
     ensure!(!last.headers.contains_key("x-local-studio-hop"), "GET /api/node carried the hop header");
     ensure!(last.headers.get("authorization") == Some(&format!("Bearer {key}")), "GET /api/node had no fleet key");
     println!("ok   fleet device: GET /api/node 200 with the fleet key and no hop header");
+    for path in ["/v1/messages", "/v1/responses"] {
+        let asked = json!({ "method": "POST", "path": path, "body": STANDARD.encode(b"{}") });
+        let answer = a.result("fleet_http", &asked).await?;
+        ensure!(status_of(&answer) == 200, "POST {path} answered {answer}");
+        let seen = stub.seen();
+        let last = seen.last().context("the stub saw nothing")?;
+        ensure!(last.method == "POST" && last.target == path, "the stub saw {last:?}");
+        ensure!(
+            last.headers.get("x-local-studio-hop").map(String::as_str) == Some("1"),
+            "POST {path} had no hop header"
+        );
+        ensure!(last.headers.get("authorization") == Some(&format!("Bearer {key}")), "POST {path} had no fleet key");
+    }
+    println!("ok   fleet device: POST /v1/messages and /v1/responses reach the controller with the hop header and key");
 
     let chat = json!({
         "method": "POST",
