@@ -4,7 +4,8 @@ Native desktop clients for local LLM work. The agent core is [Eukhe](https://git
 
 ## Architecture
 
-- Eukhe is the core, like libghostty is Ghostty's: sessions, durable storage, the harness, memory, tools and inference live there. Local Studio never reimplements them.
+- Eukhe is the default harness, like libghostty is Ghostty's core: sessions, durable storage, the harness, memory, tools and inference live there. Local Studio never reimplements them.
+- Other harnesses (Claude Code, Codex, any agent) connect over the Agent Client Protocol (ACP) through one ACP client in `core/`; each harness is a launch command for its ACP adapter (`claude-agent-acp`, `codex-acp`). No per-harness drivers, and no code that parses a CLI's own output.
 - The engine runs out of process as the Eukhe daemon (`eukhe --mode daemon`: supervisor + one worker per session), started through `eukhe-client`'s `ProcessLauncher` on Eukhe's socket path. GUIs reach it through the `eukhe-client` crate over the versioned `eukhe.daemon` protocol. A crash in the engine never takes a window down, and every Eukhe frontend can attach to the same session.
 - Shared GUI logic lives once, in Rust (`core/`, crate `local-studio-core`): inbox across projects, transcripts, Local Studio state, git, files, terminals, usage, the Local fleet client, settings. Each GUI does only native chrome:
   - `macos/`: Swift + AppKit/SwiftUI, links the core through UniFFI (`kit/` → `LocalStudioKit`), like Ghostty links `GhosttyKit`.
@@ -14,6 +15,7 @@ Native desktop clients for local LLM work. The agent core is [Eukhe](https://git
 
 ## Rules
 
+- Least maintenance wins: every line here is ours to maintain. Reuse Eukhe, ACP adapters and existing crates before writing code; never copy another project's code in. One change per PR, rebased on main; features outside the app (release channels, hosted services, phone apps) live in their own repos.
 - Logic needed by both GUIs goes in `core/`; platform behavior (windows, menus, toolbars, notifications) stays in the GUI. Never port core logic into Swift or GTK code.
 - Eukhe changes land in the eukhe repo, not as copies or patches here. Both workspaces pin `eukhe-client` and `eukhe-types` to one Eukhe release tag (git dependencies, root `Cargo.toml`); the apps bundle the `eukhe` binary of that same release (`eukhe.nu`: downloaded from the GitHub release and checked against its `SHA256SUMS` into `<target>/eukhe/<tag>/`, or `EUKHE_BIN=<eukhe built from the tag>`). Move both together.
 - Verify end to end: build and run the real binaries. No new unit tests.
