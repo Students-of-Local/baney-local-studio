@@ -13,9 +13,12 @@ export const normUrl = (u: string): string => u.trim().replace(/\/+$/, "");
 
 const isLoopback = (u: string): boolean => /^https?:\/\/(localhost|127\.[\d.]+|\[::1\])(:|$)/.test(u);
 
+export const LINK_PORT = 18095;
+export const LINK_URL = /^http:\/\/127\.0\.0\.1:18095\/m\/[A-Za-z0-9_-]{1,128}$/;
+
 export interface Graph {
   links: LocalControllerLink[];
-  nodes: { url: string; depth: number; node: LocalNode }[];
+  nodes: { url: string; depth: number; node: LocalNode; link: boolean }[];
 }
 
 const usagePath = join(home, "usage.json");
@@ -44,14 +47,19 @@ export const makeGraph = (config: () => Config, self: () => LocalNode) => {
   let cache: { at: number; value: Promise<Graph> } | null = null;
   const seen = new Map<string, { node: LocalNode; at: string; misses: number }>();
 
-  const fetchNode = (url: string) =>
-    fetchJson(`${url}/api/node`, 8_000, { authorization: `Bearer ${config().fleetKey}` }).pipe(
+  const fetchNode = (url: string) => {
+    const started = performance.now();
+    return fetchJson(`${url}/api/node`, 8_000, { authorization: `Bearer ${config().fleetKey}` }).pipe(
       Effect.flatMap((r) => {
         const n = decodeNode(r.body);
         return r.status !== 200 ? Effect.fail(`HTTP ${r.status}`) : n._tag === "Some" ? Effect.succeed(n.value) : Effect.fail("not a Local Studio controller");
       }),
+      Effect.map((n) => ({ node: n, ms: Math.round(performance.now() - started) })),
       Effect.result,
     );
+  };
+
+  const throughLink = (n: LocalNode, ms: number): LocalNode => ({ ...n, endpoints: n.endpoints.map((ep) => ({ ...ep, latencyMs: ms })) });
 
   const walk = Effect.gen(function* () {
     const me = self();
@@ -59,30 +67,33 @@ export const makeGraph = (config: () => Config, self: () => LocalNode) => {
     const urls = new Set([normUrl(me.controller.url)]);
     const links: LocalControllerLink[] = [{ ...me.controller, self: true, reachable: true, error: null, usage: me.usage }];
     const nodes: Graph["nodes"] = [];
-    let frontier = config().peers.map(normUrl);
+    const leaves = new Set((config().linkPeers ?? []).map(normUrl).filter((u) => LINK_URL.test(u)));
+    let frontier = [...config().peers.map(normUrl).filter((u) => !leaves.has(u)), ...leaves];
     for (let depth = 1; depth <= MAX_DEPTH && frontier.length && nodes.length < MAX_NODES; depth++) {
       const batch = [...new Set(frontier)].filter((u) => !urls.has(u)).slice(0, MAX_NODES - nodes.length);
       for (const u of batch) urls.add(u);
       const got = yield* Effect.forEach(batch, (u) => fetchNode(u).pipe(Effect.map((r) => [u, r] as const)), { concurrency: 8 });
       frontier = [];
       for (const [url, r] of got) {
+        const link = depth === 1 && leaves.has(url);
+        const via = link ? { via: "link" as const } : {};
         const prev = seen.get(url);
         if (r._tag === "Failure") {
           const misses = (prev?.misses ?? 0) + 1;
           if (prev) seen.set(url, { ...prev, misses });
           if (!prev || misses >= MISSES) {
-            links.push({ id: prev?.node.controller.id ?? null, name: prev?.node.controller.name ?? null, url, self: false, reachable: false, error: r.failure, seenAt: prev?.at ?? null });
+            links.push({ id: prev?.node.controller.id ?? null, name: prev?.node.controller.name ?? null, url, self: false, reachable: false, error: r.failure, seenAt: prev?.at ?? null, ...via });
             continue;
           }
-        } else seen.set(url, { node: r.success, at: now(), misses: 0 });
-        const n = r._tag === "Success" ? r.success : prev?.node;
+        } else seen.set(url, { node: link ? throughLink(r.success.node, r.success.ms) : r.success.node, at: now(), misses: 0 });
+        const n = seen.get(url)?.node;
         if (!n) continue;
         const error = r._tag === "Failure" ? r.failure : null;
         if (ids.has(n.controller.id)) continue;
         ids.add(n.controller.id);
-        nodes.push({ url, depth, node: n });
-        links.push({ id: n.controller.id, name: n.controller.name, url, self: false, reachable: true, error, seenAt: seen.get(url)?.at ?? null, usage: n.usage });
-        frontier.push(...n.peers.map(normUrl).filter((p) => isLoopback(url) || !isLoopback(p)));
+        nodes.push({ url, depth, node: n, link });
+        links.push({ id: n.controller.id, name: n.controller.name, url, self: false, reachable: true, error, seenAt: seen.get(url)?.at ?? null, usage: n.usage, ...via });
+        if (!link) frontier.push(...n.peers.map(normUrl).filter((p) => !leaves.has(p) && (isLoopback(url) || !isLoopback(p))));
       }
     }
     return { links, nodes };
@@ -105,16 +116,17 @@ export interface Route {
   peer: string | null;
   depth: number;
   cluster: LocalNodeCluster | null;
+  link: boolean;
 }
 
 export const liveModels = (local: (LocalEndpoint & { base: string })[], g: Graph, own: LocalNodeCluster | null = null): Map<string, Route[]> => {
   const out = new Map<string, Route[]>();
-  const add = (ep: LocalEndpoint, base: string, peer: string | null, depth: number, cluster: LocalNodeCluster | null) => {
-    if (ep.live) for (const m of ep.models) out.set(m, [...(out.get(m) ?? []), { endpoint: ep, base, peer, depth, cluster }]);
+  const add = (ep: LocalEndpoint, base: string, peer: string | null, depth: number, cluster: LocalNodeCluster | null, link: boolean) => {
+    if (ep.live) for (const m of ep.models) out.set(m, [...(out.get(m) ?? []), { endpoint: ep, base, peer, depth, cluster, link }]);
   };
-  for (const ep of local) add(ep, ep.base, null, 0, own);
+  for (const ep of local) add(ep, ep.base, null, 0, own, false);
   for (const n of [...g.nodes].sort((a, b) => a.depth - b.depth || a.node.controller.id.localeCompare(b.node.controller.id)))
-    for (const ep of n.node.endpoints) add(ep, n.url, n.url, n.depth, n.node.cluster ?? null);
+    for (const ep of n.node.endpoints) add(ep, n.url, n.url, n.depth, n.node.cluster ?? null, n.link);
   return out;
 };
 

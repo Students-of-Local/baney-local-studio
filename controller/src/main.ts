@@ -7,7 +7,7 @@ import { LOCAL_STUDIO_CONTROLLER_HEADER, LocalAuthorizeRequest, LocalClusterRequ
 import { decodeJson, errorResponse, exec, fail, type HttpError, httpError, json, loadConfig, now, port, saveConfig, VERSION } from "./core.ts";
 import { type Endpoint, listeners, makeScanner } from "./discovery.ts";
 import { autoModel, HOP_HEADER, inFlight, listModels, passthrough, routes } from "./gateway.ts";
-import { graphUsage, makeGraph, makeUsage, normUrl } from "./graph.ts";
+import { graphUsage, LINK_PORT, LINK_URL, makeGraph, makeUsage, normUrl } from "./graph.ts";
 import { authorize, hardware, type RawGpu, readGpuList, readGpus, readThunderbolt } from "./hardware.ts";
 import { makeJobs } from "./jobs.ts";
 import { browse, detect, download, type Library, loadLibrary, matchHardware, record } from "./library.ts";
@@ -85,7 +85,7 @@ const cluster = makeCluster({
 const gw = { config: () => config, local: localEndpoints, usage: () => usage.list(), graph: () => graph.get(), record: usage.record, cluster: () => cluster.node(), failoverMs: () => cluster.failoverMs(), refuse: (ep: Endpoint) => cluster.refuse(ep) };
 
 const excluded = (): Set<number> => {
-  const out = new Set([port, ...config.excludePorts, ...cluster.rpcPorts()]);
+  const out = new Set([port, ...config.excludePorts, ...cluster.rpcPorts(), LINK_PORT]);
   for (const p of config.peers) {
     const u = URL.parse(p);
     if (u && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(u.hostname)) out.add(Number(u.port || 80));
@@ -313,6 +313,12 @@ const handle = async (req: Request, peer: string | null): Promise<Response> => {
   if (post && p === "/api/peers") {
     const b = await body(req, LocalPeerRequest);
     const u = normUrl(b.url);
+    if (b.via === "link") {
+      if (!LINK_URL.test(u)) throw httpError(400, "BAD_URL", `a link peer url must be http://127.0.0.1:${LINK_PORT}/m/<machine id>`);
+      const was = (config.linkPeers ?? []).map(normUrl);
+      const linkPeers = b.remove ? was.filter((x) => x !== u) : [...new Set([...was, u])];
+      return saved({ ...config, linkPeers }, { linkPeers });
+    }
     if (!/^https?:\/\/[^/]+$/.test(u)) throw httpError(400, "BAD_URL", "peer url must be http(s)://host:port");
     if (u === normUrl(config.url)) throw httpError(400, "SELF_PEER", "a controller cannot peer with itself");
     const peers = b.remove ? config.peers.filter((x) => normUrl(x) !== u) : [...new Set([...config.peers.map(normUrl), u])];
