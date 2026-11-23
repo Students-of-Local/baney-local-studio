@@ -262,12 +262,12 @@ impl Fleet {
         let streams = mine.calls.values().filter(|call| call.stream.is_some()).count();
         if mine.recent.len() >= FLEET_PER_MINUTE {
             drop(usage);
-            reply.status(429, &format!("at most {FLEET_PER_MINUTE} fleet requests a minute from one device"));
+            reply.unsent(429, &format!("at most {FLEET_PER_MINUTE} fleet requests a minute from one device"));
             return Ok(());
         }
         if asked.stream && streams >= FLEET_STREAMS {
             drop(usage);
-            reply.status(429, &format!("at most {FLEET_STREAMS} fleet streams at once from one device"));
+            reply.unsent(429, &format!("at most {FLEET_STREAMS} fleet streams at once from one device"));
             return Ok(());
         }
         if let Some(id) = &asked.stream_id {

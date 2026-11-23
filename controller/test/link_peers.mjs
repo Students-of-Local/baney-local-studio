@@ -17,7 +17,7 @@ const auth = { authorization: `Bearer ${key}`, "content-type": "application/json
 const servers = [];
 const children = [];
 const hits = { link: [], tailnet: [], trap: 0, control: 0 };
-const state = { nodeDelay: 400, tailnetRunning: 0 };
+const state = { nodeDelay: 400, tailnetRunning: 0, busy: false };
 
 const listen = async (server, port = 0) => {
   servers.push(server);
@@ -74,13 +74,13 @@ const lending = () => ({
 try {
   const trap = await listen(
     createServer((req, res) => {
-      hits.trap++;
+      if (req.url === "/api/node") hits.trap++;
       json(res, 404, {});
     }),
   );
   const control = await listen(
     createServer((req, res) => {
-      hits.control++;
+      if (req.url === "/api/node") hits.control++;
       json(res, 404, {});
     }),
   );
@@ -105,6 +105,10 @@ try {
   const proxy = createServer(async (req, res) => {
     const raw = await read(req);
     hits.link.push({ method: req.method, url: req.url, headers: req.headers, raw });
+    if (req.url === `/m/${machine}/api/node` && state.busy) {
+      res.writeHead(503, { "content-type": "application/json", "x-local-studio-retry": "1" });
+      return res.end(JSON.stringify({ error: { code: "busy", message: "Linked A is busy: at most 32 fleet requests a minute from one device" } }));
+    }
     if (req.url === `/m/${machine}/api/node`) {
       await new Promise((resolve) => setTimeout(resolve, state.nodeDelay));
       return json(res, 200, {
@@ -257,6 +261,19 @@ try {
   const only = await call("/v1/chat/completions", { model: "link-only", messages: [] });
   assert.equal((await only.json()).served, "link");
 
+  state.busy = true;
+  const polls = () => hits.link.filter((h) => h.url === `/m/${machine}/api/node`).length;
+  for (let round = 1; round <= 4; round++) {
+    const before = polls();
+    assert.equal((await call("/api/peers", { url: linkUrl, via: "link" })).status, 200);
+    const models = await get("/v1/models");
+    assert(polls() > before, "the link peer's /api/node was not polled again");
+    assert(models.data.some((m) => m.id === "link-only"), `a link answering its node poll 503 busy was dropped after ${round} polls`);
+  }
+  const held = (await get("/api/snapshot")).controllers.find((c) => c.id === "link-a");
+  assert.equal(held?.reachable, true, "a busy link peer was marked unreachable");
+  state.busy = false;
+
   const removed = await call("/api/peers", { url: linkUrl, via: "link", remove: true });
   assert.equal(removed.status, 200);
   assert.deepEqual(config().linkPeers, []);
@@ -265,7 +282,7 @@ try {
   assert(!(config().cluster?.ignored ?? []).includes(linkUrl), "removing a link peer touched the tailnet ignore list");
   await waitFor(async () => !(await get("/v1/models")).data.some((m) => m.id === "link-only"), "a removed link peer leaves the gateway");
   console.log(
-    "PASS link peers: exact link urls only, a separate linkPeers list, the proxy token and never the fleet key on link requests, leaf crawl, no pool, rpc or lending, ranked after tailnet copies at equal load, latency through the link.",
+    "PASS link peers: exact link urls only, a separate linkPeers list, the proxy token and never the fleet key on link requests, leaf crawl, no pool, rpc or lending, ranked after tailnet copies at equal load, latency through the link, a busy node poll is not a miss.",
   );
 } finally {
   for (const child of children) child.kill("SIGTERM");

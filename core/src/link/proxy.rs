@@ -301,6 +301,10 @@ async fn handle(inner: &Inner, token: &str, request: Request<Incoming>) -> Reply
             return refused(&name, &code, &message);
         }
     };
+    delivered(&name, &result, received, cancel)
+}
+
+fn delivered(name: &str, result: &Value, received: mpsc::UnboundedReceiver<Piece>, mut cancel: Cancel) -> Reply {
     let status = result
         .get("status")
         .and_then(Value::as_u64)
@@ -310,6 +314,12 @@ async fn handle(inner: &Inner, token: &str, request: Request<Incoming>) -> Reply
     let kind = result.pointer("/headers/content-type").and_then(Value::as_str);
     let retry = result.pointer(&format!("/headers/{RETRY}")).and_then(Value::as_str) == Some("1");
     let marked = |response: Reply| if retry { unsent(response) } else { response };
+    if retry && status == StatusCode::TOO_MANY_REQUESTS {
+        cancel.disarm();
+        let said = result.get("body").and_then(Value::as_str).and_then(|body| STANDARD.decode(body).ok());
+        let said = said.map(|body| String::from_utf8_lossy(&body).into_owned()).unwrap_or_default();
+        return unsent(refuse(StatusCode::SERVICE_UNAVAILABLE, "busy", &format!("{name} is busy: {said}")));
+    }
     if result.get("stream").is_some() {
         return marked(reply(status, kind, Answer { full: None, pieces: Some(received), cancel: Some(cancel) }));
     }

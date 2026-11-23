@@ -1248,10 +1248,40 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
             .await?,
     )
     .await?;
-    ensure!(ninth.status == 429, "a ninth stream through the proxy gave {} {}", ninth.status, ninth.body);
+    ensure!(
+        ninth.status == 503 && ninth.code() == Some("busy") && ninth.header("x-local-studio-retry") == Some("1"),
+        "a ninth stream through the proxy gave {} {:?} {}",
+        ninth.status,
+        ninth.header("x-local-studio-retry"),
+        ninth.body
+    );
+    let (count, served_c) = (stub_a.count(), stub_c.served().len());
+    let response = http
+        .post(format!("{b_url}/v1/chat/completions"))
+        .bearer_auth(key_b)
+        .header("content-type", "application/json")
+        .body(chat("shared-model", "while A is busy"))
+        .timeout(QUICK)
+        .send()
+        .await?;
+    let status = response.status();
+    let failover = response.headers().get("x-local-studio-failover").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let served = response.headers().get("x-local-studio-endpoint").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let got = read_all(response).await?;
+    ensure!(
+        status == 200 && failover.as_deref() == Some("1") && served.as_deref() == Some("stub-c:9001"),
+        "a stream through B's gateway while the link is at its stream limit gave {status}, failover {failover:?}, served by {served:?}"
+    );
+    ensure!(got == EVENTS.concat().as_bytes(), "C's stream arrived changed");
+    ensure!(
+        stub_c.served().len() == served_c + 1 && stub_a.count() == count,
+        "the busy link's stream reached A or missed C"
+    );
     drop(held);
     stub_a.until("eight held streams closed when their clients left", |stub| stub.closed() >= closed + 8).await?;
-    println!("ok   eight streams through the proxy are served and serve's 429 for a ninth passes through");
+    println!(
+        "ok   eight streams through the proxy are served; a ninth gets 503 busy with x-local-studio-retry, and B's gateway moves it to C"
+    );
 
     let minted: Value = serde_json::from_str(
         a.ok(
@@ -1274,6 +1304,49 @@ async fn stages(world: &World, a_serve: &Proc, b_serve: &mut Option<Proc>) -> an
     ensure!(stub_a.count() == count, "the plain phone reached A's controller");
     ensure!(phone.view().fleet == 0, "the plain phone received fleet updates");
     println!("ok   an ordinarily paired phone gets forbidden from fleet_http on A");
+
+    let mut burned = 0;
+    loop {
+        let got = answer(proxied(reqwest::Method::GET, "/v1/models").bearer_auth(&token).send().await?).await?;
+        if got.status == 503 && got.code() == Some("busy") {
+            ensure!(got.header("x-local-studio-retry") == Some("1"), "the busy 503 does not say it is safe to retry");
+            break;
+        }
+        ensure!(got.status == 200, "a GET while burning A's per-minute budget gave {} {}", got.status, got.body);
+        burned += 1;
+        ensure!(burned <= 40, "40 quick GETs through the proxy never reached serve's per-minute limit");
+    }
+    for round in 1..=4 {
+        let again = http
+            .post(format!("{b_url}/api/peers"))
+            .bearer_auth(key_b)
+            .json(&json!({ "url": peer, "via": "link" }))
+            .timeout(QUICK)
+            .send()
+            .await?;
+        ensure!(again.status() == 200, "re-adding the link peer gave {}", again.status());
+        let models =
+            answer(http.get(format!("{b_url}/v1/models")).bearer_auth(key_b).timeout(QUICK).send().await?).await?;
+        ensure!(
+            models.body.to_string().contains("a-model"),
+            "B dropped A after {round} node polls refused under the per-minute limit: {}",
+            models.body
+        );
+    }
+    let snapshot =
+        answer(http.get(format!("{b_url}/api/snapshot")).bearer_auth(key_b).timeout(QUICK).send().await?).await?;
+    let linked = snapshot.body["controllers"]
+        .as_array()
+        .and_then(|all| all.iter().find(|c| c["via"] == "link"))
+        .cloned()
+        .unwrap_or_default();
+    ensure!(
+        linked["reachable"] == true && linked["error"].as_str().is_some_and(|error| error.starts_with("busy")),
+        "the busy link peer shows as {linked}"
+    );
+    println!(
+        "ok   past serve's per-minute limit the proxy answers 503 busy (after {burned} GETs) and four busy node polls keep A reachable on B"
+    );
 
     let readded = http
         .post(format!("{b_url}/api/peers"))

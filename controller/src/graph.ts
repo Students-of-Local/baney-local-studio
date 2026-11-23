@@ -8,6 +8,9 @@ import { MISSES } from "./discovery.ts";
 const MAX_DEPTH = 4;
 const MAX_NODES = 32;
 const decodeNode = Schema.decodeUnknownOption(LocalNode);
+const BUSY = "busy: the link refused the poll under its per-device limit";
+const busy = (body: unknown): boolean =>
+  typeof body === "object" && body !== null && "error" in body && typeof body.error === "object" && body.error !== null && "code" in body.error && body.error.code === "busy";
 
 export const normUrl = (u: string): string => u.trim().replace(/\/+$/, "");
 
@@ -53,6 +56,7 @@ export const makeGraph = (config: () => Config, self: () => LocalNode) => {
     return fetchJson(`${url}/api/node`, 8_000, key ? { authorization: `Bearer ${key}` } : {}).pipe(
       Effect.flatMap((r) => {
         const n = decodeNode(r.body);
+        if (link && r.status === 503 && busy(r.body)) return Effect.fail(BUSY);
         return r.status !== 200 ? Effect.fail(`HTTP ${r.status}`) : n._tag === "Some" ? Effect.succeed(n.value) : Effect.fail("not a Local Studio controller");
       }),
       Effect.map((n) => ({ node: n, ms: Math.round(performance.now() - started) })),
@@ -80,7 +84,7 @@ export const makeGraph = (config: () => Config, self: () => LocalNode) => {
         const via = link ? { via: "link" as const } : {};
         const prev = seen.get(url);
         if (r._tag === "Failure") {
-          const misses = (prev?.misses ?? 0) + 1;
+          const misses = (prev?.misses ?? 0) + Number(r.failure !== BUSY);
           if (prev) seen.set(url, { ...prev, misses });
           if (!prev || misses >= MISSES) {
             links.push({ id: prev?.node.controller.id ?? null, name: prev?.node.controller.name ?? null, url, self: false, reachable: false, error: r.failure, seenAt: prev?.at ?? null, ...via });
