@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 
 use super::{install, load, sync_agent, tree_hash, Capability, Catalog, Consent, Grants, Plugin, Source};
 
+mod compat;
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Temp(PathBuf);
@@ -73,8 +75,18 @@ fn repo(dir: &Path) -> String {
 
 fn catalog(id: &str, repo: &Path, rev: &str) -> Catalog {
     let tree = tree_hash(repo, &[]).unwrap_or_else(|error| panic!("{error}"));
+    let manifest = std::fs::read_to_string(repo.join("plugin.toml")).unwrap_or_else(|error| panic!("{error}"));
+    let manifest: toml::Table = toml::from_str(&manifest).unwrap_or_else(|error| panic!("{error}"));
+    let asks: Vec<String> = manifest
+        .get("capabilities")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(ToString::to_string)
+        .collect();
     Catalog::parse(&format!(
-        "[[plugin]]\nid = \"{id}\"\ngit = \"{}\"\nrev = \"{rev}\"\ntree = \"{tree}\"\n",
+        "[[plugin]]\nid = \"{id}\"\ndescription = \"A test plugin\"\ncapabilities = [{}]\ngit = \"{}\"\nrev = \"{rev}\"\ntree = \"{tree}\"\n",
+        asks.join(", "),
         repo.display()
     ))
     .unwrap_or_else(|error| panic!("{error}"))
