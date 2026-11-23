@@ -7,10 +7,12 @@ use serde_json::{json, Map, Value};
 use crate::model::{CommandKind, SlashCommand};
 
 pub mod ask;
+pub mod compat;
 mod consent;
 mod grants;
 pub mod hub;
 mod install;
+pub mod market;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -179,6 +181,7 @@ pub struct Plugin {
     pub capabilities: Vec<Capability>,
     pub mcp: Option<McpServer>,
     pub local_only: bool,
+    pub skipped: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,14 +394,15 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         Some(relative) => listed_dir(dir, relative, "skills", &mut errors),
         None => Some(dir.join("skills")).filter(|path| path.is_dir()),
     };
-    let skills = skills_dir.map(|path| skills_in(&path, &mut errors)).unwrap_or_default();
+    let mut skipped: Vec<PathBuf> = Vec::new();
+    let skills = skills_dir.map(|path| skills_in(dir, &path, &mut errors, &mut skipped)).unwrap_or_default();
     let prompts = manifest
         .prompts
         .as_deref()
         .and_then(|relative| listed_dir(dir, relative, "prompts", &mut errors))
-        .map(|path| prompts_in(&path))
+        .map(|path| prompts_in(dir, &path, &mut skipped))
         .unwrap_or_default();
-    let commands = commands_in(dir, manifest.commands, &skills, &mut errors);
+    let commands = commands_in(dir, manifest.commands, &skills, &mut errors, &mut skipped);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -416,6 +420,7 @@ pub fn load(dir: &Path) -> Result<Plugin, Vec<String>> {
         capabilities,
         mcp,
         local_only: manifest.local_only,
+        skipped,
     })
 }
 
@@ -518,7 +523,7 @@ pub fn env_prefix(id: &str) -> String {
     format!("LOCAL_STUDIO_PLUGIN_{}__", id.to_ascii_uppercase().replace('-', "_"))
 }
 
-fn valid_env_name(name: &str) -> bool {
+pub(crate) fn valid_env_name(name: &str) -> bool {
     name.chars().next().is_some_and(|first| first.is_ascii_uppercase() || first == '_')
         && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
@@ -687,6 +692,7 @@ fn commands_in(
     listed: Vec<ManifestCommand>,
     skills: &[PluginFile],
     errors: &mut Vec<String>,
+    skipped: &mut Vec<PathBuf>,
 ) -> Vec<PluginCommand> {
     let mut names: HashSet<String> = HashSet::new();
     let mut commands: Vec<PluginCommand> = Vec::new();
@@ -701,11 +707,17 @@ fn commands_in(
         }
         let target = match (command.prompt, command.skill) {
             (Some(prompt), None) => match inside(dir, &prompt) {
-                Ok(path) if path.is_file() => CommandTarget::Prompt(path),
-                Ok(path) => {
-                    errors.push(format!("command {}: missing prompt file: {}", command.name, path.display()));
-                    continue;
-                }
+                Ok(path) => match instruction(dir, &path) {
+                    Ok(Some(_)) => CommandTarget::Prompt(path),
+                    Ok(None) => {
+                        errors.push(format!("command {}: missing prompt file: {}", command.name, path.display()));
+                        continue;
+                    }
+                    Err(_) => {
+                        skipped.push(path);
+                        continue;
+                    }
+                },
                 Err(error) => {
                     errors.push(format!("command {}: {error}", command.name));
                     continue;
@@ -756,45 +768,83 @@ pub(crate) fn inside(dir: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(dir.join(path))
 }
 
-fn skills_in(dir: &Path, errors: &mut Vec<String>) -> Vec<PluginFile> {
-    let mut skills: Vec<PluginFile> = sorted_entries(dir)
-        .into_iter()
-        .filter(|path| path.is_dir())
-        .filter_map(|path| {
-            let file = path.join("SKILL.md");
-            if !file.is_file() {
+pub(crate) fn instruction(dir: &Path, path: &Path) -> Result<Option<String>, String> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(None) };
+    let linked = meta.file_type().is_symlink();
+    let real = match path.canonicalize() {
+        Ok(real) => real,
+        Err(_) if linked => return Err("a symlink that points nowhere; Local Studio skips it".to_string()),
+        Err(_) => return Ok(None),
+    };
+    let base = dir.canonicalize().map_err(|error| format!("cannot resolve {}: {error}", dir.display()))?;
+    if !real.starts_with(&base) {
+        return Err("a link that leaves the plugin; Local Studio skips it".to_string());
+    }
+    let target = std::fs::metadata(&real).map_err(|error| format!("cannot read it: {error}"))?;
+    if !target.is_file() {
+        return if linked {
+            Err("a symlink to something other than a regular file; Local Studio skips it".to_string())
+        } else {
+            Ok(None)
+        };
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    std::fs::File::open(&real)
+        .and_then(|file| std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_FILE + 1), &mut bytes))
+        .map_err(|error| format!("cannot read it: {error}"))?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err("over 10 MB; Local Studio skips it".to_string());
+    }
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn skills_in(plugin: &Path, dir: &Path, errors: &mut Vec<String>, skipped: &mut Vec<PathBuf>) -> Vec<PluginFile> {
+    let mut skills: Vec<PluginFile> = Vec::new();
+    for path in sorted_entries(dir).into_iter().filter(|path| path.is_dir()) {
+        let file = path.join("SKILL.md");
+        let content = match instruction(plugin, &file) {
+            Ok(Some(content)) => content,
+            Ok(None) => {
                 errors.push(format!("missing skill file: {}", file.display()));
-                return None;
+                continue;
             }
-            let content = std::fs::read_to_string(&file).unwrap_or_default();
-            let folder = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
-            let name = frontmatter(&content, "name").unwrap_or(folder);
-            let description = frontmatter(&content, "description").unwrap_or_default();
-            Some(PluginFile { name, description, path: file })
-        })
-        .collect();
+            Err(_) => {
+                skipped.push(file);
+                continue;
+            }
+        };
+        let folder = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+        let name = frontmatter(&content, "name").unwrap_or(folder);
+        let description = frontmatter(&content, "description").unwrap_or_default();
+        skills.push(PluginFile { name, description, path: file });
+    }
     skills.dedup_by(|a, b| a.name == b.name);
     skills
 }
 
-fn prompts_in(dir: &Path) -> Vec<PluginFile> {
-    sorted_entries(dir)
-        .into_iter()
-        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md"))
-        .filter_map(|path| {
-            let name = path.file_stem()?.to_str()?.to_string();
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let description = frontmatter(&content, "description").unwrap_or_else(|| {
-                content
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty() && *line != "---")
-                    .unwrap_or_default()
-                    .to_string()
-            });
-            Some(PluginFile { name, description, path })
-        })
-        .collect()
+fn prompts_in(plugin: &Path, dir: &Path, skipped: &mut Vec<PathBuf>) -> Vec<PluginFile> {
+    let mut prompts: Vec<PluginFile> = Vec::new();
+    for path in sorted_entries(dir).into_iter().filter(|path| path.extension().is_some_and(|ext| ext == "md")) {
+        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()).map(str::to_string) else { continue };
+        let content = match instruction(plugin, &path) {
+            Ok(Some(content)) => content,
+            Ok(None) => continue,
+            Err(_) => {
+                skipped.push(path);
+                continue;
+            }
+        };
+        let description = frontmatter(&content, "description").unwrap_or_else(|| {
+            content
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && *line != "---")
+                .unwrap_or_default()
+                .to_string()
+        });
+        prompts.push(PluginFile { name, description, path });
+    }
+    prompts
 }
 
 fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
@@ -805,7 +855,7 @@ fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
     entries
 }
 
-fn frontmatter(content: &str, key: &str) -> Option<String> {
+pub(crate) fn frontmatter(content: &str, key: &str) -> Option<String> {
     let normalized = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let rest = normalized.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
@@ -824,13 +874,13 @@ pub(crate) fn valid_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn valid_command_name(name: &str) -> bool {
+pub(crate) fn valid_command_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with("skill:")
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
 }
 
-fn valid_semver(version: &str) -> bool {
+pub(crate) fn valid_semver(version: &str) -> bool {
     let (core, build) = version.split_once('+').map_or((version, None), |(core, build)| (core, Some(build)));
     let (core, pre) = core.split_once('-').map_or((core, None), |(core, pre)| (core, Some(pre)));
     let numbers: Vec<&str> = core.split('.').collect();

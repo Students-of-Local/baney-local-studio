@@ -315,6 +315,8 @@ fn fixture(rows: Vec<ConsentRow>, findings: Vec<String>, update_from: Option<&st
         unpinned: false,
         told: false,
         preset: Vec::new(),
+        translated: None,
+        not_used: Vec::new(),
     }
 }
 

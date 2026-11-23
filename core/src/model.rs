@@ -500,6 +500,12 @@ pub struct ConsentRequest {
     pub told: bool,
     #[cfg_attr(feature = "wire", serde(default))]
     pub preset: Vec<String>,
+    #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub translated: Option<String>,
+    #[cfg_attr(feature = "wire", serde(default))]
+    #[cfg_attr(feature = "ffi", uniffi(default = []))]
+    pub not_used: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

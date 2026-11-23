@@ -58,6 +58,8 @@ pub struct Origin {
     pub folder: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub translated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +168,7 @@ impl Source {
     }
 }
 
-fn remote(url: &str, args: &[&str]) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn remote(url: &str, args: &[&str]) -> Result<Vec<(String, String)>, String> {
     let output = Command::new("git")
         .arg("ls-remote")
         .args(args)
@@ -268,10 +270,32 @@ pub fn peek(url: &str, rev: &str, subdir: Option<&str>, since: Option<&str>) -> 
     git(&["config", "remote.origin.partialclonefilter", "blob:none"])?;
     git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", rev])?;
     let folder = subdir.map(|subdir| subdir.trim_end_matches('/'));
-    let path = folder.map_or_else(|| MANIFEST.to_string(), |folder| format!("{folder}/{MANIFEST}"));
-    let text = git(&["show", &format!("{rev}:{path}")]).map_err(|_| format!("{rev} has no {path}"))?;
-    let head: Head =
-        toml::from_str(&text).map_err(|error| format!("invalid {MANIFEST} at {rev}: {}", error.message()))?;
+    let at = |file: &str| folder.map_or_else(|| file.to_string(), |folder| format!("{folder}/{file}"));
+    let path = at(MANIFEST);
+    let head: Head = if let Ok(text) = git(&["show", &format!("{rev}:{path}")]) {
+        toml::from_str(&text).map_err(|error| format!("invalid {MANIFEST} at {rev}: {}", error.message()))?
+    } else {
+        let foreign = [".claude-plugin/plugin.json", "plugin.json", ".codex-plugin/plugin.json"]
+            .iter()
+            .find_map(|file| git(&["show", &format!("{rev}:{}", at(file))]).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        match foreign {
+            Some(manifest) => Head {
+                id: manifest.get("name").and_then(Value::as_str).map(super::compat::fold).unwrap_or_default(),
+                version: manifest
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|version| super::valid_semver(version))
+                    .unwrap_or("0.0.0")
+                    .to_string(),
+                capabilities: Vec::new(),
+            },
+            None if git(&["cat-file", "-e", &format!("{rev}:{}", at("skills"))]).is_ok() => {
+                Head { id: String::new(), version: "0.0.0".to_string(), capabilities: Vec::new() }
+            }
+            None => return Err(format!("{rev} has no {path}")),
+        }
+    };
     let tree = |rev: &str| git(&["rev-parse", &format!("{rev}:{}", folder.unwrap_or_default())]);
     let changed = match since {
         Some(since) => git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", since])
@@ -316,14 +340,18 @@ fn is_hex(text: &str) -> bool {
     text.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-fn full_sha(rev: &str) -> bool {
+pub(crate) fn full_sha(rev: &str) -> bool {
     rev.len() == 40 && is_hex(rev)
 }
 
 pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(root: &Path, what: &str) -> Result<Self, Vec<String>> {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub(crate) fn new(root: &Path, what: &str) -> Result<Self, Vec<String>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
         let dir = root.join(format!(".{what}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|error| vec![format!("cannot create {}: {error}", dir.display())])?;
@@ -349,6 +377,7 @@ pub struct Staged {
     origin: String,
     pin: Option<String>,
     record: Box<Origin>,
+    translated: bool,
 }
 
 pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, Vec<String>> {
@@ -361,13 +390,14 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
         exclude: exclude.to_vec(),
         folder: None,
         pinned,
+        translated: false,
     };
     let mut staged = match source {
-        Source::Dir(dir) => place(root, dir, &[], None, &[], origin)?,
+        Source::Dir(dir) => place(root, dir, &[], None, &[], origin, &folder_name(dir))?,
         Source::Git { url, rev } => {
             let fetched = Scratch::new(root, "fetch")?;
             let flattened = fetch(url, rev, &fetched.0)?;
-            let mut staged = place(root, &fetched.0, &[], None, &flattened, origin)?;
+            let mut staged = place(root, &fetched.0, &[], None, &flattened, origin, &repo_name(url))?;
             staged.record = Box::new(git(url, rev, None, &[], false));
             staged
         }
@@ -375,10 +405,11 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
             let fetched = Scratch::new(root, "fetch")?;
             let flattened = fetch(url, rev, &fetched.0)?;
             let dir = match subdir {
-                Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
+                Some(subdir) => within(&fetched.0, subdir)?,
                 None => fetched.0.clone(),
             };
-            let mut staged = place(root, &dir, exclude, None, &flattened, origin)?;
+            let hint = subdir.as_deref().map_or_else(|| repo_name(url), |subdir| folder_name(Path::new(subdir)));
+            let mut staged = place(root, &dir, exclude, None, &flattened, origin, &hint)?;
             staged.record = Box::new(git(url, rev, subdir.as_ref(), exclude, false));
             staged
         }
@@ -392,7 +423,7 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
                 Some(subdir) => inside(&fetched.0, subdir).map_err(|error| vec![error])?,
                 None => fetched.0.clone(),
             };
-            let mut staged = place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, origin)?;
+            let mut staged = place(root, &dir, &entry.exclude, Some(&entry.tree), &flattened, origin, id)?;
             let asked: Vec<&str> = staged.plugin.capabilities.iter().map(|capability| capability.name()).collect();
             let listed: Vec<&str> = entry.capabilities.iter().map(String::as_str).collect();
             if asked.len() != listed.len() || asked.iter().any(|name| !listed.contains(name)) {
@@ -409,9 +440,33 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
     if let Source::Dir(dir) = source {
         staged.record.folder = Some(super::absolute(dir).to_string_lossy().into_owned());
     }
+    staged.record.translated = staged.translated;
     Ok(staged)
 }
 
+fn folder_name(dir: &Path) -> String {
+    let dir = super::absolute(dir);
+    dir.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string()
+}
+
+fn repo_name(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let last = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
+    last.strip_suffix(".git").unwrap_or(last).to_string()
+}
+
+fn within(base: &Path, subdir: &str) -> Result<PathBuf, Vec<String>> {
+    let dir = inside(base, subdir).map_err(|error| vec![error])?;
+    let real = dir.canonicalize().map_err(|error| vec![format!("{subdir}: {error}")])?;
+    let base = base.canonicalize().map_err(|error| vec![format!("{}: {error}", base.display())])?;
+    if real.starts_with(&base) {
+        Ok(dir)
+    } else {
+        Err(vec![format!("{subdir} leaves the repository")])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn place(
     root: &Path,
     source: &Path,
@@ -419,6 +474,7 @@ fn place(
     expected: Option<&str>,
     flattened: &[PathBuf],
     origin: String,
+    hint: &str,
 ) -> Result<Staged, Vec<String>> {
     let entries = walk(source, exclude, Walk::Install).map_err(|error| vec![error])?;
     let unlinked: Vec<String> = entries
@@ -434,25 +490,69 @@ fn place(
     if !unlinked.is_empty() {
         return Err(unlinked);
     }
-    let refusals = refusals(source, &entries, Walk::Install);
-    if !refusals.is_empty() {
-        return Err(refusals);
+    let foreign = super::compat::foreign(source);
+    if foreign && expected.is_some() {
+        return Err(vec![format!("a catalog plugin ships its own {MANIFEST}, and this one has none")]);
+    }
+    let refused = refusals(source, &entries, Walk::Install, !foreign);
+    if !refused.is_empty() {
+        return Err(refused);
     }
     let tree = hash_entries(source, &entries).map_err(|error| vec![error])?;
     if let Some(expected) = expected.filter(|expected| *expected != tree) {
         return Err(vec![format!("tree hash mismatch: the catalog pins {expected}, the fetched plugin is {tree}")]);
     }
-    let id = manifest_id(source)?;
     let staging = Scratch::new(root, "install")?;
-    let staged = staging.0.join(&id);
+    let id = if foreign { ".translate".to_string() } else { manifest_id(source)? };
+    let mut staged = staging.0.join(&id);
     copy(source, &staged, &entries).map_err(|error| vec![error])?;
     let copied = hash_entries(&staged, &entries).map_err(|error| vec![error])?;
     if copied != tree {
         return Err(vec![format!("the plugin changed while it was installed: hashed {tree}, copied {copied}")]);
     }
+    let (entries, tree) = if foreign {
+        let translation = super::compat::translate(&staged, hint)?;
+        taken(root, &translation.id, &origin)?;
+        let named = staging.0.join(&translation.id);
+        std::fs::rename(&staged, &named).map_err(|error| vec![format!("cannot name the translated copy: {error}")])?;
+        staged = named;
+        let entries = walk(&staged, &[], Walk::Install).map_err(|error| vec![error])?;
+        let refused = refusals(&staged, &entries, Walk::Install, true);
+        if !refused.is_empty() {
+            return Err(refused);
+        }
+        let tree = hash_entries(&staged, &entries).map_err(|error| vec![error])?;
+        (entries, tree)
+    } else {
+        (entries, tree)
+    };
     let plugin = load(&staged)?;
     let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
-    Ok(Staged { staging, plugin, files, tree, origin, pin: expected.map(str::to_string), record: Box::default() })
+    Ok(Staged {
+        staging,
+        plugin,
+        files,
+        tree,
+        origin,
+        pin: expected.map(str::to_string),
+        record: Box::default(),
+        translated: foreign,
+    })
+}
+
+fn taken(root: &Path, id: &str, origin: &str) -> Result<(), Vec<String>> {
+    if std::fs::symlink_metadata(root.join(id)).is_err() {
+        return Ok(());
+    }
+    let grants = Grants::load(root).map_err(|error| vec![error])?;
+    let recorded = grants.granted(id).map(|(_, source, _)| source.to_string()).unwrap_or_default();
+    if recorded == origin {
+        return Ok(());
+    }
+    let from = if recorded.is_empty() { "a source Local Studio did not record".to_string() } else { recorded };
+    Err(vec![format!(
+        "{id} is already installed from {from}, and this plugin from {origin} translates to the same id, so nothing was installed (remove {id} first)"
+    )])
 }
 
 impl Staged {
@@ -481,9 +581,14 @@ impl Staged {
         &self.record
     }
 
+    #[must_use]
+    pub fn translation(&self) -> Option<super::compat::Translation> {
+        super::compat::checked(&self.plugin.dir, self.translated)
+    }
+
     fn verify(&self, staged: &Path) -> Result<(), Vec<String>> {
         let entries = walk(staged, &[], Walk::Consent).map_err(|error| vec![error])?;
-        let mut refused = refusals(staged, &entries, Walk::Install);
+        let mut refused = refusals(staged, &entries, Walk::Install, true);
         if refused.is_empty() {
             let tree = hash_entries(staged, &entries).map_err(|error| vec![error])?;
             if tree != self.tree || self.pin.as_ref().is_some_and(|pin| *pin != tree) {
@@ -764,7 +869,7 @@ fn link_refusal(root: &Path, link: &str, target: &Path, mode: Walk) -> Option<St
     }
 }
 
-fn refusals(root: &Path, entries: &[Entry], mode: Walk) -> Vec<String> {
+fn refusals(root: &Path, entries: &[Entry], mode: Walk, executables: bool) -> Vec<String> {
     let mut refusals: Vec<String> = Vec::new();
     for entry in entries {
         match &entry.kind {
@@ -772,7 +877,12 @@ fn refusals(root: &Path, entries: &[Entry], mode: Walk) -> Vec<String> {
             Kind::File { size, .. } if *size > MAX_FILE => {
                 refusals.push(format!("file over 10 MB: {} ({size} bytes)", entry.path));
             }
-            Kind::File { executable: true, .. } if mode == Walk::Install && !entry.path.starts_with("bin/") => {
+            Kind::File { executable: true, .. }
+                if mode == Walk::Install
+                    && executables
+                    && !entry.path.starts_with("bin/")
+                    && !super::compat::LAUNCHERS.contains(&entry.path.as_str()) =>
+            {
                 refusals.push(format!("executable outside bin/: {}", entry.path));
             }
             Kind::Other if mode == Walk::Install => {
@@ -848,7 +958,7 @@ fn hash_entries(root: &Path, entries: &[Entry]) -> Result<String, String> {
 
 pub fn tree_hash(root: &Path, exclude: &[String]) -> Result<String, String> {
     let entries = walk(root, exclude, Walk::Install)?;
-    let refused = refusals(root, &entries, Walk::Install);
+    let refused = refusals(root, &entries, Walk::Install, true);
     if !refused.is_empty() {
         return Err(refused.join("\n"));
     }
@@ -867,7 +977,7 @@ impl<'a> Live<'a> {
             return Err(format!("the plugin folder is a symlink: {}", root.display()));
         }
         let entries = walk(root, &[], Walk::Consent)?;
-        let refused = refusals(root, &entries, Walk::Consent);
+        let refused = refusals(root, &entries, Walk::Consent, true);
         if !refused.is_empty() {
             return Err(refused.join("; "));
         }
