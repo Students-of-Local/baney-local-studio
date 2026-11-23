@@ -42,9 +42,22 @@ Two ops, added to protocol 2's op table (ops are additive: a server without them
 
 ## The client side
 
-The process that owns the data dir (the desktop app while it runs, otherwise `local-studio-serve`) already keeps every saved link connected (`core/src/link/client.rs`). For each linked machine whose pairing has the fleet scope it also serves a loopback proxy: one listener on `127.0.0.1:18095`, path prefix `/m/<machine id>`. A request there must carry this machine's own fleet key as a bearer token, like the controller's own API; the proxy strips it, sends `fleet_http` over the link, and streams the answer back. A closed client connection sends `fleet_cancel`. When the link is down the proxy answers 503 at once, so the gateway fails over to another copy.
+The process that owns the data dir (the desktop app while it runs, otherwise `local-studio-serve`) already keeps every saved link connected (`core/src/link/client.rs`). The client can't see a pairing's scope, so `fleet join` marks the saved link `"fleet": true` in `<data dir>/remote/links.json`, and only those links get a proxy route; a fleet invite pasted into the ordinary pairing sheet links the machine without one. While at least one fleet link is saved, that process serves a loopback proxy (`core/src/link/proxy.rs`): one listener on `127.0.0.1:18095`, path prefix `/m/<machine id>`. If the port is taken it warns once and keeps trying every 2 s. A request there must carry this machine's own fleet key as a bearer token, like the controller's own API, compared in constant time; a missing or wrong key gets 401 and nothing is sent. The proxy drops the key, sends `fleet_http` with only the allowed headers, and streams the answer back. Every POST goes as a stream with a name the proxy picks, so a closed client connection sends `fleet_cancel` even before the controller answers; GET answers come back whole.
 
-`fleet join <link>` pairs, then adds `http://127.0.0.1:18095/m/<machine id>` to the controller's peers with `"via": "link"` (`POST /api/peers`). A peer URL is otherwise `http(s)://host:port` with no path; a `via: "link"` peer must instead be exactly `http://127.0.0.1:18095/m/<id>`, and the controller stores it in a separate `linkPeers` list so tailnet code never sees it. `forget_machine` removes that peer. The controller treats a link peer like any peer for routing, with three differences:
+| The proxy answers | When |
+| --- | --- |
+| whatever serve answered, 429 included | the request crossed the link |
+| 401 `unauthorized` | the bearer is missing or not this machine's fleet key |
+| 404 `not_found`, `unknown_machine` | the path has no `/m/<id>/` prefix, or no fleet link has that id |
+| 413 `too_large` | the request body is over 6,288,384 bytes; a body up to four times that is read and dropped first so the client sees the answer |
+| 503 `link_down`, with `x-local-studio-retry: 1` | the link is not connected (also after a revoke), so nothing was sent |
+| 503 `link_lost` | the link dropped after the request was sent |
+| 403 `forbidden`, 400 `bad_args` | serve refused the op |
+| 502 `not_remote`, with `x-local-studio-retry: 1` | serve predates the fleet ops |
+
+The 503 with the retry header lets the gateway fail over to another copy at once, streaming or not.
+
+`fleet join <link>` asks the process that owns the data dir to pair, through the requests folder (`<data dir>/remote/requests/<id>.json` with `{"op":"fleet_join","link":...}`, answered in `<id>.done.json`), so the link lives in the process that runs the proxy. With nothing owning the data dir it refuses before using the invite. The desktop app answers that folder only while it serves phones in process (when `serve.json` exists); an app that doesn't leaves the command to time out after 30 s with a message saying so. It then adds `http://127.0.0.1:18095/m/<machine id>` to the controller's peers with `"via": "link"` (`POST /api/peers`). A peer URL is otherwise `http(s)://host:port` with no path; a `via: "link"` peer must instead be exactly `http://127.0.0.1:18095/m/<id>`, and the controller stores it in a separate `linkPeers` list so tailnet code never sees it. `forget_machine` removes that peer (`POST /api/peers` with `"via": "link", "remove": true`). The controller never scans port 18095 for engines. It treats a link peer like any peer for routing, with three differences:
 
 - It is a leaf: the graph reads its `/api/node` but never crawls the peers that node lists, since those addresses are only reachable from the other side.
 - It never joins a pool, never gets an `rpc` request, and is never offered for lending.
@@ -59,3 +72,5 @@ The process that owns the data dir (the desktop app while it runs, otherwise `lo
 ## Done check
 
 Two scratch data dirs on one machine, no tailnet: B runs `local-studio fleet join` with A's `fleet invite` link over `wss://localhost` through link_smoke's test TLS terminator. B's gateway lists A's model, a streaming chat request to B is served by A's engine through the link with the hop header set, closing the client mid-stream cancels A's request, `POST /api/cluster` and `GET /api/snapshot` sent through B's proxy are refused by A's serve with `forbidden`, a phone paired the ordinary way gets `forbidden` from `fleet_http`, and revoking B on A makes B's next request fail over within one try.
+
+`fleet_link_client_smoke` runs it, with a stub controller in place of A's and a stub tailnet peer C for B to fail over to (AGENTS.md, checks).
