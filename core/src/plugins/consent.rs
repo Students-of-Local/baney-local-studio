@@ -91,7 +91,7 @@ pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Off
     let plugin = staged.plugin();
     let old = load(&root.join(&plugin.id)).ok();
     let asked = asked(plugin, staged.tree(), staged.origin(), &Grants::load(root)?, old.as_ref());
-    let translation = report(&plugin.dir);
+    let translation = staged.translation();
     let shown = notable(plugin, translation.as_ref());
     let new = match &old {
         None => translation.is_some() || !shown.is_empty(),
@@ -114,7 +114,7 @@ pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Off
             ("the Local Studio catalog".to_string(), catalog.entry(id).map(|entry| entry.rev.clone()))
         }
     };
-    let (_, findings) = scanned(plugin)?;
+    let (_, findings) = scanned(plugin, translation.as_ref())?;
     let mut request = sheet(request, plugin, (from, pin), staged.files(), findings, &asked, translation.as_ref());
     request.install = true;
     request.unpinned = !source.pinned();
@@ -143,14 +143,15 @@ pub fn offer_capabilities(
         return Err(format!("{} asks for nothing more", plugin.name));
     }
     let tree = live_hash(&plugin.dir)?;
-    let (files, findings) = scanned(plugin)?;
+    let translation = report(&plugin.dir);
+    let (files, findings) = scanned(plugin, translation.as_ref())?;
     let from = match grants.granted(&plugin.id).map(|(_, source, _)| source).unwrap_or_default() {
         source if source.starts_with("catalog ") => "the Local Studio catalog".to_string(),
         source if source.starts_with("git ") => source.trim_start_matches("git ").to_string(),
         "" => "a folder Local Studio did not install".to_string(),
         _ => "a local folder".to_string(),
     };
-    let request = sheet(request, plugin, (from, None), files, findings, missing, report(&plugin.dir).as_ref());
+    let request = sheet(request, plugin, (from, None), files, findings, missing, translation.as_ref());
     Ok(Pending { request, asked: missing.to_vec(), kind: Kind::Grant { plugin: plugin.clone(), tree } })
 }
 
@@ -166,7 +167,7 @@ pub fn answer(root: &Path, pending: Pending, sensitive: &[String]) -> Result<Str
     }
     match pending.kind {
         Kind::Install(staged) => {
-            if scanned(staged.plugin())?.1 != pending.request.findings {
+            if scanned(staged.plugin(), staged.translation().as_ref())?.1 != pending.request.findings {
                 return Err(format!(
                     "{} changed after the sheet opened, so nothing was installed or granted",
                     staged.plugin().id
@@ -254,13 +255,11 @@ fn granted_now(plugin: &Plugin, capability: Capability) -> bool {
     Grants::load(&root).is_ok_and(|grants| grants.standing(plugin).1.contains(&capability))
 }
 
-fn scanned(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
+fn scanned(plugin: &Plugin, translation: Option<&Translation>) -> Result<(usize, Vec<String>), String> {
     let (files, executables) = survey(plugin)?;
     let mut findings: Vec<String> =
         executables.into_iter().map(|path| format!("executable not named in the manifest: {path}")).collect();
-    findings.extend(
-        report(&plugin.dir).into_iter().flat_map(|translation| translation.findings).map(|finding| finding.to_string()),
-    );
+    findings.extend(translation.into_iter().flat_map(|translation| &translation.findings).map(ToString::to_string));
     findings.extend(text_findings(plugin).into_iter().map(|finding| finding.to_string()));
     Ok((files, findings))
 }
@@ -287,17 +286,30 @@ fn sheet(
     asked: &[Capability],
     translation: Option<&Translation>,
 ) -> ConsentRequest {
-    let original =
-        translation.and_then(|translation| translation.server.as_ref()).map(|server| server.original.clone());
-    let command = original.or_else(|| {
-        plugin.mcp.as_ref().map(|mcp| {
-            let name = mcp.command.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            std::iter::once(name)
-                .chain(mcp.args.iter().map(|arg| arg.replace(super::GRANTED, "<allowed>")))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+    let program = plugin
+        .mcp
+        .as_ref()
+        .map(|mcp| mcp.command.strip_prefix(&plugin.dir).unwrap_or(&mcp.command).to_string_lossy().replace('\\', "/"));
+    let command = plugin.mcp.as_ref().zip(program.as_ref()).map(|(mcp, program)| {
+        let real = std::iter::once(program.clone())
+            .chain(mcp.args.iter().map(|arg| arg.replace(super::GRANTED, "<allowed>")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match translation.and_then(|translation| translation.server.as_ref()) {
+            Some(server) => format!("{real} (from {}: {})", server.from, server.original),
+            None => real,
+        }
     });
+    let not_used = translation
+        .map(|translation| {
+            translation
+                .not_used
+                .iter()
+                .filter(|item| program.as_ref().is_none_or(|program| !names(item, program)))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     let rows = asked
         .iter()
         .map(|capability| ConsentRow {
@@ -326,6 +338,10 @@ fn sheet(
         told: plugin.told(),
         preset: Vec::new(),
         translated: translation.map(Translation::summary),
-        not_used: translation.map(|translation| translation.not_used.clone()).unwrap_or_default(),
+        not_used,
     }
+}
+
+fn names(item: &str, file: &str) -> bool {
+    item.split_whitespace().any(|word| word.trim_end_matches([':', ',', ';', ')']).trim_start_matches('(') == file)
 }

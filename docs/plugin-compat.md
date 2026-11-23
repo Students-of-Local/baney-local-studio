@@ -14,6 +14,8 @@ Local Studio translates at install, never at load. `local-studio plugin install`
 
 A folder that has its own `plugin.toml` is native, whatever else it holds. Hildegard, which ships both, installs as native.
 
+The plugin never decides whether it counts as translated. That header is only a note for people. When install runs the translation, it writes `translated: true` into that plugin's entry in `origins.json`, in the plugins folder, which no plugin writes. Local Studio treats an installed plugin as translated only when that record says so and the folder still holds exactly that translation: the `plugin.toml` it would write from the folder today (the version in the header aside) and the same launcher. Otherwise the plugin is native, so a native plugin that copies the header and ships a `.claude-plugin/plugin.json` gets a native sheet.
+
 ## Which manifests
 
 | Found (first match wins) | Kind |
@@ -75,8 +77,10 @@ A translated plugin asks for no capability beyond `mcp-server`. It can't ask que
 The consent sheet for a translated plugin adds, above the rows:
 
 - the kind and the manifest it came from ("A Claude Code plugin, translated by Local Studio from .claude-plugin/plugin.json"), and the source with its commit, as for any git install;
-- "Not used by Local Studio": every hook, agent, LSP server, monitor, server that was not set up, and `bin/` file, by name, each with the reason;
+- "Not used by Local Studio": every hook, agent, LSP server, monitor, server that was not set up, and `bin/` file, by name, each with the reason. It never names a file the server runs;
 - the findings, which for every plugin, native or not, now also include the text findings below.
+
+The `mcp-server` row's scope line always names the command that runs, from `[mcp]`, as a path inside the plugin with its arguments: `.local-studio/mcp` for a launcher, `bin/server` for a native server. For a translated plugin the original declaration follows it, never instead of it: "Starts .local-studio/mcp (from .mcp.json: node ${CLAUDE_PLUGIN_ROOT}/server.js) when a thread uses it."
 
 On the wire these are two optional fields of `ConsentRequest`: `translated` (that first line, absent for a native plugin) and `notUsed` (the list). The command lines and text findings go into the existing `findings` list, after the executables, so the existing gate covers them: Install stays off until the person opens the findings, as it does today for executables. A sheet opens for every translated install, and for any install with text findings, even when the plugin asks for no capability.
 

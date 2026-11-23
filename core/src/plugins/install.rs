@@ -58,6 +58,8 @@ pub struct Origin {
     pub folder: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub translated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +377,7 @@ pub struct Staged {
     origin: String,
     pin: Option<String>,
     record: Box<Origin>,
+    translated: bool,
 }
 
 pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, Vec<String>> {
@@ -387,6 +390,7 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
         exclude: exclude.to_vec(),
         folder: None,
         pinned,
+        translated: false,
     };
     let mut staged = match source {
         Source::Dir(dir) => place(root, dir, &[], None, &[], origin, &folder_name(dir))?,
@@ -436,6 +440,7 @@ pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, 
     if let Source::Dir(dir) = source {
         staged.record.folder = Some(super::absolute(dir).to_string_lossy().into_owned());
     }
+    staged.record.translated = staged.translated;
     Ok(staged)
 }
 
@@ -523,7 +528,16 @@ fn place(
     };
     let plugin = load(&staged)?;
     let files = entries.iter().filter(|entry| !matches!(entry.kind, Kind::Dir)).count();
-    Ok(Staged { staging, plugin, files, tree, origin, pin: expected.map(str::to_string), record: Box::default() })
+    Ok(Staged {
+        staging,
+        plugin,
+        files,
+        tree,
+        origin,
+        pin: expected.map(str::to_string),
+        record: Box::default(),
+        translated: foreign,
+    })
 }
 
 fn taken(root: &Path, id: &str, origin: &str) -> Result<(), Vec<String>> {
@@ -565,6 +579,11 @@ impl Staged {
     #[must_use]
     pub fn record(&self) -> &Origin {
         &self.record
+    }
+
+    #[must_use]
+    pub fn translation(&self) -> Option<super::compat::Translation> {
+        super::compat::checked(&self.plugin.dir, self.translated)
     }
 
     fn verify(&self, staged: &Path) -> Result<(), Vec<String>> {

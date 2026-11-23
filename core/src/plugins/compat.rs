@@ -77,6 +77,7 @@ pub struct Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Server {
     pub name: String,
+    pub from: String,
     pub original: String,
     run: Run,
     host: BTreeMap<String, String>,
@@ -134,15 +135,42 @@ impl Translation {
     }
 }
 
-/// The translation an installed plugin came from, read again from its folder, or `None` for a native one.
+/// The translation an installed plugin came from, or `None` for a native one.
 #[must_use]
 pub fn report(dir: &Path) -> Option<Translation> {
-    let text = read_text(&dir.join(MANIFEST))?;
-    if !text.starts_with(GENERATED) {
+    let root = dir.parent()?;
+    let id = dir.file_name()?.to_str()?;
+    let recorded = super::Origins::load(root).ok()?.get(id).is_some_and(|origin| origin.translated);
+    checked(dir, recorded)
+}
+
+pub(crate) fn checked(dir: &Path, recorded: bool) -> Option<Translation> {
+    if !recorded {
         return None;
     }
     let hint = dir.canonicalize().ok()?.file_name()?.to_str()?.to_string();
-    analyze(dir, &hint).ok().flatten()
+    let translation = analyze(dir, &hint).ok().flatten()?;
+    let written = std::fs::read_to_string(dir.join(MANIFEST)).ok()?;
+    if unstamped(&written)? != unstamped(&manifest(&translation))? {
+        return None;
+    }
+    for path in LAUNCHERS {
+        let on_disk = std::fs::symlink_metadata(dir.join(path))
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .and_then(|_| std::fs::read_to_string(dir.join(path)).ok());
+        let expected = if path == LAUNCHER && translation.uses_launcher() { launcher(&translation).ok() } else { None };
+        if on_disk != expected {
+            return None;
+        }
+    }
+    Some(translation)
+}
+
+fn unstamped(text: &str) -> Option<(&str, &str)> {
+    let (first, rest) = text.split_once('\n')?;
+    let (_, from) = first.strip_prefix(GENERATED)?.split_once(" from ")?;
+    Some((from, rest))
 }
 
 pub(crate) fn foreign(dir: &Path) -> bool {
@@ -284,21 +312,15 @@ fn claude(dir: &Path, manifest: &Map<String, Value>) -> Result<Translation, Stri
     let skills = skills(dir, manifest.get("skills"), &mut not_used);
     let mut findings: Vec<Finding> = Vec::new();
     let commands = commands(dir, manifest.get("commands"), &mut not_used, &mut findings);
-    let mut configs: Vec<(String, Map<String, Value>)> = Vec::new();
+    let mut configs: Vec<Config> = Vec::new();
     if dir.join(".mcp.json").is_file() {
-        servers_in(dir, &Value::String("./.mcp.json".to_string()), &mut configs, &mut not_used);
+        servers_in(dir, CLAUDE, &Value::String("./.mcp.json".to_string()), &mut configs, &mut not_used);
     }
     if let Some(value) = manifest.get("mcpServers") {
-        servers_in(dir, value, &mut configs, &mut not_used);
+        servers_in(dir, CLAUDE, value, &mut configs, &mut not_used);
     }
     let server = server(dir, &base.id, configs, &mut not_used);
-    let used = server.as_ref().and_then(|server| match &server.run {
-        Run::Direct { command, .. } => Some(command.clone()),
-        Run::Launcher { program, .. } => match program.as_slice() {
-            [Part::Root, Part::Text(rest)] => Some(rest.trim_start_matches('/').to_string()),
-            _ => None,
-        },
-    });
+    let used = server.as_ref().map(|server| runs(dir, server)).unwrap_or_default();
     hooks(dir, manifest.get("hooks"), "hooks/hooks.json", &mut not_used);
     for (key, default, what) in [
         ("agents", "agents", "agent"),
@@ -326,7 +348,7 @@ fn claude(dir: &Path, manifest: &Map<String, Value>) -> Result<Translation, Stri
         .or_else(|| manifest.get("monitors"));
     monitors_in(dir, monitors, &mut not_used);
     for file in files_under(dir, "bin") {
-        if used.as_deref() != Some(file.as_str()) {
+        if !used.contains(&file) {
             not_used.push(format!("{file}: Claude Code puts it on the PATH; Local Studio does not"));
         }
     }
@@ -374,12 +396,12 @@ fn codex(
         .and_then(Value::as_str)
         .and_then(|icon| local_file(dir, icon));
     let skills = skills(dir, manifest.get("skills"), &mut not_used);
-    let mut configs: Vec<(String, Map<String, Value>)> = Vec::new();
+    let mut configs: Vec<Config> = Vec::new();
     if portable.is_some() && dir.join("mcp.json").is_file() {
-        servers_in(dir, &Value::String("./mcp.json".to_string()), &mut configs, &mut not_used);
+        servers_in(dir, path, &Value::String("./mcp.json".to_string()), &mut configs, &mut not_used);
     }
     if let Some(value) = manifest.get("mcpServers") {
-        servers_in(dir, value, &mut configs, &mut not_used);
+        servers_in(dir, path, value, &mut configs, &mut not_used);
     }
     let server = server(dir, &base.id, configs, &mut not_used);
     hooks(dir, openai.and_then(|openai| openai.get("hooks")), "hooks/hooks.json", &mut not_used);
@@ -763,14 +785,25 @@ fn monitors_in(dir: &Path, listed: Option<&Value>, not_used: &mut Vec<String>) {
     }
 }
 
-fn servers_in(dir: &Path, value: &Value, configs: &mut Vec<(String, Map<String, Value>)>, not_used: &mut Vec<String>) {
-    let mut add = |name: &str, config: &Value, configs: &mut Vec<(String, Map<String, Value>)>| {
+type Config = (String, String, Map<String, Value>);
+
+fn runs(dir: &Path, server: &Server) -> BTreeSet<String> {
+    match &server.run {
+        Run::Direct { command, .. } => std::iter::once(command.clone()).collect(),
+        Run::Launcher { program, args, .. } => {
+            std::iter::once(program).chain(args).filter_map(|parts| file_in(dir, parts, ".")).collect()
+        }
+    }
+}
+
+fn servers_in(dir: &Path, manifest: &str, value: &Value, configs: &mut Vec<Config>, not_used: &mut Vec<String>) {
+    let mut add = |name: &str, from: &str, config: &Value, configs: &mut Vec<Config>| {
         let Some(config) = config.as_object() else {
             not_used.push(format!("MCP server {name}: its entry is not a JSON object"));
             return;
         };
-        configs.retain(|(other, _)| other != name);
-        configs.push((name.to_string(), config.clone()));
+        configs.retain(|(other, _, _)| other != name);
+        configs.push((name.to_string(), from.to_string(), config.clone()));
     };
     match value {
         Value::String(path) => {
@@ -778,8 +811,11 @@ fn servers_in(dir: &Path, value: &Value, configs: &mut Vec<(String, Map<String, 
                 not_used.push(format!("MCP bundle {path}: Local Studio does not unpack or download bundles"));
                 return;
             }
-            let object = local_file(dir, path).map(|relative| json_object(dir, &relative));
-            let Some(Ok(Some(object))) = object else {
+            let Some(relative) = local_file(dir, path) else {
+                not_used.push(format!("MCP servers in {path}: missing, outside the plugin or not JSON"));
+                return;
+            };
+            let Ok(Some(object)) = json_object(dir, &relative) else {
                 not_used.push(format!("MCP servers in {path}: missing, outside the plugin or not JSON"));
                 return;
             };
@@ -788,31 +824,26 @@ fn servers_in(dir: &Path, value: &Value, configs: &mut Vec<(String, Map<String, 
                 _ => object,
             };
             for (name, config) in &servers {
-                add(name, config, configs);
+                add(name, &relative, config, configs);
             }
         }
         Value::Object(servers) => {
             for (name, config) in servers {
-                add(name, config, configs);
+                add(name, manifest, config, configs);
             }
         }
         Value::Array(items) => {
             for item in items {
-                servers_in(dir, item, configs, not_used);
+                servers_in(dir, manifest, item, configs, not_used);
             }
         }
         _ => {}
     }
 }
 
-fn server(
-    dir: &Path,
-    id: &str,
-    configs: Vec<(String, Map<String, Value>)>,
-    not_used: &mut Vec<String>,
-) -> Option<Server> {
+fn server(dir: &Path, id: &str, configs: Vec<Config>, not_used: &mut Vec<String>) -> Option<Server> {
     if configs.len() > 1 {
-        for (name, _) in &configs {
+        for (name, _, _) in &configs {
             not_used.push(format!(
                 "MCP server {name}: the plugin has {} servers, and Local Studio sets up a plugin's server only when it has one",
                 configs.len()
@@ -820,8 +851,8 @@ fn server(
         }
         return None;
     }
-    let (name, config) = configs.into_iter().next()?;
-    match one_server(dir, id, &name, &config) {
+    let (name, from, config) = configs.into_iter().next()?;
+    match one_server(dir, id, &name, &from, &config) {
         Ok(server) => Some(server),
         Err(reason) => {
             not_used.push(format!("MCP server {name}: {reason}"));
@@ -899,7 +930,7 @@ fn shebang(dir: &Path, relative: &str) -> Option<String> {
     ["node", "python3", "python", "bun", "deno"].contains(&program).then(|| program.to_string())
 }
 
-fn one_server(dir: &Path, id: &str, name: &str, config: &Map<String, Value>) -> Result<Server, String> {
+fn one_server(dir: &Path, id: &str, name: &str, from: &str, config: &Map<String, Value>) -> Result<Server, String> {
     let kind = config.get("type").and_then(Value::as_str).unwrap_or("stdio");
     if let Some(url) = config.get("url").and_then(Value::as_str) {
         return Err(format!("a remote server at {url}; the tree hash can't cover what it runs"));
@@ -986,7 +1017,7 @@ fn one_server(dir: &Path, id: &str, name: &str, config: &Map<String, Value>) -> 
         }
         _ => Run::Launcher { program, args: launch_args, env },
     };
-    let server = Server { name: name.to_string(), original, run, host };
+    let server = Server { name: name.to_string(), from: from.to_string(), original, run, host };
     if matches!(server.run, Run::Launcher { .. }) {
         render(&server, id, cfg!(windows))?;
     }

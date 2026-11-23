@@ -585,7 +585,7 @@ else
   rows=$(echo "$out" | sed -n 's/^SHEET .* rows=//p')
   if [ "$rows" = "mcp-server:needed,ask-user:needed,screen-capture:sensitive,site-secrets:sensitive" ] \
     && echo "$out" | grep -q '^SHEET Sheet 1.0.0 from=- source=a local folder pin=- files=3 findings=1 ' \
-    && echo "$out" | grep -q '^ROW mcp-server | Give agents tools | Starts server mcp when a thread uses it. | -$' \
+    && echo "$out" | grep -q '^ROW mcp-server | Give agents tools | Starts bin/server mcp when a thread uses it. | -$' \
     && echo "$out" | grep -q '^ROW screen-capture | See the windows or tabs it opened | .* | page screenshots$'; then
     pass "#14 a new install lists every capability, needed and sensitive, with the scan finding"
   else
