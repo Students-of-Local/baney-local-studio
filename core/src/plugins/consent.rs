@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
+use super::compat::{report, text_findings, Translation};
 use super::install::{live_hash, survey};
 use super::{load, stage, Capability, Catalog, Consent, Grants, Plugin, Source, Staged};
 use crate::model::{ConsentNeed, ConsentRequest, ConsentRow};
@@ -90,7 +91,16 @@ pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Off
     let plugin = staged.plugin();
     let old = load(&root.join(&plugin.id)).ok();
     let asked = asked(plugin, staged.tree(), staged.origin(), &Grants::load(root)?, old.as_ref());
-    if asked.is_empty() {
+    let translation = report(&plugin.dir);
+    let shown = notable(plugin, translation.as_ref());
+    let new = match &old {
+        None => translation.is_some() || !shown.is_empty(),
+        Some(old) => {
+            let before = notable(old, report(&old.dir).as_ref());
+            shown.iter().any(|item| !before.contains(item))
+        }
+    };
+    if asked.is_empty() && !new {
         let installed = staged.commit_with(root, Some((&[], &[]))).map_err(|errors| errors.join("; "))?;
         let message = summary(&installed.plugin, &installed.consent, Some(old.is_some()), 0);
         return Ok(Offer::Installed(
@@ -105,7 +115,7 @@ pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Off
         }
     };
     let (_, findings) = scanned(plugin)?;
-    let mut request = sheet(request, plugin, (from, pin), staged.files(), findings, &asked);
+    let mut request = sheet(request, plugin, (from, pin), staged.files(), findings, &asked, translation.as_ref());
     request.install = true;
     request.unpinned = !source.pinned();
     request.update_from = old.map(|old| old.version);
@@ -140,7 +150,7 @@ pub fn offer_capabilities(
         "" => "a folder Local Studio did not install".to_string(),
         _ => "a local folder".to_string(),
     };
-    let request = sheet(request, plugin, (from, None), files, findings, missing);
+    let request = sheet(request, plugin, (from, None), files, findings, missing, report(&plugin.dir).as_ref());
     Ok(Pending { request, asked: missing.to_vec(), kind: Kind::Grant { plugin: plugin.clone(), tree } })
 }
 
@@ -245,8 +255,23 @@ fn granted_now(plugin: &Plugin, capability: Capability) -> bool {
 }
 
 fn scanned(plugin: &Plugin) -> Result<(usize, Vec<String>), String> {
-    let (files, findings) = survey(plugin)?;
-    Ok((files, findings.into_iter().map(|path| format!("executable not named in the manifest: {path}")).collect()))
+    let (files, executables) = survey(plugin)?;
+    let mut findings: Vec<String> =
+        executables.into_iter().map(|path| format!("executable not named in the manifest: {path}")).collect();
+    findings.extend(
+        report(&plugin.dir).into_iter().flat_map(|translation| translation.findings).map(|finding| finding.to_string()),
+    );
+    findings.extend(text_findings(plugin).into_iter().map(|finding| finding.to_string()));
+    Ok((files, findings))
+}
+
+fn notable(plugin: &Plugin, translation: Option<&Translation>) -> BTreeSet<String> {
+    let mut items: BTreeSet<String> = text_findings(plugin).iter().map(super::compat::Finding::key).collect();
+    if let Some(translation) = translation {
+        items.extend(translation.findings.iter().map(super::compat::Finding::key));
+        items.extend(translation.not_used.iter().cloned());
+    }
+    items
 }
 
 fn grant_request(plugin: &Plugin) -> String {
@@ -260,13 +285,18 @@ fn sheet(
     files: usize,
     findings: Vec<String>,
     asked: &[Capability],
+    translation: Option<&Translation>,
 ) -> ConsentRequest {
-    let command = plugin.mcp.as_ref().map(|mcp| {
-        let name = mcp.command.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        std::iter::once(name)
-            .chain(mcp.args.iter().map(|arg| arg.replace(super::GRANTED, "<allowed>")))
-            .collect::<Vec<_>>()
-            .join(" ")
+    let original =
+        translation.and_then(|translation| translation.server.as_ref()).map(|server| server.original.clone());
+    let command = original.or_else(|| {
+        plugin.mcp.as_ref().map(|mcp| {
+            let name = mcp.command.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            std::iter::once(name)
+                .chain(mcp.args.iter().map(|arg| arg.replace(super::GRANTED, "<allowed>")))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
     });
     let rows = asked
         .iter()
@@ -295,5 +325,7 @@ fn sheet(
         unpinned: false,
         told: plugin.told(),
         preset: Vec::new(),
+        translated: translation.map(Translation::summary),
+        not_used: translation.map(|translation| translation.not_used.clone()).unwrap_or_default(),
     }
 }

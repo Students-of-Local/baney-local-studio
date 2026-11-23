@@ -7,10 +7,12 @@ use serde_json::{json, Map, Value};
 use crate::model::{CommandKind, SlashCommand};
 
 pub mod ask;
+pub mod compat;
 mod consent;
 mod grants;
 pub mod hub;
 mod install;
+pub mod market;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -518,7 +520,7 @@ pub fn env_prefix(id: &str) -> String {
     format!("LOCAL_STUDIO_PLUGIN_{}__", id.to_ascii_uppercase().replace('-', "_"))
 }
 
-fn valid_env_name(name: &str) -> bool {
+pub(crate) fn valid_env_name(name: &str) -> bool {
     name.chars().next().is_some_and(|first| first.is_ascii_uppercase() || first == '_')
         && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
@@ -805,7 +807,7 @@ fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
     entries
 }
 
-fn frontmatter(content: &str, key: &str) -> Option<String> {
+pub(crate) fn frontmatter(content: &str, key: &str) -> Option<String> {
     let normalized = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let rest = normalized.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
@@ -824,13 +826,13 @@ pub(crate) fn valid_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn valid_command_name(name: &str) -> bool {
+pub(crate) fn valid_command_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with("skill:")
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
 }
 
-fn valid_semver(version: &str) -> bool {
+pub(crate) fn valid_semver(version: &str) -> bool {
     let (core, build) = version.split_once('+').map_or((version, None), |(core, build)| (core, Some(build)));
     let (core, pre) = core.split_once('-').map_or((core, None), |(core, pre)| (core, Some(pre)));
     let numbers: Vec<&str> = core.split('.').collect();

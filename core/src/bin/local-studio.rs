@@ -11,7 +11,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio import t3 [--dry-run] [--json]
        local-studio plugin validate <dir>
        local-studio plugin list
-       local-studio plugin install <dir | catalog id | git url@full sha>
+       local-studio plugin install <dir | catalog id | git url@full sha> [--plugin <name>]
        local-studio plugin grant <id> <capability...>
        local-studio plugin revoke <id> [capability...]
        local-studio plugin capabilities
@@ -52,7 +52,8 @@ fn main() -> ExitCode {
         }
         ["plugin", "validate", dir] => validate(Path::new(dir)),
         ["plugin", "list"] => list(),
-        ["plugin", "install", source] => install(source),
+        ["plugin", "install", source] => install(source, None),
+        ["plugin", "install", source, "--plugin", name] => install(source, Some(name)),
         ["plugin", "grant", id, names @ ..] if !names.is_empty() => grant(id, names),
         ["plugin", "revoke", id, names @ ..] => revoke(id, names),
         ["plugin", "capabilities"] => {
@@ -194,7 +195,24 @@ fn validate(dir: &Path) -> Result<(), String> {
         plugin.commands.len()
     );
     asks(&plugin);
+    translated(&plugin);
     Ok(())
+}
+
+fn translated(plugin: &Plugin) {
+    if let Some(translation) = plugins::compat::report(&plugin.dir) {
+        println!("  {}", translation.summary());
+        for item in &translation.not_used {
+            println!("  not used by Local Studio: {item}");
+        }
+    }
+}
+
+fn findings(plugin: &Plugin) {
+    let shell = plugins::compat::report(&plugin.dir).map(|translation| translation.findings).unwrap_or_default();
+    for finding in shell.iter().chain(&plugins::compat::text_findings(plugin)) {
+        println!("  finding: {finding}");
+    }
 }
 
 fn asks(plugin: &Plugin) {
@@ -274,6 +292,7 @@ fn list() -> Result<(), String> {
         for capability in &plugin.capabilities {
             println!("  capability {}: {}", capability.name(), capability.description());
         }
+        translated(plugin);
     }
     for command in plugins::commands(&scan.plugins) {
         println!("command /{} ({}): {}", command.name, command.source, command.description);
@@ -298,9 +317,22 @@ fn list() -> Result<(), String> {
     }
 }
 
-fn install(arg: &str) -> Result<(), String> {
+fn install(arg: &str, plugin: Option<&str>) -> Result<(), String> {
     let root = root()?;
-    let source = Source::parse(arg)?;
+    let mut source = Source::parse(arg)?;
+    match plugin {
+        Some(name) => source = plugins::market::resolve(&source, name)?,
+        None => {
+            if let Some(entries) = plugins::market::entries(&source)? {
+                println!("{arg} is a plugin marketplace; nothing was installed. Its plugins:");
+                for entry in entries {
+                    println!("  {}: {} (from {})", entry.name, entry.description, entry.from);
+                }
+                println!("Install one with: local-studio plugin install {arg} --plugin <name>");
+                return Ok(());
+            }
+        }
+    }
     let catalog = Catalog::bundled()?;
     let installed = plugins::install(&root, &source, &catalog).map_err(|errors| {
         let mut lines = vec![format!("refused {arg}")];
@@ -317,6 +349,8 @@ fn install(arg: &str) -> Result<(), String> {
         println!("  {note}");
     }
     asks(plugin);
+    translated(plugin);
+    findings(plugin);
     println!("  {}", consent_line(plugin, &Grants::load(&root)?));
     sync(&root)
 }

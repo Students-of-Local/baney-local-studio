@@ -252,7 +252,7 @@ pub fn check(root: &Path, plugins: &[Plugin], channel: &str) -> (BTreeMap<String
                 continue;
             }
         };
-        if peeked.id != plugin.id {
+        if !peeked.id.is_empty() && peeked.id != plugin.id {
             errors.push(format!("{} on {reference}: its {MANIFEST} names {} instead", plugin.name, peeked.id));
             continue;
         }
