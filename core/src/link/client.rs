@@ -668,7 +668,7 @@ async fn send_records(sink: &mut Sink, channel: &Channel, records: Vec<Vec<u8>>)
     true
 }
 
-fn tls() -> Result<Arc<rustls::ClientConfig>, String> {
+pub(crate) fn tls() -> Result<Arc<rustls::ClientConfig>, String> {
     let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
     if let Some(path) = std::env::var_os(TEST_CA) {
         use rustls::pki_types::pem::PemObject;
