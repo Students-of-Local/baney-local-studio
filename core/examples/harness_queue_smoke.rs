@@ -897,7 +897,7 @@ fn codex_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     let deep = project(run, &plain.join("src/deep"))?;
     let gone = with_cli(run, CODEX, "codex-trust-plain", &deep, WorktreeChoice::Local)?;
     let (top, src) = (deep.trim_end_matches("/src/deep"), deep.trim_end_matches("/deep"));
-    codex_ran(run, "codex-trust-plain", "hello", "untrusted", &[top, src, &deep]);
+    codex_ran(run, "codex-trust-plain", "hello", "trusted", &[top, src, &deep]);
     run.studio.restart_thread(gone);
     std::fs::remove_dir_all(&deep)?;
     run.send("again");
@@ -929,6 +929,42 @@ fn codex_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_ran(run, "codex-trust-allowed", "hello", "trusted", &[&repo]);
     with_cli(run, CODEX, "codex-trust-kept", &repo, WorktreeChoice::Local)?;
     codex_ran(run, "codex-trust-kept", "hello", "trusted", &[&repo]);
+    codex_trust_edges(run, root)
+}
+
+fn codex_trust_edges(run: &mut Run, root: &Path) -> anyhow::Result<()> {
+    let above = root.join("codex-above");
+    repo_with(&above.join("app"), "src", "main.txt")?;
+    std::fs::create_dir_all(above.join(".codex"))?;
+    let app = project(run, &above.join("app"))?;
+    let above = above.canonicalize()?.to_string_lossy().into_owned();
+    let denied = with_cli(run, CODEX, "codex-trust-above", &app, WorktreeChoice::Local)?;
+    asks_for(run, "Codex", "codex-trust-above", &denied, &app);
+    answer(run, &denied, ApprovalAnswer::Deny);
+    codex_ran(run, "codex-trust-above", "hello", "untrusted", &[&above, &app]);
+    let allowed = with_cli(run, CODEX, "codex-trust-inside", &app, WorktreeChoice::Local)?;
+    asks_for(run, "Codex", "codex-trust-inside", &allowed, &app);
+    answer(run, &allowed, ApprovalAnswer::Approve);
+    codex_ran(run, "codex-trust-inside", "hello", "trusted", &[&app]);
+
+    let (main, tree) = (root.join("codex-main"), root.join("codex-main-tree"));
+    repo_with(&main, "src", "main.txt")?;
+    git(&main, &["worktree", "add", "-q", &tree.to_string_lossy(), "-b", "codex-main-tree"])?;
+    std::fs::create_dir_all(main.join(".codex"))?;
+    let (tree, main) = (tree.canonicalize()?.to_string_lossy().into_owned(), project(run, &main)?);
+    let linked = WorktreeChoice::Existing { path: tree.clone() };
+    let denied = with_cli(run, CODEX, "codex-trust-main", &main, linked)?;
+    asks_for(run, "Codex", "codex-trust-main", &denied, &main);
+    answer(run, &denied, ApprovalAnswer::Deny);
+    codex_ran(run, "codex-trust-main", "hello", "untrusted", &[&main, &tree]);
+
+    let home = root.join("home");
+    git(&home, &["init", "-q"])?;
+    std::fs::create_dir_all(home.join("code/app"))?;
+    let app = project(run, &home.join("code/app"))?;
+    with_cli(run, CODEX, "codex-trust-home", &app, WorktreeChoice::Local)?;
+    codex_ran(run, "codex-trust-home", "hello", "trusted", &[&app]);
+    std::fs::remove_dir_all(home.join(".git"))?;
     Ok(())
 }
 

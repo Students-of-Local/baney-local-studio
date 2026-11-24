@@ -307,6 +307,7 @@ impl Actor {
             Harness::Codex => !native.is_empty(),
             Harness::Eukhe => false,
         };
+        let configured = harness::trust::has_config(harness, &cwd);
         let launch = Launch {
             harness,
             native,
@@ -316,9 +317,9 @@ impl Actor {
             effort: flags.thinking_level.clone(),
             access: flags.access.unwrap_or(AccessMode::FullAccess),
             account,
-            project: !flags.project_refused && self.cli_trusted(&cwd),
+            project: !flags.project_refused && (self.cli_trusted(&cwd) || (harness == Harness::Codex && !configured)),
         };
-        let ask = !launch.project && !flags.project_refused && harness::trust::has_config(harness, &launch.cwd);
+        let ask = !launch.project && !flags.project_refused && configured;
         self.generation += 2;
         let generation = self.generation - 1;
         let root = harness::trust::root(&cwd);
