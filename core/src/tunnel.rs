@@ -1127,14 +1127,18 @@ fn route_status(route: &Route) -> Status {
     .stepped(false)
 }
 
+#[cfg(feature = "link")]
+fn serve_edit(hostname: &str, remove: bool) -> bool {
+    crate::data_dir(None).is_ok_and(|dir| crate::link::settings::edit_tunnel_host(&dir, hostname, remove).is_ok())
+}
+
+#[cfg(not(feature = "link"))]
+fn serve_edit(_hostname: &str, _remove: bool) -> bool {
+    false
+}
+
 fn serve_allow(hostname: &str) -> bool {
-    Command::new(setup::serve_program())
-        .args(["allow-tunnel-host", hostname])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    serve_edit(hostname, false)
 }
 
 fn startable(status: &Status) -> Result<(String, Ports), Failure> {

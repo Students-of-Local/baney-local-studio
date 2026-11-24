@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{check_ports, fail, serve_allow, Failure, Ports, Route, RoutePorts, Tunnel, UpLock, DEFAULT_PORTS};
+use super::{
+    check_ports, fail, serve_allow, serve_edit, Failure, Ports, Route, RoutePorts, Tunnel, UpLock, DEFAULT_PORTS,
+};
 use crate::platform::Mode;
 
 pub const CLOUDFLARE_SIGNUP: &str = "https://dash.cloudflare.com/sign-up";
@@ -266,17 +268,12 @@ fn tool(var: &str, name: &str) -> Option<PathBuf> {
         .or_else(|| crate::workspace::process::which(name))
 }
 
-pub(super) fn serve_program() -> PathBuf {
+fn serve_program() -> PathBuf {
     tool("LS_SERVE_BIN", "local-studio-serve").unwrap_or_else(|| PathBuf::from("local-studio-serve"))
 }
 
 fn serve_disallow(hostname: &str) {
-    let _ = std::process::Command::new(serve_program())
-        .args(["allow-tunnel-host", "--remove", hostname])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = serve_edit(hostname, true);
 }
 
 fn tailscale_program() -> Option<PathBuf> {

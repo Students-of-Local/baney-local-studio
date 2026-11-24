@@ -363,6 +363,18 @@ impl Smoke {
         self.data.join("tunnel").join("route.json")
     }
 
+    fn serve_path(&self) -> PathBuf {
+        self.data.join("remote").join("serve.json")
+    }
+
+    fn check_serve(&self, want: &Value) -> Result<(), String> {
+        let text = fs::read(self.serve_path()).map_err(|e| format!("{}: {e}", self.serve_path().display()))?;
+        let serve: Value = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
+        ensure(&serve == want, format!("serve.json {serve} != {want}"))?;
+        ensure(mode(&self.serve_path()) == 0o600, "serve.json must be 0600")?;
+        ensure(mode(&self.data.join("remote")) == 0o700, "the remote folder must be 0700")
+    }
+
     fn yml_path(&self) -> PathBuf {
         self.data.join("tunnel").join("cloudflared.yml")
     }
@@ -652,10 +664,15 @@ fn hosted_route(s: &Smoke) -> Result<(), String> {
     )?;
     let (code, value) = s.ls(&["tunnel", "setup", "--tailnet", "--json"])?;
     ensure(code == 1 && value["code"] == "other_route", format!("setup refuses next to a hosted route: {value}"))?;
+    fs::create_dir_all(s.data.join("remote")).map_err(|e| e.to_string())?;
+    let seeded = json!({"name":"kept","tunnelPort":18099,"allowTunnelHosts":["old.tunnels.example.com","kept.example.com"],"later":1});
+    fs::write(s.serve_path(), seeded.to_string()).map_err(|e| e.to_string())?;
     let mark = s.mark();
     let (code, value) = s.ls(&["tunnel", "off", "--json"])?;
     ensure(code == 0 && value["state"] == "off" && !s.route_path().exists(), format!("off removes it: {value}"))?;
-    Smoke::at(&s.since(mark), "local-studio-serve allow-tunnel-host --remove old.tunnels.example.com")?;
+    s.check_serve(&json!({"name":"kept","tunnelPort":18099,"allowHosts":[],"allowTunnelHosts":["kept.example.com"],"urls":[],"notify":[],"later":1}))?;
+    ensure(!Smoke::has(&s.since(mark), "local-studio-serve"), "off edits serve.json itself")?;
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
     println!("ok: a hosted route.json is shown by status and removed by off");
     Ok(())
 }
@@ -751,8 +768,6 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
         format!("cloudflared tunnel route dns {SHIM_TUNNEL} studio.example.com"),
         format!("cloudflared tunnel route dns {SHIM_TUNNEL} alt.example.com"),
         s.started_line(true),
-        "local-studio-serve allow-tunnel-host studio.example.com".to_string(),
-        "local-studio-serve allow-tunnel-host alt.example.com".to_string(),
         "check studio.example.com /v1/health 200".to_string(),
         "check alt.example.com /v1/health 200".to_string(),
     ] {
@@ -763,6 +778,13 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
         "checks run after the service starts",
     )?;
     ensure(s.service_running(true), "Local Studio's service must be running")?;
+    ensure(
+        value["checks"]["serveAllowed"] == true && !Smoke::has(&lines, "local-studio-serve"),
+        format!("setup allows the names in serve.json and runs no local-studio-serve: {value}"),
+    )?;
+    let allowed =
+        |hosts: Value| json!({"tunnelPort":18094,"allowHosts":[],"allowTunnelHosts":hosts,"urls":[],"notify":[]});
+    s.check_serve(&allowed(json!(["studio.example.com", "alt.example.com"])))?;
     let want = json!({"v":1,"owner":"local-studio","route":"cloudflare","hostname":"studio.example.com","aliases":["alt.example.com"],"ports":{"mcp":s.closed_port,"serve":18094}});
     check_record(s, &want)?;
     ensure(
@@ -790,6 +812,8 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     Smoke::at(&lines, "check studio.example.com /mcp 401")?;
 
     off(s)?;
+    s.check_serve(&allowed(json!([])))?;
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
     println!("ok: setup --cloudflare, needs_signin, ready, again, off");
     Ok(())
 }
@@ -799,6 +823,13 @@ fn public_dns(s: &Smoke) -> Result<(), String> {
     let set = [("LS_TUNNEL_CHECK_HTTP_PORT", stub.as_str())];
     let remove = ["LS_TUNNEL_CHECK_URL"];
     fs::write(s.state.join("doh-answers"), "doh.smoke.invalid\n").map_err(|e| e.to_string())?;
+    let owner = fs::File::create(s.data.join("studio.lock")).map_err(|e| e.to_string())?;
+    owner.lock().map_err(|e| e.to_string())?;
+    let pid = std::process::id();
+    let listening = json!({"pid":pid,"port":18093,"tunnelPort":18097,"pinnedTunnelPort":18097});
+    for (name, text) in [("studio.lock", pid.to_string()), ("remote/listening.json", listening.to_string())] {
+        fs::write(s.data.join(name), text).map_err(|e| e.to_string())?;
+    }
     let mark = s.mark();
     let (code, value) =
         s.ls_env(&["tunnel", "setup", "--cloudflare", "doh.smoke.invalid", "--mcp", &stub, "--json"], &remove, &set)?;
@@ -815,6 +846,8 @@ fn public_dns(s: &Smoke) -> Result<(), String> {
     Smoke::at(&lines, "doh doh.smoke.invalid A accept=true")?;
     Smoke::at(&lines, "check doh.smoke.invalid /v1/health 200")?;
     Smoke::at(&lines, "check doh.smoke.invalid /mcp 401")?;
+    s.check_serve(&json!({"allowHosts":[],"allowTunnelHosts":["doh.smoke.invalid"],"urls":[],"notify":[]}))?;
+    drop(owner);
     off(s)?;
 
     let mark = s.mark();
@@ -899,7 +932,11 @@ fn tailnet(s: &Smoke) -> Result<(), String> {
     ensure(got == want, format!("exactly the eleven set-path calls with their ports: {got:?}"))?;
     ensure(!s.log_lines().iter().any(|line| line.to_lowercase().contains("funnel")), "tailnet never mentions Funnel")?;
     Smoke::at(&lines, &command)?;
-    ensure(!Smoke::has(&lines, "allow-tunnel-host"), "the tailnet route never calls allow-tunnel-host")?;
+    ensure(
+        !Smoke::has(&lines, "allow-tunnel-host")
+            && fs::read_to_string(s.serve_path()).is_ok_and(|serve| !serve.contains(DNS)),
+        "the tailnet route never allows a tunnel host",
+    )?;
     Smoke::at(&lines, &format!("check {DNS} /v1/health 200"))?;
     Smoke::at(&lines, &format!("check {DNS} /mcp 401"))?;
     check_record(

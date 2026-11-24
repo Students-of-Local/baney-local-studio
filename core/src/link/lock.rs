@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
+#[must_use]
 pub fn path(data_dir: &Path) -> PathBuf {
     data_dir.join("studio.lock")
 }
 
+#[must_use]
 pub fn recorded(data_dir: &Path) -> Option<u32> {
     std::fs::read_to_string(path(data_dir)).ok()?.trim().parse().ok()
 }
@@ -13,6 +15,7 @@ pub enum Owner {
     Held(Option<u32>),
 }
 
+#[must_use]
 pub fn holder(data_dir: &Path) -> Owner {
     let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path(data_dir)) else { return Owner::Free };
     if matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)) {
@@ -22,9 +25,10 @@ pub fn holder(data_dir: &Path) -> Owner {
     }
 }
 
+#[must_use]
 pub fn describe(pid: Option<u32>) -> String {
     match pid {
-        Some(pid) => match local_studio_core::process_name(pid) {
+        Some(pid) => match crate::process_name(pid) {
             Some(name) => format!("process {pid} ({name}, {})", kind(&name)),
             None => format!("process {pid}"),
         },
@@ -32,6 +36,7 @@ pub fn describe(pid: Option<u32>) -> String {
     }
 }
 
+#[must_use]
 pub fn kind(name: &str) -> &'static str {
     match name {
         "local-studio-serve" => "serve",
@@ -40,6 +45,7 @@ pub fn kind(name: &str) -> &'static str {
     }
 }
 
+#[must_use]
 pub fn kind_id(name: &str) -> &'static str {
     match name {
         "local-studio-serve" => "serve",
@@ -58,19 +64,21 @@ pub struct Listening {
     pub pinned_tunnel_port: Option<u16>,
 }
 
+#[must_use]
 pub fn listening_path(data_dir: &Path) -> PathBuf {
     data_dir.join("remote").join("listening.json")
 }
 
 pub fn record_listening(data_dir: &Path, listening: &Listening) -> anyhow::Result<()> {
     let text = serde_json::to_vec(listening)?;
-    crate::devices::write_private(&listening_path(data_dir), &text)
+    crate::link::devices::write_private(&listening_path(data_dir), &text)
 }
 
 fn read_listening(data_dir: &Path) -> Option<Listening> {
     serde_json::from_slice(&std::fs::read(listening_path(data_dir)).ok()?).ok()
 }
 
+#[must_use]
 pub fn listening(data_dir: &Path, owner: Option<u32>) -> Option<Listening> {
     read_listening(data_dir).filter(|listening| Some(listening.pid) == owner)
 }
