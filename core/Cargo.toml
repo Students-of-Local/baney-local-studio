@@ -35,6 +35,7 @@ image.workspace = true
 ignore.workspace = true
 libghostty-vt.workspace = true
 notify.workspace = true
+nucleo-matcher.workspace = true
 portable-pty.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
