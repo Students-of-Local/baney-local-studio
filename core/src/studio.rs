@@ -552,6 +552,7 @@ enum Command {
     },
     HarnessModels {
         models: Vec<ModelOption>,
+        unsaved: Option<String>,
     },
     T3Poll,
     T3Loaded {
@@ -2011,7 +2012,10 @@ impl Actor {
             Command::T3Loaded { data, print, import } => self.t3_loaded(data, print, import),
             Command::T3Dismiss => self.t3_dismiss(),
             Command::T3SetSync { enabled } => self.t3_set_sync(enabled),
-            Command::HarnessModels { models } => {
+            Command::HarnessModels { models, unsaved } => {
+                if let Some(error) = unsaved {
+                    self.mailbox.notice(NoticeLevel::Warning, format!("Could not save the Codex model list: {error}"));
+                }
                 self.codex_models = models;
                 self.push_models();
             }

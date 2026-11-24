@@ -1072,6 +1072,17 @@ fn reopened(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> a
     Ok(())
 }
 
+fn models_at_open(config: &StudioConfig, when: &str, (wanted, shown): (usize, bool)) -> anyhow::Result<Watch> {
+    let signal = Arc::new(Signal::default());
+    let studio = reopen(config, &signal)?;
+    let mut run = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: 0 };
+    let connected = run.setup("daemon connected", |watch| matches!(watch.connection, Some(Connection::Ready)));
+    run.until(Duration::from_secs(2), |watch| shown && watch.codex);
+    listed(&mut run, when, wanted, shown);
+    studio.shutdown();
+    connected.map(|()| run.watch)
+}
+
 fn listed(run: &mut Run, when: &str, wanted: usize, shown: bool) {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let asked = std::fs::read_to_string(home.join("codex-listed")).unwrap_or_default().lines().count();
@@ -1185,6 +1196,20 @@ fn main() -> anyhow::Result<()> {
         studio.shutdown();
         misses.append(&mut again.watch.misses);
         outcome
+    });
+    let outcome = outcome.and_then(|()| {
+        let saved = root.join("data/harness/codex-models.json");
+        std::env::set_var(fakes[1].0, root.join("no-codex"));
+        misses.append(&mut models_at_open(&config, "with Codex gone", (2, false))?.misses);
+        std::env::set_var(fakes[1].0, examples.with_file_name(fakes[1].1));
+        std::fs::remove_file(&saved)?;
+        std::fs::create_dir_all(saved.join("in the way"))?;
+        let mut watch = models_at_open(&config, "with no place to save the list", (3, true))?;
+        if !watch.warnings.iter().any(|text| text.starts_with("Could not save the Codex model list")) {
+            watch.miss("the list that could not be saved is not mentioned".to_string());
+        }
+        misses.append(&mut watch.misses);
+        Ok(())
     });
     let stopped = stop_daemon(&socket);
     outcome?;

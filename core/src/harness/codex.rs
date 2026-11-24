@@ -428,12 +428,16 @@ fn models_file(data_dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn saved_models(data_dir: &Path) -> Vec<ModelOption> {
+    let binary = program("LOCAL_STUDIO_CODEX_BIN", "codex");
+    if crate::workspace::process::which(&binary.to_string_lossy()).is_none() {
+        return Vec::new();
+    }
     let listed: Option<Vec<Listed>> =
         std::fs::read(models_file(data_dir)).ok().and_then(|text| serde_json::from_slice(&text).ok());
     listed.unwrap_or_default().into_iter().map(Listed::option).collect()
 }
 
-pub(crate) async fn models(data_dir: &Path) -> Result<Vec<ModelOption>, String> {
+pub(crate) async fn models(data_dir: &Path) -> Result<(Vec<ModelOption>, Option<String>), String> {
     let mut process = start(None, None, Arc::default(), Arc::default())?;
     let listed = async {
         initialize(&process.rpc).await?;
@@ -452,8 +456,11 @@ pub(crate) async fn models(data_dir: &Path) -> Result<Vec<ModelOption>, String> 
         .filter(|model| model.get("hidden").and_then(Value::as_bool) != Some(true))
         .filter_map(Listed::read)
         .collect();
-    crate::workspace::settings::save_json(&models_file(data_dir), &listed)?;
-    Ok(listed.into_iter().map(Listed::option).collect())
+    if listed.is_empty() {
+        return Err("Codex listed no models.".to_string());
+    }
+    let unsaved = crate::workspace::settings::save_json(&models_file(data_dir), &listed).err();
+    Ok((listed.into_iter().map(Listed::option).collect(), unsaved))
 }
 
 pub(crate) async fn read(account: Option<&Path>, thread: &str) -> Result<Vec<AgentMessage>, String> {

@@ -1219,8 +1219,8 @@ impl Actor {
         }
         let (itself, data_dir) = (self.itself.clone(), self.data_dir.clone());
         tokio::spawn(async move {
-            if let Ok(models) = harness::codex_models(&data_dir).await {
-                itself.send(Command::HarnessModels { models });
+            if let Ok((models, unsaved)) = harness::codex_models(&data_dir).await {
+                itself.send(Command::HarnessModels { models, unsaved });
             }
         });
     }
