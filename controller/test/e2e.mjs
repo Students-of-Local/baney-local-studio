@@ -67,6 +67,7 @@ try {
   const launched = (launch) => ({ ...captured, proof: [], launch: { port: 8000, ctx: 4096, image: digest, weights: weight, ...launch } });
   const launches = {
     plain: launched({}),
+    hub: launched({ weights: { ...weight, at: "/root/.cache/huggingface/", layout: "hub" } }),
     tuned: launched({ flags: ["--ipc host", "--network host", "--init", "--ulimit memlock=-1:-1", "--cap-add=IPC_LOCK", "--shm-size 16g", "--workdir /model", "--user root"] }),
   };
   const blocked = Object.fromEntries(
@@ -283,6 +284,10 @@ try {
   const refusal = async (id) => (await (await call(a, `/api/recipes/${id}/run`, { dryRun: true })).json()).error.code;
   for (const id of Object.keys(launches)) assert.equal(await refusal(id), "GPUS_UNAVAILABLE", id);
   for (const id of Object.keys(blocked)) assert.match(await refusal(id), /^RECIPE_(BLOCKED|ARCHIVED)$/, `${id} ${JSON.stringify(blocked[id].launch)}`);
+  const { argv } = await (await call(a, "/api/recipes/hub/run", { dryRun: true, gpus: [0] })).json();
+  const mounts = argv.filter((_, i) => argv[i - 1] === "-v");
+  assert.equal(mounts.length, 1, JSON.stringify(mounts));
+  assert.match(mounts[0], /^\/.*\/hub:\/root\/\.cache\/huggingface\/hub:ro$/);
   assert.equal((await call(a, "/api/peers", "{")).status, 400);
   assert.equal((await call(a, "/api/peers", { url: `http://127.0.0.1:${a}` })).status, 400);
   assert.equal((await call(a, "/v1/completions", { model: "not-live" })).status, 404);
