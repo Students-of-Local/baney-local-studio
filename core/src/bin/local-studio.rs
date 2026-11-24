@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use local_studio_core::plugins::{self, Capability, Catalog, Consent, Grants, Plugin, Source};
-use local_studio_core::tunnel::{self, Cloudflared, Failure, Ports, Status, Tunnel};
+use local_studio_core::tunnel::{self, Cloudflared, Failure, Status, Tunnel};
 use local_studio_core::update;
 use serde_json::Value;
 
@@ -27,6 +27,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
        local-studio tunnel cloudflared [--yes] [--json]
        local-studio tunnel byo [--json]
+       local-studio tunnel relay run [--serve <port>] [--mcp <port>]
        local-studio fleet status [--json]
        local-studio fleet join [<link>] [--json]
        local-studio fleet invite [--url <wss url>] [--json]
@@ -78,12 +79,7 @@ fn main() -> ExitCode {
         ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), json),
         ["tunnel", "release"] => run_tunnel(|t| Box::pin(t.release()), json),
         ["tunnel", "ports", flags @ ..] if !flags.is_empty() => {
-            let unset = Ports { serve: 0, mcp: 0 };
-            request_ports(flags, unset).and_then(|ports| {
-                let serve = (ports.serve != 0).then_some(ports.serve);
-                let mcp = (ports.mcp != 0).then_some(ports.mcp);
-                run_tunnel(move |t| Box::pin(t.set_ports(serve, mcp)), json)
-            })
+            given_ports(flags).and_then(|(serve, mcp)| run_tunnel(move |t| Box::pin(t.set_ports(serve, mcp)), json))
         }
         ["tunnel", "cloudflared"] => cloudflared(false, json),
         ["tunnel", "cloudflared", "--yes"] => cloudflared(true, json),
@@ -91,6 +87,7 @@ fn main() -> ExitCode {
             show(&tunnel::byo(tunnel::platform()), json);
             Ok(())
         }
+        ["tunnel", "relay", "run", flags @ ..] => relay_run(flags, json),
         ["fleet", "status"] => fleet_status(json),
         ["fleet", "join"] => fleet_set(&serde_json::json!({ "discover": true }), json),
         ["fleet", "join", link] => fleet_join(link, json).map_err(|message| fleet_failed(message, json)),
@@ -534,18 +531,35 @@ fn adopt(flags: &[&str], json: bool) -> Result<(), String> {
     run_state(move |t| Box::pin(t.adopt(hostname, go, consent(yes, json))), json)
 }
 
-fn request_ports(flags: &[&str], mut ports: Ports) -> Result<Ports, String> {
-    let usage = "usage: local-studio tunnel ports [--serve <port>] [--mcp <port>]";
+fn given_ports(flags: &[&str]) -> Result<(Option<u16>, Option<u16>), String> {
+    let usage = "usage: local-studio tunnel (ports | relay run) [--serve <port>] [--mcp <port>]";
+    let (mut serve, mut mcp) = (None, None);
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
-        let value: u16 = rest.next().and_then(|value| value.parse().ok()).ok_or(usage)?;
         match *flag {
-            "--serve" => ports.serve = value,
-            "--mcp" => ports.mcp = value,
+            "--serve" => serve = Some(port_value(rest.next(), usage)?),
+            "--mcp" => mcp = Some(port_value(rest.next(), usage)?),
             _ => return Err(usage.to_string()),
         }
     }
-    Ok(ports)
+    Ok((serve, mcp))
+}
+
+#[cfg(feature = "link")]
+fn relay_run(flags: &[&str], as_json: bool) -> Result<(), String> {
+    let (serve, mcp) = given_ports(flags)?;
+    let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|error| error.to_string())?;
+    let log = |line: &str| eprintln!("local-studio tunnel relay: {line}");
+    let ran = runtime.block_on(tunnel.relay_run(serve, mcp, log)).map_err(|failure| failed(&failure, as_json));
+    runtime.shutdown_background();
+    ran
+}
+
+#[cfg(not(feature = "link"))]
+fn relay_run(_flags: &[&str], _as_json: bool) -> Result<(), String> {
+    Err("this build has no relay: build local-studio with --features link".into())
 }
 
 fn consent(yes: bool, as_json: bool) -> impl FnOnce(&Path, &[String]) -> bool {

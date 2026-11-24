@@ -21,8 +21,11 @@ use super::Ports;
 use crate::link::client::tls;
 use crate::link::devices::random;
 
+mod service;
 mod socket;
 mod streams;
+
+pub use service::{WORKER_CONFIG, WORKER_JS};
 
 const VERSION: u64 = 1;
 const KEY_CHARS: usize = 43;
