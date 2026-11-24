@@ -550,7 +550,6 @@ final class MarkdownNSTextView: NSTextView {
 
     override func clicked(onLink link: Any, at charIndex: Int) {
         guard let openURL, let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) else {
-            super.clicked(onLink: link, at: charIndex)
             return
         }
         openURL(url)

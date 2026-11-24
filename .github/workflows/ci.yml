@@ -40,6 +40,8 @@ jobs:
           scripts/tests/update-lock-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/update_smoke" "$RUNNER_TEMP/up"
       - name: Skill and prompt frontmatter is read as YAML
         run: cargo run -p local-studio-core --example frontmatter_smoke
+      - name: Threads open only web and mail links
+        run: cargo run -p local-studio-core --example links_smoke
       - name: No background update check while it is turned off
         run: cargo run -p local-studio-core --features test-hooks --example update_check_smoke -- "$RUNNER_TEMP/uc"
       - name: No other tool's sign-in file is opened
