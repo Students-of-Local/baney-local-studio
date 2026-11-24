@@ -93,7 +93,7 @@ const excluded = (): Set<number> => {
   return out;
 };
 
-const tick = Effect.suspend(() => scanner.scan(excluded(), config.engineKeys));
+const tick = Effect.suspend(() => scanner.scan(excluded(), config.enginePorts, config.engineKeys));
 
 const suggest = (g: RawGpu): string[] => {
   const card = matchCard(catalog, g.name, g.memoryTotalMiB);
@@ -385,7 +385,7 @@ void loop(30 * 60_000, async () => {
   console.log(`registry ${catalog.info.commit ?? "-"} ${catalog.recipes.size} recipes, ${catalog.archived.length} archived records, ${library?.rows.length ?? 0} indexed${catalog.info.error ? ` (${catalog.info.error})` : ""}`);
 });
 void Effect.runPromise(jobs.reconcile);
-void loop(10_000, () => Effect.runPromise(scanner.scan(excluded(), config.engineKeys)));
+void loop(10_000, () => Effect.runPromise(scanner.scan(excluded(), config.enginePorts, config.engineKeys)));
 void loop(5_000, () => Effect.runPromise(telemetry.sample(scanner.current(), config.engineKeys)));
 void loop(2_000, async () => {
   await Effect.runPromise(watchHardware);

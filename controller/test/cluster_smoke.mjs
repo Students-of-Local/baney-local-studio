@@ -364,6 +364,7 @@ try {
         ...(n === "a" ? [e2] : n === "b" ? [e1] : [e1, e2]),
         ...(n === "a" ? [] : poolRange),
       ],
+      enginePorts: [e1, e2],
       engineKeys: {},
       registry: { url: join(root, "registry"), dir: join(root, "registry"), ref: commit },
       modelsDir: d.models,

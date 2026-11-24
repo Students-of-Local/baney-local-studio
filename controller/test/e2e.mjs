@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,6 +138,23 @@ try {
     );
   const engineA = await engine(["alpha", "shared"]);
   const engineB = await engine(["beta", "shared"]);
+  const other = await listen(
+    createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ data: [{ id: "stranger" }] }));
+    }),
+  );
+  const named = join(root, "llama-server");
+  symlinkSync(process.execPath, named);
+  const unlisted = spawn(
+    named,
+    [
+      "-e",
+      'require("http").createServer((q,r)=>{r.setHeader("content-type","application/json");r.end(\'{"data":[{"id":"by-name"}]}\')}).listen(0,"127.0.0.1")',
+    ],
+    { stdio: "ignore" },
+  );
+  children.push(unlisted);
   const ports = [];
   for (let i = 0; i < 3; i++) {
     const s = createServer();
@@ -183,6 +200,7 @@ try {
       join(home, "config.json"),
       JSON.stringify({
         ...config,
+        enginePorts: [engineB],
         engineKeys: { [engineA]: "fixture-engine-secret" },
         registry,
         modelsDir: join(home, "models"),
@@ -220,6 +238,14 @@ try {
   const s = await snapshot(a);
   assert.equal(s.controllers.filter((x) => x.reachable).length, 3);
   assert.equal(s.endpoints.filter((x) => x.models.includes("shared")).length, 2);
+  await waitFor(
+    async () => (await snapshot(a)).models.some((m) => m.id === "by-name" && m.live),
+    "an engine on an unlisted port, found by its process",
+  );
+  assert(
+    !(await snapshot(a)).endpoints.some((e) => e.port === other),
+    "a program that is not a model server was asked",
+  );
   let telemetry;
   await waitFor(async () => {
     telemetry = await (await call(a, "/api/telemetry?history=1")).json();
