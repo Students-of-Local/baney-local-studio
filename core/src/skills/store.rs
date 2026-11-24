@@ -11,7 +11,7 @@ use super::text;
 use crate::{frontmatter, harness::trust, plugins};
 
 const FILE: &str = "skills.sqlite";
-const SKILL: &str = "SKILL.md";
+pub(super) const SKILL: &str = "SKILL.md";
 const BUILT_IN: &str = ".system";
 const VERSION: i64 = 2;
 const MAX_FILE: u64 = 256 * 1024;
@@ -19,7 +19,7 @@ const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
 const FRESH: Duration = Duration::from_secs(2);
 const FOLDERS: [&str; 3] = [".agents", ".claude", ".eukhe"];
-const BESIDE: [&str; 3] = ["asks.txt", "names.txt", "where.txt"];
+pub(super) const BESIDE: [&str; 3] = ["asks.txt", "names.txt", "where.txt"];
 
 struct Root {
     dir: PathBuf,
