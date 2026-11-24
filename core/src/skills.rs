@@ -7,9 +7,11 @@ use crate::frontmatter;
 use crate::model::{CommandKind, SkillEntry, SkillSource, SlashCommand};
 use crate::plugins::{self, CommandTarget, Plugin};
 
+mod search;
 mod store;
 mod text;
 
+pub use search::{lines, Hit, Query};
 pub use store::{roots, Listed, Roots, Store};
 pub use text::plain;
 

@@ -16,6 +16,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio plugin revoke <id> [capability...]
        local-studio plugin capabilities
        local-studio plugin hash <dir> [excluded path...]
+       local-studio skills search [--for <site or app>] [--in <skill>] [--limit <n>] [--project <dir>] [--json] <words...>
        local-studio skills list [--project <dir>] [--json]
        local-studio tunnel status [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
@@ -67,8 +68,13 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
-        ["skills", "list"] => skills(None, json),
-        ["skills", "list", "--project", dir] => skills(Some(Path::new(dir)), json),
+        ["skills", verb @ ("search" | "list"), rest @ ..] => {
+            let Some(asked) = skill_args(verb, rest) else {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            };
+            skills(verb, &asked, json)
+        }
         ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), json),
         ["tunnel", "setup", flags @ ..] => setup(flags, json),
         ["tunnel", "adopt", flags @ ..] => adopt(flags, json),
@@ -122,25 +128,69 @@ fn main() -> ExitCode {
     }
 }
 
-fn skills(project: Option<&Path>, json: bool) -> Result<(), String> {
-    use local_studio_core::skills::{plain, roots, Store};
+#[derive(Default)]
+struct SkillArgs<'a> {
+    place: Option<&'a str>,
+    within: Option<&'a str>,
+    project: Option<&'a str>,
+    limit: Option<usize>,
+    words: Vec<&'a str>,
+}
+
+fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
+    let mut asked = SkillArgs::default();
+    let mut args = args.iter().copied();
+    while let Some(arg) = args.next() {
+        match (verb, arg) {
+            ("search", "--for") => asked.place = Some(args.next()?),
+            ("search", "--in") => asked.within = Some(args.next()?),
+            ("search", "--limit") => {
+                asked.limit = Some(args.next()?.parse().ok().filter(|limit| (1..=10).contains(limit))?);
+            }
+            (_, "--project") => asked.project = Some(args.next()?),
+            (_, "--") => asked.words.extend(args.by_ref()),
+            (_, flag) if flag.starts_with("--") => return None,
+            (_, word) => asked.words.push(word),
+        }
+    }
+    let given = match verb {
+        "search" => !asked.words.is_empty() || asked.place.is_some(),
+        _ => asked.words.is_empty(),
+    };
+    given.then_some(asked)
+}
+
+fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
+    use local_studio_core::skills::{lines, plain, roots, Query, Store};
     let data = local_studio_core::data_dir(None)?;
     let plugins = plugins::plugins_dir(None);
-    let here = std::env::current_dir().map_err(|error| error.to_string())?;
-    let project = project.unwrap_or(&here);
-    let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(project))?)?;
-    let listed = store.list()?;
-    if json {
-        let text = serde_json::to_string(&listed).map_err(|error| error.to_string())?;
-        let shown = |c: char| if c.is_control() { format!("\\u{:04x}", u32::from(c)) } else { c.to_string() };
-        println!("{}", text.chars().map(shown).collect::<String>());
-        return Ok(());
-    }
-    for skill in listed {
-        let problem = skill.problem.map(|problem| format!(" [{problem}]")).unwrap_or_default();
-        let shown = [&skill.name, &skill.source, &format!("{}{problem}", skill.path.display())].map(|text| plain(text));
-        println!("{}", shown.join("\t"));
-    }
+    let project = match asked.project {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    };
+    let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(&project))?)?;
+    let words = asked.words.join(" ");
+    let (value, text) = if verb == "search" {
+        let limit = asked.limit.unwrap_or(5);
+        let hits = store.search(&Query { text: &words, place: asked.place, within: asked.within, limit })?;
+        let text = match hits.as_slice() {
+            [] => "nothing found".to_string(),
+            hits => lines(hits),
+        };
+        (serde_json::to_value(&hits), text)
+    } else {
+        let listed = store.list()?;
+        let line = |skill: &local_studio_core::skills::Listed| {
+            let problem = skill.problem.as_ref().map(|problem| format!(" [{problem}]")).unwrap_or_default();
+            let path = format!("{}{problem}", skill.path.display());
+            [&skill.name, &skill.source, &path].map(|text| plain(text)).join("\t")
+        };
+        let text = listed.iter().map(line).collect::<Vec<_>>().join("\n");
+        (serde_json::to_value(&listed), text)
+    };
+    let value = value.map_err(|error| error.to_string())?;
+    let shown = |c: char| if c.is_control() { format!("\\u{:04x}", u32::from(c)) } else { c.to_string() };
+    println!("{}", if json { value.to_string().chars().map(shown).collect() } else { text });
     Ok(())
 }
 

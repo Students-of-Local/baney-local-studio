@@ -29,6 +29,10 @@ fn put(path: &Path, text: &str) -> Result<(), String> {
     write(path, text).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+fn names(hits: &Value) -> Vec<&str> {
+    hits.as_array().into_iter().flatten().filter_map(|hit| hit["name"].as_str()).collect()
+}
+
 impl Smoke {
     fn check(&mut self, what: &str, passed: bool) {
         println!("{} {what}", if passed { "ok  " } else { "FAIL" });
@@ -58,6 +62,10 @@ impl Smoke {
         serde_json::from_str(&text).map_err(|error| format!("{args:?}: {error}: {text}"))
     }
 
+    fn first(&self, args: &[&str]) -> Result<String, String> {
+        Ok(names(&self.json(&[&["search"], args].concat())?).first().copied().unwrap_or_default().to_string())
+    }
+
     fn listed(&self, name: &str) -> Result<Option<Value>, String> {
         let listed = self.json(&["list"])?;
         let found = |skill: &&Value| skill["name"] == name && skill["problem"].is_null();
@@ -73,6 +81,63 @@ impl Smoke {
         let mut problems = listed.as_array().into_iter().flatten().filter_map(|skill| skill["problem"].as_str());
         Ok(problems.any(|problem| problem.contains(part)))
     }
+}
+
+fn words(smoke: &mut Smoke) -> Result<(), String> {
+    let hits = smoke.json(&["search", "marmalade"])?;
+    let part = hits[0]["parts"][0] == "Preserves" && names(&hits) == ["kitchen"];
+    smoke.check("a word in one section finds that skill and part", part);
+    let found = smoke.first(&["why did the glow vanish from my lamp"])? == "bulbs";
+    smoke.check("asks.txt finds a skill whose SKILL.md shares no word", found);
+    let asks = smoke.data.join("skills/bulbs/asks.txt");
+    put(&asks, "my ceiling went dark\n")?;
+    let fresh = smoke.first(&["why is the ceiling dark"])? == "bulbs" && smoke.first(&["glow vanish"])?.is_empty();
+    smoke.check("an edit of asks.txt alone is seen", fresh);
+    let shown = smoke.run(&["search", "windy"])?.stdout;
+    smoke.check("a long description is cut to one short line", shown.len() < 300 && shown.ends_with(b"...\n"));
+    let nothing = smoke.run(&["search", "what", "is", "the"])?;
+    let quiet = nothing.status.success() && String::from_utf8_lossy(&nothing.stdout) == "nothing found\n";
+    smoke.check("stop words alone find nothing, exit 0", quiet);
+    let long = "jam ".repeat(2500);
+    for odd in ["\"jam* NEAR(a b) -c : ^ AND OR NOT", "name:jam {x} 😀 (", long.as_str()] {
+        let found = smoke.first(&["--", odd])? == "kitchen";
+        smoke.check(&format!("{odd:.20} is plain words"), found);
+    }
+    smoke.check("accents fold", smoke.first(&["creme brulee"])? == "kitchen");
+    smoke.check("an unspaced language is found by part of a word", smoke.first(&["发票"])? == "invoices");
+    let usage = smoke.run(&["search"])?.status.code() == Some(2);
+    smoke.check("no words is a usage error", usage);
+    let control = smoke.run(&["search", "escape"])?.stdout;
+    smoke.check("a search prints no control character", !control.is_empty() && !control.contains(&27));
+    Ok(())
+}
+
+fn places(smoke: &mut Smoke) -> Result<(), String> {
+    let ask = "marmalade jam video";
+    let plain = smoke.json(&["search", ask])?;
+    let video = smoke.first(&["--for", "https://m.tubes.test/watch?v=x", ask])? == "tubes";
+    smoke.check("a site's skill comes first there", video && names(&plain).first() == Some(&"kitchen"));
+    let none = smoke.json(&["search", "--for", "https://nothing.test", ask])?;
+    smoke.check("a site with no skill changes nothing", names(&none) == names(&plain));
+    let other = smoke.first(&["--for", "https://eviltubes.test/", ask])? == "kitchen";
+    smoke.check("a host that only ends in the name is another site", other);
+    let app = smoke.json(&["search", "--for", "Paint Pro"])?;
+    smoke.check("where.txt names an app, no words needed", names(&app) == ["painter"]);
+    let away = smoke.first(&["fill brushes draw"])? == "painter";
+    let linked = smoke.json(&["search", "--for", "docs.forms.test", "fill brushes draw"])?;
+    let listed = away && linked[0]["name"] == "forms" && linked[0]["places"].as_array().is_some_and(Vec::is_empty);
+    smoke.check("a site linked twice counts, and is not listed as the skill's own", listed);
+    Ok(())
+}
+
+fn named(smoke: &mut Smoke) -> Result<(), String> {
+    for form in ["site learning", "SiteLearning", "site-learning", "old tricks"] {
+        smoke.check(&format!("{form} is site-learning"), smoke.first(&[form])? == "site-learning");
+    }
+    let hits = smoke.json(&["search", "duplicate"])?;
+    let own = names(&hits) == ["twin"] && hits[0]["source"] == "yours";
+    smoke.check("a hidden skill is not found", own);
+    Ok(())
 }
 
 fn naming(smoke: &mut Smoke) -> Result<(), String> {
@@ -95,19 +160,24 @@ fn naming(smoke: &mut Smoke) -> Result<(), String> {
 }
 
 fn changes(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
-    let folder = skill(own, "draft", "A pelican", "")?;
+    let folder = skill(own, "draft", "A pelican", "magpies")?;
     smoke.check("a new skill is listed", smoke.described("draft", "A pelican")?);
-    skill(own, "draft", "A penguin", "")?;
+    skill(own, "draft", "A penguin", "buzzard")?;
     smoke.check("an edit of the same length replaces the old text", smoke.described("draft", "A penguin")?);
+    let fresh = smoke.first(&["buzzard"])? == "draft" && smoke.first(&["magpies"])?.is_empty();
+    smoke.check("in the search too", fresh);
     rename(&folder, own.join("moved")).map_err(|error| error.to_string())?;
     let moved = smoke.listed("draft")?.and_then(|skill| skill["path"].as_str().map(|path| path.contains("/moved/")));
     smoke.check("a moved folder is followed", moved == Some(true));
     remove_dir_all(own.join("moved")).map_err(|error| error.to_string())?;
-    smoke.check("a deleted skill is gone", smoke.listed("draft")?.is_none());
+    let gone = smoke.listed("draft")?.is_none() && smoke.first(&["buzzard"])?.is_empty();
+    smoke.check("a deleted skill is gone", gone);
     put(&own.join("broken/SKILL.md"), "---\nname: [\n---\ntoucan\n")?;
-    smoke.check("broken front matter is reported", smoke.problem("no description")?);
+    let broken = smoke.problem("no description")? && smoke.first(&["toucan"])? == "broken";
+    smoke.check("broken front matter is reported, and still found", broken);
     put(&own.join("huge/SKILL.md"), &"cassowary ".repeat(30_000))?;
-    smoke.check("a huge SKILL.md is reported", smoke.problem("larger than 256 KB")?);
+    let huge = smoke.problem("larger than 256 KB")? && smoke.first(&["cassowary"])?.is_empty();
+    smoke.check("a huge SKILL.md is reported, and skipped", huge);
     skill(&smoke.home.join(".agents/skills"), "broken", "Works", "")?;
     smoke.check("a broken skill takes no name from a good one", smoke.described("broken", "Works")?);
     write(own.join("broken/SKILL.md"), [0xff, 0xfe, 0x00]).map_err(|error| error.to_string())?;
@@ -150,6 +220,12 @@ fn links(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     create_dir_all(project.join("leak")).map_err(|error| error.to_string())?;
     link(&secret, &project.join("leak/SKILL.md"))?;
     smoke.check("a project's may not be", !smoke.json(&["list"])?.to_string().contains("/leak/"));
+    let nosy = skill(&project, "nosy", "Nosy", "macaw")?;
+    link(&secret, &nosy.join("where.txt"))?;
+    link(&secret, &nosy.join("asks.txt"))?;
+    let hits = smoke.json(&["search", "macaw"])?;
+    let unread = names(&hits) == ["nosy"] && smoke.first(&["condor"])?.is_empty();
+    smoke.check("a file beside it that links elsewhere is not read", unread && !hits.to_string().contains("condor"));
     skill(&smoke.project.join("kept"), "kept", "Inside", "")?;
     for dir in [".claude", ".eukhe"] {
         create_dir_all(smoke.project.join(dir)).map_err(|error| error.to_string())?;
@@ -175,15 +251,17 @@ fn links(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
 }
 
 fn trust(smoke: &mut Smoke) -> Result<(), String> {
-    skill(&smoke.project.join(".agents/skills"), "local-build", "Build this project", "")?;
+    skill(&smoke.project.join(".agents/skills"), "local-build", "Build this project", "kookaburra")?;
     smoke.check("an untrusted project adds nothing", smoke.listed("local-build")?.is_none());
     let state = serde_json::json!({ "version": 1, "projects": [], "trusted": [smoke.project] });
     put(&smoke.data.join("state.json"), &state.to_string())?;
     let found = smoke.listed("local-build")?.is_some_and(|skill| skill["source"] == "project");
-    smoke.check("a trusted project's skill is listed", found);
+    smoke.check("a trusted project's skill is listed", found && smoke.first(&["kookaburra"])? == "local-build");
     let home = smoke.home.to_string_lossy().into_owned();
     let elsewhere = smoke.json(&["list", "--project", &home])?;
-    smoke.check("and only in that project", !elsewhere.to_string().contains("local-build"));
+    let hits = smoke.json(&["search", "--project", &home, "kookaburra"])?;
+    let only = !elsewhere.to_string().contains("local-build") && names(&hits).is_empty();
+    smoke.check("and only in that project", only);
     create_dir_all(smoke.project.join(".git")).map_err(|error| error.to_string())?;
     create_dir_all(smoke.project.join("src")).map_err(|error| error.to_string())?;
     for dir in [".", "src"] {
@@ -196,7 +274,7 @@ fn trust(smoke: &mut Smoke) -> Result<(), String> {
     put(&smoke.data.join("state.json"), r#"{"version":1,"projects":[],"trusted":[]}"#)?;
     smoke.check("without trust it is gone", smoke.listed("local-build")?.is_none());
     let bytes = read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
-    let kept = bytes.windows(18).any(|part| part == b"Build this project");
+    let kept = bytes.windows(10).any(|part| part == b"kookaburra" || part == b"Build this");
     smoke.check("and its text leaves the index", !kept);
     put(&smoke.data.join("state.json"), &state.to_string())?;
     Ok(())
@@ -229,14 +307,17 @@ fn index(smoke: &mut Smoke) -> Result<(), String> {
         } else {
             write(&file, [0x5a; 8192]).map_err(|error| error.to_string())?;
         }
-        let first = || smoke.command(&["list"]).stdout(Stdio::piped()).spawn();
+        let first = || smoke.command(&["search", "marmalade"]).stdout(Stdio::piped()).spawn();
         let searches: Vec<_> = (0..6).map(|_| first()).collect();
         for child in searches {
             let output = child.and_then(Child::wait_with_output).map_err(|error| error.to_string())?;
-            good += usize::from(String::from_utf8_lossy(&output.stdout).contains("kitchen\t"));
+            good += usize::from(String::from_utf8_lossy(&output.stdout).starts_with("kitchen "));
         }
     }
-    smoke.check("six first lists at once all answer, five times with no index and five with a damaged one", good == 60);
+    smoke.check(
+        "six first searches at once all answer, five times with no index and five with a damaged one",
+        good == 60,
+    );
     let (mut mixed, agents) = (0, [smoke.home.join("agent-a"), smoke.home.join("agent-b")]);
     for agent in &agents {
         skill(&agent.join("skills"), "each", &agent.to_string_lossy(), "")?;
@@ -268,7 +349,7 @@ fn index(smoke: &mut Smoke) -> Result<(), String> {
     }
     write(&file, bytes).map_err(|error| error.to_string())?;
     smoke.check("one bad byte in stored text is too", smoke.described("kitchen", "Cook at home")?);
-    smoke.check("and answers again", smoke.listed("kitchen")?.is_some());
+    smoke.check("and answers again", smoke.first(&["marmalade"])? == "kitchen");
     Ok(())
 }
 
@@ -279,15 +360,15 @@ fn many(smoke: &mut Smoke) -> Result<(), String> {
         let body = format!("## Steps {n}\n{filler}## Notes\nitem{n} {filler}");
         skill(&personal, &format!("filler-{n}"), &format!("Handle sheet {n} of the ledger"), &body)?;
     }
-    let timed = |smoke: &Smoke, name: &str| -> Result<(Duration, bool), String> {
+    let timed = |smoke: &Smoke, words: &str| -> Result<(Duration, String), String> {
         let start = Instant::now();
-        let found = smoke.listed(name)?.is_some();
+        let found = smoke.first(&[words])?;
         Ok((start.elapsed(), found))
     };
-    let (first, found) = timed(smoke, "kitchen")?;
-    let (again, also) = timed(smoke, "filler-977")?;
-    println!("     {MANY} skills: first list {first:?}, next {again:?}");
-    smoke.check("a thousand more skills are listed", found && also);
+    let (first, found) = timed(smoke, "marmalade")?;
+    let (again, also) = timed(smoke, "item977 of the ledger")?;
+    println!("     {MANY} skills: first search {first:?}, next {again:?}");
+    smoke.check("a thousand more skills leave the answer alone", found == "kitchen" && also == "filler-977");
     smoke.check("the first index takes under 5 s", first < Duration::from_secs(5));
     smoke.check("the next start reads the index", again < Duration::from_millis(500));
     Ok(())
@@ -295,10 +376,23 @@ fn many(smoke: &mut Smoke) -> Result<(), String> {
 
 fn run(smoke: &mut Smoke) -> Result<(), String> {
     let own = smoke.data.join("skills");
-    skill(&own, "kitchen", "Cook at home", "Jam.")?;
+    skill(&own, "kitchen", "Cook at home", "Jam.\n\n## Preserves\nmarmalade and jam\n\n## Sweets\ncrème brûlée")?;
+    let bulbs = skill(&own, "bulbs", "Replace lighting", "Turn it off first. No old tricks.")?;
+    put(&bulbs.join("asks.txt"), "why did the glow vanish from my lamp\n")?;
+    skill(&own, "windy", &"windy ".repeat(100), "")?;
+    skill(&own, "invoices", "开发票的步骤", "Steps.")?;
     skill(&own, "colors", "\"Escape \\e[31mred\"", "escape")?;
+    skill(&own, "tubes", "Watch clips", "## Sites\n- `tubes.test`\n\n## Captions\nvideo words")?;
+    let painter = skill(&own, "painter", "Draw", "Brushes.")?;
+    put(&painter.join("where.txt"), "Paint Pro\n")?;
+    skill(&own, "forms", "Fill out", "https://docs.forms.test/a https://docs.forms.test/b fill")?;
+    let learning = skill(&own, "site-learning", "Learn a site", "Try it.")?;
+    put(&learning.join("names.txt"), "old-tricks\n")?;
     skill(&own, "twin", "A duplicate", "mine")?;
     skill(&smoke.home.join(".claude/skills"), "twin", "A duplicate", "theirs")?;
+    words(smoke)?;
+    places(smoke)?;
+    named(smoke)?;
     naming(smoke)?;
     trust(smoke)?;
     plugins(smoke)?;
