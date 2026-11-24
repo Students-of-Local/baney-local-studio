@@ -16,6 +16,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio plugin revoke <id> [capability...]
        local-studio plugin capabilities
        local-studio plugin hash <dir> [excluded path...]
+       local-studio skills list [--project <dir>] [--json]
        local-studio tunnel status [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --tailnet [--serve <port>] [--mcp <port>] [--yes] [--json]
@@ -38,7 +39,7 @@ const USAGE: &str = "usage: local-studio --version
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let json = matches!(args.first(), Some(&("tunnel" | "fleet"))) && args.contains(&"--json");
+    let json = matches!(args.first(), Some(&("tunnel" | "fleet" | "skills"))) && args.contains(&"--json");
     if json {
         args.retain(|arg| *arg != "--json");
     }
@@ -66,6 +67,8 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
+        ["skills", "list"] => skills(None, json),
+        ["skills", "list", "--project", dir] => skills(Some(Path::new(dir)), json),
         ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), json),
         ["tunnel", "setup", flags @ ..] => setup(flags, json),
         ["tunnel", "adopt", flags @ ..] => adopt(flags, json),
@@ -117,6 +120,25 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn skills(project: Option<&Path>, json: bool) -> Result<(), String> {
+    use local_studio_core::skills::{roots, Store};
+    let data = local_studio_core::data_dir(None)?;
+    let plugins = plugins::plugins_dir(None);
+    let here = std::env::current_dir().map_err(|error| error.to_string())?;
+    let project = project.unwrap_or(&here);
+    let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(project)))?;
+    let listed = store.list()?;
+    if json {
+        println!("{}", serde_json::to_string(&listed).map_err(|error| error.to_string())?);
+        return Ok(());
+    }
+    for skill in listed {
+        let problem = skill.problem.map(|problem| format!(" [{problem}]")).unwrap_or_default();
+        println!("{}\t{}\t{}{problem}", skill.name, skill.source, skill.path.display());
+    }
+    Ok(())
 }
 
 fn import_t3(dry_run: bool, json: bool) -> Result<(), String> {

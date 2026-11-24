@@ -7,6 +7,11 @@ use crate::frontmatter;
 use crate::model::{CommandKind, SkillEntry, SkillSource, SlashCommand};
 use crate::plugins::{self, CommandTarget, Plugin};
 
+mod store;
+mod text;
+
+pub use store::{roots, Listed, Root, Store};
+
 const SESSION_COMMANDS: [(&str, &str); 7] = [
     ("compact", "Compact the conversation context"),
     ("refine", "Refine the last answer"),
