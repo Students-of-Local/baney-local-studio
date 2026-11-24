@@ -4,10 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use super::{
-    env_prefix, frontmatter, inside, instruction, valid_command_name, valid_env_name, valid_semver, CommandTarget,
-    Plugin,
-};
+use crate::frontmatter;
+
+use super::{env_prefix, inside, instruction, valid_command_name, valid_env_name, valid_semver, CommandTarget, Plugin};
 use super::{CALLER_ENV, CALLER_NAME_ENV, MANIFEST};
 
 pub const STUDIO_DIR: &str = ".local-studio";
@@ -667,9 +666,9 @@ fn commands(
             }
         }
         let description = description
-            .or_else(|| frontmatter(&content, "description"))
+            .or_else(|| frontmatter::field(&content, "description"))
             .or_else(|| {
-                body(&content)
+                frontmatter::strip(&content)
                     .lines()
                     .map(str::trim)
                     .find(|line| !line.is_empty())
@@ -683,14 +682,6 @@ fn commands(
 
 fn has_extension(path: &str, wanted: &str) -> bool {
     Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case(wanted))
-}
-
-fn body(content: &str) -> String {
-    let normalized = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    match normalized.strip_prefix("---\n").and_then(|rest| rest.find("\n---").map(|end| (rest, end))) {
-        Some((rest, end)) => rest[end + 4..].to_string(),
-        None => normalized,
-    }
 }
 
 fn shell_lines(line: &str) -> Vec<String> {

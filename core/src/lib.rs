@@ -3,6 +3,7 @@
 mod access;
 mod daemon;
 pub mod fleet;
+pub mod frontmatter;
 mod harness;
 mod highlight;
 mod images;
