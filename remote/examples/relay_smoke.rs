@@ -1,8 +1,12 @@
+use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context as Poller, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
@@ -10,6 +14,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
+use hyper::body::{Body, Frame, Incoming};
+use hyper::header::HeaderValue;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use local_studio_core::link::devices::random;
 use local_studio_core::tunnel::relay::{self, Config, Ended, Event};
 use local_studio_core::tunnel::Ports;
@@ -22,13 +32,15 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::WebSocketStream;
 
 const PING: &str = r#"{"v":1,"t":"ping"}"#;
 const QUICK: Duration = Duration::from_secs(10);
 const LONG_PING: Duration = Duration::from_secs(30);
 const NO_REDIAL: Duration = Duration::from_secs(3);
+const PUBLIC_HOST: &str = "relay.example.com";
+const MARK: &str = "x-relay-smoke";
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -92,6 +104,52 @@ struct Link {
     sink: Arc<tokio::sync::Mutex<Sender>>,
 }
 
+#[derive(Default)]
+struct Answer {
+    status: u64,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    data: usize,
+    ended: bool,
+    errors: usize,
+}
+
+impl Answer {
+    fn read(frames: &[Message], id: u32) -> Self {
+        let mut answer = Self::default();
+        for got in frames {
+            match got {
+                Message::Binary(bytes) if bytes.len() >= 5 && bytes[1..5] == id.to_be_bytes() => {
+                    answer.data += 1;
+                    answer.body.extend_from_slice(&bytes[5..]);
+                }
+                Message::Text(text) => answer.control(&serde_json::from_str(text).unwrap_or_default(), id),
+                _ => {}
+            }
+        }
+        answer
+    }
+
+    fn control(&mut self, frame: &Value, id: u32) {
+        match frame["t"].as_str() {
+            _ if frame["id"] != id || frame["v"] != 1 => {}
+            Some("res") => {
+                self.status = frame["status"].as_u64().unwrap_or_default();
+                self.headers = serde_json::from_value(frame["headers"].clone()).unwrap_or_default();
+            }
+            Some("end") => self.ended = true,
+            Some("error") => self.errors += 1,
+            _ => {}
+        }
+    }
+
+    fn is(&self, status: u64, body: &str) -> anyhow::Result<()> {
+        let ok = self.ended && self.errors == 0 && self.status == status && self.body == body.as_bytes();
+        ensure!(ok, "expected {status} {body:?}, got {} {:?}", self.status, String::from_utf8_lossy(&self.body));
+        Ok(())
+    }
+}
+
 impl Link {
     async fn open(smoke: &Smoke, stream: TcpStream, pongs: bool) -> anyhow::Result<Self> {
         let socket = tokio_tungstenite::accept_async(stream).await?;
@@ -118,6 +176,29 @@ impl Link {
 
     async fn raw(&self, message: Message) -> anyhow::Result<()> {
         Ok(self.sink.lock().await.send(message).await?)
+    }
+
+    async fn open_stream(&self, mut frame: Value, more: &[(&str, &str)]) -> anyhow::Result<()> {
+        frame["v"] = json!(1);
+        frame["t"] = json!("req");
+        frame["headers"] = json!([&[("host", PUBLIC_HOST), (MARK, "1")], more].concat());
+        self.send(&frame).await
+    }
+
+    async fn req(&self, id: u32, method: &str, path: &str, body: bool) -> anyhow::Result<()> {
+        self.open_stream(json!({ "id": id, "method": method, "path": path, "body": body, "ws": false }), &[]).await
+    }
+
+    async fn answer(&self, id: u32) -> anyhow::Result<Answer> {
+        self.until(&format!("the answer to {id}"), |frames| {
+            Some(Answer::read(frames, id)).filter(|answer| answer.ended || answer.errors > 0)
+        })
+        .await
+    }
+
+    async fn get(&self, id: u32, method: &str, path: &str) -> anyhow::Result<Answer> {
+        self.req(id, method, path, false).await?;
+        self.answer(id).await
     }
 
     async fn send(&self, frame: &Value) -> anyhow::Result<()> {
@@ -149,24 +230,91 @@ impl Link {
     }
 }
 
+struct Pipe(mpsc::Receiver<Bytes>);
+
+impl Body for Pipe {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Poller<'_>) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        self.0.poll_recv(cx).map(|bytes| bytes.map(|bytes| Ok(Frame::data(bytes))))
+    }
+}
+
+#[derive(Default)]
+struct Origin {
+    dials: AtomicUsize,
+    hosts: Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl Origin {
+    async fn listen(self: &Arc<Self>, name: &'static str) -> anyhow::Result<u16> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let origin = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                origin.dials.fetch_add(1, Ordering::AcqRel);
+                let origin = Arc::clone(&origin);
+                let service = service_fn(move |request| Arc::clone(&origin).answer(name, request));
+                let serve =
+                    http1::Builder::new().title_case_headers(true).serve_connection(TokioIo::new(stream), service);
+                tokio::spawn(serve);
+            }
+        });
+        Ok(port)
+    }
+
+    async fn answer(self: Arc<Self>, name: &str, request: Request<Incoming>) -> Result<Response<Pipe>, Infallible> {
+        let (sender, pipe) = mpsc::channel(1);
+        let mut response = Response::new(Pipe(pipe));
+        if !request.headers().contains_key(MARK) {
+            self.dials.fetch_sub(1, Ordering::AcqRel);
+            return Ok(response);
+        }
+        let value = |name: &str| request.headers().get(name).map(|value| value.as_bytes().to_vec()).unwrap_or_default();
+        lock(&self.hosts).push((String::from_utf8_lossy(&value("host")).into(), value("x-latin")));
+        let query = request.uri().query().unwrap_or_default().to_string();
+        let (kind, tag) = query.split_once('=').unwrap_or((&query, ""));
+        match kind {
+            "cookies" => {
+                for cookie in ["a=1", "b=2"] {
+                    response.headers_mut().append("set-cookie", HeaderValue::from_static(cookie));
+                }
+                response
+                    .headers_mut()
+                    .insert("x-latin", HeaderValue::from_bytes(b"caf\xe9").unwrap_or(HeaderValue::from_static("")));
+            }
+            "status" => *response.status_mut() = StatusCode::from_bytes(tag.as_bytes()).unwrap_or_default(),
+            _ => {
+                sender.send(format!("ok {name}").into()).await.ok();
+            }
+        }
+        Ok(response)
+    }
+}
+
 struct Smoke {
     key: String,
     log: Arc<Mutex<File>>,
     listener: TcpListener,
     url: String,
     ports: Ports,
+    origin: Arc<Origin>,
 }
 
 impl Smoke {
     async fn new(scratch: &PathBuf) -> anyhow::Result<Self> {
         std::fs::create_dir_all(scratch)?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let origin = Arc::new(Origin::default());
         Ok(Self {
             key: URL_SAFE_NO_PAD.encode(random::<32>()?),
             log: Arc::new(Mutex::new(File::create(scratch.join("frames.log"))?)),
             url: format!("http://{}", listener.local_addr()?),
             listener,
-            ports: Ports { serve: 1, mcp: 1 },
+            ports: Ports { serve: origin.listen("serve").await?, mcp: origin.listen("mcp").await? },
+            origin,
         })
     }
 
@@ -354,6 +502,97 @@ async fn c10_bad_config(smoke: &Smoke) -> anyhow::Result<()> {
     smoke.quiet(Duration::from_secs(1)).await
 }
 
+async fn h1_headers(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let frame = json!({ "id": 1, "method": "GET", "path": "/mcp?cookies", "body": false, "ws": false });
+    link.open_stream(frame, &[("x-latin", "caf\u{e9}")]).await?;
+    let answer = link.answer(1).await?;
+    answer.is(200, "")?;
+    let got = |name: &str| {
+        answer.headers.iter().filter(|(seen, _)| seen == name).map(|(_, value)| value.as_str()).collect::<Vec<_>>()
+    };
+    ensure!(got("set-cookie") == ["a=1", "b=2"] && got("x-latin") == ["caf\u{e9}"], "headers {:?}", answer.headers);
+    let lower = answer.headers.iter().all(|(name, _)| *name == name.to_ascii_lowercase());
+    ensure!(lower, "a header name kept its case: {:?}", answer.headers);
+    let seen = lock(&smoke.origin.hosts).last().cloned();
+    ensure!(seen == Some((PUBLIC_HOST.to_string(), b"caf\xe9".to_vec())), "the origin saw {seen:?}");
+    Ok(())
+}
+
+async fn h3_paths(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let dials = smoke.origin.dials.load(Ordering::Acquire);
+    let unknown = [
+        "/x",
+        "/",
+        "/%6dcp",
+        "/v1%2Fhealth",
+        "/v1/health/",
+        "//mcp",
+        "/mcp#x",
+        "http://127.0.0.1/mcp",
+        "/v1/health/../../mcp",
+        "",
+    ];
+    for (id, path) in (1..).zip(unknown) {
+        link.get(id, "GET", path).await?.is(404, "No local route for this path.\n")?;
+    }
+    let after = smoke.origin.dials.load(Ordering::Acquire);
+    ensure!(after == dials, "an unknown path dialed the origin");
+    link.get(21, "GET", "/v1/health?x=1").await?.is(200, "ok serve")?;
+    link.get(22, "GET", "/.well-known/oauth-authorization-server/mcp").await?.is(200, "ok mcp")
+}
+
+async fn h7_refused(smoke: &Smoke) -> anyhow::Result<()> {
+    let closed = TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
+    let mut client = Client::start(&smoke.url, &smoke.key, Ports { mcp: closed, ..smoke.ports }, LONG_PING);
+    let link = Link::open(smoke, smoke.dial(QUICK).await?.stream, true).await?;
+    link.send(&hello(1)).await?;
+    client.connected().await?;
+    let answer = link.get(1, "GET", "/mcp").await?;
+    ensure!(answer.errors == 1 && answer.status == 0 && !answer.ended, "a closed origin port got {}", answer.status);
+    link.get(2, "GET", "/v1/health").await?.is(200, "ok serve")
+}
+
+async fn h10_no_body(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    for (id, method, path, status) in [
+        (1, "HEAD", "/mcp", 200),
+        (2, "GET", "/mcp?status=204", 204),
+        (3, "GET", "/mcp?status=304", 304),
+        (4, "HEAD", "/x", 404),
+    ] {
+        let answer = link.get(id, method, path).await?;
+        answer.is(status, "")?;
+        ensure!(answer.data == 0, "{method} {path} sent DATA");
+    }
+    Ok(())
+}
+
+async fn h11_bad_headers(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let dials = smoke.origin.dials.load(Ordering::Acquire);
+    for (id, header) in (1..).zip([("x-a", "\u{100}"), ("x-a", "b\nc"), ("x a", "b"), ("x-\u{100}", "b")]) {
+        link.open_stream(json!({ "id": id, "method": "GET", "path": "/mcp" }), &[header]).await?;
+        link.answer(id).await?.is(400, "Bad request.\n")?;
+    }
+    link.send(&json!({ "v": 1, "t": "req", "id": 9, "method": "GET", "path": 7 })).await?;
+    link.answer(9).await?.is(400, "Bad request.\n")?;
+    ensure!(smoke.origin.dials.load(Ordering::Acquire) == dials, "a bad header dialed the origin");
+    Ok(())
+}
+
+async fn linked(
+    name: &str,
+    smoke: &Smoke,
+    work: impl AsyncFnOnce(&Smoke, &Link) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let (mut client, link) = smoke.connect(LONG_PING).await?;
+    step(name, work(smoke, &link)).await?;
+    ensure!(
+        client.events.try_recv().is_err() && !client.task.is_finished(),
+        "{name}: the client dropped the connection"
+    );
+    ensure!(link.count(Message::is_close) == 0, "{name}: the connection closed");
+    Ok(())
+}
+
 async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     step("C1 hello, bearer and User-Agent", c1_hello(smoke)).await?;
     step("C2 401 ends Unauthorized after one dial", c2_unauthorized(smoke)).await?;
@@ -366,7 +605,12 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     step("C7 no pong: Disconnected and redial within 2 s", c7_no_pong(smoke)).await?;
     step("C8 no hello: redial after 10 s", c8_no_hello(smoke)).await?;
     step("C9 frames it must ignore", c9_ignored(smoke)).await?;
-    step("C10 bad config never dials", c10_bad_config(smoke)).await
+    step("C10 bad config never dials", c10_bad_config(smoke)).await?;
+    linked("H1 headers both ways", smoke, h1_headers).await?;
+    linked("H3 only the exact paths reach an origin", smoke, h3_paths).await?;
+    step("H7 closed origin port", h7_refused(smoke)).await?;
+    linked("H10 answers with no body", smoke, h10_no_body).await?;
+    linked("H11 bad headers are 400", smoke, h11_bad_headers).await
 }
 
 #[tokio::main]
