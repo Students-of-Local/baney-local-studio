@@ -14,6 +14,9 @@ use super::{
 };
 use crate::platform::Mode;
 
+#[cfg(feature = "link")]
+mod relay;
+
 pub const CLOUDFLARE_SIGNUP: &str = "https://dash.cloudflare.com/sign-up";
 pub const CLOUDFLARE_ADD_DOMAIN: &str = "https://developers.cloudflare.com/fundamentals/manage-domains/add-site/";
 pub const AGENT_PROMPT: &str = "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it.";
