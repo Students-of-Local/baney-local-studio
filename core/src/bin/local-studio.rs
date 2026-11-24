@@ -123,7 +123,7 @@ fn main() -> ExitCode {
 }
 
 fn skills(project: Option<&Path>, json: bool) -> Result<(), String> {
-    use local_studio_core::skills::{roots, Store};
+    use local_studio_core::skills::{plain, roots, Store};
     let data = local_studio_core::data_dir(None)?;
     let plugins = plugins::plugins_dir(None);
     let here = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -136,7 +136,8 @@ fn skills(project: Option<&Path>, json: bool) -> Result<(), String> {
     }
     for skill in listed {
         let problem = skill.problem.map(|problem| format!(" [{problem}]")).unwrap_or_default();
-        println!("{}\t{}\t{}{problem}", skill.name, skill.source, skill.path.display());
+        let shown = [&skill.name, &skill.source, &format!("{}{problem}", skill.path.display())].map(|text| plain(text));
+        println!("{}", shown.join("\t"));
     }
     Ok(())
 }

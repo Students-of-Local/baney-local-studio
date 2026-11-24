@@ -10,7 +10,8 @@ use crate::plugins::{self, CommandTarget, Plugin};
 mod store;
 mod text;
 
-pub use store::{roots, Listed, Root, Store};
+pub use store::{roots, Listed, Roots, Store};
+pub use text::plain;
 
 const SESSION_COMMANDS: [(&str, &str); 7] = [
     ("compact", "Compact the conversation context"),
