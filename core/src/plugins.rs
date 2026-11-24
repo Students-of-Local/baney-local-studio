@@ -871,14 +871,5 @@ pub(crate) fn valid_command_name(name: &str) -> bool {
 }
 
 pub(crate) fn valid_semver(version: &str) -> bool {
-    let (core, build) = version.split_once('+').map_or((version, None), |(core, build)| (core, Some(build)));
-    let (core, pre) = core.split_once('-').map_or((core, None), |(core, pre)| (core, Some(pre)));
-    let numbers: Vec<&str> = core.split('.').collect();
-    let number = |part: &&str| {
-        !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) && (*part == "0" || !part.starts_with('0'))
-    };
-    let ident = |text: &str| {
-        text.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-    };
-    numbers.len() == 3 && numbers.iter().all(number) && pre.is_none_or(ident) && build.is_none_or(ident)
+    semver::Version::parse(version).is_ok()
 }
