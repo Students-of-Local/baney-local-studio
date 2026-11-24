@@ -102,15 +102,17 @@ pub fn stage(app: &Rc<App>, scene: &str) {
             app.apply(updates);
             app.panel.show("agents");
         }
-        "58-markdown" => {
+        name if name.starts_with("58-markdown") => {
             conversation(app, false);
             let index = u64::try_from(app.timeline.items().len()).unwrap_or(0);
+            let cases = crate::markdown_scenes::cases(scene).iter().map(|case| case.1);
+            let texts = cases.chain((scene == "58-markdown").then_some(MARKDOWN));
             let reply = item(
                 90,
                 3,
                 1,
                 ItemKind::Assistant {
-                    blocks: vec![local_studio_core::Block::Text { text: MARKDOWN.to_string() }],
+                    blocks: texts.map(|text| local_studio_core::Block::Text { text: text.to_string() }).collect(),
                     streaming: false,
                     error: None,
                     changed_files: Vec::new(),

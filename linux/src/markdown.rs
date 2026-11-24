@@ -6,7 +6,7 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, pango};
 
 use crate::colors::Colors;
-use crate::format::{self, Markdown, Span};
+use crate::format::{self, Markdown, Span, DEEPEST};
 
 const CACHE: usize = 96;
 const MARKER_STOP: i32 = 16;
@@ -16,6 +16,7 @@ const QUOTE_MARGIN: i32 = 14;
 const CODE_INSET: i32 = 12;
 const CELL_GAP: i32 = 28;
 const HIDDEN: char = '\u{200B}';
+const BREAK: &str = "\u{2028}";
 
 enum Kind {
     Text { prefix: String, skip: i32 },
@@ -159,8 +160,17 @@ fn styles(buffer: &gtk::TextBuffer, colors: &Colors) {
     let code_bg = rgba(colors.code_bg, 1.0);
     add("bold").set_weight(700);
     add("italic").set_style(pango::Style::Italic);
+    add("strike").set_strikethrough(true);
     add("mono").set_family(Some(&crate::theme::code_family()));
     add("muted").set_foreground_rgba(muted.as_ref());
+    for (level, step) in (1..=DEEPEST).zip(0..) {
+        let (quote, inside) = (add(&format!("quote-{level}")), add(&format!("inside-{level}")));
+        quote.set_foreground_rgba(muted.as_ref());
+        quote.set_left_margin((step + 1) * QUOTE_MARGIN);
+        inside.set_left_margin(step * DEPTH_STEP + TEXT_STOP);
+        quote.set_accumulative_margin(true);
+        inside.set_accumulative_margin(true);
+    }
     let link = add("link");
     link.set_foreground_rgba(rgba(colors.accent, 1.0).as_ref());
     link.set_underline(pango::Underline::Single);
@@ -169,7 +179,6 @@ fn styles(buffer: &gtk::TextBuffer, colors: &Colors) {
         heading.set_weight(700);
         heading.set_scale(scale);
     }
-    add("quote").set_left_margin(QUOTE_MARGIN);
     add("tight").set_pixels_above_lines(4);
     for (name, pixels) in [("gap", 7), ("gap-wide", 13)] {
         let gap = add(name);
@@ -218,6 +227,7 @@ struct Builder<'a> {
     jobs: Vec<Job>,
     group: usize,
     tables: usize,
+    nested: Vec<String>,
 }
 
 impl Builder<'_> {
@@ -225,7 +235,8 @@ impl Builder<'_> {
         if !self.starts.is_empty() {
             self.buffer.insert(&mut self.buffer.end_iter(), "\n");
         }
-        self.starts.push((self.buffer.char_count(), tags.iter().map(ToString::to_string).collect()));
+        let tags = tags.iter().map(ToString::to_string).chain(self.nested.iter().cloned()).collect();
+        self.starts.push((self.buffer.char_count(), tags));
         self.lines.push(Line { group: self.group, kind });
     }
 
@@ -245,11 +256,14 @@ impl Builder<'_> {
             if span.style.code {
                 tags.push("mono");
             }
+            if span.style.strike {
+                tags.push("strike");
+            }
             if span.link.is_some() {
                 tags.push("link");
             }
             let start = self.buffer.char_count();
-            self.insert(&span.text, &tags);
+            self.insert(&span.text.replace(['\n', '\r', '\u{2029}'], BREAK), &tags);
             if let Some(url) = &span.link {
                 let tag = gtk::TextTag::new(None);
                 self.buffer.tag_table().add(&tag);
@@ -285,12 +299,12 @@ impl Builder<'_> {
                 self.insert(&leader, &["muted"]);
                 self.spans(spans, &[]);
             }
-            Markdown::Quote(spans) => {
-                self.begin(Kind::Text { prefix: String::new(), skip: 0 }, &["quote", "muted"]);
-                self.spans(spans, &[]);
-            }
             Markdown::Code(language, code) => self.code(language.as_deref(), code),
             Markdown::Table(rows) => self.table(rows),
+            Markdown::Place(quotes, items) => {
+                let tags = [("quote", quotes), ("inside", items)].into_iter().filter(|(_, level)| **level > 0);
+                self.nested = tags.map(|(name, level)| format!("{name}-{level}")).collect();
+            }
             Markdown::Rule => {
                 self.begin(Kind::Rule, &["rule"]);
                 self.insert(&HIDDEN.to_string(), &[]);
@@ -439,12 +453,13 @@ fn fill(view: &gtk::TextView, doc: &Rc<RefCell<Doc>>, text: &str) {
         jobs: Vec::new(),
         group: 0,
         tables: 0,
+        nested: Vec::new(),
     };
     let mut previous: Option<Markdown> = None;
     for block in format::markdown(text) {
         let joined = matches!(
             (&previous, &block),
-            (Some(Markdown::Bullet(..)), Markdown::Bullet(..)) | (Some(Markdown::Quote(_)), Markdown::Quote(_))
+            (Some(Markdown::Bullet(..)), Markdown::Bullet(..)) | (_, Markdown::Place(..))
         );
         builder.block(&block, joined);
         previous = Some(block);
@@ -496,5 +511,5 @@ fn copy_text(buffer: &gtk::TextBuffer, doc: &Doc) -> Option<String> {
         result.push_str(&text);
         previous = Some(group);
     }
-    Some(result)
+    Some(result.replace(BREAK, "\n"))
 }

@@ -34,6 +34,7 @@ mod keyboard;
 mod link_scenes;
 mod machines;
 mod markdown;
+mod markdown_scenes;
 mod numbers;
 mod options;
 mod pages;

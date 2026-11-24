@@ -2,9 +2,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gtk::glib;
 use local_studio_core::{AccessMode, Harness, NoticeLevel, ThreadStatus, ToolKind, ToolState};
+use pulldown_cmark::{CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
 
 use crate::icons;
 
+pub const DEEPEST: usize = 4;
 pub const ACCESS_MODES: [AccessMode; 4] =
     [AccessMode::Supervised, AccessMode::AutoAcceptEdits, AccessMode::Auto, AccessMode::FullAccess];
 
@@ -228,11 +230,13 @@ pub fn function_key(key: &str) -> bool {
         .is_some_and(|number| !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    pub strike: bool,
 }
 
 pub struct Span {
@@ -245,202 +249,137 @@ pub enum Markdown {
     Paragraph(Vec<Span>),
     Heading(u8, Vec<Span>),
     Bullet(usize, String, Vec<Span>),
-    Quote(Vec<Span>),
     Code(Option<String>, String),
     Table(Vec<Vec<Vec<Span>>>),
     Rule,
+    Place(usize, usize),
 }
 
 pub fn markdown(text: &str) -> Vec<Markdown> {
-    let mut blocks = Vec::new();
-    let mut paragraph: Vec<&str> = Vec::new();
-    let mut table: Vec<Vec<Vec<Span>>> = Vec::new();
-    let mut code: Option<(Option<String>, Vec<&str>)> = None;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if let Some((language, lines)) = code.as_mut() {
-            if trimmed.starts_with("```") {
-                blocks.push(Markdown::Code(language.take(), lines.join("\n")));
-                code = None;
-            } else {
-                lines.push(line);
-            }
-            continue;
-        }
-        let cells = row(trimmed.trim_end());
-        if cells.is_none() && !table.is_empty() {
-            blocks.push(Markdown::Table(std::mem::take(&mut table)));
-        }
-        if let Some(fence) = trimmed.strip_prefix("```") {
-            flush(&mut paragraph, &mut blocks);
-            let language = Some(fence.trim().to_string()).filter(|language| !language.is_empty());
-            code = Some((language, Vec::new()));
-            continue;
-        }
-        if trimmed.is_empty() {
-            flush(&mut paragraph, &mut blocks);
-            continue;
-        }
-        if let Some(cells) = cells {
-            flush(&mut paragraph, &mut blocks);
-            if !divider(&cells) {
-                table.push(cells.into_iter().map(inline).collect());
-            }
-            continue;
-        }
-        if let Some((level, heading)) = heading(trimmed) {
-            flush(&mut paragraph, &mut blocks);
-            blocks.push(Markdown::Heading(level, inline(heading)));
-            continue;
-        }
-        if trimmed.chars().all(|ch| matches!(ch, '-' | '*' | '_')) && trimmed.len() >= 3 {
-            flush(&mut paragraph, &mut blocks);
-            blocks.push(Markdown::Rule);
-            continue;
-        }
-        if let Some((marker, item)) = bullet(trimmed) {
-            flush(&mut paragraph, &mut blocks);
-            let indent: usize =
-                line[..line.len() - trimmed.len()].chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum();
-            blocks.push(Markdown::Bullet((indent / 2).min(3), marker, inline(item)));
-            continue;
-        }
-        if let Some(quote) = trimmed.strip_prefix('>') {
-            flush(&mut paragraph, &mut blocks);
-            blocks.push(Markdown::Quote(inline(quote.trim_start())));
-            continue;
-        }
-        paragraph.push(trimmed);
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let mut reader = Reader::default();
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        reader.read(event, &text[range.clone()], range.end == text.len());
     }
-    if let Some((language, lines)) = code {
-        blocks.push(Markdown::Code(language, lines.join("\n")));
-    }
-    if !table.is_empty() {
-        blocks.push(Markdown::Table(table));
-    }
-    flush(&mut paragraph, &mut blocks);
-    blocks
+    reader.blocks
 }
 
-fn flush(paragraph: &mut Vec<&str>, blocks: &mut Vec<Markdown>) {
-    if !paragraph.is_empty() {
-        blocks.push(Markdown::Paragraph(inline(&paragraph.join(" "))));
-        paragraph.clear();
-    }
+#[derive(Default)]
+struct Reader {
+    blocks: Vec<Markdown>,
+    spans: Vec<Span>,
+    inline: Vec<(Style, Option<String>)>,
+    cells: Vec<Vec<Span>>,
+    rows: Vec<Vec<Vec<Span>>>,
+    lists: Vec<Option<u64>>,
+    marker: Option<String>,
+    language: Option<String>,
+    quotes: usize,
+    place: (usize, usize),
 }
 
-fn row(line: &str) -> Option<Vec<&str>> {
-    let inner = line.strip_prefix('|')?;
-    let inner = inner.strip_suffix('|').unwrap_or(inner);
-    Some(inner.split('|').map(str::trim).collect())
-}
-
-fn divider(cells: &[&str]) -> bool {
-    cells.iter().all(|cell| {
-        let dashes = cell.trim_matches(':');
-        !dashes.is_empty() && dashes.chars().all(|ch| ch == '-')
-    })
-}
-
-fn heading(line: &str) -> Option<(u8, &str)> {
-    let level = line.chars().take_while(|ch| *ch == '#').count();
-    let rest = line.get(level..)?;
-    (1..=6).contains(&level).then_some(())?;
-    let text = rest.strip_prefix(' ')?;
-    Some((u8::try_from(level).unwrap_or(6), text))
-}
-
-fn bullet(line: &str) -> Option<(String, &str)> {
-    for marker in ["- ", "* ", "+ "] {
-        if let Some(rest) = line.strip_prefix(marker) {
-            let rest = rest.strip_prefix("[ ] ").map_or(rest, |todo| todo);
-            return Some(("•".to_string(), rest));
+impl Reader {
+    fn read(&mut self, event: Event, source: &str, typing: bool) {
+        match &event {
+            Event::Start(Tag::Paragraph | Tag::HtmlBlock | Tag::Heading { .. })
+            | Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => self.flush(false),
+            Event::Start(Tag::List(_) | Tag::BlockQuote(_) | Tag::CodeBlock(_) | Tag::Table(_))
+            | Event::End(TagEnd::Item)
+            | Event::Rule => self.flush(true),
+            _ => {}
         }
-    }
-    let digits = line.chars().take_while(char::is_ascii_digit).count();
-    if digits > 0 {
-        let rest = line.get(digits..)?;
-        if let Some(item) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
-            return Some((format!("{}.", &line[..digits]), item));
-        }
-    }
-    None
-}
-
-fn inline(text: &str) -> Vec<Span> {
-    let mut spans = Vec::new();
-    push_inline(text, Style::default(), None, &mut spans);
-    spans
-}
-
-fn push_inline(text: &str, style: Style, link: Option<&str>, spans: &mut Vec<Span>) {
-    let mut plain = String::new();
-    let mut rest = text;
-    while let Some(ch) = rest.chars().next() {
-        if let Some(after) = rest.strip_prefix('`') {
-            if let Some(end) = after.find('`') {
-                push_span(spans, &std::mem::take(&mut plain), style, link);
-                push_span(spans, &after[..end], Style { code: true, ..style }, link);
-                rest = &after[end + 1..];
-                continue;
-            }
-        }
-        if let Some(after) = rest.strip_prefix("**").or_else(|| rest.strip_prefix("__")) {
-            let marker = &rest[..2];
-            if let Some(end) = after.find(marker).filter(|end| *end > 0) {
-                push_span(spans, &std::mem::take(&mut plain), style, link);
-                push_inline(&after[..end], Style { bold: true, ..style }, link, spans);
-                rest = &after[end + 2..];
-                continue;
-            }
-        }
-        if let Some(after) = rest.strip_prefix('[') {
-            if let Some((label, url, consumed)) = self::link(after) {
-                push_span(spans, &std::mem::take(&mut plain), style, link);
-                push_inline(label, style, Some(url), spans);
-                rest = &after[consumed..];
-                continue;
-            }
-        }
-        if ch == '*' || ch == '_' {
-            let after = &rest[1..];
-            if after.chars().next().is_some_and(|next| !next.is_whitespace() && next != ch) {
-                if let Some(end) = after.find(ch).filter(|end| *end > 0) {
-                    let boundary = after[end + 1..].chars().next().is_none_or(|next| !next.is_alphanumeric());
-                    if boundary && !after[..end].ends_with(' ') {
-                        push_span(spans, &std::mem::take(&mut plain), style, link);
-                        push_inline(&after[..end], Style { italic: true, ..style }, link, spans);
-                        rest = &after[end + 1..];
-                        continue;
-                    }
+        let (style, link) = self.inline.last().cloned().unwrap_or_default();
+        match event {
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => self.text(&text, false),
+            Event::Code(text) => self.text(&text, true),
+            Event::SoftBreak => self.text(" ", false),
+            Event::HardBreak => self.text("\n", false),
+            Event::Start(Tag::Emphasis) => self.inline.push((Style { italic: true, ..style }, link)),
+            Event::Start(Tag::Strong) => self.inline.push((Style { bold: true, ..style }, link)),
+            Event::Start(Tag::Strikethrough) => self.inline.push((Style { strike: true, ..style }, link)),
+            Event::Start(Tag::Link { link_type, dest_url, .. } | Tag::Image { link_type, dest_url, .. }) => {
+                let opens = link_type != LinkType::Email && !dest_url.contains(char::is_whitespace);
+                self.inline.push((style, link.or_else(|| opens.then(|| dest_url.to_string()))));
+                if source.starts_with("![]") {
+                    self.text(&dest_url, false);
                 }
             }
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link | TagEnd::Image) => {
+                drop(self.inline.pop());
+            }
+            Event::Start(Tag::List(number)) => self.lists.push(number),
+            Event::End(TagEnd::List(_)) => drop(self.lists.pop()),
+            Event::Start(Tag::Item) => {
+                let number = self.lists.last_mut().and_then(Option::as_mut);
+                let marker = number.map(|next| format!("{}.", std::mem::replace(next, *next + 1)));
+                self.marker = Some(marker.unwrap_or_else(|| "•".to_string()));
+            }
+            Event::TaskListMarker(done) => {
+                let number = self.marker.take().unwrap_or_default().replace('•', "").replace('.', ". ");
+                self.marker = Some(number + if done { "✓" } else { "☐" });
+            }
+            Event::Start(Tag::BlockQuote(_)) => self.quotes += 1,
+            Event::End(TagEnd::BlockQuote(_)) => self.quotes -= 1,
+            Event::End(TagEnd::Heading(level)) => {
+                let underline =
+                    source.rsplit('\n').next().unwrap_or("").trim_start_matches([' ', '\t', '>']).trim_end();
+                if typing && underline == "-" {
+                    return self.flush(false);
+                }
+                if self.marker.is_some() {
+                    self.spans.iter_mut().for_each(|span| span.style.bold = true);
+                    return self.flush(true);
+                }
+                let spans = std::mem::take(&mut self.spans);
+                self.flush(true);
+                self.block(Markdown::Heading(level as u8, spans));
+            }
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                self.language = Some(info.trim().to_string()).filter(|language| !language.is_empty());
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                let code: String = self.spans.drain(..).map(|span| span.text).collect();
+                let language = self.language.take();
+                self.block(Markdown::Code(language, code.strip_suffix('\n').unwrap_or(&code).to_string()));
+            }
+            Event::End(TagEnd::TableCell) => self.cells.push(std::mem::take(&mut self.spans)),
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => self.rows.push(std::mem::take(&mut self.cells)),
+            Event::End(TagEnd::Table) => {
+                let rows = std::mem::take(&mut self.rows);
+                self.block(Markdown::Table(rows));
+            }
+            Event::Rule => self.block(Markdown::Rule),
+            _ => {}
         }
-        plain.push(ch);
-        rest = &rest[ch.len_utf8()..];
     }
-    push_span(spans, &plain, style, link);
-}
 
-fn push_span(spans: &mut Vec<Span>, text: &str, style: Style, link: Option<&str>) {
-    if text.is_empty() {
-        return;
+    fn text(&mut self, text: &str, code: bool) {
+        let (style, link) = self.inline.last().cloned().unwrap_or_default();
+        let style = Style { code, ..style };
+        match self.spans.last_mut().filter(|last| last.style == style && last.link == link) {
+            Some(last) => last.text.push_str(text),
+            None => self.spans.push(Span { text: text.to_string(), style, link }),
+        }
     }
-    if let Some(last) = spans.last_mut().filter(|last| last.style == style && last.link.as_deref() == link) {
-        last.text.push_str(text);
-        return;
-    }
-    spans.push(Span { text: text.to_string(), style, link: link.map(str::to_string) });
-}
 
-fn link(after: &str) -> Option<(&str, &str, usize)> {
-    let close = after.find("](")?;
-    let label = &after[..close];
-    if label.contains('[') {
-        return None;
+    fn flush(&mut self, item: bool) {
+        let mut spans = std::mem::take(&mut self.spans);
+        if let Some(last) = spans.last_mut() {
+            last.text.truncate(last.text.trim_end_matches('\n').len());
+        }
+        if let Some(marker) = self.marker.take_if(|_| item || !spans.is_empty()) {
+            self.block(Markdown::Bullet(self.lists.len().clamp(1, DEEPEST) - 1, marker, spans));
+        } else if !spans.is_empty() {
+            self.block(Markdown::Paragraph(spans));
+        }
     }
-    let tail = &after[close + 2..];
-    let end = tail.find(')')?;
-    let url = &tail[..end];
-    (!url.contains(char::is_whitespace)).then_some((label, url, close + 3 + end))
+
+    fn block(&mut self, block: Markdown) {
+        let items = if matches!(block, Markdown::Bullet(..)) { 0 } else { self.lists.len().min(DEEPEST) };
+        let place = (self.quotes.min(DEEPEST), items);
+        if std::mem::replace(&mut self.place, place) != place {
+            self.blocks.push(Markdown::Place(place.0, place.1));
+        }
+        self.blocks.push(block);
+    }
 }
