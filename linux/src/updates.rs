@@ -65,7 +65,7 @@ impl UpdatesGroup {
         let current = app.upgrade().is_some_and(|app| app.state.borrow().settings.automatic_updates);
         let automatic = adw::SwitchRow::builder()
             .title("Automatic updates")
-            .subtitle("Download new versions in the background, then restart when you are ready")
+            .subtitle("Check for and download new versions in the background. When off, only Check Now checks.")
             .active(current)
             .build();
         let weak = app.clone();
@@ -228,9 +228,14 @@ fn status(update: Option<&AppUpdateState>, automatic: bool) -> Status {
         notes: None,
     };
     match update {
-        None | Some(AppUpdateState::Idle) => {
-            plain("Not checked yet", "Local Studio checks shortly after it starts and every 6 hours.")
-        }
+        None | Some(AppUpdateState::Idle) => plain(
+            "Not checked yet",
+            if automatic {
+                "Local Studio checks for updates in the background."
+            } else {
+                "Choose Check Now to look for a new version."
+            },
+        ),
         Some(AppUpdateState::Checking) => Status { busy: true, ..plain("Checking for updates…", "") },
         Some(AppUpdateState::UpToDate { latest }) => {
             plain("Local Studio is up to date", &format!("The newest version on this channel is {latest}."))

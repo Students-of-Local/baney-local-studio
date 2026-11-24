@@ -28,7 +28,7 @@ struct UpdatesSection: View {
             SettingRow(.automaticUpdates) {
                 Toggle(isOn: bind(\.automaticUpdates)) {
                     Text(SettingKey.automaticUpdates.title)
-                    Text("Download new versions in the background. Restarting to update is always your choice.")
+                    Text("Check for and download new versions in the background. When off, Local Studio checks only when you choose Check Now. Restarting to update is always your choice.")
                 }
             }
             SettingRow(.channel) {
