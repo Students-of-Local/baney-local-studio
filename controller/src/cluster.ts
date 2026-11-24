@@ -91,7 +91,10 @@ export const clusterSettings = (c: Config) => ({
   power: { activeWatts: Math.max(0, c.cluster?.power?.activeWatts ?? 0), awayWatts: awayCap(c.cluster?.power?.awayWatts) },
 });
 
-const proof = (key: string, nonce: string, id: string, target: string): string => createHmac("sha256", key).update(`${nonce}|${id}|${normUrl(target)}`).digest("hex");
+const CONTROLLER_ID = /^[\w.-]{1,128}$/;
+const HELLO_NONCE = /^[\w-]{16,128}$/;
+
+const proof = (key: string, nonce: string, id: string, target: string): string => createHmac("sha256", key).update(JSON.stringify(["local-studio-hello", 2, nonce, id, target])).digest("hex");
 
 const same = (a: string, b: string): boolean => {
   const [x, y] = [Buffer.from(a), Buffer.from(b)];
@@ -594,7 +597,7 @@ export const makeCluster = (d: ClusterDeps) => {
     const found = await Promise.all(targets.map(async (url) => {
       const h = await Effect.runPromise(Effect.option(fetchJson(`${url}/api/health`, 1_500)));
       const health = h._tag === "Some" && h.value.status === 200 ? decodeHealth(h.value.body) : null;
-      if (health?._tag !== "Some" || !health.value.cluster || health.value.id === me.id) return null;
+      if (health?._tag !== "Some" || !health.value.cluster || !CONTROLLER_ID.test(health.value.id) || health.value.id === me.id) return null;
       const nonce = randomBytes(24).toString("base64url");
       const r = await fetch(`${url}/api/cluster/hello`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: me.id, nonce, target: url }), signal: AbortSignal.timeout(3_000), redirect: "manual" }).catch(() => null);
       const hello = r?.ok ? decodeHello(await r.json().catch(() => null)) : null;
@@ -614,7 +617,7 @@ export const makeCluster = (d: ClusterDeps) => {
       if (!set().discover) return yield* fail(404, "NOT_FOUND", "POST /api/cluster/hello");
       const me = d.config();
       const t = URL.parse(req.target);
-      if (!t || t.port !== String(d.port) || !ownHosts().has(t.hostname) || req.nonce.length < 16 || req.nonce.length > 128 || req.id === me.id)
+      if (!t || req.target !== `http://${t.hostname}:${d.port}` || !ownHosts().has(t.hostname) || !HELLO_NONCE.test(req.nonce) || req.id === me.id)
         return yield* fail(400, "BAD_HELLO", "that address is not this controller");
       return { id: me.id, name: me.name, proof: proof(me.fleetKey, req.nonce, me.id, req.target) };
     });

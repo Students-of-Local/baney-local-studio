@@ -437,6 +437,15 @@ try {
   assert.equal((await snap(A)).cluster.discovered.some((x) => x.id === "cluster-d"), false);
   const relay = await call(B, "/api/cluster/hello", { id: "x", nonce: randomBytes(24).toString("base64url"), target: `http://127.0.0.1:${A}` }, { "content-type": "application/json" });
   assert.equal(relay.status, 400, "hello must refuse a target that is not its own address");
+  const own = `http://127.0.0.1:${B}`;
+  for (const target of [`${own}/`, `${own}/x`, `${own}?x`, `${own}#x`, `${own}/#|http://127.0.0.1:${A}`, `http://me@127.0.0.1:${B}`, `https://127.0.0.1:${B}`, `http://127.1:${B}`]) {
+    const odd = await call(B, "/api/cluster/hello", { id: "x", nonce: randomBytes(24).toString("base64url"), target }, { "content-type": "application/json" });
+    assert.equal(odd.status, 400, `hello must answer its exact address only, not ${target}`);
+  }
+  for (const nonce of ["short", "x".repeat(129), `${randomBytes(24).toString("base64url")}|`]) {
+    const odd = await call(B, "/api/cluster/hello", { id: "x", nonce, target: own }, { "content-type": "application/json" });
+    assert.equal(odd.status, 400, `hello must refuse the nonce ${nonce}`);
+  }
   const health = await (await call(A, "/api/health", undefined, {})).json();
   assert.equal(health.cluster, true);
 
