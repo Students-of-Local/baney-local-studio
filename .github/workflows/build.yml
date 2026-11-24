@@ -129,6 +129,9 @@ jobs:
       - name: Build (Release)
         if: steps.secrets.outputs.ship == 'true'
         run: nu macos/build.nu --configuration Release
+      - name: Build the command line tool (Release)
+        if: steps.secrets.outputs.ship == 'true'
+        run: PATH="$(nu macos/zig.nu):$PATH" MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --release -p local-studio-core --bin local-studio --features link
       - name: Sign, package and upload
         id: ship
         env:
@@ -168,6 +171,7 @@ jobs:
           mkdir -p "$stage" "$RUNNER_TEMP/out"
           app="$stage/$name.app"
           mv macos/build/Release/LocalStudio.app "$app"
+          cp target/release/local-studio "$app/Contents/MacOS/local-studio-cli"
           keychain="$RUNNER_TEMP/build.keychain-db"
           password=$(openssl rand -hex 24)
           security create-keychain -p "$password" "$keychain"
@@ -202,6 +206,8 @@ jobs:
           esac
           reported=$("$app/Contents/MacOS/LocalStudio" --version)
           [ "$reported" = "local-studio $VERSION ($CHANNEL)" ] || { echo "::error::the signed build reports $reported, not local-studio $VERSION ($CHANNEL)"; exit 1; }
+          reported=$("$app/Contents/MacOS/local-studio-cli" --version)
+          [ "$reported" = "local-studio $VERSION ($CHANNEL)" ] || { echo "::error::the signed command line tool reports $reported, not local-studio $VERSION ($CHANNEL)"; exit 1; }
           if [ "$MODE" = notarized ]; then
             printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/notary.p8"
             ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"

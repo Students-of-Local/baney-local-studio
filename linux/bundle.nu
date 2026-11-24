@@ -10,6 +10,10 @@ def main [--profile (-p): string = "debug"] {
     if not ($app | path exists) {
         error make { msg: $"($app) is missing: run `cargo build` first" }
     }
+    let tool_target = ($target_root | path join "cli")
+    let tool_profile = if $profile == "debug" { "dev" } else { $profile }
+    ^cargo build --manifest-path ($repo | path join "Cargo.toml") -p local-studio-core --bin local-studio --features link --profile $tool_profile --target-dir $tool_target
+    let tool = ($tool_target | path join $profile "local-studio")
     let cli = (eukhe binary $repo ($target_root | path join "eukhe"))
     let sidecars = (eukhe sidecars $cli)
     if ($sidecars | is-empty) {
@@ -21,6 +25,7 @@ def main [--profile (-p): string = "debug"] {
     for binary in [$app $cli] {
         cp $binary $bundle
     }
+    cp $tool ($bundle | path join "local-studio-cli")
     for sidecar in $sidecars {
         eukhe copy-sidecar $sidecar $bundle
     }

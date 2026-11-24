@@ -84,8 +84,34 @@ use gtk::{gio, glib};
 
 use crate::app::App;
 
-const USAGE: &str =
-    "usage: local-studio [--version | --smoke | --smoke-kernel [install|installed] | --smoke-providers | --snapshot <dir> [name-filter]]";
+const USAGE: &str = "usage: local-studio [--version | --smoke | --smoke-kernel [install|installed] | --smoke-providers | --snapshot <dir> [name-filter]]
+       local-studio import | plugin | tunnel | fleet | update ... (runs local-studio-cli beside this binary)";
+
+const CLI_VERBS: [&str; 5] = ["import", "plugin", "tunnel", "fleet", "update"];
+const CLI: &str = "local-studio-cli";
+
+fn cli_verb(arg: Option<&str>) -> bool {
+    arg.is_some_and(|arg| CLI_VERBS.contains(&arg))
+}
+
+fn run_cli() -> glib::ExitCode {
+    use std::os::unix::process::CommandExt;
+    let exe = match std::env::current_exe().and_then(std::fs::canonicalize) {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("local-studio: could not find this binary to locate {CLI}: {error}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
+    let cli = exe.with_file_name(CLI);
+    if !cli.is_file() {
+        eprintln!("local-studio: this build has no command line tool; expected it at {}", cli.display());
+        return glib::ExitCode::FAILURE;
+    }
+    let error = std::process::Command::new(&cli).args(std::env::args_os().skip(1)).exec();
+    eprintln!("local-studio: could not run {}: {error}", cli.display());
+    glib::ExitCode::FAILURE
+}
 
 #[derive(Clone)]
 enum Mode {
@@ -119,6 +145,9 @@ fn main() -> glib::ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("local-studio {} ({})", local_studio_core::VERSION, local_studio_core::CHANNEL);
         return glib::ExitCode::SUCCESS;
+    }
+    if cli_verb(std::env::args().nth(1).as_deref()) {
+        return run_cli();
     }
     let mode = match parse() {
         Ok(mode) => mode,
