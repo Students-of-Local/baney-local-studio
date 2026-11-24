@@ -15,6 +15,10 @@ pub(crate) fn days_since_epoch(ms: i64) -> i64 {
     ms.div_euclid(DAY_MS)
 }
 
+pub(crate) fn steady(zone: &TimeZone, ms: i64) -> TimeZone {
+    Timestamp::from_millisecond(ms).map_or_else(|_| zone.clone(), |at| TimeZone::fixed(zone.to_offset(at)))
+}
+
 pub(crate) fn local_ms(zone: &TimeZone, ms: i64) -> i64 {
     Timestamp::from_millisecond(ms).map_or(ms, |at| ms + i64::from(zone.to_offset(at).seconds()) * 1000)
 }

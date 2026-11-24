@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use super::history::{self, DayTokens, HEATMAP_DAYS};
 use super::model::{UsageBucket, UsageByModel, UsageLimit, UsagePeriod, UsageReport};
-use super::time::{days_since_epoch, instant_ms, local_ms, parse_rfc3339_ms, DAY_MS};
+use super::time::{days_since_epoch, instant_ms, local_ms, parse_rfc3339_ms, steady, DAY_MS};
 use crate::daemon::DaemonQuery;
 
 const HOUR_MS: i64 = 3_600_000;
@@ -353,6 +353,7 @@ fn row_model(row: &Value) -> (&str, &str) {
 
 struct Tally<'a> {
     zone: TimeZone,
+    clock: TimeZone,
     period: UsagePeriod,
     now: i64,
     start: i64,
@@ -369,10 +370,15 @@ struct Tally<'a> {
 impl<'a> Tally<'a> {
     fn new(period: UsagePeriod, now: i64) -> Self {
         let zone = TimeZone::system();
+        let clock = match period {
+            UsagePeriod::Day => steady(&zone, now),
+            UsagePeriod::Week | UsagePeriod::Month | UsagePeriod::Quarter => zone.clone(),
+        };
         let now = local_ms(&zone, now);
         let (start, step, count) = window(period, now);
         Self {
             zone,
+            clock,
             period,
             now,
             start,
@@ -393,8 +399,9 @@ impl<'a> Tally<'a> {
     }
 
     fn add(&mut self, at: i64, provider: &'a str, model: &'a str, spend: Spend) {
-        let at = local_ms(&self.zone, at).min(self.now);
-        merge(self.days.entry(days_since_epoch(at)).or_default(), spend);
+        let day = days_since_epoch(local_ms(&self.zone, at).min(self.now));
+        merge(self.days.entry(day).or_default(), spend);
+        let at = local_ms(&self.clock, at).min(self.now);
         if at < self.start {
             return;
         }
@@ -437,7 +444,7 @@ impl<'a> Tally<'a> {
             .iter()
             .zip(0_i64..)
             .map(|((tokens, cost_usd), index)| UsageBucket {
-                start_ms: instant_ms(&self.zone, self.start + index * self.step),
+                start_ms: instant_ms(&self.clock, self.start + index * self.step),
                 tokens: *tokens,
                 cost_usd: *cost_usd,
             })
