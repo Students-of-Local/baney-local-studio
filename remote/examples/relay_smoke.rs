@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context as Poller, Poll};
 use std::time::{Duration, Instant};
@@ -41,6 +41,12 @@ const LONG_PING: Duration = Duration::from_secs(30);
 const NO_REDIAL: Duration = Duration::from_secs(3);
 const PUBLIC_HOST: &str = "relay.example.com";
 const MARK: &str = "x-relay-smoke";
+const BIG: usize = 3_201 * 65_521;
+const BLOCK: u32 = 65_521;
+
+fn noise(bytes: u32) -> Vec<u8> {
+    (0..bytes).map(|at| at.wrapping_mul(2_654_435_761).to_le_bytes()[3]).collect()
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -101,6 +107,7 @@ type Sender = SplitSink<WebSocketStream<TcpStream>, Message>;
 struct Link {
     frames: Arc<Mutex<Vec<Message>>>,
     changed: Arc<Notify>,
+    paused: Arc<AtomicBool>,
     sink: Arc<tokio::sync::Mutex<Sender>>,
 }
 
@@ -154,10 +161,18 @@ impl Link {
     async fn open(smoke: &Smoke, stream: TcpStream, pongs: bool) -> anyhow::Result<Self> {
         let socket = tokio_tungstenite::accept_async(stream).await?;
         let (sink, mut stream) = socket.split();
-        let link = Self { frames: Arc::default(), changed: Arc::default(), sink: Arc::new(sink.into()) };
+        let link = Self {
+            frames: Arc::default(),
+            changed: Arc::default(),
+            paused: Arc::default(),
+            sink: Arc::new(sink.into()),
+        };
         let (seen, log) = (link.clone(), Arc::clone(&smoke.log));
         tokio::spawn(async move {
             loop {
+                while seen.paused.load(Ordering::Acquire) {
+                    sleep(Duration::from_millis(5)).await;
+                }
                 let Some(Ok(got)) = stream.next().await else { return };
                 writeln!(lock(&log), "{} bytes {}", got.len(), got.to_text().unwrap_or_default()).ok();
                 let (ping, closed) = (is_ping(&got), got.is_close());
@@ -187,6 +202,18 @@ impl Link {
 
     async fn req(&self, id: u32, method: &str, path: &str, body: bool) -> anyhow::Result<()> {
         self.open_stream(json!({ "id": id, "method": method, "path": path, "body": body, "ws": false }), &[]).await
+    }
+
+    async fn quiet(&self, id: u32) -> anyhow::Result<()> {
+        let before = self.count(|_| true);
+        sleep(Duration::from_millis(300)).await;
+        let late = Answer::read(&lock(&self.frames)[before..], id);
+        ensure!(late.data == 0 && !late.ended && late.errors == 0 && late.status == 0, "a stopped stream sent more");
+        Ok(())
+    }
+
+    async fn cancel(&self, id: u32) -> anyhow::Result<()> {
+        self.send(&json!({ "v": 1, "t": "cancel", "id": id, "reason": "client" })).await
     }
 
     async fn answer(&self, id: u32) -> anyhow::Result<Answer> {
@@ -245,6 +272,9 @@ impl Body for Pipe {
 struct Origin {
     dials: AtomicUsize,
     hosts: Mutex<Vec<(String, Vec<u8>)>>,
+    written: AtomicUsize,
+    left: AtomicBool,
+    go: Notify,
 }
 
 impl Origin {
@@ -286,11 +316,39 @@ impl Origin {
                     .insert("x-latin", HeaderValue::from_bytes(b"caf\xe9").unwrap_or(HeaderValue::from_static("")));
             }
             "status" => *response.status_mut() = StatusCode::from_bytes(tag.as_bytes()).unwrap_or_default(),
+            "events" => {
+                tokio::spawn(async move {
+                    sender.send("data: 1\n\n".into()).await.ok();
+                    self.go.notified().await;
+                    sender.send("data: 2\n\n".into()).await.ok();
+                });
+            }
+            "forever" | "big" => {
+                let wanted = if kind == "big" { BIG } else { usize::MAX };
+                let block = Bytes::from(noise(BLOCK));
+                tokio::spawn(async move {
+                    let mut sent = 0;
+                    while sent < wanted && sender.send(block.clone()).await.is_ok() {
+                        sent += block.len();
+                        self.written.store(sent, Ordering::Release);
+                    }
+                    self.left.store(sent < wanted, Ordering::Release);
+                });
+            }
             _ => {
                 sender.send(format!("ok {name}").into()).await.ok();
             }
         }
         Ok(response)
+    }
+
+    async fn until(&self, what: &str, within: Duration, done: impl Fn(&Self) -> bool) -> anyhow::Result<()> {
+        let deadline = Instant::now() + within;
+        while !done(self) {
+            ensure!(Instant::now() < deadline, "the origin never saw {what}");
+            sleep(Duration::from_millis(5)).await;
+        }
+        Ok(())
     }
 }
 
@@ -541,6 +599,29 @@ async fn h3_paths(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     link.get(22, "GET", "/.well-known/oauth-authorization-server/mcp").await?.is(200, "ok mcp")
 }
 
+async fn h4_events(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    link.req(1, "GET", "/mcp?events", false).await?;
+    link.until("event 1", |frames| (Answer::read(frames, 1).body == b"data: 1\n\n").then_some(())).await?;
+    let hits = lock(&smoke.origin.hosts).len();
+    link.req(1, "GET", "/mcp", false).await?;
+    link.get(2, "GET", "/mcp").await?.is(200, "ok mcp")?;
+    ensure!(lock(&smoke.origin.hosts).len() == hits + 1, "a second req with an id in flight was served");
+    smoke.origin.go.notify_one();
+    link.answer(1).await?.is(200, "data: 1\n\ndata: 2\n\n")
+}
+
+async fn h5_cancel(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    link.req(1, "GET", "/mcp?forever", false).await?;
+    link.until("some of the answer", |frames| (Answer::read(frames, 1).data > 3).then_some(())).await?;
+    link.cancel(1).await?;
+    let gone = smoke.origin.until("the close", Duration::from_secs(1), |origin| origin.left.load(Ordering::Acquire));
+    gone.await?;
+    link.get(2, "GET", "/mcp").await?.is(200, "ok mcp")?;
+    link.quiet(1).await?;
+    ensure!(!Answer::read(&lock(&link.frames), 1).ended, "a canceled stream ended");
+    Ok(())
+}
+
 async fn h7_refused(smoke: &Smoke) -> anyhow::Result<()> {
     let closed = TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
     let mut client = Client::start(&smoke.url, &smoke.key, Ports { mcp: closed, ..smoke.ports }, LONG_PING);
@@ -550,6 +631,41 @@ async fn h7_refused(smoke: &Smoke) -> anyhow::Result<()> {
     let answer = link.get(1, "GET", "/mcp").await?;
     ensure!(answer.errors == 1 && answer.status == 0 && !answer.ended, "a closed origin port got {}", answer.status);
     link.get(2, "GET", "/v1/health").await?.is(200, "ok serve")
+}
+
+async fn h9_slow_relay(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    link.req(1, "GET", "/mcp?big", false).await?;
+    link.until("the head", |frames| (Answer::read(frames, 1).status == 200).then_some(())).await?;
+    link.paused.store(true, Ordering::Release);
+    let before = smoke.origin.written.load(Ordering::Acquire);
+    sleep(Duration::from_secs(2)).await;
+    let written = smoke.origin.written.load(Ordering::Acquire) - before;
+    ensure!(written < 32 << 20, "the origin wrote {written} bytes while the relay read nothing");
+    link.paused.store(false, Ordering::Release);
+    let (mut at, mut seen) = (0, 0);
+    let (period, block) = (BLOCK as usize, noise(BLOCK).repeat(3));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let frames = lock(&link.frames)[at..].to_vec();
+        at += frames.len();
+        for got in &frames {
+            match got {
+                Message::Binary(bytes) => {
+                    ensure!(bytes.len() <= 5 + (64 << 10), "a DATA frame held {} bytes", bytes.len() - 5);
+                    ensure!(block[seen % period..].starts_with(&bytes[5..]), "the answer differs near byte {seen}");
+                    seen += bytes.len() - 5;
+                }
+                Message::Text(text) if text.contains(r#""t":"end""#) => {
+                    ensure!(seen == BIG, "{seen} of {BIG} bytes arrived");
+                    println!("     the origin wrote {written} bytes while the relay read nothing");
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        ensure!(Instant::now() < deadline, "{seen} of {BIG} bytes arrived in time");
+        sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn h10_no_body(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
@@ -608,7 +724,10 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     step("C10 bad config never dials", c10_bad_config(smoke)).await?;
     linked("H1 headers both ways", smoke, h1_headers).await?;
     linked("H3 only the exact paths reach an origin", smoke, h3_paths).await?;
+    linked("H4 events arrive as they are sent", smoke, h4_events).await?;
+    linked("H5 cancel mid-answer", smoke, h5_cancel).await?;
     step("H7 closed origin port", h7_refused(smoke)).await?;
+    linked("H9 a slow relay slows the origin", smoke, h9_slow_relay).await?;
     linked("H10 answers with no body", smoke, h10_no_body).await?;
     linked("H11 bad headers are 400", smoke, h11_bad_headers).await
 }

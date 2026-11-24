@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream};
 
-use self::streams::Streams;
+use self::streams::{Queued, Streams};
 use super::Ports;
 use crate::link::client::tls;
 use crate::link::devices::random;
@@ -148,15 +148,16 @@ async fn dial(address: &str, key: &str) -> Result<Socket, Stop> {
     }
 }
 
-async fn write(mut sink: Sink, mut queue: mpsc::UnboundedReceiver<Message>, ping: Duration) {
+async fn write(mut sink: Sink, mut queue: mpsc::UnboundedReceiver<Queued>, ping: Duration) {
     let mut pings = interval_at(Instant::now() + ping, ping);
     pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        let message = tokio::select! {
+        let queued = tokio::select! {
             biased;
-            _ = pings.tick() => Message::text(PING),
-            next = queue.recv() => next.unwrap_or(Message::Close(None)),
+            _ = pings.tick() => Queued::own(Message::text(PING)),
+            next = queue.recv() => next.unwrap_or_else(|| Queued::own(Message::Close(None))),
         };
+        let Some(message) = queued.message() else { continue };
         let last = message.is_close();
         if sink.send(message).await.is_err() || last {
             return;
@@ -217,7 +218,7 @@ async fn session(
         }
     };
     drop(streams);
-    out.send(Message::Close(None)).ok();
+    out.send(Queued::own(Message::Close(None))).ok();
     timeout(HANG_UP, writer.join_next()).await.ok();
     stop
 }
