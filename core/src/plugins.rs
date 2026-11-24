@@ -836,10 +836,10 @@ fn prompts_in(plugin: &Path, dir: &Path, skipped: &mut Vec<PathBuf>) -> Vec<Plug
             }
         };
         let description = frontmatter::field(&content, "description").unwrap_or_else(|| {
-            content
+            frontmatter::strip(&content)
                 .lines()
                 .map(str::trim)
-                .find(|line| !line.is_empty() && *line != "---")
+                .find(|line| !line.is_empty())
                 .unwrap_or_default()
                 .to_string()
         });
