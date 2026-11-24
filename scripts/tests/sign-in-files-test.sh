@@ -37,8 +37,8 @@ LIST
 }
 
 claude='credentials\.json|\.claude\.json|CLAUDE_SIGNED_IN|names\(harness\)|join\(marker\)'
-others='["'\''/]auth\.json(\.lock)?["'\'']|["'\''/]hosts\.ya?ml|\bauth["'\'', ]+token|cert\.pem|\.netrc|\.git-credentials'
-keychain='find-(generic|internet)-password|dump-keychain|SecKeychain|SecItemCopyMatching|secret-tool|libsecret|org\.freedesktop\.secrets|CryptUnprotectData'
+others='["'\''/]auth\.json(\.lock)?["'\''`]|\.codex/auth\.json|["'\''/]hosts\.ya?ml|\bauth["'\'', ]+token|auth"\)\.arg\("token|show-token|cloud-auth-token|cert\.pem|\.netrc|\.git-credentials'
+keychain='get_(generic|internet)_password|security_framework|keyring::|Claude Code-credentials|find-(generic|internet)-password|dump-keychain|SecKeychain|SecItemCopyMatching|secret-tool|libsecret|org\.freedesktop\.secrets|CryptUnprotectData'
 browser='Cookies["'\''/]|cookies\.(sqlite|binarycookies)|Login Data|logins\.json|key4\.db'
 
 found=$(git ls-files -co --exclude-standard -- core remote macos linux ios kit controller |

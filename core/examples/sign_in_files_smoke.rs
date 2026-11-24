@@ -94,6 +94,7 @@ fn run(scratch: &Path) -> Result<()> {
     for name in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "LOCAL_STUDIO_DATA_DIR", "T3CODE_HOME", "XDG_CONFIG_HOME"] {
         std::env::remove_var(name);
     }
+    std::env::set_var("LOCAL_STUDIO_CONTROLLER_URL", "http://127.0.0.1:9");
     std::env::set_var("HOME", &home);
     std::env::set_var("EUKHE_CODING_AGENT_DIR", scratch.join("agent"));
     std::env::set_var("LOCAL_STUDIO_CLAUDE_BIN", "false");
