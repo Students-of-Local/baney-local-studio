@@ -21,6 +21,7 @@ use super::Ports;
 use crate::link::client::tls;
 use crate::link::devices::random;
 
+mod socket;
 mod streams;
 
 const VERSION: u64 = 1;
@@ -35,6 +36,7 @@ const HANG_UP: Duration = Duration::from_millis(500);
 const FIRST_WAIT_MS: u64 = 1_000;
 const LONGEST_WAIT_MS: u64 = 30_000;
 const MAX_MESSAGE: usize = 40 << 20;
+const RELAY_TAKES: usize = 32 << 20;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Sink = SplitSink<Socket, Message>;
@@ -117,8 +119,8 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(half + roll % (half + 1))
 }
 
-fn limits() -> WebSocketConfig {
-    WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE))
+fn limits(most: usize) -> WebSocketConfig {
+    WebSocketConfig::default().max_message_size(Some(most)).max_frame_size(Some(most))
 }
 
 async fn dial(address: &str, key: &str) -> Result<Socket, Stop> {
@@ -134,7 +136,7 @@ async fn dial(address: &str, key: &str) -> Result<Socket, Stop> {
     } else {
         Connector::Plain
     };
-    let connect = connect_async_tls_with_config(request, Some(limits()), true, Some(connector));
+    let connect = connect_async_tls_with_config(request, Some(limits(MAX_MESSAGE)), true, Some(connector));
     match timeout(CONNECT, connect).await {
         Err(_) => Err(Stop::Lost("the relay did not answer within 10 s".into())),
         Ok(Ok((socket, _))) => Ok(socket),

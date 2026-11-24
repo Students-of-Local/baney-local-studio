@@ -32,10 +32,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{sleep, timeout};
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Bytes, Message};
-use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::{accept_async_with_config, WebSocketStream};
 
 const PING: &str = r#"{"v":1,"t":"ping"}"#;
 const QUICK: Duration = Duration::from_secs(10);
@@ -45,6 +46,12 @@ const PUBLIC_HOST: &str = "relay.example.com";
 const MARK: &str = "x-relay-smoke";
 const BIG: usize = 3_201 * 65_521;
 const BLOCK: u32 = 65_521;
+const RELAY_TAKES: usize = 32 << 20;
+const FRAME_HEAD: usize = 5;
+
+fn limits(most: usize) -> WebSocketConfig {
+    WebSocketConfig::default().max_message_size(Some(most)).max_frame_size(Some(most))
+}
 
 fn noise(bytes: u32) -> Vec<u8> {
     (0..bytes).map(|at| at.wrapping_mul(2_654_435_761).to_le_bytes()[3]).collect()
@@ -164,7 +171,7 @@ impl Answer {
 impl Link {
     async fn open(smoke: &Smoke, stream: TcpStream, pongs: bool) -> anyhow::Result<Self> {
         let client = stream.peer_addr()?.port();
-        let socket = tokio_tungstenite::accept_async(stream).await?;
+        let socket = accept_async_with_config(stream, Some(limits(RELAY_TAKES))).await?;
         let (sink, mut stream) = socket.split();
         let link = Self {
             client,
@@ -219,6 +226,50 @@ impl Link {
         self.open_stream(json!({ "id": id, "method": method, "path": path, "body": body, "ws": false }), &[]).await
     }
 
+    async fn ws(&self, id: u32, path: &str, more: &[(&str, &str)]) -> anyhow::Result<Answer> {
+        let frame = json!({ "id": id, "method": "GET", "path": path, "body": false, "ws": true });
+        self.open_stream(frame, more).await?;
+        self.until(&format!("the answer to {id}"), |frames| {
+            Some(Answer::read(frames, id)).filter(|answer| answer.status == 101 || answer.ended || answer.errors > 0)
+        })
+        .await
+    }
+
+    async fn socket(&self, id: u32, path: &str) -> anyhow::Result<()> {
+        let answer = self.ws(id, path, &[]).await?;
+        ensure!(answer.status == 101 && answer.headers.is_empty(), "{path}: {} {:?}", answer.status, answer.headers);
+        Ok(())
+    }
+
+    async fn message(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
+        let mut frame = vec![kind];
+        frame.extend(id.to_be_bytes());
+        frame.extend(payload);
+        self.raw(Message::binary(frame)).await
+    }
+
+    async fn echo(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
+        self.message(id, kind, payload).await?;
+        self.echoed(id, kind, payload).await
+    }
+
+    async fn echoed(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
+        let mut wanted = vec![kind];
+        wanted.extend(id.to_be_bytes());
+        wanted.extend(payload);
+        self.until("the echo", |frames| frames.contains(&Message::binary(wanted.clone())).then_some(())).await
+    }
+
+    async fn ws_close(&self, id: u32, code: u16, reason: &str) -> anyhow::Result<()> {
+        self.until(&format!("ws_close {code}"), |frames| {
+            let close = json!({ "v": 1, "t": "ws_close", "id": id, "code": code, "reason": reason });
+            let same =
+                |got: &Message| got.to_text().is_ok_and(|text| serde_json::from_str(text).ok() == Some(close.clone()));
+            frames.iter().any(same).then_some(())
+        })
+        .await
+    }
+
     async fn quiet(&self, id: u32) -> anyhow::Result<()> {
         let before = self.count(|_| true);
         sleep(Duration::from_millis(300)).await;
@@ -228,10 +279,7 @@ impl Link {
     }
 
     async fn data(&self, id: u32, payload: &[u8]) -> anyhow::Result<()> {
-        let mut frame = vec![1];
-        frame.extend(id.to_be_bytes());
-        frame.extend(payload);
-        self.raw(Message::binary(frame)).await
+        self.message(id, 1, payload).await
     }
 
     async fn end(&self, id: u32) -> anyhow::Result<()> {
@@ -310,6 +358,8 @@ struct Origin {
     hosts: Mutex<Vec<(String, Vec<u8>)>>,
     uploads: Mutex<HashMap<String, Upload>>,
     written: AtomicUsize,
+    closes: Mutex<Vec<(u16, String)>>,
+    sockets: AtomicUsize,
     left: AtomicBool,
     go: Notify,
 }
@@ -326,7 +376,7 @@ impl Origin {
                 let service = service_fn(move |request| Arc::clone(&origin).answer(name, request));
                 let serve =
                     http1::Builder::new().title_case_headers(true).serve_connection(TokioIo::new(stream), service);
-                tokio::spawn(serve);
+                tokio::spawn(serve.with_upgrades());
             }
         });
         Ok(port)
@@ -343,6 +393,21 @@ impl Origin {
         lock(&self.hosts).push((String::from_utf8_lossy(&value("host")).into(), value("x-latin")));
         let query = request.uri().query().unwrap_or_default().to_string();
         let (kind, tag) = query.split_once('=').unwrap_or((&query, ""));
+        if let Some(key) = request.headers().get("sec-websocket-key").filter(|_| kind != "refuse") {
+            let accept =
+                HeaderValue::from_str(&derive_accept_key(key.as_bytes())).unwrap_or(HeaderValue::from_static(""));
+            *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            let mut set = |name, value| response.headers_mut().insert(name, value);
+            set("sec-websocket-accept", accept);
+            set("connection", HeaderValue::from_static("upgrade"));
+            set("upgrade", HeaderValue::from_static("websocket"));
+            if value("sec-websocket-protocol") == b"a, b" && value("sec-websocket-extensions").is_empty() {
+                set("sec-websocket-protocol", HeaderValue::from_static("b"));
+            }
+            let (kind, tag) = (kind.to_string(), tag.parse().unwrap_or_default());
+            tokio::spawn(async move { self.socket(request, &kind, tag).await });
+            return Ok(response);
+        }
         let mut body = request.into_body();
         match kind {
             "cookies" => {
@@ -354,6 +419,10 @@ impl Origin {
                     .insert("x-latin", HeaderValue::from_bytes(b"caf\xe9").unwrap_or(HeaderValue::from_static("")));
             }
             "status" => *response.status_mut() = StatusCode::from_bytes(tag.as_bytes()).unwrap_or_default(),
+            "refuse" => {
+                *response.status_mut() = StatusCode::FORBIDDEN;
+                sender.send("no entry".into()).await.ok();
+            }
             "upload" | "stall" => {
                 let (origin, tag, stall) = (Arc::clone(&self), tag.to_string(), kind == "stall");
                 tokio::spawn(async move {
@@ -397,6 +466,28 @@ impl Origin {
             }
         }
         Ok(response)
+    }
+
+    async fn socket(&self, request: Request<Incoming>, kind: &str, size: usize) {
+        let Ok(upgraded) = hyper::upgrade::on(request).await else { return };
+        self.sockets.fetch_add(1, Ordering::AcqRel);
+        let limits = Some(limits(64 << 20));
+        let mut socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, limits).await;
+        if kind == "close" {
+            let code = CloseCode::from(u16::try_from(size).unwrap_or_default());
+            socket.close(Some(CloseFrame { code, reason: "origin".into() })).await.ok();
+        } else if kind == "send" {
+            socket.send(Message::binary(vec![7; size])).await.ok();
+        } else if kind == "stall" {
+            self.go.notified().await;
+        }
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Close(Some(frame)) => lock(&self.closes).push((frame.code.into(), frame.reason.to_string())),
+                message => socket.send(message).await.unwrap_or_default(),
+            }
+        }
+        self.sockets.fetch_sub(1, Ordering::AcqRel);
     }
 
     async fn until(&self, what: &str, within: Duration, done: impl Fn(&Self) -> bool) -> anyhow::Result<()> {
@@ -911,6 +1002,88 @@ async fn h12_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn w1_echo(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let more = [("sec-websocket-protocol", "a, b"), ("sec-websocket-extensions", "permessage-deflate")];
+    let answer = link.ws(1, "/v1/ws?x=1", &more).await?;
+    let chosen = [("sec-websocket-protocol".to_string(), "b".to_string())];
+    ensure!(answer.status == 101 && answer.headers == chosen, "{} {:?}", answer.status, answer.headers);
+    link.echo(1, 2, "h\u{e9}llo".as_bytes()).await?;
+    link.echo(1, 3, &[0, 255, 1]).await?;
+    link.echo(1, 2, b"").await
+}
+
+async fn w2_refused(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    link.ws(1, "/v1/ws?refuse", &[]).await?;
+    link.answer(1).await?.is(403, "no entry")
+}
+
+async fn w3_close_codes(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    for (id, (code, wanted)) in (1..).zip([(1000, 1000), (1001, 1000), (4001, 4001)]) {
+        link.socket(id, &format!("/v1/ws?close={code}")).await?;
+        link.ws_close(id, wanted, "origin").await?;
+        let id = id + 10;
+        link.socket(id, "/v1/ws").await?;
+        link.send(&json!({ "v": 1, "t": "ws_close", "id": id, "code": code, "reason": "public" })).await?;
+        let seen = (wanted, "public".to_string());
+        smoke.origin.until("the close", QUICK, |origin| lock(&origin.closes).contains(&seen)).await?;
+        lock(&smoke.origin.closes).clear();
+        link.quiet(id).await?;
+    }
+    Ok(())
+}
+
+async fn w4_large(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    link.socket(1, "/v1/ws").await?;
+    link.echo(1, 3, &noise(17 << 20)).await?;
+    link.echo(1, 2, &vec![b'x'; 17 << 20]).await?;
+    let most = RELAY_TAKES - FRAME_HEAD;
+    link.socket(2, &format!("/v1/ws?send={most}")).await?;
+    let whole =
+        |got: &Message| got.len() == RELAY_TAKES && got.is_binary() && got.clone().into_data()[..5] == [3, 0, 0, 0, 2];
+    link.until("32 MiB frame", |frames| frames.iter().any(whole).then_some(())).await?;
+    link.socket(3, &format!("/v1/ws?send={}", most + 1)).await?;
+    link.ws_close(3, 1000, "").await?;
+    link.echo(1, 2, b"still here").await
+}
+
+async fn w5_cancel(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let open = |wanted: usize| move |origin: &Origin| origin.sockets.load(Ordering::Acquire) == wanted;
+    smoke.origin.until("the earlier sockets close", QUICK, open(0)).await?;
+    link.socket(1, "/v1/ws").await?;
+    link.echo(1, 2, b"up").await?;
+    link.cancel(1).await?;
+    smoke.origin.until("the socket close", Duration::from_secs(1), open(0)).await?;
+    link.quiet(1).await
+}
+
+async fn w6_paths(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    for (id, path) in (1..).zip(["/mcp", "/v1/health", "/v1/ws/"]) {
+        link.ws(id, path, &[]).await?;
+        link.answer(id).await?.is(404, "No local route for this path.\n")?;
+    }
+    Ok(())
+}
+
+async fn w7_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let ids = [1u32, 2, 3, 4];
+    let block = noise(17 << 20);
+    for id in ids {
+        link.socket(id, "/v1/ws?stall").await?;
+    }
+    for id in ids {
+        ensure!(ids.iter().all(|id| link.peek(*id).errors == 0), "an error before message {id}");
+        link.message(id, 3, &block).await?;
+        link.get(10 + id, "GET", "/v1/health").await?.is(200, "ok serve")?;
+        sleep(Duration::from_millis(300)).await;
+    }
+    ensure!(ids.map(|id| link.peek(id).errors) == [0, 0, 0, 1], "a message the origin has not read was not counted");
+    smoke.origin.go.notify_waiters();
+    for id in &ids[..3] {
+        link.echoed(*id, 3, &block).await?;
+    }
+    Ok(())
+}
+
 async fn linked(
     name: &str,
     smoke: &Smoke,
@@ -951,7 +1124,14 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     linked("H9 a slow relay slows the origin", smoke, h9_slow_relay).await?;
     linked("H10 answers with no body", smoke, h10_no_body).await?;
     linked("H11 bad headers are 400", smoke, h11_bad_headers).await?;
-    linked("H12 request bytes are capped", smoke, h12_cap).await
+    linked("H12 request bytes are capped", smoke, h12_cap).await?;
+    linked("W1 messages and the subprotocol", smoke, w1_echo).await?;
+    linked("W2 a refused upgrade", smoke, w2_refused).await?;
+    linked("W3 close codes both ways", smoke, w3_close_codes).await?;
+    linked("W4 large messages", smoke, w4_large).await?;
+    linked("W5 cancel closes the origin socket", smoke, w5_cancel).await?;
+    linked("W6 sockets only on /v1/ws", smoke, w6_paths).await?;
+    linked("W7 socket bytes are capped", smoke, w7_cap).await
 }
 
 #[tokio::main]
