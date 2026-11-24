@@ -22,6 +22,19 @@ pub struct Reading {
     pub path: PathBuf,
 }
 
+impl Reading {
+    #[must_use]
+    pub fn shown(&self) -> String {
+        let mut text = self.text.clone();
+        for (label, list) in [("Parts", &self.parts), ("Files", &self.files)] {
+            if !list.is_empty() {
+                text = format!("{text}\n\n{label}: {}", list.join("; "));
+            }
+        }
+        format!("{text}\n\nFolder: {}", text::plain(&self.path.with_file_name("").to_string_lossy()))
+    }
+}
+
 impl Store {
     pub fn read(&mut self, name: &str, part: Option<&str>) -> Result<Reading, String> {
         let wanted = self.sound(|store| {

@@ -9,11 +9,13 @@ use crate::plugins::{self, CommandTarget, Plugin};
 
 mod read;
 mod search;
+mod serve;
 mod store;
 mod text;
 
 pub use read::Reading;
 pub use search::{lines, Hit, Query};
+pub use serve::{serve, SERVER};
 pub use store::{roots, Listed, Roots, Store};
 pub use text::plain;
 
