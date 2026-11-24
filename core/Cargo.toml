@@ -59,5 +59,9 @@ libc = "0.2"
 [dev-dependencies]
 blake2.workspace = true
 
+[[example]]
+name = "relay_setup_smoke"
+required-features = ["link"]
+
 [lints]
 workspace = true
