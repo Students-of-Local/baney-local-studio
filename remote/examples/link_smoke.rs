@@ -22,6 +22,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[path = "../../core/examples/support/real_model.rs"]
 mod real_model;
+#[path = "support/tls.rs"]
+mod tls;
 
 const CHANNEL: &str = env!("LOCAL_STUDIO_BUILD_CHANNEL");
 const QUICK: Duration = Duration::from_secs(30);
@@ -1287,58 +1289,6 @@ fn open_pairing_phone(run: &Run, desk: &mut Desk, machine: &str, device: &str) -
     Ok(())
 }
 
-fn test_ca(root: &Path) -> anyhow::Result<PathBuf> {
-    let dir = root.join("tls");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(
-        dir.join("leaf.ext"),
-        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
-    )?;
-    let ca: &[&str] = &[
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-keyout",
-        "ca.key",
-        "-out",
-        "ca.pem",
-        "-days",
-        "2",
-        "-subj",
-        "/CN=link smoke test CA",
-        "-addext",
-        "basicConstraints=critical,CA:TRUE",
-        "-addext",
-        "keyUsage=critical,keyCertSign,cRLSign",
-    ];
-    let request: &[&str] =
-        &["req", "-newkey", "rsa:2048", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=localhost"];
-    let sign: &[&str] = &[
-        "x509",
-        "-req",
-        "-in",
-        "leaf.csr",
-        "-CA",
-        "ca.pem",
-        "-CAkey",
-        "ca.key",
-        "-CAcreateserial",
-        "-out",
-        "leaf.pem",
-        "-days",
-        "2",
-        "-extfile",
-        "leaf.ext",
-    ];
-    for args in [ca, request, sign] {
-        let output = Command::new("openssl").args(args).current_dir(&dir).output().context("run openssl")?;
-        ensure!(output.status.success(), "openssl {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(dir)
-}
-
 struct Terminator {
     port: u16,
     handshakes: Arc<AtomicUsize>,
@@ -1348,16 +1298,7 @@ struct Terminator {
 
 impl Terminator {
     fn start(tls: &Path, upstream: u16) -> anyhow::Result<Self> {
-        use tokio_rustls::rustls;
-        use tokio_rustls::rustls::pki_types::pem::PemObject;
-        let certs =
-            rustls::pki_types::CertificateDer::pem_file_iter(tls.join("leaf.pem"))?.collect::<Result<Vec<_>, _>>()?;
-        let key = rustls::pki_types::PrivateKeyDer::from_pem_file(tls.join("leaf.key"))?;
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let acceptor = tls::acceptor(tls)?;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -1527,7 +1468,7 @@ fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(args.next().context(usage)?);
     std::fs::create_dir_all(&root)?;
     let root = std::fs::canonicalize(root)?;
-    let tls = test_ca(&root)?;
+    let tls = tls::test_ca(&root)?;
     std::env::set_var(TEST_CA, tls.join("ca.pem"));
     let bin = std::env::current_exe()?
         .parent()

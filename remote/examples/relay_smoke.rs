@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -38,8 +38,12 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::{accept_async_with_config, WebSocketStream};
 
+#[path = "support/tls.rs"]
+mod tls;
+
 const PING: &str = r#"{"v":1,"t":"ping"}"#;
 const QUICK: Duration = Duration::from_secs(10);
+const TEST_CA: &str = "LOCAL_STUDIO_LINK_TEST_CA";
 const LONG_PING: Duration = Duration::from_secs(30);
 const NO_REDIAL: Duration = Duration::from_secs(3);
 const PUBLIC_HOST: &str = "relay.example.com";
@@ -521,10 +525,11 @@ struct Smoke {
     url: String,
     ports: Ports,
     origin: Arc<Origin>,
+    tls: PathBuf,
 }
 
 impl Smoke {
-    async fn new(scratch: &PathBuf) -> anyhow::Result<Self> {
+    async fn new(scratch: &Path, tls: PathBuf) -> anyhow::Result<Self> {
         std::fs::create_dir_all(scratch)?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let origin = Arc::new(Origin::default());
@@ -535,6 +540,7 @@ impl Smoke {
             listener,
             ports: Ports { serve: origin.listen("serve").await?, mcp: origin.listen("mcp").await? },
             origin,
+            tls,
         })
     }
 
@@ -552,6 +558,23 @@ impl Smoke {
         };
         let sent = queue(client, relay, 0).context("no row for the client's socket")?;
         Ok(sent + queue(relay, client, 1).context("no row for the relay's socket")?)
+    }
+
+    async fn terminate(&self) -> anyhow::Result<(u16, JoinHandle<()>)> {
+        let acceptor = tls::acceptor(&self.tls)?;
+        let (listener, upstream) = (TcpListener::bind("127.0.0.1:0").await?, self.listener.local_addr()?);
+        let port = listener.local_addr()?.port();
+        let terminator = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let mut secure = acceptor.accept(stream).await.ok()?;
+                    let mut plain = TcpStream::connect(upstream).await.ok()?;
+                    tokio::io::copy_bidirectional(&mut secure, &mut plain).await.ok()
+                });
+            }
+        });
+        Ok((port, terminator))
     }
 
     fn client(&self, ping: Duration) -> Client {
@@ -616,8 +639,8 @@ async fn step(name: &str, work: impl Future<Output = anyhow::Result<()>>) -> any
     Ok(())
 }
 
-async fn c1_hello(smoke: &Smoke) -> anyhow::Result<()> {
-    let mut client = smoke.client(LONG_PING);
+async fn c1_hello(smoke: &Smoke, url: &str) -> anyhow::Result<()> {
+    let mut client = Client::start(url, &smoke.key, smoke.ports, LONG_PING);
     let dial = smoke.dial(QUICK).await?;
     for wanted in [format!("authorization: Bearer {}", smoke.key), format!("user-agent: LocalStudio/{VERSION} (relay)")]
     {
@@ -1100,7 +1123,10 @@ async fn linked(
 }
 
 async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
-    step("C1 hello, bearer and User-Agent", c1_hello(smoke)).await?;
+    step("C1 hello, bearer and User-Agent", c1_hello(smoke, &smoke.url)).await?;
+    let (port, terminator) = smoke.terminate().await?;
+    step("C1 again over wss", c1_hello(smoke, &format!("https://localhost:{port}"))).await?;
+    terminator.abort();
     step("C2 401 ends Unauthorized after one dial", c2_unauthorized(smoke)).await?;
     step("C3 503s back off, then Connected", c3_backoff(smoke)).await?;
     let frame = Message::text(json!({ "v": 1, "t": "replaced" }).to_string());
@@ -1135,10 +1161,16 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run(scratch: &Path, tls: PathBuf) -> anyhow::Result<()> {
+    cases(&Smoke::new(scratch, tls).await?).await
+}
+
+fn main() -> anyhow::Result<()> {
     let scratch = PathBuf::from(std::env::args_os().nth(1).context("usage: relay_smoke <scratch>")?);
+    let tls = tls::test_ca(&scratch)?;
+    std::env::set_var(TEST_CA, tls.join("ca.pem"));
     let started = Instant::now();
-    cases(&Smoke::new(&scratch).await?).await?;
+    run(&scratch, tls)?;
     println!("relay smoke passed in {:.1} s", started.elapsed().as_secs_f32());
     Ok(())
 }
