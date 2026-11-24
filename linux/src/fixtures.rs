@@ -28,6 +28,7 @@ pub fn scenes() -> Vec<&'static str> {
     all.extend(crate::keyboard::SCENES);
     all.extend(crate::usage_scenes::scenes());
     all.extend(crate::link_scenes::scenes());
+    all.extend(crate::markdown_scenes::SCENES);
     all.extend(crate::scenes_updates::SCENES);
     all
 }
