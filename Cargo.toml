@@ -33,6 +33,7 @@ uniffi = "0.32.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ignore = "0.4"
 libghostty-vt = { version = "0.2.2", default-features = false }
+minisign-verify = "0.3"
 notify = "8"
 portable-pty = "0.9"
 rusqlite = { version = "0.40", features = ["bundled"] }

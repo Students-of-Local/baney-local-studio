@@ -8,12 +8,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use blake2::Blake2b512;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use self::apply::{apply, current_install, install_path, open_channel, relaunch, Applied};
-use self::minisign::{PublicKey, SignatureFile};
 
 pub const NIGHTLY_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4QjIxNzIyMDY2NkJFNkMKUldSc3ZtWUdJaGV5ZU1zUnB3bi9heW1vdFlnMllXZG9LOTBnTGhNL0VLQ21OdGRsN1dHcEx5SWkK";
 pub const STABLE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1NkMxREQ1MDdBNzBDNzUKUldSMURLY0gxUjFzRlF0L0hnZEdRanI0WHpYTmlzWml4VlB4cCtKY1JDNU5RZ241M0k4Um9RM3MK";
@@ -388,9 +386,13 @@ fn slot(version: &str) -> String {
 }
 
 pub fn verify_file(build: &Build, path: &Path, sha256: &str, signature: &str, asset: &str) -> Result<(), Refusal> {
+    let key = minisign::public_key(&build.public_key)
+        .map_err(|error| Refusal::BadSignature(format!("this build's key: {error}")))?;
+    let signature = minisign::signature(signature).map_err(Refusal::BadSignature)?;
+    let refused = |error: minisign_verify::Error| Refusal::BadSignature(error.to_string());
+    let mut verifier = key.verify_stream(&signature).map_err(refused)?;
     let mut file = File::open(path).map_err(|error| Refusal::Apply(format!("open {}: {error}", path.display())))?;
     let mut sha = Sha256::new();
-    let mut blake = Blake2b512::new();
     let mut buffer = vec![0; 1 << 20];
     loop {
         let read =
@@ -399,27 +401,14 @@ pub fn verify_file(build: &Build, path: &Path, sha256: &str, signature: &str, as
             break;
         }
         sha.update(&buffer[..read]);
-        blake.update(&buffer[..read]);
+        verifier.update(&buffer[..read]);
     }
-    check_digests(build, &hex(&sha.finalize()), &blake.finalize().into(), sha256, signature, asset)
-}
-
-fn check_digests(
-    build: &Build,
-    got_sha: &str,
-    blake: &[u8; 64],
-    sha256: &str,
-    signature: &str,
-    asset: &str,
-) -> Result<(), Refusal> {
-    if !got_sha.eq_ignore_ascii_case(sha256) {
-        return Err(Refusal::BadSha256 { want: sha256.to_string(), got: got_sha.to_string() });
+    let got = hex(&sha.finalize());
+    if !got.eq_ignore_ascii_case(sha256) {
+        return Err(Refusal::BadSha256 { want: sha256.to_string(), got });
     }
-    let key = PublicKey::decode(&build.public_key)
-        .map_err(|error| Refusal::BadSignature(format!("this build's key: {error}")))?;
-    let signature = SignatureFile::decode(signature).map_err(Refusal::BadSignature)?;
-    signature.verify(&key, blake).map_err(Refusal::BadSignature)?;
-    match signature.file_name() {
+    verifier.finalize().map_err(refused)?;
+    match minisign::file_name(&signature) {
         Some(name) if name == asset => Ok(()),
         Some(name) => Err(Refusal::BadSignature(format!("it was made for {name}, not {asset}"))),
         None => Err(Refusal::BadSignature("its trusted comment names no file".to_string())),
@@ -471,8 +460,6 @@ pub async fn download(
     }
     let mut file =
         File::create(&part).map_err(|error| Refusal::Apply(format!("create {}: {error}", part.display())))?;
-    let mut sha = Sha256::new();
-    let mut blake = Blake2b512::new();
     let mut received = 0u64;
     progress(0, total);
     loop {
@@ -491,8 +478,6 @@ pub async fn download(
             let _ = std::fs::remove_file(&part);
             return Err(Refusal::BadFeed("the download is larger than 4 GiB".to_string()));
         }
-        sha.update(&chunk);
-        blake.update(&chunk);
         if let Err(error) = file.write_all(&chunk) {
             drop(file);
             let _ = std::fs::remove_file(&part);
@@ -506,14 +491,13 @@ pub async fn download(
         let _ = std::fs::remove_file(&part);
         return Err(Refusal::Apply(format!("write {}: {error}", part.display())));
     }
-    if let Err(refusal) = check_digests(
-        build,
-        &hex(&sha.finalize()),
-        &blake.finalize().into(),
-        &offer.sha256,
-        &offer.signature,
-        &offer.asset,
-    ) {
+    let checked = {
+        let (build, offer, part) = (build.clone(), offer.clone(), part.clone());
+        tokio::task::spawn_blocking(move || verify_file(&build, &part, &offer.sha256, &offer.signature, &offer.asset))
+            .await
+            .map_err(|error| Refusal::Apply(format!("check the download: {error}")))?
+    };
+    if let Err(refusal) = checked {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(refusal);
     }
