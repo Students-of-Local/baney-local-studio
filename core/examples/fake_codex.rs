@@ -28,6 +28,7 @@ struct Shared {
     turns: AtomicU64,
     answers: Mutex<Vec<(Value, Sender<String>)>>,
     thread: Mutex<String>,
+    refused: AtomicBool,
 }
 
 impl Shared {
@@ -208,6 +209,9 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         };
         reply = format!("{reply} after {decision}");
     }
+    if shared.refused.load(Ordering::Relaxed) {
+        reply.push_str(" without project settings");
+    }
     let agent = format!("agent-{number}");
     shared.notify("item/started", &json!({ "item": { "id": agent, "type": "agentMessage" } }));
     let reply = json!({ "id": agent, "type": "agentMessage", "text": reply });
@@ -222,6 +226,11 @@ fn pause(variable: &str) {
 }
 
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
+    if matches!(method, "thread/start" | "thread/resume") {
+        let trust = |cwd: &str| params["config"]["projects"][cwd]["trust_level"].clone();
+        let refused = params["cwd"].as_str().is_some_and(|cwd| trust(cwd) == "untrusted");
+        shared.refused.store(refused, Ordering::Relaxed);
+    }
     match method {
         "model/list" => shared.respond(
             id,

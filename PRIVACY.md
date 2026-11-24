@@ -66,14 +66,14 @@ The other machine answers with its random machine ID, name, operating system, ve
 | Codex's session log for a thread (`sessions/**/rollout-*.jsonl`) | Copied the same way. Codex itself reads it to show a thread |
 | An older remote access tool's `remote.json`, cloudflared config and `cloudflared` copy in its `~/.config` folder | Only in `local-studio tunnel` commands: to take over or refuse its tunnel, and to reuse `cloudflared` if its SHA-256 matches. Its tunnel credentials are not opened |
 | Hugging Face's cache folder (`~/.cache/huggingface`, or `HF_HOME`) | The controller lists `.gguf` files there by name and size. A recipe that asks for the hub cache gets the whole folder mounted in its container, with the `hf` sign-in token if one is saved there. The controller itself does not open the token |
-| `.claude`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` in a Claude Code thread's folder and the folders above it, up to your home | Only to see whether one is there, so Local Studio can ask before Claude Code loads that project's settings. In a git worktree, its `.git` file and the link back to it are read to find the main checkout |
+| `.claude`, `.mcp.json`, `CLAUDE.md` and `CLAUDE.local.md` (Claude Code) or `.codex` (Codex) in a thread's folder and the folders above it, up to your home | Only to see whether one is there, so Local Studio can ask before that tool loads the project's settings. In a git worktree, its `.git` file and the link back to it are read to find the main checkout |
 | Files in your projects, and files and themes you pick | To show, edit, attach or import them |
 
 Usage numbers come from these files and the Eukhe daemon. No provider is asked for usage. Opening Usage also reads this computer's time zone (`TZ`, or the system's time zone setting and zone database) so days start at your midnight.
 
 ## Where your data lives
 
-- `<data>` is `LOCAL_STUDIO_DATA_DIR` if set, else `~/Library/Application Support/Local Studio` on macOS, and `$XDG_DATA_HOME/local-studio` or `~/.local/share/local-studio` on Linux. It holds settings, state (with the folders of projects whose Claude Code settings you allowed), worktrees, staged updates, `harness/usage.jsonl` (time, provider, model, thread ID, tokens and cost), pairings and keys in `remote/`, and the controller's files and `controller.log` in `controller/`.
+- `<data>` is `LOCAL_STUDIO_DATA_DIR` if set, else `~/Library/Application Support/Local Studio` on macOS, and `$XDG_DATA_HOME/local-studio` or `~/.local/share/local-studio` on Linux. It holds settings, state (with the folders of projects whose own settings you allowed), worktrees, staged updates, `harness/usage.jsonl` (time, provider, model, thread ID, tokens and cost), pairings and keys in `remote/`, and the controller's files and `controller.log` in `controller/`.
 - Plugins and tunnel files, with the tunnel logs, are in `~/.local-studio`, or under `LOCAL_STUDIO_DATA_DIR` if set. A controller you run yourself keeps its files in `~/.local-studio-controller`.
 - `local-studio-serve` logs to `~/Library/Logs/local-studio-serve.log` on macOS and to the systemd journal on Linux.
 - Threads are kept by the agent that ran them: Eukhe, Claude Code or Codex, in its own folder.

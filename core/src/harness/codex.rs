@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use eukhe_types::daemon::{SessionEvent, StreamUpdate};
 use eukhe_types::session::AgentMessage;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, user,
-    Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
+    assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, trust,
+    user, Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -461,6 +461,12 @@ impl Codex {
             });
             if let Some(model) = launch.model.as_deref().filter(|model| !model.is_empty()) {
                 params["model"] = json!(model);
+            }
+            if !launch.project {
+                let refused = json!({ "trust_level": "untrusted" });
+                let projects: Map<String, Value> =
+                    trust::folders(&launch.cwd).into_iter().map(|folder| (folder, refused.clone())).collect();
+                params["config"] = json!({ "projects": projects });
             }
             if launch.resume {
                 params["threadId"] = json!(launch.native);

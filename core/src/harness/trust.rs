@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::model::Harness;
 use crate::store::home_dir;
 use crate::threads::git_dir;
 
-const CONFIG: [&str; 4] = [".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md"];
+const CLAUDE: &[&str] = &[".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md"];
+const CODEX: &[&str] = &[".codex"];
 
 fn real(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -41,9 +44,17 @@ fn main_checkout(dot_git: &Path) -> Option<PathBuf> {
     linked.then(|| common.parent().map(Path::to_path_buf)).flatten()
 }
 
-pub(crate) fn has_config(cwd: &str) -> bool {
+pub(crate) fn folders(cwd: &str) -> BTreeSet<String> {
+    let here = real(Path::new(cwd));
+    let top = git_dir(&here).map_or_else(|| here.clone(), |(_, root)| root);
+    let paths = [here, top].into_iter().map(|path| path.to_string_lossy().into_owned());
+    paths.chain([cwd.to_string(), root(cwd)]).collect()
+}
+
+pub(crate) fn has_config(harness: Harness, cwd: &str) -> bool {
+    let names = if harness == Harness::Codex { CODEX } else { CLAUDE };
     let (cwd, home) = (real(Path::new(cwd)), home());
     cwd.ancestors()
         .take_while(|dir| home.as_deref() != Some(*dir))
-        .any(|dir| CONFIG.iter().any(|name| dir.join(name).exists()))
+        .any(|dir| names.iter().any(|name| dir.join(name).exists()))
 }
