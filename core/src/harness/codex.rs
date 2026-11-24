@@ -498,8 +498,10 @@ impl Codex {
             }
             if !trust::own(&launch.cwd) {
                 let level = json!({ "trust_level": if launch.project { "trusted" } else { "untrusted" } });
-                let projects: Map<String, Value> =
-                    trust::folders(&launch.cwd).into_iter().map(|folder| (folder, level.clone())).collect();
+                let projects: Map<String, Value> = trust::folders(&launch.cwd, launch.project)
+                    .into_iter()
+                    .map(|folder| (folder, level.clone()))
+                    .collect();
                 params["config"] = json!({ "projects": projects });
             }
             if launch.resume {

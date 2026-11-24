@@ -44,17 +44,27 @@ fn main_checkout(dot_git: &Path) -> Option<PathBuf> {
     linked.then(|| common.parent().map(Path::to_path_buf)).flatten()
 }
 
-pub(crate) fn folders(cwd: &str) -> BTreeSet<String> {
-    let here = real(Path::new(cwd));
-    let top = git_dir(&here).map_or_else(|| here.clone(), |(_, root)| root);
-    let inside = here.ancestors().take_while(|dir| dir.starts_with(&top));
-    inside.map(|dir| dir.to_string_lossy().into_owned()).chain([cwd.to_string(), root(cwd)]).collect()
+pub(crate) fn folders(cwd: &str, allowed: bool) -> BTreeSet<String> {
+    let (here, home) = (real(Path::new(cwd)), home());
+    let top = git_dir(&here).map(|(_, root)| root).filter(|root| Some(root) != home.as_ref());
+    let top = top.unwrap_or_else(|| here.clone());
+    here.ancestors()
+        .take_while(|dir| home.as_deref() != Some(*dir))
+        .filter(|dir| dir.starts_with(&top) || (!allowed && configured(dir, CODEX)))
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .chain([cwd.to_string(), root(cwd)])
+        .filter(|folder| home.as_deref() != Some(Path::new(folder)))
+        .collect()
+}
+
+fn configured(dir: &Path, names: &[&str]) -> bool {
+    names.iter().any(|name| dir.join(name).exists())
 }
 
 pub(crate) fn has_config(harness: Harness, cwd: &str) -> bool {
-    let names = if harness == Harness::Codex { CODEX } else { CLAUDE };
-    let (cwd, home) = (real(Path::new(cwd)), home());
-    cwd.ancestors()
-        .take_while(|dir| home.as_deref() != Some(*dir))
-        .any(|dir| names.iter().any(|name| dir.join(name).exists()))
+    let codex = harness == Harness::Codex;
+    let names = if codex { CODEX } else { CLAUDE };
+    let (here, home, main) = (real(Path::new(cwd)), home(), PathBuf::from(root(cwd)));
+    here.ancestors().take_while(|dir| home.as_deref() != Some(*dir)).any(|dir| configured(dir, names))
+        || (codex && home.as_ref() != Some(&main) && configured(&main, names))
 }
