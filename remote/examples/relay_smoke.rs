@@ -105,6 +105,7 @@ type Sender = SplitSink<WebSocketStream<TcpStream>, Message>;
 
 #[derive(Clone)]
 struct Link {
+    client: u16,
     frames: Arc<Mutex<Vec<Message>>>,
     changed: Arc<Notify>,
     paused: Arc<AtomicBool>,
@@ -159,9 +160,11 @@ impl Answer {
 
 impl Link {
     async fn open(smoke: &Smoke, stream: TcpStream, pongs: bool) -> anyhow::Result<Self> {
+        let client = stream.peer_addr()?.port();
         let socket = tokio_tungstenite::accept_async(stream).await?;
         let (sink, mut stream) = socket.split();
         let link = Self {
+            client,
             frames: Arc::default(),
             changed: Arc::default(),
             paused: Arc::default(),
@@ -335,6 +338,9 @@ impl Origin {
                     self.left.store(sent < wanted, Ordering::Release);
                 });
             }
+            "block" => {
+                sender.send(noise(BLOCK).into()).await.ok();
+            }
             _ => {
                 sender.send(format!("ok {name}").into()).await.ok();
             }
@@ -374,6 +380,22 @@ impl Smoke {
             ports: Ports { serve: origin.listen("serve").await?, mcp: origin.listen("mcp").await? },
             origin,
         })
+    }
+
+    fn kernel_bytes(&self, link: &Link) -> anyhow::Result<usize> {
+        let (relay, client) = (self.listener.local_addr()?.port(), link.client);
+        let table = std::fs::read_to_string("/proc/net/tcp")?;
+        let queue = |from: u16, to: u16, at: usize| {
+            let row = table.lines().find(|row| {
+                let cells: Vec<&str> = row.split_whitespace().collect();
+                let ends = |cell: &str, port: u16| cell.ends_with(&format!(":{port:04X}"));
+                cells.len() > 4 && ends(cells[1], from) && ends(cells[2], to)
+            });
+            let bytes = row?.split_whitespace().nth(4)?.split(':').nth(at)?;
+            usize::from_str_radix(bytes, 16).ok()
+        };
+        let sent = queue(client, relay, 0).context("no row for the client's socket")?;
+        Ok(sent + queue(relay, client, 1).context("no row for the relay's socket")?)
     }
 
     fn client(&self, ping: Duration) -> Client {
@@ -622,6 +644,43 @@ async fn h5_cancel(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn h5_queued(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    if !cfg!(target_os = "linux") {
+        println!("     skipped: the kernel's own buffers are measured on Linux only");
+        return Ok(());
+    }
+    let ids = 1..=240;
+    link.paused.store(true, Ordering::Release);
+    for id in ids.clone() {
+        link.req(id, "GET", "/mcp?block", false).await?;
+        sleep(Duration::from_millis(15)).await;
+    }
+    let mut kernel = 0;
+    let deadline = Instant::now() + QUICK;
+    loop {
+        sleep(Duration::from_millis(300)).await;
+        let now = smoke.kernel_bytes(link)?;
+        if now > 0 && now == kernel {
+            break;
+        }
+        ensure!(Instant::now() < deadline, "the link never filled: {kernel} then {now} bytes");
+        kernel = now;
+    }
+    let all = ids.clone().count() * BLOCK as usize;
+    ensure!(kernel + (2 << 20) < all, "{kernel} bytes fit in the kernel; the queue was never full");
+    let before = link.count(|_| true);
+    for id in ids.clone() {
+        link.cancel(id).await?;
+    }
+    sleep(Duration::from_millis(200)).await;
+    link.paused.store(false, Ordering::Release);
+    link.get(241, "GET", "/mcp").await?.is(200, "ok mcp")?;
+    let late: usize = lock(&link.frames)[before..].iter().map(Message::len).sum();
+    ensure!(late < kernel + (256 << 10), "{late} bytes came after the cancels, {kernel} of them already sent");
+    println!("     {late} bytes came after the cancels, {kernel} of them already sent");
+    Ok(())
+}
+
 async fn h7_refused(smoke: &Smoke) -> anyhow::Result<()> {
     let closed = TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
     let mut client = Client::start(&smoke.url, &smoke.key, Ports { mcp: closed, ..smoke.ports }, LONG_PING);
@@ -634,6 +693,7 @@ async fn h7_refused(smoke: &Smoke) -> anyhow::Result<()> {
 }
 
 async fn h9_slow_relay(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    smoke.origin.written.store(0, Ordering::Release);
     link.req(1, "GET", "/mcp?big", false).await?;
     link.until("the head", |frames| (Answer::read(frames, 1).status == 200).then_some(())).await?;
     link.paused.store(true, Ordering::Release);
@@ -726,6 +786,7 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     linked("H3 only the exact paths reach an origin", smoke, h3_paths).await?;
     linked("H4 events arrive as they are sent", smoke, h4_events).await?;
     linked("H5 cancel mid-answer", smoke, h5_cancel).await?;
+    linked("H5 cancel drops what is queued", smoke, h5_queued).await?;
     step("H7 closed origin port", h7_refused(smoke)).await?;
     linked("H9 a slow relay slows the origin", smoke, h9_slow_relay).await?;
     linked("H10 answers with no body", smoke, h10_no_body).await?;

@@ -82,6 +82,12 @@ impl Out {
         }
     }
 
+    fn error(&self, why: &str) {
+        if self.settle(DONE) {
+            self.push(self.control(json!({ "t": "error", "message": why })), None);
+        }
+    }
+
     fn fail(&self, why: &str) {
         if self.settle(STOPPED) {
             self.queue.send(Queued::own(self.control(json!({ "t": "error", "message": why })))).ok();
@@ -184,11 +190,10 @@ impl Streams {
             None => return std::future::pending().await,
         };
         self.open.retain(|_, entry| {
-            let ended = entry.task.id() == done;
-            if ended {
+            if entry.task.id() == done {
                 entry.out.fail(FAILED);
             }
-            !ended
+            entry.out.state.load(Ordering::Acquire) == OPEN || Arc::strong_count(&entry.out.state) > 1
         });
     }
 
@@ -229,7 +234,7 @@ async fn answer(out: Out, open: Option<Open>, routes: Vec<(&'static str, u16)>) 
     };
     let sent = if open.body { Err(NO_BODIES) } else { forward(&out, request, *port).await };
     if let Err(why) = sent {
-        out.last(out.control(json!({ "t": "error", "message": why }))).await;
+        out.error(why);
     }
 }
 
