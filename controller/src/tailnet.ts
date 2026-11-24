@@ -54,7 +54,7 @@ export const scanTailnet = (linked: Set<string>): Effect.Effect<LocalTailnet> =>
 const quote = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
 const SET_UP = "a controller is already set up on this machine; connect it instead";
 const PROBE = `D="$HOME/.local-studio-controller"; L="$HOME/${LEGACY_DIR}"
-if [ -e "$D/config.json" ] || [ -e "$L/config.json" ]; then echo "${SET_UP}" >&2; exit 3; fi
+if [ -e "$D/config.json" ] || [ -e "$L/config.json" ] || [ -e "$HOME/.local/bin/local-studio-controller" ]; then echo "${SET_UP}" >&2; exit 3; fi
 echo "controller-platform=$(uname -s)-$(uname -m)" | tr A-Z a-z | sed 's/x86_64/x64/;s/aarch64/arm64/'
 for b in "$(command -v bun)" "$HOME/.bun/bin/bun" /opt/homebrew/bin/bun /usr/local/bin/bun; do
   case "$([ -x "$b" ] && "$b" --version 2>/dev/null < /dev/null)" in 1.[3-9].*|1.[1-9][0-9].*|[2-9].*) echo "controller-bun=$b"; break ;; esac
@@ -62,12 +62,14 @@ done`;
 const SCRIPT = `set -e
 umask 077
 D="$HOME/.local-studio-controller"; U="$D/$UPLOAD"; B="$HOME/.local/bin/local-studio-controller"
-refuse() { rm -f "$U"; rmdir "$D" 2>/dev/null || true; echo "$1" >&2; exit 3; }
+trap 'rm -f "$U" "$B.$UPLOAD"; rmdir "$D" 2>/dev/null || true' EXIT
+refuse() { echo "$1" >&2; exit 3; }
 chmod 700 "$D" "$U"
 "$U" --version > /dev/null 2>&1 < /dev/null || refuse "this machine cannot run the controller; install Bun there first (bun.sh)"
 mkdir -p "$HOME/.local/bin"
+mv "$U" "$B.$UPLOAD"
 (set -C; printf '%s\\n' "$CFG" > "$D/config.json") 2>/dev/null || refuse "${SET_UP}"
-mv "$U" "$B"
+mv "$B.$UPLOAD" "$B"
 if [ "$(uname -s)" = Linux ]; then
   mkdir -p "$HOME/.config/systemd/user"
   printf '[Unit]\\nDescription=Local Studio controller\\n[Service]\\nEnvironment=LOCAL_STUDIO_CONTROLLER_HOST=%s\\nExecStart=%s\\nRestart=always\\n[Install]\\nWantedBy=default.target\\n' "$HOST" "$B" > "$HOME/.config/systemd/user/local-studio-controller.service"
@@ -128,7 +130,7 @@ export const deployController = (config: Config, req: { ip: string; name: string
     const bun = /^controller-bun=(\/.+)$/m.exec(said)?.[1];
     if (!platform) return yield* fail(502, "DEPLOY_FAILED", `${target} is not a Linux or macOS machine on x64 or arm64`);
     const upload = `upload-${randomBytes(8).toString("hex")}`;
-    yield* ssh(`sh -c 'umask 077; mkdir -p "$HOME/.local-studio-controller" && cat > "$HOME/.local-studio-controller/${upload}"'`, yield* program(platform, bun, target), 1_800);
+    yield* ssh(`sh -c 'umask 077; D="$HOME/.local-studio-controller"; U="$D/${upload}"; mkdir -p "$D" && cat > "$U" || { rm -f "$U"; rmdir "$D"; exit 1; }'`, yield* program(platform, bun, target), 1_800);
     yield* ssh("sh -s", `${vars({ CFG: cfg, HOST: req.ip, UPLOAD: upload })}\n${SCRIPT}\n`);
     for (let i = 0; i < 20; i++) {
       const h = yield* Effect.option(fetchJson(`${url}/api/health`, 1_500));

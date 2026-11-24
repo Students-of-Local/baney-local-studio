@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +27,7 @@ const script = (path, text) => {
   chmodSync(path, 0o755);
 };
 script(join(nearBin, "ssh"), `for command; do :; done\nprintf '%s\\n' "$command" >> "${log}"\nexec env -i HOME="${far}" PATH="${farBin}:/usr/bin:/bin" /bin/sh -c "echo Welcome; $command"`);
-for (const name of ["curl", "wget"]) script(join(farBin, name), `printf '${name} %s\\n' "$*" >> "${log}"\nexit 7`);
+for (const name of ["curl", "wget", "git"]) script(join(farBin, name), `printf '${name} %s\\n' "$*" >> "${log}"\nexit 7`);
 script(join(farBin, "uname"), `case "$1" in -s) cat "${root}/os" ;; -m) cat "${root}/arch" ;; esac`);
 for (const name of ["systemctl", "loginctl", "launchctl"]) script(join(farBin, name), `printf '${name} %s\\n' "$*" >> "${log}"\nexit 1`);
 script(join(farBin, "setsid"), `shift\nprintf '%s\\n' "$$" >> "${root}/pids"\nexec "$@"`);
@@ -49,9 +49,9 @@ const quit = async () => {
   child?.kill("SIGTERM");
   if (child && child.exitCode === null && child.signalCode === null) await once(child, "exit");
 };
-const start = async (main) => {
+const start = async (main, ...args) => {
   await quit();
-  child = spawn("bun", [main], {
+  child = spawn(main, args, {
     env: { ...process.env, HOME: root, PATH: `${nearBin}:${process.env.PATH}`, LOCAL_STUDIO_CONTROLLER_HOME: home, LOCAL_STUDIO_CONTROLLER_PORT: String(port), LOCAL_STUDIO_CONTROLLER_HOST: "127.0.0.1" },
     stdio: ["ignore", "ignore", "inherit"],
   });
@@ -91,11 +91,12 @@ const took = async (label) => {
   const commands = readFileSync(log, "utf8");
   assert(!commands.includes(key), "the fleet key is on a command line");
   assert.doesNotMatch(commands, /^(curl|wget) /m, "something was downloaded");
-  for (const line of commands.trim().split("\n")) assert.match(line, /^(sh -(s$|c ')|(systemctl|loginctl) )/, "only sh may read a command, whatever the login shell is");
+  assert.doesNotMatch(commands.replace(/^git clone .*registry.*$/gm, ""), /^git /m, "the registry is the only thing the installed controller fetches");
+  for (const line of commands.trim().split("\n")) assert.match(line, /^(sh -(s$|c ')|(systemctl|loginctl|git) )/, "only sh may read a command, whatever the login shell is");
 };
 
 try {
-  await start(new URL("../src/main.ts", import.meta.url).pathname);
+  await start(bun, new URL("../src/main.ts", import.meta.url).pathname);
   machine("Linux", arch);
   await took("with Bun on the machine");
   assert.equal(readFileSync(installed, "utf8").split("\n")[0], `#!${join(farBin, "bun")}`);
@@ -103,6 +104,7 @@ try {
   assert.equal(again.status, 502);
   assert.match(again.body.error.message, /already set up/);
   const copy = join(root, "local-studio-controller");
+  const binary = join(root, "local-studio-controller-binary");
   writeFileSync(copy, readFileSync(installed));
   await stopped();
 
@@ -111,8 +113,20 @@ try {
     if (text) script(join(farBin, "bun"), text);
     await took(`the same kind of machine, ${label}`);
     assert.equal(readFileSync(installed).subarray(1, 4).toString(), "ELF");
+    copyFileSync(installed, binary);
     await stopped();
   }
+
+  const blocked = join(far, ".local/bin");
+  mkdirSync(blocked, { recursive: true });
+  chmodSync(blocked, 0o500);
+  assert.equal((await deploy()).status, 502);
+  assert(!existsSync(join(far, ".local-studio-controller")), "a failed install left its upload or config");
+  chmodSync(blocked, 0o700);
+  writeFileSync(installed, "theirs");
+  assert.match((await deploy()).body.error.message, /already set up/);
+  assert.equal(readFileSync(installed, "utf8"), "theirs");
+  await stopped();
 
   script(join(farBin, "bun"), 'echo 1.3.99; [ "$1" = --version ] && [ $# = 1 ]');
   const broken = await deploy();
@@ -130,7 +144,7 @@ try {
   await stopped();
 
   rmSync(join(farBin, "bun"));
-  await start(copy);
+  await start(bun, copy);
   await took("from an installed script, no Bun there");
   assert.equal(readFileSync(installed).subarray(1, 4).toString(), "ELF");
   await stopped();
@@ -138,6 +152,15 @@ try {
   await took("from an installed script");
   assert.equal(readFileSync(installed, "utf8"), readFileSync(copy, "utf8"));
   await stopped();
+
+  await start(binary);
+  await took("from an installed binary");
+  assert.deepEqual(readFileSync(installed), readFileSync(binary));
+  await stopped();
+  machine("Darwin", "arm64");
+  assert.match((await deploy()).body.error.message, /deploy from a machine of the same kind/);
+  assert.deepEqual(readdirSync(far), [], "a refused machine was changed");
+  await start(bun, copy);
   rmSync(join(farBin, "bun"));
 
   machine("Darwin", "arm64");
