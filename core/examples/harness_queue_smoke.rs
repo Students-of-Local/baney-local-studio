@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -661,6 +662,7 @@ fn account_scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     run.setup("two scratch accounts are listed for each CLI", |watch| {
         watch.settings.as_ref().is_some_and(|settings| settings.harness_accounts.codex.len() == 2)
     })?;
+    private_settings(root, "harnessAccounts")?;
     let claude = Account {
         root,
         label: "claude-account",
@@ -681,6 +683,18 @@ fn account_scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     };
     account_switch(run, &codex)?;
     codex_resend_cases(run, &codex)
+}
+
+fn private_settings(root: &Path, holding: &str) -> anyhow::Result<()> {
+    let path = root.join("data/settings.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&path)?.contains(holding) {
+        ensure!(Instant::now() < deadline, "settings.json never held {holding}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
+    ensure!(mode == 0o600, "settings.json is readable to others: {mode:o}");
+    Ok(())
 }
 
 fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
@@ -887,12 +901,16 @@ fn main() -> anyhow::Result<()> {
         take_over_serve: false,
     };
     let signal = Arc::new(Signal::default());
+    std::fs::create_dir_all(root.join("data"))?;
+    std::fs::write(root.join("data/settings.json"), "{}")?;
+    std::fs::set_permissions(root.join("data/settings.json"), PermissionsExt::from_mode(0o644))?;
     let studio = Studio::new(config.clone(), Arc::clone(&signal) as Arc<dyn Waker>)?;
     let mut run = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: 0 };
     let outcome = (|| {
         run.setup("daemon connected", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
         studio.add_project(work.to_string_lossy().into_owned());
         run.setup("project added", |watch| watch.projects.len() == 1)?;
+        private_settings(&root, "{}")?;
         scenarios(&mut run, &root)
     })();
     studio.shutdown();

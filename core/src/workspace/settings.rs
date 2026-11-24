@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -6,6 +8,7 @@ use serde::Serialize;
 
 use super::model::{Keybinding, Settings};
 use crate::model::AccessMode;
+use crate::platform::Mode;
 
 const DEFAULT_KEYBINDINGS: &[(&str, &str, Option<&str>)] = &[
     ("sidebar.toggle", "cmd+b", None),
@@ -222,6 +225,12 @@ pub(crate) fn load_settings(path: &Path) -> (Settings, Option<String>) {
     if !chosen {
         settings.access_follows_model = settings.default_access == AccessMode::Supervised;
     }
+    let error = error.or_else(|| match crate::platform::set_mode(path, 0o600) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Some(format!("could not make {} private: {error}", path.display()))
+        }
+        _ => None,
+    });
     (settings, error)
 }
 
@@ -232,11 +241,19 @@ pub(crate) fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Stri
     }
     let file_name = path.file_name().map_or_else(|| "settings".into(), |name| name.to_string_lossy().into_owned());
     let temporary: PathBuf = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, bytes).map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+    write_private(&temporary, &bytes).map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
     std::fs::rename(&temporary, path).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         format!("could not save {}: {error}", path.display())
     })
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?.write_all(bytes)
 }
 
 pub(crate) fn sanitize(mut settings: Settings) -> Settings {
