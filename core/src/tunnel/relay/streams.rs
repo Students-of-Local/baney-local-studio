@@ -78,18 +78,23 @@ impl Out {
         self.queue.send(Queued { state: Arc::clone(&self.state), message, _room: room }).ok();
     }
 
-    async fn room(&self, message: &Message) -> Option<OwnedSemaphorePermit> {
-        let cost = u32::try_from(message.len().clamp(1, SEND_ROOM)).ok()?;
+    async fn room(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
+        let cost = u32::try_from(bytes.clamp(1, SEND_ROOM)).ok()?;
         Arc::clone(&self.room).acquire_many_owned(cost).await.ok()
     }
 
     pub(super) async fn send(&self, message: Message) {
-        let room = self.room(&message).await;
+        let room = self.room(message.len()).await;
         self.push(message, room);
     }
 
+    pub(super) async fn relay(&self, kind: u8, payload: Bytes) {
+        let room = self.room(HEAD + payload.len()).await;
+        self.push(self.data(kind, &payload), room);
+    }
+
     pub(super) async fn last(&self, message: Message) {
-        let room = self.room(&message).await;
+        let room = self.room(message.len()).await;
         if self.settle(DONE) {
             self.push(message, room);
         }
@@ -113,7 +118,7 @@ impl Out {
         Message::text(frame.to_string())
     }
 
-    pub(super) fn data(&self, kind: u8, payload: &[u8]) -> Message {
+    fn data(&self, kind: u8, payload: &[u8]) -> Message {
         let mut frame = Vec::with_capacity(HEAD + payload.len());
         frame.push(kind);
         frame.extend_from_slice(&self.id.to_be_bytes());

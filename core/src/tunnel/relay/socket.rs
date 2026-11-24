@@ -1,6 +1,7 @@
 use std::future::pending;
 
 use futures_util::{SinkExt, StreamExt};
+use hyper::body::Bytes;
 use hyper::header::{
     HeaderMap, HeaderValue, CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_EXTENSIONS, SEC_WEBSOCKET_KEY,
     SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_VERSION, UPGRADE,
@@ -60,9 +61,12 @@ impl Socket {
         let (mut sink, mut stream) = socket.split();
         let up = async {
             while let Some(feed) = self.feed.recv().await {
+                let held = feed.bytes();
                 let Some(message) = feed.message() else { continue };
                 let last = message.is_close();
-                if sink.send(message).await.is_err() || last {
+                let sent = sink.send(message).await;
+                drop(held);
+                if sent.is_err() || last {
                     break;
                 }
             }
@@ -71,8 +75,8 @@ impl Socket {
         let down = async {
             loop {
                 match stream.next().await {
-                    Some(Ok(Message::Text(text))) => out.send(out.data(WS_TEXT, text.as_bytes())).await,
-                    Some(Ok(Message::Binary(bytes))) => out.send(out.data(WS_BINARY, &bytes)).await,
+                    Some(Ok(Message::Text(text))) => out.relay(WS_TEXT, text.into()).await,
+                    Some(Ok(Message::Binary(bytes))) => out.relay(WS_BINARY, bytes).await,
                     Some(Ok(Message::Close(frame))) => return frame,
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => return None,
@@ -96,6 +100,13 @@ impl Feed {
         let code = frame.get("code").and_then(Value::as_u64).unwrap_or_default();
         let (code, reason) = close(code, frame.get("reason").and_then(Value::as_str).unwrap_or_default());
         Self::Close(CloseFrame { code: code.into(), reason: reason.into() })
+    }
+
+    fn bytes(&self) -> Option<Bytes> {
+        match self {
+            Self::Text(bytes) | Self::Data(bytes) => Some(bytes.clone()),
+            Self::Close(_) | Self::End => None,
+        }
     }
 
     fn message(self) -> Option<Message> {

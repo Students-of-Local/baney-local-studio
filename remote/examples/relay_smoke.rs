@@ -250,6 +250,10 @@ impl Link {
 
     async fn echo(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
         self.message(id, kind, payload).await?;
+        self.echoed(id, kind, payload).await
+    }
+
+    async fn echoed(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
         let mut wanted = vec![kind];
         wanted.extend(id.to_be_bytes());
         wanted.extend(payload);
@@ -474,6 +478,8 @@ impl Origin {
             socket.close(Some(CloseFrame { code, reason: "origin".into() })).await.ok();
         } else if kind == "send" {
             socket.send(Message::binary(vec![7; size])).await.ok();
+        } else if kind == "stall" {
+            self.go.notified().await;
         }
         while let Some(Ok(message)) = socket.next().await {
             match message {
@@ -1058,6 +1064,26 @@ async fn w6_paths(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn w7_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let ids = [1u32, 2, 3, 4];
+    let block = noise(17 << 20);
+    for id in ids {
+        link.socket(id, "/v1/ws?stall").await?;
+    }
+    for id in ids {
+        ensure!(ids.iter().all(|id| link.peek(*id).errors == 0), "an error before message {id}");
+        link.message(id, 3, &block).await?;
+        link.get(10 + id, "GET", "/v1/health").await?.is(200, "ok serve")?;
+        sleep(Duration::from_millis(300)).await;
+    }
+    ensure!(ids.map(|id| link.peek(id).errors) == [0, 0, 0, 1], "a message the origin has not read was not counted");
+    smoke.origin.go.notify_waiters();
+    for id in &ids[..3] {
+        link.echoed(*id, 3, &block).await?;
+    }
+    Ok(())
+}
+
 async fn linked(
     name: &str,
     smoke: &Smoke,
@@ -1104,7 +1130,8 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     linked("W3 close codes both ways", smoke, w3_close_codes).await?;
     linked("W4 large messages", smoke, w4_large).await?;
     linked("W5 cancel closes the origin socket", smoke, w5_cancel).await?;
-    linked("W6 sockets only on /v1/ws", smoke, w6_paths).await
+    linked("W6 sockets only on /v1/ws", smoke, w6_paths).await?;
+    linked("W7 socket bytes are capped", smoke, w7_cap).await
 }
 
 #[tokio::main]
