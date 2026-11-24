@@ -82,6 +82,7 @@ enum Limited {
 pub(super) struct Opening {
     generation: u64,
     launch: Launch,
+    root: String,
     task: Option<AbortHandle>,
     waiting: Vec<Waiting>,
     early: Vec<(u64, Event)>,
@@ -320,7 +321,8 @@ impl Actor {
         let ask = !launch.project && !flags.project_refused && harness::trust::has_config(&launch.cwd);
         self.generation += 2;
         let generation = self.generation - 1;
-        let opening = Opening { generation, launch, task: None, waiting, early: Vec::new(), draft, note };
+        let root = harness::trust::root(&cwd);
+        let opening = Opening { generation, launch, root, task: None, waiting, early: Vec::new(), draft, note };
         if ask {
             self.cli_hold(id, opening);
         } else {
@@ -345,7 +347,7 @@ impl Actor {
 
     fn cli_ask_trust(&mut self, id: &str) {
         let Some(opening) = self.opening.get(id).filter(|opening| opening.held()) else { return };
-        let root = harness::trust::root(&opening.launch.cwd);
+        let root = &opening.root;
         let approval = Approval {
             request_id: TRUST.to_string(),
             step: 0,
@@ -361,7 +363,7 @@ impl Actor {
     }
 
     fn cli_answer_trust(&mut self, id: &str, answer: ApprovalAnswer) {
-        let Some(root) = self.opening.get(id).map(|opening| harness::trust::root(&opening.launch.cwd)) else { return };
+        let Some(root) = self.opening.get(id).map(|opening| opening.root.clone()) else { return };
         let trusted = answer != ApprovalAnswer::Deny;
         if trusted {
             self.store.trusted.insert(root.clone());
@@ -372,9 +374,7 @@ impl Actor {
         let answered: Vec<String> = self
             .opening
             .iter()
-            .filter(|(thread, opening)| {
-                opening.held() && (*thread == id || trusted && harness::trust::root(&opening.launch.cwd) == root)
-            })
+            .filter(|(thread, opening)| opening.held() && (*thread == id || trusted && opening.root == root))
             .map(|(thread, _)| thread.clone())
             .collect();
         for thread in answered {
@@ -383,6 +383,8 @@ impl Actor {
                 let flags = self.store.flags(&thread);
                 opening.launch.project = trusted;
                 opening.launch.effort = flags.thinking_level;
+                opening.launch.model = flags.model;
+                opening.launch.access = flags.access.unwrap_or(AccessMode::FullAccess);
                 self.cli_launch(&thread, opening);
             }
         }
@@ -535,6 +537,7 @@ impl Actor {
     async fn cli_cancel(&mut self, id: &str, lead: Option<&str>) {
         let Some(opening) = self.opening.remove(id) else { return };
         opening.cancel();
+        self.settle_approval(id, TRUST);
         if let Some(draft) = opening.draft {
             self.mailbox.push(Update::ThreadStarted { draft, thread: id.to_string() });
         }
