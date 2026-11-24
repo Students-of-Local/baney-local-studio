@@ -42,6 +42,8 @@ jobs:
         run: cargo run -p local-studio-core --example frontmatter_smoke
       - name: No background update check while it is turned off
         run: cargo run -p local-studio-core --features test-hooks --example update_check_smoke -- "$RUNNER_TEMP/uc"
+      - name: No other tool's sign-in file is opened
+        run: cargo run -p local-studio-core --example sign_in_files_smoke -- "$RUNNER_TEMP/si"
       - name: e2e examples replace a stale credential link, never write through it
         run: cargo build -p local-studio-core --example smoke && scripts/tests/e2e-credential-link-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/smoke"
 
@@ -71,6 +73,8 @@ jobs:
       - run: scripts/tests/check-channels-test.sh
       - run: scripts/tests/e2e-target-test.sh
       - run: scripts/tests/release-feed-test.sh
+      - run: scripts/tests/privacy-hosts-test.sh
+      - run: scripts/tests/sign-in-files-test.sh
       - name: Version strings sort local < dev < nightly < stable
         run: |
           set -euo pipefail

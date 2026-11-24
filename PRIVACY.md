@@ -1,0 +1,82 @@
+# Privacy
+
+Local Studio runs on your computers and has no account and no server of its own. This page lists what it sends, what it reads and where it keeps things. It covers the macOS and Linux apps, `local-studio-serve`, the Local controller, the command line tool and the iPhone app. Below, `<data>` is the folder under [Where your data lives](#where-your-data-lives).
+
+## What never happens
+
+- No telemetry, analytics, crash upload or usage report. The controller's "telemetry" is engine and GPU numbers kept in its own folder and shown to the Local Studio apps and controllers that connect to it.
+- No account name or email is read from a sign-in, and nothing about your accounts is hashed or uploaded.
+- The contents of Claude Code, Codex, `gh` and browser sign-in files are never opened, and no other app's keychain items are read. Three kinds of existence check are made, and none opens the file:
+  - Claude Code: `.credentials.json` (`.claude.json` on macOS) in `~/.claude-*` folders and in account folders T3 Code's settings name.
+  - Codex: `auth.json` in `~/.codex-*` folders and in account folders T3 Code's settings name.
+  - cloudflared: `cert.pem` and a tunnel's credentials file, only during `local-studio tunnel` commands.
+- Eukhe's sign-in file is different: Local Studio does open it. See [Files of other tools](#files-of-other-tools).
+
+## Tools with their own policies
+
+Agents do the model work, and this page does not cover what they do on their own: Eukhe (the agent engine, whose daemon starts with the app, [its repository](https://github.com/gildrb/eukhe)), Claude Code (`claude`, [Anthropic's privacy center](https://privacy.anthropic.com)) and Codex (`codex`, [OpenAI's privacy policy](https://openai.com/policies/privacy-policy)). Your prompts, files and tool output go from them to the model provider you chose. The same holds for `git`, `gh`, `cloudflared`, `tailscale`, Docker, `hf`, plugins and their MCP servers, and any endpoint you add. Local Studio starts these programs and they connect with their own settings.
+
+Local Studio starts Claude Code and Codex without `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `OPENAI_API_KEY`.
+
+## Network calls that happen on their own
+
+| Call | Goes to | When | What is sent | Off switch |
+| --- | --- | --- | --- | --- |
+| Update check | `github.com` and the hosts its release downloads redirect to | 20 seconds after launch, then every 6 hours, in installed release builds | A GET for the channel's `latest.json`, with `local-studio/<version>` as the user agent. With Automatic updates on, a newer build is downloaded too | Settings: Automatic updates off, or `LOCAL_STUDIO_NO_UPDATE_CHECK=1`. Then only Check Now checks. Dev builds start with it off |
+| Project git fetch | Each project's own remotes | Every 30 seconds by default | What `git fetch --prune` sends, with your git sign-in. With Automatically pull on, it also fast-forwards | Settings: Git fetch interval 0 |
+| Pull request status | `github.com`, or your GitHub server, through `gh` | When a project's git status refreshes (so after each git fetch): for its branch if that has an upstream, at most every 60 seconds, and for the branches of its threads each time. Thread rows also look again after 2 minutes | `gh pr view` or `gh pr list` for the branch, with `gh`'s sign-in | No off switch. Without `gh` on `PATH` it does not run |
+| Eukhe's Python | `github.com` (Python packages come later, from hosts Eukhe picks) | At launch, when `eukhe kernel install --check` says the pinned runtime is missing | Eukhe's downloads of `uv` and Python, checked by SHA-256 | No off switch. Without a bundled Eukhe it does not run |
+| Codex model list | Whatever `codex` contacts | At launch, if `codex` is installed | Starts `codex app-server`, names the client as Local Studio with its version, and asks for `model/list` | No off switch |
+| Model registry | `github.com` (`0xSero/local-ai-registry`) | When the controller starts and every 30 minutes while it runs | `git clone` the first time, then `git fetch --prune` | Start controller off stops only a controller the app starts; stop one you installed or started yourself. Or a full commit as the registry `ref` in the controller's `config.json` |
+| Local port scan | Programs listening on this computer | Every 10 seconds while the controller runs; `/metrics` of found engines every 5 seconds | A GET for `/v1/models` on each listening port, with the key you set for that engine, if any | The same, or list ports in `excludePorts` |
+| Controller status | Your controller and the controllers it lists | When Local Studio connects on Linux, when setup or Settings opens, and every 5 seconds while a Local view is open | `/api/health` and `/api/snapshot`, with your fleet key | No off switch, but it asks only the controller you set. Start controller off keeps it from being started |
+| Custom endpoint check | Endpoints you added whose host is private or local | While a Local view is open, at most every 4 seconds each; their names are looked up in your DNS | A GET for `/models` with that endpoint's key | No off switch. Remove the endpoint. Endpoints on public hosts are not checked |
+| Tailnet discovery | Online devices in your tailnet | Every 15 seconds while the controller runs | `tailscale status`, then `/api/health`, and to controllers found a hello with this controller's ID and a random value | Off unless you turn on `cluster.discover` in the controller's `config.json` |
+| Linked controllers | Controllers you added as peers or through a fleet link | When a Local view or a gateway request needs them | Status requests and the model requests you route there, with your fleet key | Remove the peer |
+| Saved links | Machines you paired with | At launch and after a drop, retrying every 1 to 30 seconds | See [Pairing](#pairing) | Forget the machine |
+| Notify hooks | Only URLs you gave `local-studio-serve` | When a thread finishes or needs you | Machine ID and name, the kind of event and the thread ID, no message text | Off unless you set one |
+
+The controller runs only if you installed it or started it, or after you open a Local view with "Start controller automatically" ("Start the controller" on Linux) on and nothing answers on your own computer. A controller the app started stops with the app.
+
+## Network calls you ask for
+
+- Threads: messages and attachments go to the agent you picked, and from it to its model provider. When you leave a commit message or pull request empty and have set a model for writing them, the staged changes or branch summary, recent commit subjects and any pull request template go to that model. "Regenerate Title" sends the start of the thread to the text generation model, or asks the thread's own model. Titles are never generated on their own, and no model writes commits unless you set one.
+- Web panel: it loads only pages you open, with their images, in the system web view with its default storage (on macOS, cookies stay between launches). On macOS, text that is not an address is searched at `duckduckgo.com`. Local Studio fetches no favicons, and chat text loads no remote images.
+- Git, GitHub, plugins: clone, pull, push, pull request actions, plugin installs and plugin update checks contact the repository you named. Worktree cleanup on merge, off by default, looks up pull requests on its own once you turn it on.
+- Providers: finding or testing an endpoint's models asks that endpoint, with the key you entered or stored for it.
+- Local: downloads and recipes you start or set up use `hf` and Docker. Share asks `huggingface.co` about the model and opens a pull request on `github.com` through `gh`. Scan asks online tailnet devices for `/api/health`. Deploy signs in with `ssh`, and that machine downloads the controller from `github.com`.
+- Tunnel: nothing runs until you run `local-studio tunnel`. `cloudflared` is downloaded from `github.com` only with your consent, and its SHA-256 is checked. Setup checks your own hostname over HTTPS, and if your DNS has no answer for it, asks `cloudflare-dns.com` and `dns.google`, which see that hostname. Until `local-studio tunnel off`, the running tunnel carries traffic through Cloudflare, or through Tailscale if you pick that. `LS_TUNNEL_SERVICE`, unset by default, names a hosted tunnel service to use instead.
+- Install script: `scripts/install.sh` downloads from `github.com` and `raw.githubusercontent.com`.
+- Devices: the devices panel runs `xcrun simctl`, `adb` and `emulator`.
+
+## Pairing
+
+Pairing sends this device's name and details to the machine you pair with and to nobody else. Inside Noise encryption (XXpsk3) the other machine gets a random device ID made for that pairing, this computer's hostname (on iPhone, the device name iOS gives the app), the operating system, the Local Studio version and channel, and a public key. A reconnect sends the name, version and channel again, encrypted (KK). The device ID and the pairing ID are in the unencrypted first line of the connection, so use a `wss://` address to hide them too.
+
+The other machine answers with its random machine ID, name, operating system, version, channel and addresses, then its projects, threads and transcripts. From then on each side sees what you do there through the link. A pairing link works once, for 10 minutes. Opening one runs `tailscale status` to find an address. A device you pair with `--fleet` can also use that machine's Local controller for models. The iPhone app connects only to machines you paired.
+
+## Files of other tools
+
+| File | Why it is opened |
+| --- | --- |
+| Eukhe's `auth.json` (`~/.eukhe`, or `EUKHE_CODING_AGENT_DIR`) | To show which providers have a key, to save or remove the keys you enter, to use a stored key with the endpoint it belongs to, and to see whether Claude is signed in through Eukhe so that can be refused. The whole file is parsed. Local Studio sends a key only to the endpoint address set for it |
+| Eukhe's `models.json`, `settings.json` and saved threads | To list and save endpoints, plugin servers and the default model, and to count usage. A `!command` key in `models.json` is run to check a local endpoint |
+| T3 Code's `settings.json`, `client-settings.json`, `keybindings.json`, `themes/*.json` and `statev2.sqlite` (or `server-owner.sqlite`), in `~/.t3` or `T3CODE_HOME` | To offer an import and keep it in step. Local Studio looks every 3 seconds and reads them at launch and when they change, even if you never import. From the database it reads projects only: ID, title, folder, archived, default model. Keys and tokens in the settings become "set" or "not set". No off switch; turning sync off only stops changes to Local Studio |
+| Claude Code's session log for a thread (`projects/*/<session>.jsonl`) | To show that thread. When a thread moves to another of your accounts, the log is copied to that account's folder |
+| Codex's session log for a thread (`sessions/**/rollout-*.jsonl`) | Copied the same way. Codex itself reads it to show a thread |
+| An older remote access tool's `remote.json`, cloudflared config and `cloudflared` copy in its `~/.config` folder | Only in `local-studio tunnel` commands: to take over or refuse its tunnel, and to reuse `cloudflared` if its SHA-256 matches. Its tunnel credentials are not opened |
+| Hugging Face's cache folder (`~/.cache/huggingface`, or `HF_HOME`) | The controller lists `.gguf` files there by name and size. A recipe that asks for the hub cache gets the whole folder mounted in its container, with the `hf` sign-in token if one is saved there. The controller itself does not open the token |
+| Files in your projects, and files and themes you pick | To show, edit, attach or import them |
+
+Usage numbers come from these files and the Eukhe daemon. No provider is asked for usage.
+
+## Where your data lives
+
+- `<data>` is `LOCAL_STUDIO_DATA_DIR` if set, else `~/Library/Application Support/Local Studio` on macOS, and `$XDG_DATA_HOME/local-studio` or `~/.local/share/local-studio` on Linux. It holds settings, state, worktrees, staged updates, `harness/usage.jsonl` (time, provider, model, thread ID, tokens and cost), pairings and keys in `remote/`, and the controller's files and `controller.log` in `controller/`.
+- Plugins and tunnel files, with the tunnel logs, are in `~/.local-studio`, or under `LOCAL_STUDIO_DATA_DIR` if set. A controller you run yourself keeps its files in `~/.local-studio-controller`.
+- `local-studio-serve` logs to `~/Library/Logs/local-studio-serve.log` on macOS and to the systemd journal on Linux.
+- Threads are kept by the agent that ran them: Eukhe, Claude Code or Codex, in its own folder.
+- The iPhone app keeps its pairing keys in its own keychain items and a copy of recent threads in its app folder.
+- Local Studio uploads none of these logs.
+
+Checks in CI fail when shipped code names a host this page does not, or names another tool's sign-in file: `scripts/tests/privacy-hosts-test.sh` and `scripts/tests/sign-in-files-test.sh`.
