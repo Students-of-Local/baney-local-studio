@@ -20,7 +20,6 @@ local-studio-version.workspace = true
 aes-gcm.workspace = true
 anyhow.workspace = true
 base64.workspace = true
-blake2.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
@@ -34,6 +33,7 @@ tokio.workspace = true
 image.workspace = true
 ignore.workspace = true
 libghostty-vt.workspace = true
+minisign-verify.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 reqwest.workspace = true
@@ -54,6 +54,9 @@ http-body-util = { version = "0.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+blake2.workspace = true
 
 [lints]
 workspace = true

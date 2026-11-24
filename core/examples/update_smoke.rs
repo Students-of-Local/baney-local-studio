@@ -132,11 +132,8 @@ fn run(scratch: &Path) -> Outcome {
             .map_err(|error| error.to_string())?,
     };
     smoke.asset = smoke.build(V0).asset();
-    println!(
-        "feed on {} for {platform}, test key {}",
-        smoke.base,
-        update::minisign::PublicKey::decode(&smoke.key.public())?.id()
-    );
+    update::minisign::public_key(&smoke.key.public())?;
+    println!("feed on {} for {platform}", smoke.base);
     if cfg!(target_os = "macos") {
         smoke.make_identity()?;
     }
