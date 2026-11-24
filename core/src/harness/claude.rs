@@ -90,6 +90,9 @@ impl Claude {
         if let Some(effort) = launch.effort.as_deref().filter(|effort| EFFORTS.contains(effort)) {
             command.args(["--effort", effort]);
         }
+        if !launch.project {
+            command.args(["--setting-sources", "user"]);
+        }
         command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
         if let Some(account) = &launch.account {
             command.env("CLAUDE_CONFIG_DIR", account);

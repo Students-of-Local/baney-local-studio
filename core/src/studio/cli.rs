@@ -12,14 +12,17 @@ use crate::harness::accounts::{self, Parks};
 use crate::harness::{self, Driver, Envelope, Event, Failure, Image, Launch, OpenReport, Sink, Stop};
 use crate::images;
 use crate::model::{
-    AccessMode, Approval, ApprovalAnswer, Harness, ModelOption, ModelRef, NoticeLevel, NotificationKind, Update,
+    AccessMode, Approval, ApprovalAnswer, Harness, ImageAttachment, ModelOption, ModelRef, NoticeLevel,
+    NotificationKind, PromptDraft, Update,
 };
 use crate::session::LiveState;
+use crate::store::{HeldImage, HeldPrompt};
 use crate::transcript::Transcript;
 
 const IDLE_KILL: Duration = Duration::from_secs(600);
 /// How long a CLI may sit idle with sends unanswered before Local Studio counts them as dropped.
 const SETTLE: Duration = Duration::from_secs(3);
+const TRUST: &str = "project-trust";
 
 pub(super) struct Cli {
     driver: Driver,
@@ -79,7 +82,8 @@ enum Limited {
 pub(super) struct Opening {
     generation: u64,
     launch: Launch,
-    task: AbortHandle,
+    root: String,
+    task: Option<AbortHandle>,
     waiting: Vec<Waiting>,
     early: Vec<(u64, Event)>,
     draft: Option<String>,
@@ -96,8 +100,14 @@ impl Opening {
         generation == self.generation || generation == self.generation + 1
     }
 
+    fn held(&self) -> bool {
+        self.task.is_none()
+    }
+
     fn cancel(&self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -231,7 +241,8 @@ impl Actor {
 
     pub(super) fn cli_view(&mut self, id: &str) -> String {
         let has_live = self.threads.entry(id.to_string()).or_default().live.is_some();
-        let busy = self.drivers.contains_key(id) || self.opening.contains_key(id) || self.loading.contains_key(id);
+        let opening = self.opening.get(id).is_some_and(|opening| !opening.held());
+        let busy = self.drivers.contains_key(id) || opening || self.loading.contains_key(id);
         if !has_live && !busy {
             if let Some(harness) = self.harness(id) {
                 let cwd = self.cli_cwd(id);
@@ -269,6 +280,7 @@ impl Actor {
             self.emit_focus(id);
         }
         self.dirty = true;
+        self.cli_ask_trust(id);
     }
 
     fn cli_begin_open(&mut self, id: &str, waiting: Vec<Waiting>, draft: Option<String>) -> Result<(), String> {
@@ -299,15 +311,88 @@ impl Actor {
             harness,
             native,
             resume,
-            cwd,
+            cwd: cwd.clone(),
             model: flags.model.clone(),
             effort: flags.thinking_level.clone(),
             access: flags.access.unwrap_or(AccessMode::FullAccess),
             account,
+            project: harness != Harness::ClaudeCode || !flags.project_refused && self.cli_trusted(&cwd),
         };
+        let ask = !launch.project && !flags.project_refused && harness::trust::has_config(&launch.cwd);
         self.generation += 2;
         let generation = self.generation - 1;
-        let (sender, thread, first) = (self.cli.clone(), id.to_string(), launch.clone());
+        let root = harness::trust::root(&cwd);
+        let opening = Opening { generation, launch, root, task: None, waiting, early: Vec::new(), draft, note };
+        if ask {
+            self.cli_hold(id, opening);
+        } else {
+            self.cli_launch(id, opening);
+        }
+        Ok(())
+    }
+
+    fn cli_trusted(&self, cwd: &str) -> bool {
+        harness::trust::own(cwd) || self.store.trusted.contains(&harness::trust::root(cwd))
+    }
+
+    fn cli_hold(&mut self, id: &str, mut opening: Opening) {
+        let draft = opening.draft.take();
+        self.opening.insert(id.to_string(), opening);
+        if let Some(draft) = draft {
+            self.mailbox.push(Update::ThreadStarted { draft, thread: id.to_string() });
+        }
+        self.cli_view(id);
+        self.cli_ask_trust(id);
+    }
+
+    fn cli_ask_trust(&mut self, id: &str) {
+        let Some(opening) = self.opening.get(id).filter(|opening| opening.held()) else { return };
+        let root = &opening.root;
+        let approval = Approval {
+            request_id: TRUST.to_string(),
+            step: 0,
+            command: format!("Use this project's own Claude Code settings: {root}"),
+            effects: vec![
+                "Its hooks and MCP servers run without asking, and the answer is kept for this project's threads"
+                    .to_string(),
+                "Deny keeps this thread on your own settings".to_string(),
+            ],
+            agent: Some(name(Harness::ClaudeCode).to_string()),
+        };
+        self.add_approval(id.to_string(), approval);
+    }
+
+    fn cli_answer_trust(&mut self, id: &str, answer: ApprovalAnswer) {
+        let Some(root) = self.opening.get(id).map(|opening| opening.root.clone()) else { return };
+        let trusted = answer != ApprovalAnswer::Deny;
+        if trusted {
+            self.store.trusted.insert(root.clone());
+        } else {
+            self.store.update(id, |flags| flags.project_refused = true);
+        }
+        self.save();
+        let answered: Vec<String> = self
+            .opening
+            .iter()
+            .filter(|(thread, opening)| opening.held() && (*thread == id || trusted && opening.root == root))
+            .map(|(thread, _)| thread.clone())
+            .collect();
+        for thread in answered {
+            self.settle_approval(&thread, TRUST);
+            if let Some(mut opening) = self.opening.remove(&thread) {
+                let flags = self.store.flags(&thread);
+                opening.launch.project = trusted;
+                opening.launch.effort = flags.thinking_level;
+                opening.launch.model = flags.model;
+                opening.launch.access = flags.access.unwrap_or(AccessMode::FullAccess);
+                self.cli_launch(&thread, opening);
+            }
+        }
+    }
+
+    fn cli_launch(&mut self, id: &str, mut opening: Opening) {
+        let generation = opening.generation;
+        let (sender, thread, first) = (self.cli.clone(), id.to_string(), opening.launch.clone());
         let task = tokio::spawn(async move {
             let opened = Driver::open(first.clone(), Sink::new(&thread, generation, sender.clone())).await;
             let (generation, result, lost) = match opened {
@@ -321,11 +406,8 @@ impl Actor {
             let event = Event::Opened(Box::new(OpenReport { result, lost }));
             sender.send(Envelope { thread, generation, event }).ok();
         });
-        self.opening.insert(
-            id.to_string(),
-            Opening { generation, launch, task: task.abort_handle(), waiting, early: Vec::new(), draft, note },
-        );
-        Ok(())
+        opening.task = Some(task.abort_handle());
+        self.opening.insert(id.to_string(), opening);
     }
 
     async fn cli_opened(&mut self, id: &str, generation: u64, report: OpenReport) {
@@ -430,9 +512,20 @@ impl Actor {
         }
         let mut reported = false;
         for waiting in opening.waiting {
-            if let Waiting::Send { request: Some(request), .. } = waiting {
-                self.mailbox.push(Update::RequestFailed { request, message: error.clone() });
-                reported = true;
+            match waiting {
+                Waiting::Send { request: Some(request), .. } => {
+                    self.mailbox.push(Update::RequestFailed { request, message: error.clone() });
+                    reported = true;
+                }
+                Waiting::Send { text, images, .. } => {
+                    let images = images.into_iter().filter_map(|image| {
+                        let data = crate::images::decode_base64(&image.data)?;
+                        Some(ImageAttachment { mime_type: image.mime_type, data })
+                    });
+                    let draft = PromptDraft { text, images: images.collect(), files: Vec::new() };
+                    self.mailbox.push(Update::ComposerDraft { thread: id.to_string(), draft });
+                }
+                Waiting::Compact => {}
             }
         }
         if !reported {
@@ -444,6 +537,7 @@ impl Actor {
     async fn cli_cancel(&mut self, id: &str, lead: Option<&str>) {
         let Some(opening) = self.opening.remove(id) else { return };
         opening.cancel();
+        self.settle_approval(id, TRUST);
         if let Some(draft) = opening.draft {
             self.mailbox.push(Update::ThreadStarted { draft, thread: id.to_string() });
         }
@@ -583,6 +677,9 @@ impl Actor {
     }
 
     pub(super) fn cli_answer(&mut self, id: &str, request: &str, answer: ApprovalAnswer) {
+        if request == TRUST && self.opening.get(id).is_some_and(Opening::held) {
+            return self.cli_answer_trust(id, answer);
+        }
         let result = match self.drivers.get_mut(id) {
             Some(cli) => cli.driver.answer(request, answer),
             None => Err("That approval is no longer pending.".to_string()),
@@ -759,8 +856,19 @@ impl Actor {
         for (_, mut cli) in self.drivers.drain() {
             cli.driver.kill();
         }
-        for (_, opening) in self.opening.drain() {
+        let mut waiting = false;
+        for (id, opening) in self.opening.drain() {
             opening.cancel();
+            for held in opening.waiting.into_iter().filter(|_| opening.task.is_none()) {
+                let Waiting::Send { text, images, steer, .. } = held else { continue };
+                let images = images.into_iter().map(|image| HeldImage { mime_type: image.mime_type, data: image.data });
+                let prompt = HeldPrompt { text, images: images.collect(), steer: Some(steer), ..HeldPrompt::default() };
+                self.store.update(&id, |flags| flags.held.push(prompt));
+                waiting = true;
+            }
+        }
+        if waiting {
+            self.save();
         }
     }
 

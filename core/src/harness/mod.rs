@@ -1,6 +1,7 @@
 pub(crate) mod accounts;
 mod claude;
 mod codex;
+pub(crate) mod trust;
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -130,6 +131,7 @@ pub(crate) struct Launch {
     pub(crate) effort: Option<String>,
     pub(crate) access: AccessMode,
     pub(crate) account: Option<PathBuf>,
+    pub(crate) project: bool,
 }
 
 #[derive(Clone)]

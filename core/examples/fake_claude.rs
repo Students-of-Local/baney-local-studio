@@ -60,7 +60,7 @@ fn remember(file: Option<&PathBuf>, lines: &[Value]) {
 fn run(
     turn: u32,
     frame: &Value,
-    effort: &str,
+    (effort, sources): (&str, &str),
     (inbox, file): (&Receiver<Value>, Option<&PathBuf>),
     waiting: &mut VecDeque<Value>,
 ) {
@@ -116,7 +116,7 @@ fn run(
         );
         return;
     }
-    let reply = format!("reply to {text} at effort {effort}");
+    let reply = format!("reply to {text} at effort {effort} with {sources} settings");
     let assistant = json!({
         "type": "assistant",
         "message": {
@@ -135,6 +135,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let effort =
         args.windows(2).find(|pair| pair[0] == "--effort").map_or_else(|| "none".to_string(), |pair| pair[1].clone());
+    let sources = args
+        .windows(2)
+        .find(|pair| pair[0] == "--setting-sources")
+        .map_or_else(|| "all".to_string(), |pair| pair[1].clone());
     let file = session_file(&args);
     let (frames, inbox) = mpsc::channel::<Value>();
     std::thread::spawn(move || {
@@ -159,7 +163,7 @@ fn main() {
         match frame["type"].as_str() {
             Some("user") => {
                 turn += 1;
-                run(turn, &frame, &effort, (&inbox, file.as_ref()), &mut waiting);
+                run(turn, &frame, (&effort, &sources), (&inbox, file.as_ref()), &mut waiting);
             }
             Some("control_request") => answer_control(&frame),
             _ => {}

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,7 @@ pub(crate) struct StoredProject {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ThreadFlags {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) project: Option<String>,
@@ -63,6 +64,8 @@ pub(crate) struct ThreadFlags {
     pub(crate) local_only: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) account: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) project_refused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) caller: Option<crate::plugins::Caller>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -154,6 +157,8 @@ struct StateFile {
     favorites: Vec<ModelKey>,
     #[serde(default)]
     hidden: Vec<ModelKey>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    trusted: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -163,6 +168,7 @@ pub(crate) struct Store {
     pub(crate) threads: BTreeMap<String, ThreadFlags>,
     pub(crate) favorites: Vec<ModelKey>,
     pub(crate) hidden: Vec<ModelKey>,
+    pub(crate) trusted: BTreeSet<String>,
 }
 
 impl Store {
@@ -177,6 +183,7 @@ impl Store {
                 threads: BTreeMap::new(),
                 favorites: Vec::new(),
                 hidden: Vec::new(),
+                trusted: BTreeSet::new(),
             },
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
@@ -193,6 +200,7 @@ impl Store {
             threads: file.threads,
             favorites: file.favorites,
             hidden: file.hidden,
+            trusted: file.trusted,
         })
     }
 
@@ -228,6 +236,7 @@ impl Store {
             threads: self.threads.clone(),
             favorites: self.favorites.clone(),
             hidden: self.hidden.clone(),
+            trusted: self.trusted.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&file)?;
         let directory = self.path.parent().context("the state file has no directory")?;

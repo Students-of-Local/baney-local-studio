@@ -81,7 +81,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose
   --include-partial-messages --replay-user-messages
   --permission-prompts host --permission-prompt-tool stdio
   --permission-mode <manual|acceptEdits|auto|bypassPermissions>
-  [--model <m>] [--effort low|medium|high|xhigh|max]
+  [--model <m>] [--effort low|medium|high|xhigh|max] [--setting-sources user]
   --session-id <uuid> | --resume <uuid>
 ```
 
@@ -132,6 +132,10 @@ Items map to the Eukhe shapes: `userMessage` to a user message, `agentMessage` t
 Server requests we answer: `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept`, `acceptForSession` or `decline`; the legacy `execCommandApproval` and `applyPatchApproval` with `approved`, `approved_for_session` or `denied`. Every other server request (`item/permissions/requestApproval`, `tool/requestUserInput`, `mcpServer/elicitation` and so on) gets a JSON-RPC error.
 
 Token use comes from `thread/tokenUsage/updated`: the driver records the difference of `total` between updates (`last` for the first update after a resume). Codex reports no cost, so Codex rows show tokens with a cost of 0.
+
+### Project settings
+
+A project can carry its own Claude Code settings (`.claude`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`), and `claude -p` asks nothing before it uses them. Local Studio asks first: the first thread in such a project, or under a folder that has such files, shows an approval card before any process starts, and the thread's messages wait for the answer. Allowing it is kept in `state.json` (`trusted`) for the project's main checkout, its linked worktrees included, and answers every other thread waiting on that project. Denying starts that thread with `--setting-sources user`, and the choice stays with the thread (`projectRefused`), also after another thread of the project is allowed. A project without such files starts with `--setting-sources user` too and shows no card. The home folder is the user's own and never asked about. Stop takes the card away and shows the text of the dropped messages in the thread; the next message asks again. Closing Local Studio keeps the messages, and the question comes back with them.
 
 ### Account switching
 
