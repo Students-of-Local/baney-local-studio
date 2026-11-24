@@ -11,9 +11,8 @@ use crate::app::App;
 
 const PROMPT: &str = "Use the bash tool to run exactly this command once: `echo smoke-ok > smoke.txt && cat smoke.txt`. Then reply with only the word done.";
 const MARK: &str = "smoke-ok";
-const PROVIDER: &str = "anthropic";
-const MODEL: &str = "claude-haiku-5-5";
-const THINKING: &str = "low";
+const MODEL_ENV: &str = "LOCAL_STUDIO_SMOKE_MODEL";
+const THINKING: &str = "off";
 const TIMEOUT: Duration = Duration::from_secs(300);
 const TERMINAL_MARK: &str = "smoke-term";
 const STUB_KEY: &str = "smoke-key";
@@ -46,8 +45,30 @@ enum Phase {
     Finished,
 }
 
+fn real_model() -> Option<ModelKey> {
+    let value = std::env::var(MODEL_ENV).ok()?;
+    let (provider, model) =
+        value.split_once('/').filter(|(provider, model)| !provider.is_empty() && !model.is_empty())?;
+    Some(ModelKey { provider: provider.to_string(), model: model.to_string() })
+}
+
+fn has_model(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>) -> bool {
+    let named = real_model().is_some();
+    if !named {
+        finish(app, phase, failed, false, &format!("set {MODEL_ENV} to the local model as <provider>/<model>"));
+    }
+    named
+}
+
+fn label(model: &ModelKey) -> String {
+    format!("{}/{} thinking {THINKING}", model.provider, model.model)
+}
+
 pub fn start(app: &Rc<App>, failed: Rc<Cell<bool>>) {
     let phase = Rc::new(Cell::new(Phase::Connecting));
+    if !has_model(app, &phase, &failed) {
+        return;
+    }
     let project = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from).join("smoke-project");
     if let Err(error) = std::fs::create_dir_all(&project) {
         finish(app, &phase, &failed, false, &format!("create {}: {error}", project.display()));
@@ -81,6 +102,9 @@ fn kernel_project(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>
 
 pub fn start_kernel(app: &Rc<App>, failed: Rc<Cell<bool>>, expect_install: bool) {
     let phase = Rc::new(Cell::new(Phase::Kernel));
+    if !has_model(app, &phase, &failed) {
+        return;
+    }
     let Some(project) = kernel_project(app, &phase, &failed) else { return };
     let installing = Cell::new(false);
     drive(app, phase, failed, KERNEL_TIMEOUT, move |app, phase, failed| {
@@ -144,15 +168,15 @@ fn kernel(
 
 fn send_kernel_prompt(app: &Rc<App>, phase: &Rc<Cell<Phase>>) {
     let first = app.state.borrow().projects.first().map(|project| project.id.clone());
-    let Some(first) = first else { return };
+    let (Some(first), Some(model)) = (first, real_model()) else { return };
     phase.set(Phase::Opening);
     app.new_thread(Some(first));
+    println!("     real model {}", label(&model));
     {
         let mut state = app.state.borrow_mut();
-        state.draft_settings.model = Some(ModelKey { provider: PROVIDER.to_string(), model: MODEL.to_string() });
+        state.draft_settings.model = Some(model);
         state.draft_settings.thinking = Some(THINKING.to_string());
     }
-    println!("     real model {PROVIDER}/{MODEL} thinking {THINKING}");
     app.composer.set_text(KERNEL_PROMPT);
     app.composer.submit(app);
 }
@@ -325,7 +349,7 @@ fn start_draft(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>) 
         }
         state.projects.first().map(|project| project.id.clone())
     };
-    let Some(first) = first else { return };
+    let (Some(first), Some(model)) = (first, real_model()) else { return };
     println!("ok   project added in the sidebar: {first}");
     app.new_thread(Some(first));
     let (chip, daemon, unset) = {
@@ -336,8 +360,8 @@ fn start_draft(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>) 
             state.settings.default_model.is_none() && state.settings.default_thinking_level.is_none(),
         )
     };
-    let real =
-        (Some(ModelKey { provider: PROVIDER.to_string(), model: MODEL.to_string() }), Some(THINKING.to_string()));
+    let shown = label(&model);
+    let real = (Some(model), Some(THINKING.to_string()));
     if !unset {
         finish(
             app,
@@ -358,7 +382,7 @@ fn start_draft(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>) 
         finish(app, phase, failed, false, &detail);
         return;
     }
-    println!("ok   with no default set the composer shows the daemon's default {PROVIDER}/{MODEL} thinking {THINKING}");
+    println!("ok   with no default set the composer shows the daemon's default {shown}");
     phase.set(Phase::Opening);
     app.composer.set_text(PROMPT);
     app.composer.submit(app);
@@ -443,8 +467,9 @@ fn verify_turn(app: &Rc<App>, items: &[local_studio_core::Item], project: &str) 
         return Err("the turn finished without a real bash call writing smoke.txt".to_string());
     }
     let model = state.info.as_ref().and_then(|info| info.model.clone());
-    if !model.as_ref().is_some_and(|model| model.provider == PROVIDER && model.id == MODEL) {
-        return Err(format!("the thread ran on {model:?}, not {PROVIDER}/{MODEL} as the composer showed"));
+    let wanted = real_model().map(|model| (model.provider, model.model));
+    if model.as_ref().map(|model| (model.provider.clone(), model.id.clone())) != wanted {
+        return Err(format!("the thread ran on {model:?}, not {wanted:?} as the composer showed"));
     }
     let thinking = state.info.as_ref().map(|info| info.thinking_level.clone()).unwrap_or_default();
     if thinking != THINKING {
