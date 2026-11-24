@@ -1,4 +1,4 @@
-use crate::format::{Markdown, Span, markdown};
+use crate::format::{markdown, Markdown, Span};
 
 pub const SCENES: [&str; 3] = ["58-markdown-1", "58-markdown-2", "58-markdown-3"];
 const CASES: [(&str, &str, &str); 30] = [
@@ -31,7 +31,7 @@ const CASES: [(&str, &str, &str); 30] = [
     ("rule 6", "1. Steps\n\t-", "01. Steps"),
     ("table", "Rows:\n| a | b |\n|---|---|\n| 1 | 2 |\n\nend", "Rows:|a;b;/1;2;/|end"),
     ("table", "- Rows:\n  | a |\n  |--|\n  | 1 |\n- x", "0• Rows:|in 0,1|a;/1;/|in 0,0|0• x"),
-    ("table", "> one\n> two\n> a \\| b | c\n> :-: | -:", "in 1,0|one two|a | b;c;/"),
+    ("table", "> one\n> two\n> | a \\| b | c |\n> |:-:|-:|", "in 1,0|one two|a | b;c;/"),
     ("table", "a\n| b | c |\n|--|\n\n```\na\n|b|\n|-|\n```", "a | b | c | |--||code :a\n|b|\n|-|"),
     ("item", "1. ### In\n   x\n- ## To", "01. In(b)|in 0,1|x|in 0,0|0• To(b)"),
     ("M4", "a\n-\n\nb", "#2 a|b"),
