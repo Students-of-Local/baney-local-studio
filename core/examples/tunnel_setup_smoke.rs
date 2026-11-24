@@ -544,6 +544,7 @@ fn run() -> Result<(), String> {
     let channel = version.rsplit_once('(').map(|(_, rest)| rest.trim_end_matches(')').to_string()).unwrap_or_default();
     println!("{version}");
     let real_before = real_services();
+    byo(&smoke, &channel)?;
     no_waitlist(&smoke, &channel)?;
     hosted_route(&smoke)?;
     guard(&smoke)?;
@@ -567,6 +568,36 @@ fn real_manager() -> &'static str {
     }
 }
 
+fn byo(s: &Smoke, channel: &str) -> Result<(), String> {
+    let mark = s.mark();
+    let (code, value) = s.ls(&["tunnel", "byo", "--json"])?;
+    let plan: Vec<&str> = value["plan"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    ensure(
+        code == 0
+            && value["state"] == "byo"
+            && value["next"] == "byo"
+            && value["command"]
+                .as_str()
+                .or(value["template"].as_str())
+                .is_some_and(|c| c.starts_with("local-studio tunnel setup --"))
+            && !value.to_string().contains("waitlist")
+            && (cfg!(windows) || value["agentPrompt"].as_str().is_some_and(|p| p.contains("tunnel byo --json")))
+            && (cfg!(windows) || plan.iter().any(|step| step.contains("tunnel login"))),
+        format!("tunnel byo on {channel} answers the own-Cloudflare guide: {value}"),
+    )?;
+    let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
+    ensure(
+        code == 0
+            && value["state"] == "none"
+            && value["next"] == "byo"
+            && value["nextCommand"] == "local-studio tunnel byo",
+        format!("status with no route on {channel} points at the guide: {value}"),
+    )?;
+    ensure(s.since(mark).is_empty() && !s.route_path().exists(), "the guide touches nothing")?;
+    println!("ok: on {channel}, byo and an empty status point at the own-Cloudflare guide");
+    Ok(())
+}
+
 fn no_waitlist(s: &Smoke, channel: &str) -> Result<(), String> {
     let mark = s.mark();
     let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
@@ -574,8 +605,8 @@ fn no_waitlist(s: &Smoke, channel: &str) -> Result<(), String> {
         code == 0
             && value["state"] == "none"
             && value["next"] == "byo"
-            && value["nextCommand"] == "local-studio tunnel setup --tailnet",
-        format!("status with no route on {channel} points at setup: {value}"),
+            && value["nextCommand"] == "local-studio tunnel byo",
+        format!("status with no route on {channel} points at the guide: {value}"),
     )?;
     for (args, state) in [
         (&["tunnel", "setup", "--cloudflare", "studio.example.com", "--json"][..], "needs_signin"),

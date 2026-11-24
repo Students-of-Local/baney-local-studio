@@ -25,7 +25,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel down | release [--json]
        local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
        local-studio tunnel cloudflared [--yes] [--json]
-       local-studio tunnel byo
+       local-studio tunnel byo [--json]
        local-studio fleet status [--json]
        local-studio fleet join [<link>] [--json]
        local-studio fleet invite [--url <wss url>] [--json]
@@ -84,7 +84,10 @@ fn main() -> ExitCode {
         }
         ["tunnel", "cloudflared"] => cloudflared(false, json),
         ["tunnel", "cloudflared", "--yes"] => cloudflared(true, json),
-        ["tunnel", "byo"] => byo(),
+        ["tunnel", "byo"] => {
+            show(&tunnel::byo(tunnel::platform()), json);
+            Ok(())
+        }
         ["fleet", "status"] => fleet_status(json),
         ["fleet", "join"] => fleet_set(&serde_json::json!({ "discover": true }), json),
         ["fleet", "join", link] => fleet_join(link, json).map_err(|message| fleet_failed(message, json)),
@@ -426,7 +429,13 @@ fn show(value: &Value, as_json: bool) {
     for step in value.get("plan").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
         println!("  - {step}");
     }
-    for (key, label) in [("command", "run"), ("url", "open"), ("mcpUrl", "MCP address"), ("wsUrl", "phone address")] {
+    for (key, label) in [
+        ("command", "run"),
+        ("template", "run"),
+        ("url", "open"),
+        ("mcpUrl", "MCP address"),
+        ("wsUrl", "phone address"),
+    ] {
         if let Some(found) = text(key) {
             println!("  {label}: {found}");
         }
@@ -560,14 +569,6 @@ fn cloudflared(yes: bool, as_json: bool) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn byo() -> Result<(), String> {
-    match std::process::Command::new("tychicus").args(["remote", "setup"]).status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("tychicus remote setup exited with {status}")),
-        Err(_) => Err("Install the Tychicus plugin, then run: tychicus remote setup".to_string()),
-    }
 }
 
 fn update_runtime() -> Result<tokio::runtime::Runtime, String> {
