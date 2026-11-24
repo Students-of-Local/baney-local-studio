@@ -212,7 +212,7 @@ pub(crate) fn read_file(project: &str, relative: &str) -> Result<(String, FileCo
     }
 }
 
-type Ranked = Reverse<(u32, Reverse<(usize, String)>, bool)>;
+type Ranked = Reverse<(u32, u32, Reverse<(usize, String)>, bool)>;
 
 pub(crate) fn search_files(project: &str, query: &str, limit: u32) -> Result<Vec<SearchHit>, String> {
     let root = root(project)?;
@@ -233,7 +233,9 @@ pub(crate) fn search_files(project: &str, query: &str, limit: u32) -> Result<Vec
         let relative = relative_of(&root, entry.path());
         let directory = entry.file_type().is_some_and(|kind| kind.is_dir());
         let Some(score) = query.score(Utf32Str::new(&relative, &mut buffer), &mut matcher) else { continue };
-        best.push(Reverse((score, Reverse((relative.len(), relative)), directory)));
+        let name = relative.rsplit_once('/').map_or(relative.as_str(), |(_, name)| name);
+        let named = query.score(Utf32Str::new(name, &mut buffer), &mut matcher).unwrap_or(0);
+        best.push(Reverse((score, named, Reverse((relative.len(), relative)), directory)));
         if best.len() > limit {
             best.pop();
         }
@@ -241,7 +243,7 @@ pub(crate) fn search_files(project: &str, query: &str, limit: u32) -> Result<Vec
     Ok(best
         .into_sorted_vec()
         .into_iter()
-        .map(|Reverse((_, Reverse((_, relative)), directory))| SearchHit {
+        .map(|Reverse((_, _, Reverse((_, relative)), directory))| SearchHit {
             preview: relative.rsplit_once('/').map_or("", |(parent, _)| parent).to_string(),
             relative: if directory { format!("{relative}/") } else { relative },
             line: None,
