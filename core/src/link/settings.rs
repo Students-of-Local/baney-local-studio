@@ -4,9 +4,11 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::devices::write_private;
+use crate::link::devices::write_private;
+use crate::link::lock;
+use crate::platform::{set_mode, Mode};
 
-pub use crate::pairing::DEFAULT_PORT;
+pub use crate::link::pairing::DEFAULT_PORT;
 pub const DEFAULT_TUNNEL_PORT: u16 = 18094;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -42,6 +44,7 @@ pub enum Hook {
 }
 
 impl Hook {
+    #[must_use]
     pub fn webhook(url: &str) -> Self {
         Self::Webhook { kind: "webhook".to_string(), url: url.to_string() }
     }
@@ -88,6 +91,7 @@ fn appended<T: Clone + PartialEq>(known: &[T], before: &[T], after: &[T]) -> Vec
 }
 
 impl Installed {
+    #[must_use]
     pub fn record(stored: Option<&Settings>, after: &Settings) -> Self {
         let before = stored.cloned().unwrap_or_default();
         let known = before.installed.clone().unwrap_or(Self { created: stored.is_none(), ..Self::default() });
@@ -123,10 +127,12 @@ pub struct Effective {
     pub hooks: Vec<String>,
 }
 
+#[must_use]
 pub fn path(data_dir: &Path) -> PathBuf {
     data_dir.join("remote").join("serve.json")
 }
 
+#[must_use]
 pub fn exists(data_dir: &Path) -> bool {
     path(data_dir).is_file()
 }
@@ -142,9 +148,62 @@ pub fn load(data_dir: &Path) -> anyhow::Result<Option<Settings>> {
 }
 
 pub fn save(data_dir: &Path, settings: &Settings) -> anyhow::Result<()> {
+    let path = path(data_dir);
+    if let Some(folder) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .and_then(|()| set_mode(folder, 0o700))
+            .with_context(|| format!("restrict {}", folder.display()))?;
+    }
     let mut text = serde_json::to_string_pretty(settings)?;
     text.push('\n');
-    write_private(&path(data_dir), text.as_bytes())
+    write_private(&path, text.as_bytes())
+}
+
+pub struct Edited {
+    pub settings: Settings,
+    pub present: bool,
+}
+
+pub fn edit_hosts(
+    data_dir: &Path,
+    host: &str,
+    tunnel: bool,
+    remove: bool,
+    pinned: Option<u16>,
+) -> anyhow::Result<Edited> {
+    check_host(host)?;
+    let stored = load(data_dir)?;
+    let mut settings = stored.clone().unwrap_or_default();
+    if tunnel && !remove && settings.tunnel_port.is_none() && pinned.is_none() {
+        settings.tunnel_port = Some(DEFAULT_TUNNEL_PORT);
+    }
+    let hosts = if tunnel { &mut settings.allow_tunnel_hosts } else { &mut settings.allow_hosts };
+    let present = hosts.iter().any(|known| known == host);
+    if remove {
+        hosts.retain(|known| known != host);
+    } else if !present {
+        hosts.push(host.to_string());
+    }
+    let changed = match &stored {
+        Some(stored) => stored != &settings,
+        None => settings != Settings::default(),
+    };
+    if changed {
+        save(data_dir, &settings)?;
+    }
+    Ok(Edited { settings, present })
+}
+
+pub fn edit_tunnel_host(data_dir: &Path, host: &str, remove: bool) -> anyhow::Result<()> {
+    let owner = match lock::holder(data_dir) {
+        lock::Owner::Held(pid) => lock::listening(data_dir, pid),
+        lock::Owner::Free => None,
+    };
+    let pinned = owner.and_then(|listening| listening.pinned_tunnel_port);
+    edit_hosts(data_dir, host, true, remove, pinned).map(|_| ())
 }
 
 fn union(first: &[String], second: &[String]) -> Vec<String> {
@@ -158,6 +217,7 @@ fn union(first: &[String], second: &[String]) -> Vec<String> {
 }
 
 impl Settings {
+    #[must_use]
     pub fn others(&self) -> Vec<String> {
         let lists = [
             ("allowHosts", self.allow_hosts.is_empty()),
@@ -170,6 +230,7 @@ impl Settings {
         named.chain(self.rest.keys().cloned()).collect()
     }
 
+    #[must_use]
     pub fn merged(&self, flags: &Settings) -> Settings {
         let mut notify = self.notify.clone();
         for hook in &flags.notify {
@@ -191,6 +252,7 @@ impl Settings {
         }
     }
 
+    #[must_use]
     pub fn effective(&self, default_name: &str) -> Effective {
         let derived: Vec<String> =
             self.allow_hosts.iter().chain(&self.allow_tunnel_hosts).map(|host| format!("wss://{host}/v1/ws")).collect();

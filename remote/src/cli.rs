@@ -12,7 +12,7 @@ use crate::devices::{self, hex, now_ms, random, Devices};
 use crate::host::{self, Launch, Stop};
 use crate::hub::{self, Feed};
 use crate::pairing::{self, host_name};
-use crate::settings::{self, Hook, Settings};
+use crate::settings::{self, Edited, Hook, Settings};
 use crate::{lock, service, CHANNEL};
 
 const LOCK_RETRY: Duration = Duration::from_secs(2);
@@ -439,11 +439,8 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
     };
     let listening = owner.and_then(|pid| lock::listening(&data_dir, pid));
     let pinned = listening.as_ref().and_then(|listening| listening.pinned_tunnel_port);
-    let stored = settings::load(&data_dir)?;
-    let mut settings = stored.clone().unwrap_or_default();
-    if matches!(which, Allow::Tunnel) && !remove && settings.tunnel_port.is_none() && pinned.is_none() {
-        settings.tunnel_port = Some(settings::DEFAULT_TUNNEL_PORT);
-    }
+    let Edited { settings, present } =
+        settings::edit_hosts(&data_dir, &name, matches!(which, Allow::Tunnel), remove, pinned)?;
     let port = match (which, &listening) {
         (Allow::Local, Some(listening)) => listening.port,
         (Allow::Local, None) => settings.port.unwrap_or(settings::DEFAULT_PORT),
@@ -454,23 +451,9 @@ fn allow(mut args: Args, which: Allow) -> anyhow::Result<()> {
             .unwrap_or(settings.tunnel_port.unwrap_or(settings::DEFAULT_TUNNEL_PORT)),
     };
     let hosts = match which {
-        Allow::Local => &mut settings.allow_hosts,
-        Allow::Tunnel => &mut settings.allow_tunnel_hosts,
+        Allow::Local => &settings.allow_hosts,
+        Allow::Tunnel => &settings.allow_tunnel_hosts,
     };
-    let present = hosts.contains(&name);
-    if remove {
-        hosts.retain(|host| host != &name);
-    } else if !present {
-        hosts.push(name.clone());
-    }
-    let hosts = hosts.clone();
-    let changed = match &stored {
-        Some(stored) => stored != &settings,
-        None => settings != Settings::default(),
-    };
-    if changed {
-        settings::save(&data_dir, &settings)?;
-    }
     let path = settings::path(&data_dir);
     let list = which.list();
     let state = match (remove, present) {

@@ -4,13 +4,11 @@ mod fleet;
 pub mod host;
 mod hub;
 mod limits;
-mod lock;
 mod ops;
 mod server;
 mod service;
-mod settings;
 
-use local_studio_core::link::{devices, noise, pairing};
+use local_studio_core::link::{devices, lock, noise, pairing, settings};
 
 pub use cli::cli;
 
