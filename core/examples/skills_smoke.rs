@@ -109,6 +109,18 @@ fn words(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("no words is a usage error", usage);
     let control = smoke.run(&["search", "escape"])?.stdout;
     smoke.check("a search prints no control character", !control.is_empty() && !control.contains(&27));
+    let inside = smoke.first(&["开票"])? == "invoices" && smoke.first(&["pdf发票"])? == "invoices";
+    smoke.check("nor is its section text or a name in capitals missed", inside);
+    let hits = smoke.json(&["search", "ladder rung", "--in", "ladder", "--limit", "8"])?;
+    let parts = hits[0]["parts"].as_array().map_or(0, Vec::len);
+    smoke.check("--in looks in one skill, at --limit parts", names(&hits) == ["ladder"] && parts == 8);
+    let shown = smoke.run(&["search", "ladder rung", "--in", "ladder", "--limit", "8"])?.stdout;
+    smoke.check("and prints them all", String::from_utf8_lossy(&shown).matches("Rung").count() == 8);
+    let none = !smoke.run(&["search", "rung", "--in", "lader"])?.status.success();
+    smoke.check("--in with no such skill is an error", none);
+    smoke.check("--limit cuts the list", names(&smoke.json(&["search", "marmalade rung", "--limit", "1"])?).len() == 1);
+    let example = smoke.json(&["search", "gargoyle"])?;
+    smoke.check("a heading in a longer fence is no part", example[0]["parts"].as_array().is_some_and(Vec::is_empty));
     Ok(())
 }
 
@@ -123,6 +135,25 @@ fn places(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("a host that only ends in the name is another site", other);
     let app = smoke.json(&["search", "--for", "Paint Pro"])?;
     smoke.check("where.txt names an app, no words needed", names(&app) == ["painter"]);
+    let words = smoke.first(&["open paint pro please"])? == "painter";
+    smoke.check("its words are searched too", words && smoke.first(&["an old tricks site"])? == "site-learning");
+    let alone = smoke.json(&["search", "--for", "tubes.test", "marmalade"])?;
+    smoke.check("a site's skill with none of the words comes first", names(&alone) == ["tubes", "kitchen"]);
+    for (place, skill) in [
+        ("tubes.test:8080", "tubes"),
+        ("tubes.test/in?next=https://notes.test/", "tubes"),
+        ("http://localhost:3000/a", "workbench"),
+        ("localhost:3000", "workbench"),
+        ("http://[fd00::1]:80/", "workbench"),
+        ("notes.test", "workbench"),
+    ] {
+        smoke.check(&format!("{place} is {skill}"), smoke.first(&["--for", place])? == skill);
+    }
+    let sites = smoke.json(&["search", "--for", "notes.test"])?[0]["places"].clone();
+    let sites_only = sites == serde_json::json!(["[fd00::1]", "localhost", "notes.test"]);
+    smoke.check("a note beside a site is not a place", sites_only);
+    let shown = smoke.run(&["search", "beacon"])?.stdout;
+    smoke.check("a place prints no control character", !shown.is_empty() && !shown.contains(&27));
     let away = smoke.first(&["fill brushes draw"])? == "painter";
     let linked = smoke.json(&["search", "--for", "docs.forms.test", "fill brushes draw"])?;
     let listed = away && linked[0]["name"] == "forms" && linked[0]["places"].as_array().is_some_and(Vec::is_empty);
@@ -133,6 +164,10 @@ fn places(smoke: &mut Smoke) -> Result<(), String> {
 fn named(smoke: &mut Smoke) -> Result<(), String> {
     for form in ["site learning", "SiteLearning", "site-learning", "old tricks"] {
         smoke.check(&format!("{form} is site-learning"), smoke.first(&[form])? == "site-learning");
+    }
+    for name in ["mark", "mark++"] {
+        let within = smoke.json(&["search", "pen", "--in", name])?;
+        smoke.check(&format!("{name} is itself"), names(&within) == [name] && smoke.first(&[name])? == name);
     }
     let hits = smoke.json(&["search", "duplicate"])?;
     let own = names(&hits) == ["twin"] && hits[0]["source"] == "yours";
@@ -167,6 +202,8 @@ fn changes(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     smoke.check("an edit of the same length replaces the old text", smoke.described("draft", "A penguin")?);
     let fresh = smoke.first(&["buzzard"])? == "draft" && smoke.first(&["magpies"])?.is_empty();
     smoke.check("in the search too", fresh);
+    let bytes = read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
+    smoke.check("and the old words leave the index", !bytes.windows(5).any(|part| part == b"magpi"));
     rename(&folder, own.join("moved")).map_err(|error| error.to_string())?;
     let moved = smoke.listed("draft")?.and_then(|skill| skill["path"].as_str().map(|path| path.contains("/moved/")));
     smoke.check("a moved folder is followed", moved == Some(true));
@@ -272,6 +309,14 @@ fn trust(smoke: &mut Smoke) -> Result<(), String> {
         let found = smoke.json(&["list", "--project", dir])?.to_string().contains("local-build");
         smoke.check(&format!("it is listed from --project {dir}"), found);
     }
+    let own = skill(&smoke.project.join(".agents/skills"), "own-git", "Its own checkout", "wallaby")?;
+    create_dir_all(own.join(".git")).map_err(|error| error.to_string())?;
+    let found = smoke.first(&["wallaby"])? == "own-git";
+    put(&own.join("SKILL.md"), &"x".repeat(300_000))?;
+    let left = smoke.first(&["wallaby"])?.is_empty();
+    let bytes = read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
+    let left = left && !bytes.windows(7).any(|part| part == b"wallaby");
+    smoke.check("a skill that is its own checkout leaves the index too", found && left);
     put(&smoke.data.join("state.json"), "{")?;
     let unread = smoke.run(&["list"])?;
     smoke.check("state that cannot be read is an error", !unread.status.success());
@@ -335,11 +380,12 @@ fn index(smoke: &mut Smoke) -> Result<(), String> {
     );
     let (mut mixed, agents) = (0, [smoke.home.join("agent-a"), smoke.home.join("agent-b")]);
     for agent in &agents {
-        skill(&agent.join("skills"), "each", &agent.to_string_lossy(), "")?;
+        skill(&agent.join("skills"), "each", &format!("Mixed {}", agent.display()), "")?;
     }
     for _ in 0..10 {
-        let start =
-            |agent| smoke.command(&["list"]).env("EUKHE_CODING_AGENT_DIR", agent).stdout(Stdio::piped()).spawn();
+        let start = |agent| {
+            smoke.command(&["search", "mixed"]).env("EUKHE_CODING_AGENT_DIR", agent).stdout(Stdio::piped()).spawn()
+        };
         let lists: Vec<_> = agents.iter().cycle().take(6).map(|agent| (agent, start(agent))).collect();
         for (agent, child) in lists {
             let output = child.and_then(Child::wait_with_output).map_err(|error| error.to_string())?;
@@ -395,7 +441,16 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     let bulbs = skill(&own, "bulbs", "Replace lighting", "Turn it off first. No old tricks.")?;
     put(&bulbs.join("asks.txt"), "why did the glow vanish from my lamp\n")?;
     skill(&own, "windy", &"windy ".repeat(100), "")?;
-    skill(&own, "invoices", "开发票的步骤", "Steps.")?;
+    skill(&own, "invoices", "开发票的步骤 PDF发票", "## 怎么开票\nSteps.")?;
+    let rungs: String = (0..9).map(|n| format!("## Rung {n}\nstep up the ladder\n")).collect();
+    skill(&own, "ladder", "Climb", &rungs)?;
+    skill(&own, "mark", "One pen", "pen")?;
+    skill(&own, "mark++", "Two pens", "pen")?;
+    skill(&own, "quoting", "Show text", "````\n```\n## Example\ngargoyle\n```\n````")?;
+    let sites = "## Sites\n- `notes.test`: the notes\n- localhost (the dev page)\n- [fd00::1]\n- not a site\n";
+    skill(&own, "workbench", "Try things", sites)?;
+    let beacon = skill(&own, "beacon", "Light", "beacon")?;
+    put(&beacon.join("where.txt"), "Lamp\u{1b}[2J Pro\u{9b}\n")?;
     skill(&own, "colors", "\"Escape \\e[31mred\"", "escape")?;
     skill(&own, "tubes", "Watch clips", "## Sites\n- `tubes.test`\n\n## Captions\nvideo words")?;
     let painter = skill(&own, "painter", "Draw", "Brushes.")?;

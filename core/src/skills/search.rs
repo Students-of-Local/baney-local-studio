@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -7,7 +7,9 @@ use super::store::{Listed, Store};
 use super::text;
 
 const SHOWN: usize = 240;
-const SHOWN_LIST: usize = 5;
+const SHOWN_ITEM: usize = 80;
+const SHOWN_PLACES: usize = 5;
+const TRIES: usize = 4;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
@@ -35,12 +37,10 @@ pub fn lines(hits: &[Hit]) -> String {
         if !hit.description.is_empty() {
             line = format!("{line}: {}", text::cut(&hit.description, SHOWN));
         }
-        for (label, list) in [("parts", &hit.parts), ("for", &hit.places)] {
+        for (label, list, most) in [("parts", &hit.parts, hit.parts.len()), ("for", &hit.places, SHOWN_PLACES)] {
             if !list.is_empty() {
-                line = format!(
-                    "{line} | {label}: {}",
-                    list.iter().take(SHOWN_LIST).cloned().collect::<Vec<_>>().join("; ")
-                );
+                let items: Vec<_> = list.iter().take(most).map(|item| text::cut(item, SHOWN_ITEM)).collect();
+                line = format!("{line} | {label}: {}", items.join("; "));
             }
         }
         line
@@ -50,13 +50,26 @@ pub fn lines(hits: &[Hit]) -> String {
 
 impl Store {
     pub fn search(&mut self, query: &Query) -> Result<Vec<Hit>, String> {
-        self.sound(|store| {
-            store.refresh()?;
-            store.find(query)
-        })
+        let found = self.sound(|store| {
+            for left in (0..TRIES).rev() {
+                store.refresh()?;
+                let read = store.db.unchecked_transaction()?;
+                if left == 0 || store.current()? {
+                    return store.find(query);
+                }
+                drop(read);
+                store.checked = None;
+            }
+            Ok(None)
+        });
+        found?.ok_or_else(|| format!("no skill is named {}", text::plain(query.within.unwrap_or_default())))
     }
 
-    fn find(&self, query: &Query) -> rusqlite::Result<Vec<Hit>> {
+    fn find(&self, query: &Query) -> rusqlite::Result<Option<Vec<Hit>>> {
+        let within = match query.within.map(|name| self.named(name)).transpose()? {
+            Some(None) => return Ok(None),
+            within => within.flatten(),
+        };
         let words = text::words(query.text);
         let mut scores: HashMap<i64, f64> = HashMap::new();
         let mut parts: HashMap<i64, Vec<(f64, String)>> = HashMap::new();
@@ -77,7 +90,10 @@ impl Store {
             }
         }
         for word in words.iter().filter(|word| word.chars().any(text::unspaced)) {
-            let mut rows = self.db.prepare_cached("SELECT id FROM skills WHERE instr(name || ' ' || descr, ?1)")?;
+            let mut rows = self.db.prepare_cached(
+                "SELECT id FROM skills WHERE instr(lower(name || ' ' || descr), ?1)
+                 UNION SELECT rowid >> 20 FROM parts WHERE instr(lower(head || ' ' || body), ?1)",
+            )?;
             for id in rows.query_map([word], |row| row.get(0))? {
                 *scores.entry(id?).or_default() += 1.0;
             }
@@ -86,34 +102,39 @@ impl Store {
             let more: f64 = ranked.iter().skip(1).take(2).map(|(score, _)| score).sum();
             *scores.entry(*id).or_default() += ranked.first().map_or(0.0, |(score, _)| *score) + 0.3 * more;
         }
+        let (mut listing, mut linking) = (HashSet::new(), HashSet::new());
         if let Some(wanted) = query.place.and_then(text::place) {
-            let top = scores.values().copied().fold(1.0, f64::max);
+            let seen = scores.iter().filter(|(id, _)| self.seen.contains_key(id));
+            let top = seen.map(|(_, score)| *score).fold(1.0, f64::max);
             let mut rows = self.db.prepare_cached("SELECT skill, place, listed FROM places")?;
             let mut rows = rows.query([])?;
-            let mut here: HashMap<i64, f64> = HashMap::new();
             while let Some(row) = rows.next()? {
                 if text::at(&row.get::<_, String>(1)?, &wanted) {
-                    let share = if row.get(2)? { 1.0 } else { 0.5 };
-                    let best = here.entry(row.get(0)?).or_default();
-                    *best = best.max(share);
+                    let (id, own) = (row.get(0)?, row.get(2)?);
+                    if own {
+                        listing.insert(id);
+                    } else if linking.insert(id) {
+                        *scores.entry(id).or_default() += top * 0.5;
+                    }
                 }
             }
-            for (id, share) in here {
-                *scores.entry(id).or_default() += top * share;
-            }
         }
-        if let Some(id) = self.named(query.text)? {
-            *scores.entry(id).or_default() += 1000.0;
+        let named = self.named(query.text)?;
+        for id in listing.iter().chain(&named) {
+            scores.entry(*id).or_default();
         }
-        let within = query.within.map(|name| self.named(name)).transpose()?;
-        let mut ranked: Vec<(f64, i64)> = scores
+        let mut ranked: Vec<(bool, bool, f64, i64)> = scores
             .into_iter()
-            .filter(|(id, _)| within.map_or_else(|| self.seen.contains_key(id), |within| within == Some(*id)))
-            .map(|(id, score)| (score, id))
+            .filter(|(id, _)| within.map_or_else(|| self.seen.contains_key(id), |within| within == *id))
+            .map(|(id, score)| (named == Some(id), listing.contains(&id), score, id))
             .collect();
-        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| self.seen[&a.1].name.cmp(&self.seen[&b.1].name)));
+        ranked.sort_by(|a, b| {
+            let first = (b.0, b.1).cmp(&(a.0, a.1)).then_with(|| b.2.total_cmp(&a.2));
+            first.then_with(|| self.seen[&a.3].name.cmp(&self.seen[&b.3].name))
+        });
         let heads = if within.is_some() { query.limit } else { 2 };
-        ranked.into_iter().take(query.limit).map(|(_, id)| self.hit(id, parts.remove(&id), heads)).collect()
+        let hits = ranked.into_iter().take(query.limit).map(|(.., id)| self.hit(id, parts.remove(&id), heads));
+        hits.collect::<rusqlite::Result<_>>().map(Some)
     }
 
     fn hit(&self, id: i64, ranked: Option<Vec<(f64, String)>>, heads: usize) -> rusqlite::Result<Hit> {

@@ -18,6 +18,7 @@ const MAX_FILE: u64 = 256 * 1024;
 const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
 const FRESH: Duration = Duration::from_secs(2);
+const FOLDERS: [&str; 3] = [".agents", ".claude", ".eukhe"];
 const BESIDE: [&str; 3] = ["asks.txt", "names.txt", "where.txt"];
 
 struct Root {
@@ -66,7 +67,7 @@ pub struct Store {
     roots: Roots,
     pub(super) seen: HashMap<i64, Listed>,
     hidden: Vec<Listed>,
-    checked: Option<Instant>,
+    pub(super) checked: Option<Instant>,
 }
 
 impl Root {
@@ -104,7 +105,7 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
                 project.ancestors().find(|dir| dir.join(".git").exists()).filter(|top| Some(*top) != home.as_deref());
             let top = top.unwrap_or(&project);
             here = Some(top.to_path_buf());
-            let folders = [".agents", ".claude", ".eukhe"].map(|dir| top.join(dir).join("skills"));
+            let folders = FOLDERS.map(|dir| top.join(dir).join("skills"));
             list.extend(folders.iter().filter_map(|dir| Root::project(dir, top, &owner)));
         }
     }
@@ -173,13 +174,14 @@ impl Store {
             let write = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             stored = rows(&write)?;
             let (changed, gone) = due(&stored, &self.roots, &found);
+            let replaced = changed.iter().any(|found| stored.contains_key(&found.path));
             for id in &gone {
                 drop_skill(&write, *id)?;
             }
             for found in changed {
                 add(&write, found)?;
             }
-            if !gone.is_empty() {
+            if replaced || !gone.is_empty() {
                 write.execute_batch(
                     "INSERT INTO whole (whole) VALUES ('optimize'); INSERT INTO parts (parts) VALUES ('optimize');",
                 )?;
@@ -208,9 +210,18 @@ impl Store {
         Ok(())
     }
 
+    pub(super) fn current(&self) -> rusqlite::Result<bool> {
+        let stored = rows(&self.db)?;
+        Ok(self.seen.iter().all(|(id, skill)| stored.get(&skill.path).is_some_and(|row| row.id == *id)))
+    }
+
     pub(super) fn named(&self, name: &str) -> rusqlite::Result<Option<i64>> {
-        let key = text::key(name);
-        let mut rows = self.db.prepare("SELECT skill FROM names WHERE key = ?1 ORDER BY old")?;
+        let (key, spelled) = (text::key(name), name.trim().to_lowercase());
+        let exact = self.seen.iter().find(|(_, skill)| skill.problem.is_none() && skill.name.to_lowercase() == spelled);
+        if exact.is_some() || key.is_empty() {
+            return Ok(exact.map(|(id, _)| *id));
+        }
+        let mut rows = self.db.prepare("SELECT skill FROM names WHERE key = ?1 ORDER BY old, skill")?;
         let ids = rows.query_map([key], |row| row.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
         let mut named = ids.into_iter().filter_map(|id| Some((id, self.seen.get(&id)?)));
         Ok(named.clone().find(|(_, skill)| skill.problem.is_none()).or_else(|| named.next()).map(|(id, _)| id))
@@ -306,7 +317,10 @@ fn due<'a>(known: &HashMap<PathBuf, Row>, roots: &Roots, found: &'a [Found]) -> 
     let changed =
         |found: &&Found| known.get(&found.path).is_none_or(|row| row.stamp != found.stamp || row.owner != found.owner);
     let inside = |path: &Path, top: &Path| {
-        path.starts_with(top) && !path.ancestors().take_while(|dir| *dir != top).any(|dir| dir.join(".git").exists())
+        let folder =
+            path.ancestors().find(|dir| FOLDERS.iter().any(|name| dir.ends_with(Path::new(name).join("skills"))));
+        let above = folder.and_then(Path::parent).unwrap_or(path);
+        path.starts_with(top) && !above.ancestors().take_while(|dir| *dir != top).any(|dir| dir.join(".git").exists())
     };
     let elsewhere = |path: &Path, owner: &str| {
         roots.trusted.contains(owner) && roots.here.as_ref().is_none_or(|top| !inside(path, top)) && path.exists()
@@ -349,6 +363,7 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     let sections = text::sections(&body);
     let chars = u32::try_from(body.chars().count()).unwrap_or(u32::MAX);
     let spoken = name.replace(['-', '_'], " ");
+    let beside = BESIDE.map(|name| extra(name).unwrap_or_default());
     db.execute(
         "INSERT INTO skills (id, path, stamp, owner, name, descr, chars, problem)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -357,7 +372,7 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     let id = db.last_insert_rowid();
     db.execute(
         "INSERT INTO whole (rowid, name, descr, asks, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, spoken, description, extra("asks.txt").unwrap_or_default(), body],
+        params![id, spoken, description, beside.join("\n"), body],
     )?;
     let mut part = db.prepare_cached("INSERT INTO parts (rowid, name, head, body) VALUES (?1, ?2, ?3, ?4)")?;
     let pieces =
@@ -367,7 +382,7 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     }
     let mut named = db.prepare_cached("INSERT INTO names (skill, key, old) VALUES (?1, ?2, ?3)")?;
     named.execute(params![id, text::key(&name), false])?;
-    for old in extra("names.txt").iter().flat_map(|text| text.lines()).map(text::key).filter(|key| !key.is_empty()) {
+    for old in beside[1].lines().map(text::key).filter(|key| !key.is_empty()) {
         named.execute(params![id, old, true])?;
     }
     let listed = text::listed_places(&sections, extra("where.txt").as_deref());

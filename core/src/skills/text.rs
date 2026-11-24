@@ -60,16 +60,26 @@ pub(super) struct Part {
     pub(super) text: String,
 }
 
+fn run(line: &str) -> Option<(char, usize)> {
+    let mark = line.chars().next().filter(|mark| matches!(mark, '`' | '~'))?;
+    let long = line.chars().take_while(|c| *c == mark).count();
+    (long > 2).then_some((mark, long))
+}
+
 pub(super) fn sections(body: &str) -> Vec<Part> {
     let mut parts = vec![Part { head: String::new(), text: String::new() }];
-    let mut fence: Option<&str> = None;
+    let mut fence: Option<(char, usize)> = None;
     for line in body.lines() {
         let trimmed = line.trim_start();
-        match fence {
-            Some(open) if trimmed.starts_with(open) => fence = None,
-            Some(_) => {}
-            None => {
-                fence = ["```", "~~~"].into_iter().find(|mark| trimmed.starts_with(mark));
+        match (fence, run(trimmed)) {
+            (Some((open, least)), Some((mark, long))) => {
+                if mark == open && long >= least && trimmed[long..].trim().is_empty() {
+                    fence = None;
+                }
+            }
+            (Some(_), None) => {}
+            (None, mark) => {
+                fence = mark.filter(|(mark, long)| *mark == '~' || !trimmed[*long..].contains('`'));
                 if let Some(head) = line.strip_prefix("## ") {
                     parts.push(Part { head: self::line(head), text: String::new() });
                     continue;
@@ -100,31 +110,30 @@ pub(super) fn pieces(text: &str) -> Vec<&str> {
 }
 
 pub(super) fn place(text: &str) -> Option<String> {
-    let text = text.trim();
-    let host = match text.split_once("://") {
-        Some((_, rest)) => {
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-            let host = authority.rsplit('@').next().unwrap_or_default();
-            host.split(':').next().unwrap_or_default()
-        }
-        None => text.split('/').next().unwrap_or_default(),
-    };
+    let text = line(text);
+    let scheme = |scheme: &str| scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+    let rest = text.split_once("://").filter(|(start, _)| scheme(start)).map_or(text.as_str(), |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let port = host.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()));
+    let host = port.map_or(host, |(host, _)| host);
     let host = host.trim_end_matches('.').to_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
     (!host.is_empty()).then_some(host)
 }
 
 pub(super) fn listed_places(sections: &[Part], listed: Option<&str>) -> Vec<String> {
-    let lines: Vec<&str> = match listed {
-        Some(text) => text.lines().collect(),
-        None => sections
-            .iter()
-            .filter(|part| part.head.eq_ignore_ascii_case("sites"))
-            .flat_map(|part| part.text.lines())
-            .filter_map(|line| line.trim().strip_prefix("- "))
-            .collect(),
+    if let Some(text) = listed {
+        return text.lines().filter_map(|line| place(line.trim_matches(['`', ' ']))).collect();
+    }
+    let site = |item: &str| {
+        let quoted = item.strip_prefix('`').and_then(|rest| rest.split('`').next());
+        let site = quoted.or_else(|| item.split_whitespace().next())?;
+        place(site.trim_end_matches([',', ';', ':'])).filter(|host| host.contains(['.', '[']) || host == "localhost")
     };
-    lines.into_iter().filter_map(|line| place(line.trim_matches(['`', ' ']))).collect()
+    let sites = sections.iter().filter(|part| part.head.eq_ignore_ascii_case("sites"));
+    let items = sites.flat_map(|part| part.text.lines()).filter_map(|line| line.trim().strip_prefix("- "));
+    items.filter_map(|item| site(item.trim())).collect()
 }
 
 pub(super) fn linked_places(body: &str) -> Vec<String> {
