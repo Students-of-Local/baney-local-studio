@@ -13,7 +13,7 @@ pub mod model;
 pub(crate) mod process;
 mod projects;
 pub(crate) mod providers;
-mod settings;
+pub(crate) mod settings;
 mod setup;
 pub(crate) mod t3;
 mod terminal;

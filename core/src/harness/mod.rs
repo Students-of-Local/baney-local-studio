@@ -263,8 +263,12 @@ pub(crate) fn models(harness: Harness) -> Vec<ModelOption> {
     }
 }
 
-pub(crate) async fn codex_models() -> Result<Vec<ModelOption>, String> {
-    codex::models().await
+pub(crate) fn saved_codex_models(data_dir: &Path) -> Vec<ModelOption> {
+    codex::saved_models(data_dir)
+}
+
+pub(crate) async fn codex_models(data_dir: &Path) -> Result<(Vec<ModelOption>, Option<String>), String> {
+    codex::models(data_dir).await
 }
 
 pub(crate) async fn history(

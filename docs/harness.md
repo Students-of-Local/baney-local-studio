@@ -34,7 +34,7 @@ Local Studio core gets two more harnesses beside Eukhe: **Claude Code** and **Co
 
 ## Models and picker
 
-`Update::Models` lists Claude Code models (aliases `opus`, `sonnet`, `haiku`, `fable` and their full ids) and Codex models (from app-server) as their own providers, so favorites and hidden work as today. Starting a thread on one of those models picks that harness. Linux picker shows the harness; the macOS picker gets the field through UniFFI and is finished on the Mac later.
+`Update::Models` lists Claude Code models (aliases `opus`, `sonnet`, `haiku`, `fable` and their full ids) and Codex models (from app-server, saved in `harness/codex-models.json`; asked for at launch or when a project is added while there is no saved list, otherwise once per run when a Codex thread starts; the saved list shows only while the `codex` program is found) as their own providers, so favorites and hidden work as today. Starting a thread on one of those models picks that harness. Linux picker shows the harness; the macOS picker gets the field through UniFFI and is finished on the Mac later.
 
 ## Account rules (hard)
 
