@@ -260,6 +260,8 @@ final class StudioStore {
         case .searchResults(let request, let results):
             requests.settle(request)
             workspace.setSearchResults(request: request, results: results)
+        case .mentions:
+            break
         case .pullRequests(let request, let pulls):
             requests.settle(request)
             workspace.setPullRequests(request: request, pulls: pulls)

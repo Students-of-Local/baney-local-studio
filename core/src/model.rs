@@ -584,6 +584,27 @@ pub struct CatalogPlugin {
     pub installed: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum MentionKind {
+    Skill,
+    Plugin,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct Mention {
+    pub kind: MentionKind,
+    pub title: String,
+    pub detail: String,
+    pub badge: String,
+    pub insert: String,
+    pub install: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "wire",
@@ -825,6 +846,10 @@ pub enum Update {
     SearchResults {
         request: String,
         results: Vec<SearchHit>,
+    },
+    Mentions {
+        request: String,
+        items: Vec<Mention>,
     },
     PullRequests {
         request: String,

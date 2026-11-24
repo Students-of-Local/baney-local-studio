@@ -307,6 +307,7 @@ impl Harness {
             | Update::Kernel { .. }
             | Update::AppUpdate { .. }
             | Update::Skills { .. }
+            | Update::Mentions { .. }
             | Update::Subagents { .. }
             | Update::MessageImage { .. }
             | Update::ProviderModels { .. }

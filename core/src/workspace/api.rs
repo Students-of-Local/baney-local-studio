@@ -143,6 +143,14 @@ impl Studio {
         self.workspace.search_files(request, project, query, limit);
     }
 
+    pub fn mentions(&self, request: String, project: Option<String>, query: String, limit: u32) {
+        let remote = |project: &String| self.on_machine(project, "Searching files", Some(request.clone()));
+        if project.as_ref().is_some_and(remote) {
+            return;
+        }
+        self.workspace.mentions(request, self.plugins_dir.clone(), project, query, limit);
+    }
+
     pub fn search_text(&self, request: String, project: String, query: String, limit: u32) {
         if self.on_machine(&project, "Searching text", Some(request.clone())) {
             return;
