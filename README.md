@@ -74,7 +74,7 @@ Settings → General → Keyboard turns on vim keys (j/k, gg/G, h/l, / and a mod
 
 ### Reach it from anywhere
 
-Your phone, other machines and web assistants (claude.ai, ChatGPT, grok.com) reach Local Studio through a tunnel on your own free Cloudflare account and a domain you own. There is no hosted tunnel and no waitlist. Run `local-studio tunnel byo` for the steps, tell a coding agent "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it.", or follow [Your own Cloudflare tunnel, step by step](docs/tunnel.md#your-own-cloudflare-tunnel-step-by-step). Without a domain, `local-studio tunnel setup --tailnet` keeps it on your tailnet.
+Your phone, other machines and web assistants (claude.ai, ChatGPT, grok.com) reach Local Studio through your own free Cloudflare account: a relay of your own with no domain (`local-studio tunnel setup --relay`), or a tunnel on a domain you own. There is no hosted tunnel and no waitlist. Run `local-studio tunnel byo` for the steps, tell a coding agent "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it.", or follow [Your own relay, step by step](docs/tunnel.md#your-own-relay-step-by-step). `local-studio tunnel setup --tailnet` keeps it on your tailnet instead.
 
 ## Plugins
 

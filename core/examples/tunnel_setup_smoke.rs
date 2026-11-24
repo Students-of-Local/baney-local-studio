@@ -588,14 +588,12 @@ fn byo(s: &Smoke, channel: &str) -> Result<(), String> {
         code == 0
             && value["state"] == "byo"
             && value["next"] == "byo"
-            && value["command"]
-                .as_str()
-                .or(value["template"].as_str())
-                .is_some_and(|c| c.starts_with("local-studio tunnel setup --"))
+            && value["command"].as_str().is_some_and(|c| c.starts_with("local-studio tunnel setup --"))
+            && (cfg!(windows) || plan.first().is_some_and(|step| step.contains("tunnel setup --relay")))
             && !value.to_string().contains("waitlist")
             && (cfg!(windows) || value["agentPrompt"].as_str().is_some_and(|p| p.contains("tunnel byo --json")))
             && (cfg!(windows) || plan.iter().any(|step| step.contains("tunnel login"))),
-        format!("tunnel byo on {channel} answers the own-Cloudflare guide: {value}"),
+        format!("tunnel byo on {channel} answers the guide, the relay first: {value}"),
     )?;
     let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
     ensure(

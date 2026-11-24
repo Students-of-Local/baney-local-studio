@@ -27,7 +27,7 @@ These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. On
 }
 ```
 
-- `route` is `cloudflare` (the person's own account and domain) or `tailnet` (`tailscale serve`, no Funnel). Setup never writes `hosted` any more: that was the retired hosted route on Donovan's account. A route.json that still says `hosted` is shown by `status` and removed by `off`, and setup refuses next to it until it is off.
+- `route` is `cloudflare` (the person's own account: a tunnel on their domain, or their own relay, whose hostname is its `workers.dev` name) or `tailnet` (`tailscale serve`, no Funnel). Setup never writes `hosted` any more: that was the retired hosted route on Donovan's account. A route.json that still says `hosted` is shown by `status` and removed by `off`, and setup refuses next to it until it is off.
 - `aliases` are extra hostnames on the same tunnel with the same routes, kept only while a connector moves to `hostname`.
 - Ports are loopback, 1024 to 65535, different from each other, and never 18091 (the controller).
 
@@ -35,18 +35,29 @@ These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. On
 
 ```
 local-studio tunnel byo                                             the steps for a tunnel on the person's own Cloudflare account
+local-studio tunnel setup --relay [<name>] [--account <id>]         a relay Worker on the person's own Cloudflare account, no domain
 local-studio tunnel setup --cloudflare <name> [--alias <name>]...   the person's own Cloudflare account
 local-studio tunnel setup --tailnet                                 tailnet only, no Funnel
 local-studio tunnel adopt [--hostname <name>]                       take over a Tychicus tunnel already on this machine
 local-studio tunnel status                                          the route, its health and the next step
-local-studio tunnel off                                             stop and remove the route; the Cloudflare tunnel and DNS stay
+local-studio tunnel off                                             stop and remove the route; the Cloudflare tunnel, DNS and relay Worker stay
 ```
 
 `setup` also takes `--serve <port>` and `--mcp <port>` (defaults 18094 on Cloudflare, 18093 on the tailnet, and 8787).
 
+### Your own relay, step by step
+
+The first choice `byo` gives, and the only one on the open internet that needs no domain. The relay is a small Worker on the person's own free Cloudflare account, at `https://<name>.<subdomain>.workers.dev`. This machine dials out to it and answers its requests, so nothing listens on the internet here and nothing runs on anyone else's account.
+
+1. Install Node.js 22 or later (https://nodejs.org/en/download) if `npx` isn't there.
+2. Run `local-studio tunnel setup --relay --yes`. The first time it answers `needs_signin` with `npx --yes wrangler@4.163.0 login`.
+3. Run that command and sign in to Cloudflare, or make a free account, in the browser it opens.
+4. Run the setup command again. With more than one account it answers `needs_account`, and with an account that never used Workers `needs_subdomain` with the link to pick one; run it again after. It deploys the relay, starts a login service, checks the public address, and answers `ready`.
+5. `local-studio tunnel status` shows it any time. `local-studio tunnel off` removes it from this machine and gives the command that deletes the Worker.
+
 ### Your own Cloudflare tunnel, step by step
 
-This is what `local-studio tunnel byo` prints, and what anyone setting up a tunnel follows:
+For a domain the person owns, after the relay in what `local-studio tunnel byo` prints:
 
 1. Make a free Cloudflare account at https://dash.cloudflare.com/sign-up and add a domain you own to it (https://developers.cloudflare.com/fundamentals/manage-domains/add-site/). Cloudflare must run the domain's DNS. The free plan is enough.
 2. Run `local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes`, with your domain in place of `YOUR-DOMAIN`. It downloads the pinned cloudflared and, the first time, answers `needs_signin` with a `cloudflared tunnel login` command.
@@ -54,9 +65,19 @@ This is what `local-studio tunnel byo` prints, and what anyone setting up a tunn
 4. Run the setup command again. It creates the tunnel `local-studio-<machine>`, its DNS record and a login service, checks the public address, and answers `ready` with the MCP address (`https://studio.YOUR-DOMAIN/mcp`) and the phone address (`wss://studio.YOUR-DOMAIN/v1/ws`).
 5. `local-studio tunnel status` shows it any time; `local-studio tunnel off` removes it from this machine and leaves the tunnel and DNS record in your Cloudflare account.
 
-**Or let an agent do it.** Tell a coding agent such as Claude Code or Codex: "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it." The guide's JSON carries that sentence as `agentPrompt`. The person makes the Cloudflare account and adds the domain first (step 1); the agent can't. The agent asks which domain to use, then runs the steps in order, since each answers a state with the next command (below). It stops at `needs_signin`, hands the person the `cloudflared tunnel login` command (signing in to Cloudflare stays with the person), and once they say they signed in, runs the setup command again.
+**Or let an agent do it.** Tell a coding agent such as Claude Code or Codex: "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it." The guide's JSON carries that sentence as `agentPrompt`. The agent runs the steps in order, since each answers a state with the next command (below). It sets up the relay unless the person wants their own domain, which they add to Cloudflare themselves (step 1). It stops at `needs_signin`, hands the person the `wrangler login` or `cloudflared tunnel login` command (signing in to Cloudflare stays with the person), and once they say they signed in, runs the setup command again.
 
-A machine that already runs a Tychicus tunnel uses `local-studio tunnel adopt` instead. Without a domain, `local-studio tunnel setup --tailnet` keeps Local Studio on the tailnet. Windows has no tunnel service yet, so there `byo` points at the tailnet route.
+A machine that already runs a Tychicus tunnel uses `local-studio tunnel adopt` instead. `local-studio tunnel setup --tailnet` keeps Local Studio on the tailnet only. Windows has no tunnel service yet, so there `byo` points at the tailnet route.
+
+### Your own relay
+
+`setup --relay [<name>] [--account <id>]` deploys the Worker vendored in `core/src/tunnel/worker/` (byte for byte from baney75/local-studio-tunnels; `SOURCE` names the commit and digests, and `scripts/tests/relay-bundle-test.sh` checks them). The name defaults to `local-studio-<machine>`: 1 to 63 of `a-z`, `0-9` and `-`. Every wrangler run is `npx --yes wrangler@4.163.0` (`LS_NPX` names another `npx`) in `<data dir>/tunnel/relay/` (0700), which holds only the two Worker files and wrangler's output file, with `WRANGLER_SEND_METRICS=false`. Local Studio never opens wrangler's own files and never runs its login.
+
+Setup runs `whoami --json`, `deploy --name <name>`, then `secret put RELAY_KEY --name <name>` with a new 32-byte key on stdin. Only then does it write `<data dir>/tunnel/relay.json` (0600: `v`, `url`, `name`, `accountId`, `key`), the one place the key is kept. The service of the Cloudflare route (same label and unit) runs `local-studio tunnel relay run`, and the workers.dev name goes into `allowTunnelHosts`. Setup polls `https://<host>/_relay/health` until it says this machine is connected (a new name can take minutes, so up to 5 minutes, every 5 seconds), restarting the service when the relay doesn't know the new key yet, and then runs the checks below. route.json is written last. If any of that fails, the service, relay.json and the host allowance go; the Worker stays and refuses every connector until setup runs again. `LS_RELAY_WAIT_MS` shortens the wait for checks only. Setup again on a live relay sets a new key and restarts the service.
+
+It answers `needs_node`, `needs_signin`, `needs_account` (`accounts`, and `nextCommand` with `--account`), `needs_subdomain` (`url`) or `ready` with `relay: {name, accountId}`, and the errors `bad_name`, `bad_account`, `no_account`, `relay_whoami`, `relay_deploy`, `relay_key`, `service_failed` and `going_live`.
+
+`tunnel relay run` connects to the relay and stays in the foreground until SIGTERM or SIGINT. It writes `<data dir>/tunnel/relay-state.json` (`state`, `at`, `pid`): `connecting`, `connected`, `disconnected` (it dials again every 1 to 30 seconds), `replaced` (another machine took the relay over), `unauthorized`, `outdated`, `bad_config` or `stopped`. After `replaced`, `unauthorized`, `outdated` and `bad_config` it stays up without dialing. `status` adds `relay: {state, since}`, with `stopped` for a process that is gone, and a message with the next step when it isn't connected.
 
 ### Your own Cloudflare account
 
@@ -76,15 +97,15 @@ While both connectors run, Cloudflare sends each request to either one, and Tych
 
 ### off
 
-`off` works on every channel. It removes Local Studio's service and yml, the tailnet paths it added, and route.json, takes each name out of `serve.json`, and stops a hosted cloudflared. The Cloudflare tunnel, its DNS records and the tailnet node stay. A route run by Tychicus is refused with `not_ours`.
+`off` works on every channel. It removes Local Studio's service and yml, relay.json, relay-state.json and the relay folder, the tailnet paths it added, and route.json, takes each name out of `serve.json`, and stops a hosted cloudflared. The Cloudflare tunnel, its DNS records and the tailnet node stay, and so does a relay's Worker, whose delete command is in the message. A route run by Tychicus is refused with `not_ours`.
 
 ### Every channel, no waitlist
 
-Donovan, 2026-11-24: "NO more waitlist." `setup`, `adopt`, `status` and `off` run the same on stable, nightly and dev, and nothing answers `waitlist`. Everyone is directed to set up a tunnel on their own free Cloudflare account and domain (`local-studio tunnel byo` prints the steps, or hands them to an agent), or Tailscale (`setup --tailnet`, no domain needed). `local-studio tunnel request` and the hosted route are gone. The hosted client commands (`up`, `down`, `release`, `ports`) remain only for a machine that already holds a hosted tunnel's keys.
+Donovan, 2026-11-24: "NO more waitlist." `setup`, `adopt`, `status` and `off` run the same on stable, nightly and dev, and nothing answers `waitlist`. Everyone is directed to set up a relay on their own free Cloudflare account, a tunnel on a domain they own (`local-studio tunnel byo` prints the steps for both, or hands them to an agent), or Tailscale (`setup --tailnet`). `local-studio tunnel request` and the hosted route are gone. The hosted client commands (`up`, `down`, `release`, `ports`) remain only for a machine that already holds a hosted tunnel's keys.
 
 ### Agents can run it
 
-An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `byo` (the guide; `byo --json` carries the steps as `plan`, the setup command as `template` and the sentence for an agent as `agentPrompt`), `none` (no route yet), `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL or the command), `needs_dns`, `confirm` (adopt's plan, waiting for `--yes`), `needs_tychicus_join`, `needs_serve_allow_host` (tailnet: run the command it carries), `off`, or `error` with a code (exit 1). `status` with no route answers `none` with `nextCommand` `local-studio tunnel byo`, and its message names the tailnet choice too. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
+An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `byo` (the guide; `byo --json` carries the steps as `plan`, the relay setup command as `command`, the domain one as `template` and the sentence for an agent as `agentPrompt`), `none` (no route yet), `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL or the command), `needs_node`, `needs_account`, `needs_subdomain` (the relay), `needs_dns`, `confirm` (adopt's plan, waiting for `--yes`), `needs_tychicus_join`, `needs_serve_allow_host` (tailnet: run the command it carries), `off`, or `error` with a code (exit 1). `status` with no route answers `none` with `nextCommand` `local-studio tunnel byo`, and its message names the tailnet choice too. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
 
 ### Going live
 
