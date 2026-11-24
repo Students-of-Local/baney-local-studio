@@ -386,7 +386,7 @@ enum SettingKey: CaseIterable {
         case .version: "about build"
         case .t3Sync: "t3 import bring over migrate sync settings projects favorites keybindings"
         case .updateStatus: "check now download restart install software"
-        case .automaticUpdates: "background download software"
+        case .automaticUpdates: "background check download software"
         case .releaseNotes: "changes what's new"
         case .channel: "stable nightly dev switch install open"
         case .dataFolder, .dataLocation: "logs finder reveal storage"

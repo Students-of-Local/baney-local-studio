@@ -38,6 +38,8 @@ jobs:
         run: |
           cargo build -p local-studio-core --example update_smoke
           scripts/tests/update-lock-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/update_smoke" "$RUNNER_TEMP/up"
+      - name: No background update check while it is turned off
+        run: cargo run -p local-studio-core --features test-hooks --example update_check_smoke -- "$RUNNER_TEMP/uc"
       - name: e2e examples replace a stale credential link, never write through it
         run: cargo build -p local-studio-core --example smoke && scripts/tests/e2e-credential-link-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/smoke"
 

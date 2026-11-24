@@ -65,7 +65,7 @@ impl UpdatesGroup {
         let current = app.upgrade().is_some_and(|app| app.state.borrow().settings.automatic_updates);
         let automatic = adw::SwitchRow::builder()
             .title("Automatic updates")
-            .subtitle("Download new versions in the background, then restart when you are ready")
+            .subtitle("Check for and download new versions in the background. When off, only Check Now checks.")
             .active(current)
             .build();
         let weak = app.clone();

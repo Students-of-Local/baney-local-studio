@@ -9,6 +9,8 @@ use crate::model::Update;
 use crate::update::{self, Build, Checked, Offer, Refusal, Staged};
 
 const FIRST_CHECK: Duration = Duration::from_secs(20);
+const NO_CHECK: &str = "LOCAL_STUDIO_NO_UPDATE_CHECK";
+const TEST_FEED: &str = "LOCAL_STUDIO_TEST_UPDATE_FEED";
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 pub(crate) struct Updates {
@@ -35,7 +37,39 @@ fn unavailable(build: &Build) -> Option<String> {
     if let Some(refusal) = build.refusal() {
         return Some(refusal.to_string());
     }
+    if test_feed().is_some() {
+        return None;
+    }
     update::current_install().err()
+}
+
+fn checks_turned_off() -> bool {
+    std::env::var_os(NO_CHECK).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+fn test_feed() -> Option<String> {
+    if !cfg!(feature = "test-hooks") {
+        return None;
+    }
+    std::env::var(TEST_FEED).ok().filter(|feed| !feed.is_empty())
+}
+
+fn build() -> Build {
+    let mut build = Build::current();
+    if let Some(feed) = test_feed() {
+        build.feed = feed;
+        build.channel = "nightly".to_string();
+        build.version = "0.1.0-nightly.20261124000000+0000000".to_string();
+    }
+    build
+}
+
+fn first_check() -> Duration {
+    if test_feed().is_some() {
+        Duration::from_secs(1)
+    } else {
+        FIRST_CHECK
+    }
 }
 
 impl Workspace {
@@ -44,7 +78,7 @@ impl Workspace {
             self.push_update_state();
             return;
         }
-        let build = Build::current();
+        let build = build();
         if let Some(reason) = unavailable(&build) {
             self.set_update(AppUpdateState::Unavailable { reason });
             return;
@@ -65,15 +99,24 @@ impl Workspace {
             }
             let watcher = workspace.clone();
             workspace.inner.runtime.spawn(async move { watcher.watch_automatic().await });
-            tokio::time::sleep(FIRST_CHECK).await;
+            let mut settings = workspace.settings();
+            tokio::time::sleep(first_check()).await;
             loop {
                 if workspace.inner.stopped.load(Ordering::SeqCst) {
                     return;
                 }
-                workspace.run_update_check(false).await;
-                tokio::time::sleep(update::CHECK_EVERY).await;
+                if workspace.background_checks() {
+                    workspace.run_update_check(false).await;
+                    tokio::time::sleep(update::CHECK_EVERY).await;
+                } else if settings.changed().await.is_err() {
+                    return;
+                }
             }
         });
+    }
+
+    fn background_checks(&self) -> bool {
+        self.current_settings().automatic_updates && !checks_turned_off()
     }
 
     async fn watch_automatic(&self) {
@@ -176,7 +219,7 @@ impl Workspace {
 
     async fn run_update_check(&self, manual: bool) {
         let Ok(_busy) = self.inner.updates.busy.try_lock() else { return };
-        let build = Build::current();
+        let build = build();
         if let Some(reason) = unavailable(&build) {
             self.set_update(AppUpdateState::Unavailable { reason });
             return;
