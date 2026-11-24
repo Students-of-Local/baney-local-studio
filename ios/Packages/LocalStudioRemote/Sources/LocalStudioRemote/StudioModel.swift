@@ -329,6 +329,8 @@ public final class MachineModel: Identifiable {
             pendingSends.removeValue(forKey: request)
             waitingSends.removeValue(forKey: request)
             lastError = message
+        case let .outboxProblem(message):
+            lastError = message
         }
     }
 
