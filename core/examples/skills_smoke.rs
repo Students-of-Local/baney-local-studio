@@ -80,11 +80,15 @@ fn naming(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("your own skill hides a personal one", twin && smoke.problem("another skill has this name")?);
     let shown = smoke.run(&["list"])?.stdout;
     smoke.check("control characters never reach the terminal", !shown.is_empty() && !shown.contains(&27));
-    put(&smoke.data.join("skills/beep\u{7}box\tb/SKILL.md"), "---\nname: beeper\ndescription: Beep\n---\n")?;
+    put(&smoke.data.join("skills/beep\u{7}box\tb\u{9b}c/SKILL.md"), "---\nname: beeper\ndescription: Beep\n---\n")?;
     let beep = smoke.run(&["list"])?.stdout;
     let beep = String::from_utf8_lossy(&beep).lines().find(|line| line.starts_with("beeper")).map(str::to_string);
     let clean = beep.is_some_and(|line| line.matches('\t').count() == 2 && !line.contains('\u{7}'));
     smoke.check("nor do a folder name's", clean);
+    let raw = smoke.run(&["list", "--json"])?.stdout;
+    smoke.check("nor do they in the JSON", !String::from_utf8_lossy(&raw).trim_end().contains(char::is_control));
+    let typo = smoke.run(&["list", "--project", "nowhere"])?;
+    smoke.check("a project folder that is not there is an error", !typo.status.success());
     let usage = smoke.run(&["list", "extra"])?.status.code() == Some(2);
     smoke.check("an unknown argument is a usage error", usage);
     Ok(())
@@ -129,7 +133,12 @@ fn links(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     link(&shared, &smoke.home.join(".claude/skills/shared"))?;
     let listed = smoke.json(&["list"])?;
     let shared = listed.as_array().into_iter().flatten().filter(|skill| skill["name"] == "shared").count();
-    smoke.check("a skill linked from two folders is listed once", shared == 1);
+    let large = smoke.home.join(".agents/skills/large");
+    put(&large.join("SKILL.md"), &"emu ".repeat(80_000))?;
+    link(&large, &smoke.home.join(".claude/skills/large"))?;
+    let listed = smoke.json(&["list"])?;
+    let large = listed.as_array().into_iter().flatten().filter(|skill| skill["name"] == "large").count();
+    smoke.check("a skill linked from two folders is listed once", shared == 1 && large == 1);
     create_dir_all(own.join("dotfile")).map_err(|error| error.to_string())?;
     link(&outside.join("linked/SKILL.md"), &own.join("dotfile/SKILL.md"))?;
     remove_file(own.join("linked")).map_err(|error| error.to_string())?;
@@ -149,6 +158,14 @@ fn links(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     link(&outside, &smoke.project.join(".claude/skills"))?;
     smoke.check("a project may link a skills folder inside it", smoke.listed("kept")?.is_some());
     smoke.check("but not one outside it", smoke.listed("linked")?.is_none());
+    skill(&smoke.project.join("kept"), "cuckoo", "Cuckoo", "")?;
+    let indexed = smoke.listed("cuckoo")?.is_some();
+    remove_dir_all(smoke.project.join("kept")).map_err(|error| error.to_string())?;
+    skill(&outside.join("nest"), "cuckoo", "Cuckoo", "")?;
+    link(&outside.join("nest"), &smoke.project.join("kept"))?;
+    let bytes = || read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string());
+    let left = smoke.listed("cuckoo")?.is_none() && !bytes()?.windows(6).any(|part| part == b"Cuckoo");
+    smoke.check("a folder that becomes a link out leaves the index", indexed && left);
     link(&outside.join("linked"), &project.join("linked-too"))?;
     smoke.check("a project may not link a skill in", smoke.listed("linked")?.is_none());
     let mode = std::fs::metadata(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
@@ -173,6 +190,9 @@ fn trust(smoke: &mut Smoke) -> Result<(), String> {
         let found = smoke.json(&["list", "--project", dir])?.to_string().contains("local-build");
         smoke.check(&format!("it is listed from --project {dir}"), found);
     }
+    put(&smoke.data.join("state.json"), "{")?;
+    let unread = smoke.run(&["list"])?;
+    smoke.check("state that cannot be read is an error", !unread.status.success());
     put(&smoke.data.join("state.json"), r#"{"version":1,"projects":[],"trusted":[]}"#)?;
     smoke.check("without trust it is gone", smoke.listed("local-build")?.is_none());
     let bytes = read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
@@ -217,6 +237,21 @@ fn index(smoke: &mut Smoke) -> Result<(), String> {
         }
     }
     smoke.check("six first lists at once all answer, five times with no index and five with a damaged one", good == 60);
+    let (mut mixed, agents) = (0, [smoke.home.join("agent-a"), smoke.home.join("agent-b")]);
+    for agent in &agents {
+        skill(&agent.join("skills"), "each", &agent.to_string_lossy(), "")?;
+    }
+    for _ in 0..10 {
+        let start =
+            |agent| smoke.command(&["list"]).env("EUKHE_CODING_AGENT_DIR", agent).stdout(Stdio::piped()).spawn();
+        let lists: Vec<_> = agents.iter().cycle().take(6).map(|agent| (agent, start(agent))).collect();
+        for (agent, child) in lists {
+            let output = child.and_then(Child::wait_with_output).map_err(|error| error.to_string())?;
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            mixed += usize::from(text.contains(&*agent.to_string_lossy()));
+        }
+    }
+    smoke.check("lists with other folders at the same time keep their own skills", mixed == 60);
     write(&file, b"not a database, long enough to be read as one page header").map_err(|error| error.to_string())?;
     smoke.check("a file that is no index is rebuilt", smoke.listed("kitchen")?.is_some());
     let mut bytes = read(&file).map_err(|error| error.to_string())?;

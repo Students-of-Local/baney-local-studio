@@ -30,6 +30,7 @@ struct Root {
 pub struct Roots {
     list: Vec<Root>,
     trusted: BTreeSet<String>,
+    here: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +47,15 @@ struct Found {
     source: String,
     owner: String,
     stamp: String,
+}
+
+struct Row {
+    id: i64,
+    stamp: String,
+    owner: String,
+    name: String,
+    description: String,
+    problem: Option<String>,
 }
 
 pub struct Store {
@@ -79,17 +89,19 @@ impl Root {
     }
 }
 
-#[must_use]
-pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Roots {
+pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Result<Roots, String> {
     let mut list = vec![Root::yours(&data.join("skills"), "yours")];
-    let trusted = crate::store::Store::open(data).map(|store| store.trusted).unwrap_or_default();
-    let home = crate::store::home_dir();
-    if let Some(project) = project.and_then(|project| project.canonicalize().ok()) {
+    let trusted = crate::store::Store::open(data).map_err(|error| format!("{error:#}"))?.trusted;
+    let home = crate::store::home_dir().map(|home| home.canonicalize().unwrap_or(home));
+    let mut here = None;
+    if let Some(dir) = project {
+        let project = dir.canonicalize().map_err(|error| format!("{}: {error}", dir.display()))?;
         let owner = trust::root(&project.to_string_lossy());
         if trusted.contains(&owner) {
             let top =
                 project.ancestors().find(|dir| dir.join(".git").exists()).filter(|top| Some(*top) != home.as_deref());
             let top = top.unwrap_or(&project);
+            here = Some(top.to_path_buf());
             let folders = [".agents", ".claude", ".eukhe"].map(|dir| top.join(dir).join("skills"));
             list.extend(folders.iter().filter_map(|dir| Root::project(dir, top, &owner)));
         }
@@ -106,7 +118,7 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Roo
         files: Some(plugin.skills.into_iter().map(|skill| skill.path).collect()),
         dir: plugin.dir,
     }));
-    Roots { list, trusted }
+    Ok(Roots { list, trusted, here })
 }
 
 impl Store {
@@ -152,28 +164,26 @@ impl Store {
         }
         let mut hidden = Vec::new();
         let mut files = HashSet::new();
-        let mut found: Vec<Found> = self.roots.list.iter().flat_map(|root| walk(root, &mut hidden)).collect();
-        found.retain(|found| files.insert(found.path.canonicalize().unwrap_or_else(|_| found.path.clone())));
-        let (changed, gone) = due(&self.db, &self.roots, &found)?;
+        let found: Vec<Found> = self.roots.list.iter().flat_map(|root| walk(root, &mut files, &mut hidden)).collect();
+        let mut stored = rows(&self.db)?;
+        let (changed, gone) = due(&stored, &self.roots, &found);
         if !changed.is_empty() || !gone.is_empty() {
             let write = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (changed, gone) = due(&write, &self.roots, &found)?;
+            stored = rows(&write)?;
+            let (changed, gone) = due(&stored, &self.roots, &found);
             for id in gone {
                 drop_skill(&write, id)?;
             }
             for found in changed {
                 add(&write, found)?;
             }
+            stored = rows(&write)?;
             write.commit()?;
         }
         self.seen.clear();
         let mut names: HashMap<String, PathBuf> = HashMap::new();
-        let mut row = self.db.prepare("SELECT id, name, descr, problem FROM skills WHERE path = ?1")?;
         for Found { path, source, .. } in found {
-            let stored = row
-                .query_row([path.to_string_lossy()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-                .optional()?;
-            let Some((id, name, description, problem)) = stored else { continue };
+            let Some(Row { id, name, description, problem, .. }) = stored.remove(&path) else { continue };
             let mut listed = Listed { name, description, source, path, problem };
             if listed.problem.is_none() {
                 let name = listed.name.to_lowercase();
@@ -186,7 +196,6 @@ impl Store {
             }
             self.seen.insert(id, listed);
         }
-        drop(row);
         self.hidden = hidden;
         self.checked = Some(Instant::now());
         Ok(())
@@ -216,14 +225,17 @@ fn changed(meta: &std::fs::Metadata) -> String {
     format!("{} {:?}", meta.len(), meta.modified().ok())
 }
 
-fn walk(root: &Root, hidden: &mut Vec<Listed>) -> Vec<Found> {
+fn walk(root: &Root, files: &mut HashSet<PathBuf>, hidden: &mut Vec<Listed>) -> Vec<Found> {
     let mut found = Vec::new();
-    let files: Box<dyn Iterator<Item = PathBuf>> = match &root.files {
+    let paths: Box<dyn Iterator<Item = PathBuf>> = match &root.files {
         Some(files) => Box::new(files.iter().cloned()),
         None => Box::new(skill_files(root)),
     };
-    for path in files {
+    for path in paths {
         let Some((size, stamp)) = path.to_str().and_then(|_| stamp(&path, root.links)) else { continue };
+        if !files.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
+            continue;
+        }
         if size > MAX_FILE {
             hidden.push(root.hides(&path, format!("larger than {} KB", MAX_FILE / 1024)));
             continue;
@@ -256,21 +268,26 @@ fn skill_files(root: &Root) -> impl Iterator<Item = PathBuf> {
         .map(ignore::DirEntry::into_path)
 }
 
-fn due<'a>(db: &Connection, roots: &Roots, found: &'a [Found]) -> rusqlite::Result<(Vec<&'a Found>, Vec<i64>)> {
-    let known: HashMap<PathBuf, (i64, String, String)> = db
-        .prepare("SELECT path, id, stamp, owner FROM skills")?
-        .query_map([], |row| Ok((PathBuf::from(row.get::<_, String>(0)?), (row.get(1)?, row.get(2)?, row.get(3)?))))?
-        .collect::<rusqlite::Result<_>>()?;
+fn rows(db: &Connection) -> rusqlite::Result<HashMap<PathBuf, Row>> {
+    db.prepare("SELECT path, id, stamp, owner, name, descr, problem FROM skills NOT INDEXED")?
+        .query_map([], |row| {
+            let (id, stamp, owner) = (row.get(1)?, row.get(2)?, row.get(3)?);
+            let (name, description, problem) = (row.get(4)?, row.get(5)?, row.get(6)?);
+            Ok((PathBuf::from(row.get::<_, String>(0)?), Row { id, stamp, owner, name, description, problem }))
+        })?
+        .collect()
+}
+
+fn due<'a>(known: &HashMap<PathBuf, Row>, roots: &Roots, found: &'a [Found]) -> (Vec<&'a Found>, Vec<i64>) {
     let here: HashSet<&Path> = found.iter().map(|found| found.path.as_path()).collect();
-    let changed = |found: &&Found| {
-        known.get(&found.path).is_none_or(|(_, stamp, owner)| *stamp != found.stamp || *owner != found.owner)
-    };
+    let changed =
+        |found: &&Found| known.get(&found.path).is_none_or(|row| row.stamp != found.stamp || row.owner != found.owner);
     let elsewhere = |path: &Path, owner: &str| {
-        roots.trusted.contains(owner) && !roots.list.iter().any(|root| root.owner == owner) && path.exists()
+        roots.trusted.contains(owner) && roots.here.as_ref().is_none_or(|top| !path.starts_with(top)) && path.exists()
     };
-    let gone = |path: &Path, owner: &str| !here.contains(path) && !elsewhere(path, owner);
-    let lost = known.iter().filter(|(path, (_, _, owner))| gone(path, owner)).map(|(_, (id, ..))| *id).collect();
-    Ok((found.iter().filter(changed).collect(), lost))
+    let lost = known.iter().filter(|(path, row)| !here.contains(path.as_path()) && !elsewhere(path, &row.owner));
+    let lost = lost.map(|(_, row)| row.id).collect();
+    (found.iter().filter(changed).collect(), lost)
 }
 
 fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
@@ -280,12 +297,16 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     if let Some(old) = old {
         drop_skill(db, old)?;
     }
+    let mut stamp = found.stamp.as_str();
     let (content, unread) = match std::fs::read_to_string(&found.path) {
         Ok(content) => (content, None),
         Err(error) if error.kind() == ErrorKind::InvalidData => {
             (String::new(), Some("cannot be read as text".to_string()))
         }
-        Err(error) => (String::new(), Some(error.to_string())),
+        Err(error) => {
+            stamp = "";
+            (String::new(), Some(error.to_string()))
+        }
     };
     let field =
         |key: &str| frontmatter::field(&content, key).map(|value| text::line(&value)).filter(|value| !value.is_empty());
@@ -295,7 +316,7 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     let description = description.unwrap_or_default();
     db.execute(
         "INSERT INTO skills (id, path, stamp, owner, name, descr, problem) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![old, path, found.stamp, found.owner, name, description, problem],
+        params![old, path, stamp, found.owner, name, description, problem],
     )?;
     Ok(())
 }

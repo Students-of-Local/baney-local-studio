@@ -128,10 +128,12 @@ fn skills(project: Option<&Path>, json: bool) -> Result<(), String> {
     let plugins = plugins::plugins_dir(None);
     let here = std::env::current_dir().map_err(|error| error.to_string())?;
     let project = project.unwrap_or(&here);
-    let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(project)))?;
+    let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(project))?)?;
     let listed = store.list()?;
     if json {
-        println!("{}", serde_json::to_string(&listed).map_err(|error| error.to_string())?);
+        let text = serde_json::to_string(&listed).map_err(|error| error.to_string())?;
+        let shown = |c: char| if c.is_control() { format!("\\u{:04x}", u32::from(c)) } else { c.to_string() };
+        println!("{}", text.chars().map(shown).collect::<String>());
         return Ok(());
     }
     for skill in listed {
