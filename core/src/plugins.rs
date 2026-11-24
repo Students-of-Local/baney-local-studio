@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::frontmatter;
 use crate::model::{CommandKind, SlashCommand};
 
 pub mod ask;
@@ -814,8 +815,8 @@ fn skills_in(plugin: &Path, dir: &Path, errors: &mut Vec<String>, skipped: &mut 
             }
         };
         let folder = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
-        let name = frontmatter(&content, "name").unwrap_or(folder);
-        let description = frontmatter(&content, "description").unwrap_or_default();
+        let name = frontmatter::field(&content, "name").unwrap_or(folder);
+        let description = frontmatter::field(&content, "description").unwrap_or_default();
         skills.push(PluginFile { name, description, path: file });
     }
     skills.dedup_by(|a, b| a.name == b.name);
@@ -834,11 +835,11 @@ fn prompts_in(plugin: &Path, dir: &Path, skipped: &mut Vec<PathBuf>) -> Vec<Plug
                 continue;
             }
         };
-        let description = frontmatter(&content, "description").unwrap_or_else(|| {
-            content
+        let description = frontmatter::field(&content, "description").unwrap_or_else(|| {
+            frontmatter::strip(&content)
                 .lines()
                 .map(str::trim)
-                .find(|line| !line.is_empty() && *line != "---")
+                .find(|line| !line.is_empty())
                 .unwrap_or_default()
                 .to_string()
         });
@@ -853,17 +854,6 @@ fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default();
     entries.sort();
     entries
-}
-
-pub(crate) fn frontmatter(content: &str, key: &str) -> Option<String> {
-    let normalized = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    let rest = normalized.strip_prefix("---\n")?;
-    let end = rest.find("\n---")?;
-    rest[..end].lines().find_map(|line| {
-        let value = line.strip_prefix(key)?.strip_prefix(':')?.trim();
-        let value = value.trim_matches(|c| c == '"' || c == '\'');
-        (!value.is_empty()).then(|| value.to_string())
-    })
 }
 
 pub(crate) fn valid_id(id: &str) -> bool {

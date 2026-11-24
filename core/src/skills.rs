@@ -3,6 +3,7 @@ use std::path::Path;
 use eukhe_types::slash_commands::parse_slash_command;
 use serde_json::Value;
 
+use crate::frontmatter;
 use crate::model::{CommandKind, SkillEntry, SkillSource, SlashCommand};
 use crate::plugins::{self, CommandTarget, Plugin};
 
@@ -159,7 +160,7 @@ impl Resources {
             }
             if let Some(template) = self.all_templates().iter().find(|template| template.name == name) {
                 if let Ok(content) = std::fs::read_to_string(&template.file_path) {
-                    return Expansion::from(substitute_args(&strip_frontmatter(&content), &words(&args)), [template]);
+                    return Expansion::from(substitute_args(&frontmatter::strip(&content), &words(&args)), [template]);
                 }
             }
             return self.expand_plugin(&name, &args).unwrap_or_else(plain);
@@ -217,7 +218,7 @@ impl Resources {
         let text = match &command.target {
             CommandTarget::Prompt(path) => {
                 let content = std::fs::read_to_string(path).ok()?;
-                substitute_args(&strip_frontmatter(&content), &words(args))
+                substitute_args(&frontmatter::strip(&content), &words(args))
             }
             CommandTarget::Skill(skill) => {
                 let file = plugin.skill(skill)?;
@@ -245,7 +246,7 @@ fn skill_block(skill: &Resource) -> Option<String> {
         skill.name,
         skill.file_path,
         base,
-        strip_frontmatter(&content).trim()
+        frontmatter::strip(&content).trim()
     ))
 }
 
@@ -270,16 +271,6 @@ fn source_label(source: SkillSource) -> &'static str {
         SkillSource::Personal => "personal",
         SkillSource::System => "system",
     }
-}
-
-fn strip_frontmatter(content: &str) -> String {
-    let normalized = content.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
-    let Some(rest) = normalized.strip_prefix("---") else { return normalized };
-    let Some(end) = rest.find("\n---") else { return normalized };
-    if rest.get(1..end).is_none_or(str::is_empty) {
-        return normalized;
-    }
-    rest.get(end + 4..).unwrap_or_default().trim().to_string()
 }
 
 fn words(args: &str) -> Vec<String> {
