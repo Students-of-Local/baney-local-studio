@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gtk::glib;
@@ -109,11 +110,7 @@ pub fn default_access_names() -> Vec<&'static str> {
 }
 
 pub fn default_access_index(settings: &local_studio_core::Settings) -> u32 {
-    if settings.access_follows_model {
-        0
-    } else {
-        access_index(settings.default_access) + 1
-    }
+    if settings.access_follows_model { 0 } else { access_index(settings.default_access) + 1 }
 }
 
 pub fn set_default_access(settings: &mut local_studio_core::Settings, index: usize) {
@@ -255,13 +252,62 @@ pub enum Markdown {
     Place(usize, usize),
 }
 
+const QUOTE: [char; 3] = [' ', '\t', '>'];
+
 pub fn markdown(text: &str) -> Vec<Markdown> {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let text = tables_apart(text, options);
     let mut reader = Reader::default();
-    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+    for (event, range) in Parser::new_ext(&text, options).into_offset_iter() {
         reader.read(event, &text[range.clone()], range.end == text.len());
     }
     reader.blocks
+}
+
+fn tables_apart(text: &str, options: Options) -> Cow<'_, str> {
+    if !text.lines().any(|line| delimiter(line).is_some()) {
+        return Cow::Borrowed(text);
+    }
+    let mut apart = String::with_capacity(text.len() + 8);
+    let mut done = 0;
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        if !matches!(event, Event::SoftBreak | Event::HardBreak) {
+            continue;
+        }
+        let Some(start) = text[range.start..].find('\n').map(|at| range.start + at + 1) else { continue };
+        let mut lines = text[start..].lines();
+        let (head, rule) = (lines.next().unwrap_or(""), lines.next().and_then(delimiter));
+        if head.contains('|') && rule == Some(cells(head)) {
+            let quote = &head[..head.len() - head.trim_start_matches(QUOTE).len()];
+            apart.push_str(&text[done..start]);
+            apart.push_str(quote.trim_end());
+            apart.push('\n');
+            done = start;
+        }
+    }
+    apart.push_str(&text[done..]);
+    Cow::Owned(apart)
+}
+
+fn delimiter(line: &str) -> Option<usize> {
+    let row = line.trim_start_matches(QUOTE).trim_end();
+    let cell = |cell: &str| {
+        let dashes = cell.trim();
+        let dashes = dashes.strip_prefix(':').unwrap_or(dashes);
+        let dashes = dashes.strip_suffix(':').unwrap_or(dashes);
+        !dashes.is_empty() && dashes.chars().all(|ch| ch == '-')
+    };
+    (row.contains('|') && bare(row).split('|').all(cell)).then(|| cells(row))
+}
+
+fn cells(line: &str) -> usize {
+    let row = bare(line.trim_start_matches(QUOTE).trim_end()).as_bytes();
+    (0..row.len()).filter(|&at| row[at] == b'|' && (at == 0 || row[at - 1] != b'\\')).count() + 1
+}
+
+fn bare(row: &str) -> &str {
+    let row = row.strip_prefix('|').unwrap_or(row);
+    row.strip_suffix('|').filter(|row| !row.ends_with('\\')).unwrap_or(row)
 }
 
 #[derive(Default)]
@@ -321,9 +367,13 @@ impl Reader {
             Event::Start(Tag::BlockQuote(_)) => self.quotes += 1,
             Event::End(TagEnd::BlockQuote(_)) => self.quotes -= 1,
             Event::End(TagEnd::Heading(level)) => {
-                let underline = source.rsplit('\n').next().unwrap_or("").trim_start_matches([' ', '>']);
+                let underline = source.rsplit('\n').next().unwrap_or("").trim_start_matches(QUOTE).trim_end();
                 if typing && underline == "-" {
                     return self.flush(false);
+                }
+                if self.marker.is_some() {
+                    self.spans.iter_mut().for_each(|span| span.style.bold = true);
+                    return self.flush(true);
                 }
                 let spans = std::mem::take(&mut self.spans);
                 self.flush(true);
