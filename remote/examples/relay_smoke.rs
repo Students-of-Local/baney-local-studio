@@ -100,10 +100,7 @@ impl Link {
         let (seen, log) = (link.clone(), Arc::clone(&smoke.log));
         tokio::spawn(async move {
             loop {
-                let got = match stream.next().await {
-                    Some(Ok(message)) => message,
-                    Some(Err(_)) | None => Message::Close(None),
-                };
+                let Some(Ok(got)) = stream.next().await else { return };
                 writeln!(lock(&log), "{} bytes {}", got.len(), got.to_text().unwrap_or_default()).ok();
                 let (ping, closed) = (is_ping(&got), got.is_close());
                 lock(&seen.frames).push(got);
@@ -329,8 +326,8 @@ async fn c9_ignored(smoke: &Smoke) -> anyhow::Result<()> {
         link.raw(Message::binary(bytes.to_vec())).await?;
     }
     let before = link.pings();
-    let more = |frames: &[Message]| (frames.iter().filter(|got| is_ping(got)).count() >= before + 2).then_some(());
-    link.until("two more pings", more).await?;
+    let more = |frames: &[Message]| (frames.iter().filter(|got| is_ping(got)).count() >= before + 5).then_some(());
+    link.until("five more pings", more).await?;
     ensure!(link.count(|got| !is_ping(got)) == 0, "the client answered: {:?}", lock(&link.frames));
     ensure!(client.events.try_recv().is_err() && !client.task.is_finished(), "the client dropped the connection");
     Ok(())

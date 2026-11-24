@@ -175,6 +175,8 @@ async fn session(
     let mut deadline = Instant::now() + HELLO;
     let stop = loop {
         let next = tokio::select! {
+            biased;
+            next = stream.next() => next,
             () = sleep_until(deadline) => {
                 break Stop::Lost(match up {
                     Some(_) => "the relay stopped answering pings".into(),
@@ -182,7 +184,6 @@ async fn session(
                 });
             }
             _ = writer.join_next() => return Stop::Lost("the relay connection broke".into()),
-            next = stream.next() => next,
         };
         let text = match next {
             None => return Stop::Lost("the relay closed the connection".into()),
