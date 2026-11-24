@@ -21,6 +21,7 @@ use super::Ports;
 use crate::link::client::tls;
 use crate::link::devices::random;
 
+mod socket;
 mod streams;
 
 const VERSION: u64 = 1;
