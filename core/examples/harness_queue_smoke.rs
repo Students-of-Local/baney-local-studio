@@ -731,6 +731,7 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
     codex_unexpected_approval(run)?;
+    looks_up(run)?;
     claude_trust(run, root)?;
     codex_trust(run, root)?;
     account_scenarios(run, root)
@@ -812,6 +813,20 @@ fn ran_with(run: &mut Run, label: &str, text: &str, sources: &str) {
     } else {
         run.watch.miss(format!("{label}: {text:?} did not run with {sources} settings: {reply}"));
     }
+}
+
+fn looks_up(run: &mut Run) -> anyhow::Result<()> {
+    let first = run.watch.projects.first().cloned().context("first project")?;
+    for (label, pick) in [("skills-claude", CLAUDE), ("skills-codex", CODEX)] {
+        with_cli(run, pick, label, &first, WorktreeChoice::Local)?;
+        run.setup(&format!("{label}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
+        run.send("look up zorb steps");
+        run.check(&format!("{label}: the thread's own tools find a skill"), |watch| {
+            let reply = watch.replied("reply to look up zorb steps");
+            reply.is_some_and(|reply| reply.contains(", found zorbing (personal)"))
+        });
+    }
+    Ok(())
 }
 
 fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
@@ -1183,12 +1198,18 @@ fn main() -> anyhow::Result<()> {
         ensure!(binary.is_file(), "build the {name} example first ({} is missing)", binary.display());
         std::env::set_var(variable, binary);
     }
+    let cli = examples.parent().and_then(Path::parent).context("target folder")?.join("local-studio");
+    ensure!(cli.is_file(), "build the local-studio binary first ({} is missing)", cli.display());
+    std::env::set_var("LOCAL_STUDIO_CLI_BIN", cli);
     let home = root.join("home");
     let agent_dir = root.join("agent");
     let work = root.join("work");
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&agent_dir)?;
     scratch_repo(&work)?;
+    let skill = home.join(".agents/skills/zorbing");
+    std::fs::create_dir_all(&skill)?;
+    std::fs::write(skill.join("SKILL.md"), "---\nname: zorbing\ndescription: Roll down a hill\n---\nzorb steps\n")?;
     std::env::set_var("HOME", &home);
     std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
     std::env::set_var("CODEX_HOME", home.join(".codex"));

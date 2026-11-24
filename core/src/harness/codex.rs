@@ -17,6 +17,7 @@ use super::{
     user, Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
+use crate::skills::SERVER;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const CONTEXT_WINDOW: u64 = 272_000;
@@ -503,6 +504,10 @@ impl Codex {
                     .map(|folder| (folder, level.clone()))
                     .collect();
                 params["config"] = json!({ "projects": projects });
+            }
+            if let Some(skills) = &launch.skills {
+                params["config"]["mcp_servers"] = json!({ SERVER: skills });
+                params["config"]["mcp_servers"][SERVER]["default_tools_approval_mode"] = json!("approve");
             }
             if launch.resume {
                 params["threadId"] = json!(launch.native);

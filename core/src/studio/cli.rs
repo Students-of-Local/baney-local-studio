@@ -318,6 +318,7 @@ impl Actor {
             access: flags.access.unwrap_or(AccessMode::FullAccess),
             account,
             project: !flags.project_refused && (self.cli_trusted(&cwd) || (harness == Harness::Codex && !configured)),
+            skills: crate::skills::entry(&self.data_dir, &cwd),
         };
         let ask = !launch.project && !flags.project_refused && configured;
         self.generation += 2;

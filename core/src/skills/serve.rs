@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
@@ -12,6 +12,8 @@ use serde_json::{json, Map, Value};
 use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
+pub(crate) const TOOLS: [&str; 2] = ["skill_search", "skill_read"];
+const CLI: &str = if cfg!(windows) { "local-studio-cli.exe" } else { "local-studio-cli" };
 const INSTRUCTIONS: &str = "Skills are how-to notes for websites, APIs, apps and jobs. Before a task, call skill_search with it. \
      If one of the skills it lists is about the task, call skill_read for that one and follow it; if none is, work without one. \
      Search again when a step does not work.";
@@ -127,6 +129,22 @@ impl ServerHandler for Server {
         };
         std::future::ready(Ok(result.into()))
     }
+}
+
+pub(crate) fn entry(data: &Path, project: &str) -> Option<Value> {
+    let binary = match std::env::var_os("LOCAL_STUDIO_CLI_BIN").filter(|value| !value.is_empty()) {
+        Some(binary) => PathBuf::from(binary),
+        None => std::env::current_exe().and_then(std::fs::canonicalize).ok()?.with_file_name(CLI),
+    };
+    if !binary.is_file() {
+        return None;
+    }
+    let mut env = Map::new();
+    env.insert("LOCAL_STUDIO_DATA_DIR".to_string(), json!(data));
+    if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
+        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(agent.to_string_lossy()));
+    }
+    Some(json!({ "command": binary, "args": ["skills", "mcp", "--project", project], "env": env }))
 }
 
 pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: PathBuf) -> Result<(), String> {
