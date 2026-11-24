@@ -200,6 +200,10 @@ async fn session(
                 None => return Stop::Lost("the relay closed the connection".into()),
             },
             Some(Ok(Message::Text(text))) => text,
+            Some(Ok(Message::Binary(bytes))) => {
+                streams.data(&bytes);
+                continue;
+            }
             Some(Ok(_)) => continue,
         };
         let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };

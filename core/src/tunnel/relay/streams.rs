@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{ready, Context, Poll};
 
-use http_body_util::{BodyExt, Empty};
-use hyper::body::{Bytes, Incoming};
+use http_body_util::BodyExt;
+use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::client::conn::http1;
-use hyper::header::{HeaderName, HeaderValue};
+use hyper::header::{HeaderName, HeaderValue, CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
@@ -23,13 +26,15 @@ const DATA: u8 = 1;
 const HEAD: usize = 5;
 const CHUNK: usize = 64 << 10;
 const SEND_ROOM: usize = 1 << 20;
+const LEAST_COST: usize = 64;
+const BODY_ROOM: usize = 64 << 20;
 const OPEN: u8 = 0;
 const DONE: u8 = 1;
 const STOPPED: u8 = 2;
 const UNREACHABLE: &str = "the origin did not answer";
 const BAD_ANSWER: &str = "the origin sent a bad answer";
 const BROKEN: &str = "the origin's answer broke off";
-const NO_BODIES: &str = "request bodies are not carried yet";
+const TOO_MUCH: &str = "too much of the request body is waiting for the origin";
 const FAILED: &str = "the request failed";
 
 pub(super) struct Queued {
@@ -125,6 +130,55 @@ impl Out {
     }
 }
 
+enum Feed {
+    Data(Bytes),
+    End,
+}
+
+type Share = Arc<Mutex<Option<OwnedSemaphorePermit>>>;
+
+struct Held {
+    bytes: Vec<u8>,
+    cost: usize,
+    share: Share,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut share = self.share.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(share.as_mut().and_then(|share| share.split(self.cost)));
+    }
+}
+
+impl AsRef<[u8]> for Held {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+struct Upload(Option<mpsc::UnboundedReceiver<Feed>>);
+
+impl Body for Upload {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+        let Some(feed) = self.0.as_mut() else { return Poll::Ready(None) };
+        Poll::Ready(match ready!(feed.poll_recv(cx)) {
+            Some(Feed::Data(bytes)) => Some(Ok(Frame::data(bytes))),
+            Some(Feed::End) => {
+                self.0 = None;
+                None
+            }
+            None => Some(Err(io::Error::other("the request body broke off"))),
+        })
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
 #[derive(Deserialize)]
 struct Open {
     method: String,
@@ -137,14 +191,18 @@ struct Open {
 }
 
 impl Open {
-    fn request(&self) -> Option<Request<Empty<Bytes>>> {
-        let mut request = Request::new(Empty::new());
+    fn request(&self, body: Upload) -> Option<Request<Upload>> {
+        let framed = !body.is_end_stream();
+        let mut request = Request::new(body);
         *request.method_mut() = Method::from_bytes(self.method.as_bytes()).ok()?;
         *request.uri_mut() = self.path.parse().ok()?;
         let headers = request.headers_mut();
         for (name, value) in &self.headers {
             let name = HeaderName::from_bytes(&latin1(name)?).ok()?;
             headers.try_append(name, HeaderValue::from_bytes(&latin1(value)?).ok()?).ok()?;
+        }
+        if framed && !headers.contains_key(CONTENT_LENGTH) {
+            headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
         }
         Some(request)
     }
@@ -161,13 +219,36 @@ fn latin1(text: &str) -> Option<Vec<u8>> {
 
 struct Entry {
     out: Out,
+    feed: mpsc::UnboundedSender<Feed>,
+    share: Share,
     task: AbortHandle,
+}
+
+impl Entry {
+    fn feed(&self, payload: &[u8], room: &Arc<Semaphore>) -> bool {
+        let cost = payload.len().max(LEAST_COST);
+        let more = u32::try_from(cost).ok().and_then(|cost| Arc::clone(room).try_acquire_many_owned(cost).ok());
+        let mut share = self.share.lock().unwrap_or_else(PoisonError::into_inner);
+        match (more, share.as_mut()) {
+            (Some(more), Some(share)) => share.merge(more),
+            (Some(more), None) => *share = Some(more),
+            (None, _) => {
+                share.take();
+                return false;
+            }
+        }
+        drop(share);
+        let held = Held { bytes: payload.to_vec(), cost, share: Arc::clone(&self.share) };
+        self.feed.send(Feed::Data(Bytes::from_owner(held))).ok();
+        true
+    }
 }
 
 pub(super) struct Streams {
     routes: Vec<(&'static str, u16)>,
     queue: mpsc::UnboundedSender<Queued>,
     send_room: Arc<Semaphore>,
+    body_room: Arc<Semaphore>,
     open: HashMap<u32, Entry>,
     tasks: JoinSet<()>,
 }
@@ -178,6 +259,7 @@ impl Streams {
             routes: path_ports(ports),
             queue,
             send_room: Arc::new(Semaphore::new(SEND_ROOM)),
+            body_room: Arc::new(Semaphore::new(BODY_ROOM)),
             open: HashMap::new(),
             tasks: JoinSet::new(),
         }
@@ -202,6 +284,11 @@ impl Streams {
         let Some(id) = id.filter(|id| *id != 0) else { return };
         match kind {
             "req" => self.start(id, frame),
+            "end" => {
+                if let Some(entry) = self.open.get(&id) {
+                    entry.feed.send(Feed::End).ok();
+                }
+            }
             "cancel" => {
                 if let Some(entry) = self.open.remove(&id) {
                     entry.out.state.store(STOPPED, Ordering::Release);
@@ -212,33 +299,46 @@ impl Streams {
         }
     }
 
+    pub(super) fn data(&mut self, bytes: &[u8]) {
+        let Some((head, payload)) = bytes.split_first_chunk::<HEAD>() else { return };
+        let [DATA, id @ ..] = *head else { return };
+        let id = u32::from_be_bytes(id);
+        if self.open.get(&id).is_none_or(|entry| entry.feed(payload, &self.body_room)) {
+            return;
+        }
+        if let Some(entry) = self.open.remove(&id) {
+            entry.task.abort();
+            entry.out.fail(TOO_MUCH);
+        }
+    }
+
     fn start(&mut self, id: u32, frame: &Value) {
         if self.open.get(&id).is_some_and(|entry| entry.out.state.load(Ordering::Acquire) == OPEN) {
             return;
         }
         let state = Arc::new(AtomicU8::new(OPEN));
         let out = Out { id, state, queue: self.queue.clone(), room: Arc::clone(&self.send_room) };
+        let (feed, upload) = mpsc::unbounded_channel();
         let open = Open::deserialize(frame).ok();
-        let task = self.tasks.spawn(answer(out.clone(), open, self.routes.clone()));
-        self.open.insert(id, Entry { out, task });
+        let task = self.tasks.spawn(answer(out.clone(), open, upload, self.routes.clone()));
+        self.open.insert(id, Entry { out, feed, share: Share::default(), task });
     }
 }
 
-async fn answer(out: Out, open: Option<Open>, routes: Vec<(&'static str, u16)>) {
+async fn answer(out: Out, open: Option<Open>, feed: mpsc::UnboundedReceiver<Feed>, routes: Vec<(&'static str, u16)>) {
     let Some(open) = open else { return out.plain(400, "Bad request.\n", "").await };
     let path = open.path.split('?').next().unwrap_or_default();
     let route = routes.iter().find(|(public, _)| *public == path && !open.ws);
     let Some((_, port)) = route else { return out.plain(404, "No local route for this path.\n", &open.method).await };
-    let Some(request) = open.request() else {
+    let Some(request) = open.request(Upload(open.body.then_some(feed))) else {
         return out.plain(400, "Bad request.\n", &open.method).await;
     };
-    let sent = if open.body { Err(NO_BODIES) } else { forward(&out, request, *port).await };
-    if let Err(why) = sent {
+    if let Err(why) = forward(&out, request, *port).await {
         out.error(why);
     }
 }
 
-async fn forward(out: &Out, request: Request<Empty<Bytes>>, port: u16) -> Result<(), &'static str> {
+async fn forward(out: &Out, request: Request<Upload>, port: u16) -> Result<(), &'static str> {
     let stream = TcpStream::connect(("127.0.0.1", port)).await.map_err(|_| UNREACHABLE)?;
     stream.set_nodelay(true).map_err(|_| UNREACHABLE)?;
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await.map_err(|_| UNREACHABLE)?;
