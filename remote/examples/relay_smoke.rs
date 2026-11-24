@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
@@ -14,6 +15,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
+use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
 use hyper::header::HeaderValue;
 use hyper::server::conn::http1;
@@ -28,7 +30,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
@@ -109,7 +111,8 @@ struct Link {
     frames: Arc<Mutex<Vec<Message>>>,
     changed: Arc<Notify>,
     paused: Arc<AtomicBool>,
-    sink: Arc<tokio::sync::Mutex<Sender>>,
+    sink: Arc<tokio::sync::Mutex<Option<Sender>>>,
+    reader: Arc<Mutex<Option<AbortHandle>>>,
 }
 
 #[derive(Default)]
@@ -168,10 +171,11 @@ impl Link {
             frames: Arc::default(),
             changed: Arc::default(),
             paused: Arc::default(),
-            sink: Arc::new(sink.into()),
+            sink: Arc::new(Some(sink).into()),
+            reader: Arc::default(),
         };
         let (seen, log) = (link.clone(), Arc::clone(&smoke.log));
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             loop {
                 while seen.paused.load(Ordering::Acquire) {
                     sleep(Duration::from_millis(5)).await;
@@ -189,11 +193,19 @@ impl Link {
                 }
             }
         });
+        *lock(&link.reader) = Some(reader.abort_handle());
         Ok(link)
     }
 
+    async fn cut(&self) {
+        self.sink.lock().await.take();
+        if let Some(reader) = lock(&self.reader).take() {
+            reader.abort();
+        }
+    }
+
     async fn raw(&self, message: Message) -> anyhow::Result<()> {
-        Ok(self.sink.lock().await.send(message).await?)
+        Ok(self.sink.lock().await.as_mut().context("the link is cut")?.send(message).await?)
     }
 
     async fn open_stream(&self, mut frame: Value, more: &[(&str, &str)]) -> anyhow::Result<()> {
@@ -215,8 +227,23 @@ impl Link {
         Ok(())
     }
 
+    async fn data(&self, id: u32, payload: &[u8]) -> anyhow::Result<()> {
+        let mut frame = vec![1];
+        frame.extend(id.to_be_bytes());
+        frame.extend(payload);
+        self.raw(Message::binary(frame)).await
+    }
+
+    async fn end(&self, id: u32) -> anyhow::Result<()> {
+        self.send(&json!({ "v": 1, "t": "end", "id": id })).await
+    }
+
     async fn cancel(&self, id: u32) -> anyhow::Result<()> {
         self.send(&json!({ "v": 1, "t": "cancel", "id": id, "reason": "client" })).await
+    }
+
+    fn peek(&self, id: u32) -> Answer {
+        Answer::read(&lock(&self.frames), id)
     }
 
     async fn answer(&self, id: u32) -> anyhow::Result<Answer> {
@@ -271,10 +298,17 @@ impl Body for Pipe {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum Upload {
+    Whole(Vec<u8>),
+    Broken,
+}
+
 #[derive(Default)]
 struct Origin {
     dials: AtomicUsize,
     hosts: Mutex<Vec<(String, Vec<u8>)>>,
+    uploads: Mutex<HashMap<String, Upload>>,
     written: AtomicUsize,
     left: AtomicBool,
     go: Notify,
@@ -309,6 +343,7 @@ impl Origin {
         lock(&self.hosts).push((String::from_utf8_lossy(&value("host")).into(), value("x-latin")));
         let query = request.uri().query().unwrap_or_default().to_string();
         let (kind, tag) = query.split_once('=').unwrap_or((&query, ""));
+        let mut body = request.into_body();
         match kind {
             "cookies" => {
                 for cookie in ["a=1", "b=2"] {
@@ -319,6 +354,22 @@ impl Origin {
                     .insert("x-latin", HeaderValue::from_bytes(b"caf\xe9").unwrap_or(HeaderValue::from_static("")));
             }
             "status" => *response.status_mut() = StatusCode::from_bytes(tag.as_bytes()).unwrap_or_default(),
+            "upload" | "stall" => {
+                let (origin, tag, stall) = (Arc::clone(&self), tag.to_string(), kind == "stall");
+                tokio::spawn(async move {
+                    if stall {
+                        origin.go.notified().await;
+                    }
+                    let whole = read(&mut body).await;
+                    let length = whole.as_ref().map_or(0, Vec::len);
+                    lock(&origin.uploads).insert(tag, whole.map_or(Upload::Broken, Upload::Whole));
+                    sender.send(length.to_string().into()).await.ok();
+                });
+            }
+            "echo" => {
+                let text = read(&mut body).await.unwrap_or_default();
+                sender.send(format!("{tag}:{}", String::from_utf8_lossy(&text)).into()).await.ok();
+            }
             "events" => {
                 tokio::spawn(async move {
                     sender.send("data: 1\n\n".into()).await.ok();
@@ -356,6 +407,20 @@ impl Origin {
         }
         Ok(())
     }
+
+    async fn uploaded(&self, tag: &str, wanted: &Upload) -> anyhow::Result<()> {
+        self.until(&format!("the body of {tag} end"), QUICK, |origin| lock(&origin.uploads).contains_key(tag)).await?;
+        ensure!(lock(&self.uploads).get(tag) == Some(wanted), "the origin saw another body for {tag}");
+        Ok(())
+    }
+}
+
+async fn read(body: &mut Incoming) -> Option<Vec<u8>> {
+    let mut whole = Vec::new();
+    while let Some(frame) = body.frame().await {
+        whole.extend_from_slice(&frame.ok()?.into_data().unwrap_or_default());
+    }
+    Some(whole)
 }
 
 struct Smoke {
@@ -598,6 +663,17 @@ async fn h1_headers(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn h2_upload(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let body = noise(5_000_000);
+    link.req(1, "POST", "/mcp?upload=whole", true).await?;
+    for piece in body.chunks(64 << 10) {
+        link.data(1, piece).await?;
+    }
+    link.end(1).await?;
+    link.answer(1).await?.is(200, "5000000")?;
+    smoke.origin.uploaded("whole", &Upload::Whole(body)).await
+}
+
 async fn h3_paths(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     let dials = smoke.origin.dials.load(Ordering::Acquire);
     let unknown = [
@@ -640,7 +716,33 @@ async fn h5_cancel(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     gone.await?;
     link.get(2, "GET", "/mcp").await?.is(200, "ok mcp")?;
     link.quiet(1).await?;
-    ensure!(!Answer::read(&lock(&link.frames), 1).ended, "a canceled stream ended");
+    ensure!(!link.peek(1).ended, "a canceled stream ended");
+    Ok(())
+}
+
+async fn h6_broken(smoke: &Smoke) -> anyhow::Result<()> {
+    let (_client, link) = smoke.connect(LONG_PING).await?;
+    for (id, tag, more) in [
+        (1, "cancel", &[][..]),
+        (2, "drop", &[]),
+        (3, "cancel-sized", &[("content-length", "1000000")]),
+        (4, "drop-sized", &[("content-length", "1000000")]),
+    ] {
+        let hits = lock(&smoke.origin.hosts).len();
+        let path = format!("/mcp?upload={tag}");
+        link.open_stream(json!({ "id": id, "method": "POST", "path": path, "body": true }), more).await?;
+        link.data(id, &noise(BLOCK)).await?;
+        let began = smoke.origin.until("the request", QUICK, |origin| lock(&origin.hosts).len() > hits);
+        began.await?;
+    }
+    for (id, tag) in [(1, "cancel"), (3, "cancel-sized")] {
+        link.cancel(id).await?;
+        smoke.origin.uploaded(tag, &Upload::Broken).await?;
+    }
+    link.cut().await;
+    for tag in ["drop", "drop-sized"] {
+        smoke.origin.uploaded(tag, &Upload::Broken).await?;
+    }
     Ok(())
 }
 
@@ -690,6 +792,25 @@ async fn h7_refused(smoke: &Smoke) -> anyhow::Result<()> {
     let answer = link.get(1, "GET", "/mcp").await?;
     ensure!(answer.errors == 1 && answer.status == 0 && !answer.ended, "a closed origin port got {}", answer.status);
     link.get(2, "GET", "/v1/health").await?.is(200, "ok serve")
+}
+
+async fn h8_many(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let ids = || (0..64u32).map(|n| u32::MAX - n);
+    for id in ids() {
+        link.req(id, "POST", &format!("/mcp?echo={id}"), true).await?;
+    }
+    for part in ["one ", "two ", "three"] {
+        for id in ids() {
+            link.data(id, part.as_bytes()).await?;
+        }
+    }
+    for id in ids() {
+        link.end(id).await?;
+    }
+    for id in ids() {
+        link.answer(id).await?.is(200, &format!("{id}:one two three"))?;
+    }
+    Ok(())
 }
 
 async fn h9_slow_relay(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
@@ -754,6 +875,42 @@ async fn h11_bad_headers(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn h12_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let ids = [1u32, 2, 3];
+    for id in ids {
+        link.req(id, "POST", &format!("/mcp?stall=cap{id}"), true).await?;
+    }
+    let errors = || ids.map(|id| link.peek(id).errors);
+    let mut sent = [0usize; 3];
+    let block = vec![7; 64 << 10];
+    for round in 100.. {
+        let total: usize = sent.iter().sum();
+        ensure!(total < 160 << 20, "{total} bytes were taken with no error");
+        for at in 0..48 {
+            link.data(ids[at % 3], &block).await?;
+            sent[at % 3] += block.len();
+        }
+        link.get(round, "GET", "/v1/health").await?.is(200, "ok serve")?;
+        if errors().iter().sum::<usize>() > 0 {
+            break;
+        }
+    }
+    let total: usize = sent.iter().sum();
+    ensure!(total >= 64 << 20, "the error came after {total} bytes");
+    ensure!(errors().iter().sum::<usize>() == 1, "errors {:?}", errors());
+    smoke.origin.go.notify_waiters();
+    for ((id, sent), errors) in ids.into_iter().zip(sent).zip(errors()) {
+        if errors == 1 {
+            smoke.origin.uploaded(&format!("cap{id}"), &Upload::Broken).await?;
+        } else {
+            link.end(id).await?;
+            link.answer(id).await?.is(200, &sent.to_string())?;
+        }
+    }
+    println!("     one error after {total} bytes");
+    Ok(())
+}
+
 async fn linked(
     name: &str,
     smoke: &Smoke,
@@ -783,14 +940,18 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     step("C9 frames it must ignore", c9_ignored(smoke)).await?;
     step("C10 bad config never dials", c10_bad_config(smoke)).await?;
     linked("H1 headers both ways", smoke, h1_headers).await?;
+    linked("H2 5 MB upload arrives whole", smoke, h2_upload).await?;
     linked("H3 only the exact paths reach an origin", smoke, h3_paths).await?;
     linked("H4 events arrive as they are sent", smoke, h4_events).await?;
     linked("H5 cancel mid-answer", smoke, h5_cancel).await?;
     linked("H5 cancel drops what is queued", smoke, h5_queued).await?;
+    step("H6 cut uploads are broken bodies", h6_broken(smoke)).await?;
     step("H7 closed origin port", h7_refused(smoke)).await?;
+    linked("H8 64 requests at once", smoke, h8_many).await?;
     linked("H9 a slow relay slows the origin", smoke, h9_slow_relay).await?;
     linked("H10 answers with no body", smoke, h10_no_body).await?;
-    linked("H11 bad headers are 400", smoke, h11_bad_headers).await
+    linked("H11 bad headers are 400", smoke, h11_bad_headers).await?;
+    linked("H12 request bytes are capped", smoke, h12_cap).await
 }
 
 #[tokio::main]
