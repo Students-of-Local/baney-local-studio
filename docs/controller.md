@@ -48,7 +48,7 @@ To link machines by hand:
 
 1. `ssh <tailnet-ip> sh -s` with `BatchMode`, so key-based access is required. A new host key is accepted.
 2. On the remote machine, it refuses if `~/.local-studio-controller/config.json` or `~/.local-studio-t3/config.json` exists or anything answers on port 18091. An existing controller is never replaced.
-3. It sends its own code over that ssh connection; nothing is downloaded. Where the machine has [Bun](https://bun.sh), that is one script run by it. Without Bun, a machine of the same system and processor gets a compiled binary, and any other is refused before anything is written. A controller that is itself a compiled binary sends that binary, and only to the same kind of machine.
+3. It sends its own code over that ssh connection; nothing is downloaded. Where the machine has [Bun](https://bun.sh) 1.3 or newer, that is one script run by it. Without Bun, a machine of the same system and processor gets a compiled binary, and any other is refused before anything is written. A controller that is itself a compiled binary sends that binary, and only to the same kind of machine. A machine that cannot run what it was sent is refused, and the upload removed.
 4. It writes a config with your fleet key and the device's tailnet URL. The key is never on a command line.
 5. It installs and starts the user service.
 6. It waits until `/api/health` answers, then adds the device to your peers.

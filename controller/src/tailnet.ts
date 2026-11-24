@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
@@ -52,15 +52,22 @@ export const scanTailnet = (linked: Set<string>): Effect.Effect<LocalTailnet> =>
   });
 
 const quote = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
+const SET_UP = "a controller is already set up on this machine; connect it instead";
 const PROBE = `D="$HOME/.local-studio-controller"; L="$HOME/${LEGACY_DIR}"
-if [ -e "$D/config.json" ] || [ -e "$L/config.json" ] || curl -s -m 2 -o /dev/null "http://$HOST:18091/api/health"; then echo "a controller is already set up on this machine; connect it instead" >&2; exit 3; fi
-echo "$(uname -s)-$(uname -m)" | tr A-Z a-z | sed 's/x86_64/x64/;s/aarch64/arm64/'
-for b in "$(command -v bun)" "$HOME/.bun/bin/bun" /opt/homebrew/bin/bun /usr/local/bin/bun; do if [ -x "$b" ]; then echo "$b"; break; fi; done`;
-const UPLOAD = 'umask 077; D="$HOME/.local-studio-controller"; mkdir -p "$D" && cat > "$D/upload"';
+if [ -e "$D/config.json" ] || [ -e "$L/config.json" ]; then echo "${SET_UP}" >&2; exit 3; fi
+echo "controller-platform=$(uname -s)-$(uname -m)" | tr A-Z a-z | sed 's/x86_64/x64/;s/aarch64/arm64/'
+for b in "$(command -v bun)" "$HOME/.bun/bin/bun" /opt/homebrew/bin/bun /usr/local/bin/bun; do
+  case "$([ -x "$b" ] && "$b" --version 2>/dev/null < /dev/null)" in 1.[3-9].*|1.[1-9][0-9].*|[2-9].*) echo "controller-bun=$b"; break ;; esac
+done`;
 const SCRIPT = `set -e
-D="$HOME/.local-studio-controller"; B="$HOME/.local/bin/local-studio-controller"
-mkdir -p "$HOME/.local/bin" && chmod 700 "$D" "$D/upload" && mv "$D/upload" "$B"
-umask 077 && printf '%s\\n' "$CFG" > "$D/config.json"
+umask 077
+D="$HOME/.local-studio-controller"; U="$D/$UPLOAD"; B="$HOME/.local/bin/local-studio-controller"
+refuse() { rm -f "$U"; rmdir "$D" 2>/dev/null || true; echo "$1" >&2; exit 3; }
+chmod 700 "$D" "$U"
+"$U" --version > /dev/null 2>&1 < /dev/null || refuse "this machine cannot run the controller; install Bun there first (bun.sh)"
+mkdir -p "$HOME/.local/bin"
+(set -C; printf '%s\\n' "$CFG" > "$D/config.json") 2>/dev/null || refuse "${SET_UP}"
+mv "$U" "$B"
 if [ "$(uname -s)" = Linux ]; then
   mkdir -p "$HOME/.config/systemd/user"
   printf '[Unit]\\nDescription=Local Studio controller\\n[Service]\\nEnvironment=LOCAL_STUDIO_CONTROLLER_HOST=%s\\nExecStart=%s\\nRestart=always\\n[Install]\\nWantedBy=default.target\\n' "$HOST" "$B" > "$HOME/.config/systemd/user/local-studio-controller.service"
@@ -75,6 +82,14 @@ else
   launchctl bootstrap "gui/$(id -u)" "$P" || launchctl bootstrap "user/$(id -u)" "$P"
 fi`;
 
+const own = async () => {
+  if (/\.[jt]s$/.test(Bun.main)) {
+    const built = await Bun.build({ entrypoints: [Bun.main], target: "bun" });
+    return built.outputs[0]!.text();
+  }
+  return (await Bun.file(Bun.main).text()).replace(/^#!.*\n/, "");
+};
+
 const program = (platform: string, bun: string | undefined, target: string) =>
   Effect.gen(function* () {
     const same = platform === `${process.platform}-${process.arch}`;
@@ -82,14 +97,14 @@ const program = (platform: string, bun: string | undefined, target: string) =>
       if (!same) return yield* fail(502, "DEPLOY_FAILED", `${target} is ${platform} and this controller was built for ${process.platform}-${process.arch}; deploy from a machine of the same kind`);
       return yield* Effect.promise(() => Bun.file(process.execPath).bytes());
     }
-    if (bun) {
-      const built = yield* Effect.tryPromise({ try: () => Bun.build({ entrypoints: [Bun.main], target: "bun" }), catch: (e) => httpError(500, "BUILD_FAILED", String(e)) });
-      return new TextEncoder().encode(`#!${bun}\n${yield* Effect.promise(() => built.outputs[0]!.text())}`);
-    }
-    if (!same) return yield* fail(502, "DEPLOY_FAILED", `${target} is ${platform}: install Bun there first (bun.sh)`);
+    if (!bun && !same) return yield* fail(502, "DEPLOY_FAILED", `${target} is ${platform}: install Bun there first (bun.sh)`);
+    const text = yield* Effect.tryPromise({ try: own, catch: (e) => httpError(500, "BUILD_FAILED", String(e)) });
+    if (bun) return new TextEncoder().encode(`#!${bun}\n${text}`);
     const dir = mkdtempSync(join(tmpdir(), "local-studio-deploy-"));
+    const entry = join(dir, "controller.js");
     const out = join(dir, "controller");
-    const r = yield* exec([process.execPath, "build", "--compile", Bun.main, "--outfile", out], 120_000);
+    writeFileSync(entry, text);
+    const r = yield* exec([process.execPath, "build", "--compile", entry, "--outfile", out], 120_000);
     const bytes = r.code === 0 ? yield* Effect.promise(() => Bun.file(out).bytes()) : null;
     rmSync(dir, { recursive: true, force: true });
     return bytes ?? (yield* fail(500, "BUILD_FAILED", lastLine(r)));
@@ -102,14 +117,19 @@ export const deployController = (config: Config, req: { ip: string; name: string
     const name = req.name.replace(/[^\w.-]/g, "-") || req.ip;
     const cfg = JSON.stringify({ id: `${name}-${randomBytes(3).toString("hex")}`, name, url, fleetKey: config.fleetKey, peers: [] });
     const target = req.user ? `${req.user}@${req.ip}` : req.ip;
-    const ssh = (command: string, stdin: string | Uint8Array) =>
-      Effect.flatMap(exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new", target, command], 180_000, { stdin }), (r) =>
-        r.code === 0 ? Effect.succeed(r.stdout) : fail(502, "DEPLOY_FAILED", `${target}: ${lastLine(r)}`),
+    if ((yield* Effect.option(fetchJson(`${url}/api/health`, 2_000)))._tag === "Some") return yield* fail(502, "DEPLOY_FAILED", `${target}: ${SET_UP}`);
+    const ssh = (command: string, stdin: string | Uint8Array, seconds = 180) =>
+      Effect.flatMap(exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "StrictHostKeyChecking=accept-new", target, command], seconds * 1_000, { stdin }), (r) =>
+        r.code === 0 ? Effect.succeed(r.stdout) : fail(502, "DEPLOY_FAILED", `${target}: ${r.code === 124 ? `no answer in ${seconds} s` : lastLine(r)}`),
       );
     const vars = (v: Record<string, string>) => Object.entries(v).map(([k, value]) => `${k}=${quote(value)}`).join("\n");
-    const [platform, bun] = (yield* ssh("sh -s", `${vars({ HOST: req.ip })}\n${PROBE}\n`)).trim().split("\n");
-    yield* ssh(UPLOAD, yield* program(platform ?? "", bun, target));
-    yield* ssh("sh -s", `${vars({ CFG: cfg, HOST: req.ip })}\n${SCRIPT}\n`);
+    const said = yield* ssh("sh -s", `${PROBE}\n`);
+    const platform = /^controller-platform=((?:linux|darwin)-(?:x64|arm64))$/m.exec(said)?.[1];
+    const bun = /^controller-bun=(\/.+)$/m.exec(said)?.[1];
+    if (!platform) return yield* fail(502, "DEPLOY_FAILED", `${target} is not a Linux or macOS machine on x64 or arm64`);
+    const upload = `upload-${randomBytes(8).toString("hex")}`;
+    yield* ssh(`sh -c 'umask 077; mkdir -p "$HOME/.local-studio-controller" && cat > "$HOME/.local-studio-controller/${upload}"'`, yield* program(platform, bun, target), 1_800);
+    yield* ssh("sh -s", `${vars({ CFG: cfg, HOST: req.ip, UPLOAD: upload })}\n${SCRIPT}\n`);
     for (let i = 0; i < 20; i++) {
       const h = yield* Effect.option(fetchJson(`${url}/api/health`, 1_500));
       if (h._tag === "Some" && h.value.status === 200) return url;
