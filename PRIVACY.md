@@ -68,7 +68,7 @@ The other machine answers with its random machine ID, name, operating system, ve
 | Hugging Face's cache folder (`~/.cache/huggingface`, or `HF_HOME`) | The controller lists `.gguf` files there by name and size. A recipe that asks for the hub cache gets the whole folder mounted in its container, with the `hf` sign-in token if one is saved there. The controller itself does not open the token |
 | Files in your projects, and files and themes you pick | To show, edit, attach or import them |
 
-Usage numbers come from these files and the Eukhe daemon. No provider is asked for usage.
+Usage numbers come from these files and the Eukhe daemon. No provider is asked for usage. Opening Usage also reads this computer's time zone (`TZ`, or the system's time zone setting and zone database) so days start at your midnight.
 
 ## Where your data lives
 
