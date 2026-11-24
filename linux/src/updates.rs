@@ -228,9 +228,14 @@ fn status(update: Option<&AppUpdateState>, automatic: bool) -> Status {
         notes: None,
     };
     match update {
-        None | Some(AppUpdateState::Idle) => {
-            plain("Not checked yet", "Local Studio checks shortly after it starts and every 6 hours.")
-        }
+        None | Some(AppUpdateState::Idle) => plain(
+            "Not checked yet",
+            if automatic {
+                "Local Studio checks for updates in the background."
+            } else {
+                "Choose Check Now to look for a new version."
+            },
+        ),
         Some(AppUpdateState::Checking) => Status { busy: true, ..plain("Checking for updates…", "") },
         Some(AppUpdateState::UpToDate { latest }) => {
             plain("Local Studio is up to date", &format!("The newest version on this channel is {latest}."))

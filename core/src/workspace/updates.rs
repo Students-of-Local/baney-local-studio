@@ -97,21 +97,7 @@ impl Workspace {
             } else {
                 workspace.set_update(AppUpdateState::Idle);
             }
-            let watcher = workspace.clone();
-            workspace.inner.runtime.spawn(async move { watcher.watch_automatic().await });
-            let mut settings = workspace.settings();
-            tokio::time::sleep(first_check()).await;
-            loop {
-                if workspace.inner.stopped.load(Ordering::SeqCst) {
-                    return;
-                }
-                if workspace.background_checks() {
-                    workspace.run_update_check(false).await;
-                    tokio::time::sleep(update::CHECK_EVERY).await;
-                } else if settings.changed().await.is_err() {
-                    return;
-                }
-            }
+            workspace.watch_updates().await;
         });
     }
 
@@ -119,15 +105,31 @@ impl Workspace {
         self.current_settings().automatic_updates && !checks_turned_off()
     }
 
-    async fn watch_automatic(&self) {
+    async fn watch_updates(&self) {
         let mut settings = self.settings();
-        let mut automatic = settings.borrow().automatic_updates;
-        while settings.changed().await.is_ok() {
-            let now = settings.borrow().automatic_updates;
-            if now && !automatic && matches!(self.update_state(), AppUpdateState::Available { .. }) {
-                self.download_update();
+        let mut automatic = settings.borrow_and_update().automatic_updates;
+        let mut due = tokio::time::Instant::now() + first_check();
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(due), if self.background_checks() => {
+                    if self.inner.stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    self.run_update_check(false).await;
+                    due = tokio::time::Instant::now() + update::CHECK_EVERY;
+                }
+                changed = settings.changed() => {
+                    if changed.is_err() || self.inner.stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let now = settings.borrow_and_update().automatic_updates;
+                    if now && !automatic && matches!(self.update_state(), AppUpdateState::Available { .. }) {
+                        self.download_update();
+                        due = tokio::time::Instant::now() + update::CHECK_EVERY;
+                    }
+                    automatic = now;
+                }
             }
-            automatic = now;
         }
     }
 
@@ -264,7 +266,7 @@ impl Workspace {
     }
 
     async fn run_download(&self, offer: Offer) {
-        let build = Build::current();
+        let build = build();
         let version = offer.version.clone();
         let notes = offer.notes.clone();
         self.set_update(AppUpdateState::Downloading {
