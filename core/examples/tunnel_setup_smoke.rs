@@ -543,10 +543,9 @@ fn run() -> Result<(), String> {
     let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
     let channel = version.rsplit_once('(').map(|(_, rest)| rest.trim_end_matches(')').to_string()).unwrap_or_default();
     println!("{version}");
-    if channel != "dev" {
-        return waitlist(&smoke, &channel);
-    }
     let real_before = real_services();
+    no_waitlist(&smoke, &channel)?;
+    hosted_route(&smoke)?;
     guard(&smoke)?;
     cloudflare(&smoke)?;
     public_dns(&smoke)?;
@@ -568,30 +567,65 @@ fn real_manager() -> &'static str {
     }
 }
 
-fn waitlist(s: &Smoke, channel: &str) -> Result<(), String> {
+fn no_waitlist(s: &Smoke, channel: &str) -> Result<(), String> {
     let mark = s.mark();
-    for args in [
-        &["tunnel", "setup", "--cloudflare", "studio.example.com", "--json"][..],
-        &["tunnel", "setup", "--tailnet", "--json"][..],
-        &["tunnel", "adopt", "--yes", "--json"][..],
-        &["tunnel", "request", "--json"][..],
-        &["tunnel", "status", "--json"][..],
+    let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
+    ensure(
+        code == 0
+            && value["state"] == "none"
+            && value["next"] == "byo"
+            && value["nextCommand"] == "local-studio tunnel setup --tailnet",
+        format!("status with no route on {channel} points at setup: {value}"),
+    )?;
+    for (args, state) in [
+        (&["tunnel", "setup", "--cloudflare", "studio.example.com", "--json"][..], "needs_signin"),
+        (&["tunnel", "setup", "--tailnet", "--json"][..], "needs_signin"),
+        (&["tunnel", "adopt", "--json"][..], "error"),
     ] {
-        let (code, value) = s.ls(args)?;
-        let url = format!("https://local-studio-waitlist.magnus-b37.workers.dev/?channel={channel}&platform=");
+        let (_, value) = s.ls(args)?;
         ensure(
-            code == 0
-                && value["state"] == "waitlist"
-                && value["next"] == "waitlist"
-                && value["channel"] == channel
-                && value["url"].as_str().is_some_and(|u| u.starts_with(&url)),
-            format!("{} on {channel} answers waitlist: {value}", args.join(" ")),
+            value["state"] == state && !value.to_string().contains("waitlist"),
+            format!("{} on {channel} answers {state}, never waitlist: {value}", args.join(" ")),
         )?;
     }
+    let request = Command::new(&s.bin)
+        .args(["tunnel", "request", "--json"])
+        .env("HOME", &s.home)
+        .env("LOCAL_STUDIO_DATA_DIR", &s.data)
+        .output()
+        .map_err(|e| e.to_string())?;
+    ensure(
+        !request.status.success() && !String::from_utf8_lossy(&request.stdout).contains("waitlist"),
+        "tunnel request is gone",
+    )?;
+    ensure(!s.route_path().exists() && !Smoke::has(&s.since(mark), "tunnel create"), "sign-in states change nothing")?;
+    println!("ok: on {channel}, setup and adopt run and nothing answers waitlist");
+    Ok(())
+}
+
+fn hosted_route(s: &Smoke) -> Result<(), String> {
+    let route = json!({
+        "v": 1,
+        "owner": "local-studio",
+        "route": "hosted",
+        "hostname": "old.tunnels.example.com",
+        "aliases": [],
+        "ports": { "mcp": 8787, "serve": 18094 },
+    });
+    fs::create_dir_all(s.route_path().parent().unwrap_or(&s.data)).map_err(|e| e.to_string())?;
+    fs::write(s.route_path(), route.to_string()).map_err(|e| e.to_string())?;
+    let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
+    ensure(
+        code == 0 && value["route"] == "hosted" && value["hostname"] == "old.tunnels.example.com",
+        format!("status shows a hosted route.json: {value}"),
+    )?;
+    let (code, value) = s.ls(&["tunnel", "setup", "--tailnet", "--json"])?;
+    ensure(code == 1 && value["code"] == "other_route", format!("setup refuses next to a hosted route: {value}"))?;
+    let mark = s.mark();
     let (code, value) = s.ls(&["tunnel", "off", "--json"])?;
-    ensure(code == 0 && value["state"] == "off", format!("off works on {channel}: {value}"))?;
-    ensure(s.since(mark).is_empty() && !s.route_path().exists(), "the gate touches nothing")?;
-    println!("ok: on {channel}, setup, adopt, request and status answer waitlist; off answers off");
+    ensure(code == 0 && value["state"] == "off" && !s.route_path().exists(), format!("off removes it: {value}"))?;
+    Smoke::at(&s.since(mark), "local-studio-serve allow-tunnel-host --remove old.tunnels.example.com")?;
+    println!("ok: a hosted route.json is shown by status and removed by off");
     Ok(())
 }
 

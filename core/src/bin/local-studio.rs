@@ -21,7 +21,6 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel setup --tailnet [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel adopt [--hostname <name>] [--yes] [--json]
        local-studio tunnel off [--json]
-       local-studio tunnel request [--serve <port>] [--mcp <port>] [--json]
        local-studio tunnel up [--yes] [--json]
        local-studio tunnel down | release [--json]
        local-studio tunnel ports [--serve <port>] [--mcp <port>] [--json]
@@ -67,31 +66,10 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
-        ["tunnel", "status"] => status(json),
-        ["tunnel", "setup", flags @ ..] => gate(json).unwrap_or_else(|| setup(flags, json)),
-        ["tunnel", "adopt", flags @ ..] => gate(json).unwrap_or_else(|| adopt(flags, json)),
+        ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), json),
+        ["tunnel", "setup", flags @ ..] => setup(flags, json),
+        ["tunnel", "adopt", flags @ ..] => adopt(flags, json),
         ["tunnel", "off"] => run_state(|t| Box::pin(t.off()), json),
-        ["tunnel", "request", flags @ ..] => gate(json).unwrap_or_else(|| {
-            request_ports(flags, tunnel::DEFAULT_PORTS).and_then(|ports| {
-                run_tunnel(
-                    move |t| {
-                        Box::pin(t.request(ports, local_studio_core::CHANNEL, move |url| {
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::json!({ "state": "confirming", "next": "needs_signin", "signinUrl": url })
-                            );
-                        } else {
-                            println!("Open this address and sign in with GitHub: {url}");
-                        }
-                        let _ = std::io::stdout().flush();
-                        open_browser(url);
-                    }))
-                    },
-                    json,
-                )
-            })
-        }),
         ["tunnel", "up"] => run_tunnel(|t| Box::pin(t.up(consent(false, json))), json),
         ["tunnel", "up", "--yes"] => run_tunnel(|t| Box::pin(t.up(consent(true, json))), json),
         ["tunnel", "down"] => run_tunnel(|t| Box::pin(t.down()), json),
@@ -438,23 +416,6 @@ fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: 
 
 type StateCall<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Failure>> + 'a>>;
 
-fn gate(as_json: bool) -> Option<Result<(), String>> {
-    let value = tunnel::waitlist(local_studio_core::CHANNEL, tunnel::platform())?;
-    show(&value, as_json);
-    Some(Ok(()))
-}
-
-fn status(as_json: bool) -> Result<(), String> {
-    if let Some(value) = tunnel::waitlist(local_studio_core::CHANNEL, tunnel::platform()) {
-        let tunnel = Tunnel::open(None).map_err(|error| failed(&error.into(), as_json))?;
-        if tunnel.is_unset() {
-            show(&value, as_json);
-            return Ok(());
-        }
-    }
-    run_tunnel(|t| Box::pin(t.status()), as_json)
-}
-
 fn show(value: &Value, as_json: bool) {
     if as_json {
         println!("{value}");
@@ -540,7 +501,7 @@ fn adopt(flags: &[&str], json: bool) -> Result<(), String> {
 }
 
 fn request_ports(flags: &[&str], mut ports: Ports) -> Result<Ports, String> {
-    let usage = "usage: local-studio tunnel request | ports [--serve <port>] [--mcp <port>]";
+    let usage = "usage: local-studio tunnel ports [--serve <port>] [--mcp <port>]";
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         let value: u16 = rest.next().and_then(|value| value.parse().ok()).ok_or(usage)?;
@@ -551,30 +512,6 @@ fn request_ports(flags: &[&str], mut ports: Ports) -> Result<Ports, String> {
         }
     }
     Ok(ports)
-}
-
-fn open_browser(url: &str) {
-    if std::env::var_os("LS_TUNNEL_NO_BROWSER").is_some() {
-        return;
-    }
-    let _ = opener()
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
-#[cfg(unix)]
-fn opener() -> std::process::Command {
-    std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" })
-}
-
-#[cfg(windows)]
-fn opener() -> std::process::Command {
-    let mut command = std::process::Command::new("rundll32.exe");
-    command.arg("url.dll,FileProtocolHandler");
-    command
 }
 
 fn consent(yes: bool, as_json: bool) -> impl FnOnce(&Path, &[String]) -> bool {

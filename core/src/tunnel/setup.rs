@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 use super::{check_ports, fail, serve_allow, Failure, Ports, Route, RoutePorts, Tunnel, UpLock, DEFAULT_PORTS};
 use crate::platform::Mode;
 
-pub const WAITLIST_URL: &str = "https://local-studio-waitlist.magnus-b37.workers.dev/";
 pub const SERVE_PATHS: [&str; 2] = ["/v1/health", "/v1/ws"];
 pub const MCP_PATHS: [&str; 9] = [
     "/mcp",
@@ -47,21 +46,6 @@ pub fn platform() -> &'static str {
     } else {
         "linux"
     }
-}
-
-#[must_use]
-pub fn waitlist(channel: &str, platform: &str) -> Option<Value> {
-    if channel == "dev" {
-        return None;
-    }
-    let url = format!("{WAITLIST_URL}?channel={}&platform={}", query(channel), query(platform));
-    Some(json!({
-        "state": "waitlist",
-        "next": "waitlist",
-        "url": url,
-        "channel": channel,
-        "message": format!("Tunnel setup is on the dev channel only for now. Join the waitlist: {url}"),
-    }))
 }
 
 fn query(text: &str) -> String {

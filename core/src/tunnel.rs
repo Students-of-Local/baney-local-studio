@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,8 +20,8 @@ use crate::platform::Mode;
 mod setup;
 
 pub use setup::{
-    ingress, normalize_host, path_ports, platform, tailnet_mounts, tailnet_off, tailnet_on, waitlist, MCP_PATHS,
-    SERVE_PATHS, SERVICE_LABEL, SERVICE_UNIT, TAILNET_SERVE_PORT, WAITLIST_URL,
+    ingress, normalize_host, path_ports, platform, tailnet_mounts, tailnet_off, tailnet_on, MCP_PATHS, SERVE_PATHS,
+    SERVICE_LABEL, SERVICE_UNIT, TAILNET_SERVE_PORT,
 };
 
 pub const DEFAULT_PORTS: Ports = Ports { serve: 18094, mcp: 8787 };
@@ -80,7 +79,8 @@ const STABLE_SERVICE: Option<&str> = None;
 const SEAL_ALG: &str = "X25519-HKDF-SHA256-A256GCM";
 const SEAL_INFO: &[u8] = b"ls-tunnels sealed token v1";
 const RUNNABLE: [&str; 3] = ["approved", "live", "down"];
-const NOT_OPEN: &str = "Hosted tunnels aren't open yet. Use your own Cloudflare account: local-studio tunnel byo";
+const NO_ROUTE: &str = "No tunnel on this machine. Set one up for free with Tailscale (local-studio tunnel setup --tailnet) or your own Cloudflare account (local-studio tunnel setup --cloudflare <hostname>).";
+const SETUP: &str = "local-studio tunnel setup --tailnet";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ports {
@@ -115,11 +115,9 @@ impl Status {
         let (next, command) = match self.state.as_str() {
             "live" | "attached" | "detached" => ("ready", None),
             "approved" | "down" if !running => ("needs_start", Some("local-studio tunnel up --yes")),
-            "confirming" => ("needs_signin", Some("local-studio tunnel request")),
             "approved" | "down" | "waiting" | "provisioning" => ("waiting", Some("local-studio tunnel status --json")),
             "suspended" => ("suspended", Some("local-studio tunnel status --json")),
-            _ if self.message == NOT_OPEN => ("byo", Some("local-studio tunnel byo")),
-            _ => ("needs_request", Some("local-studio tunnel request")),
+            _ => ("byo", Some(SETUP)),
         };
         self.next = next.into();
         self.next_command = command.map(ToString::to_string);
@@ -237,10 +235,6 @@ impl Keys {
     fn sign_key(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.sign.verifying_key().as_bytes())
     }
-
-    fn seal_key(&self) -> String {
-        URL_SAFE_NO_PAD.encode(PublicKey::from(&self.seal).as_bytes())
-    }
 }
 
 pub struct Tunnel {
@@ -334,7 +328,7 @@ impl Tunnel {
     }
 
     fn service(&self) -> Result<&str, Failure> {
-        self.service.as_deref().ok_or_else(|| fail("not_open", NOT_OPEN))
+        self.service.as_deref().ok_or_else(|| fail("not_open", NO_ROUTE))
     }
 
     async fn call(&self, keys: &Keys, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), Failure> {
@@ -418,16 +412,12 @@ impl Tunnel {
         let saved = self.saved();
         let ports = saved.ports.unwrap_or(DEFAULT_PORTS);
         let keys = self.keys(false)?;
-        if keys.is_none() {
-            if let Some(route) = self.route().ok().flatten().filter(|route| !route.is_hosted()) {
-                return Ok(route_status(&route));
-            }
-        }
-        if self.service.is_none() {
-            return Ok(local_status("none", NOT_OPEN, ports));
-        }
-        let Some(keys) = keys else {
-            return Ok(local_status("none", "Request a tunnel, or use your own.", ports));
+        let route = self.route().ok().flatten();
+        let keys = match (keys, route) {
+            (Some(keys), Some(route)) if route.is_hosted() && self.service.is_some() => keys,
+            (Some(keys), None) if self.service.is_some() => keys,
+            (_, Some(route)) => return Ok(route_status(&route)),
+            (_, None) => return Ok(local_status("none", NO_ROUTE, ports)),
         };
         self.flush_reports(&keys).await;
         let value = self.remote(&keys).await?;
@@ -475,51 +465,9 @@ impl Tunnel {
         .stepped(running)
     }
 
-    pub async fn request(&self, ports: Ports, channel: &str, on_url: impl FnOnce(&str)) -> Result<Status, Failure> {
-        self.refuse_other_route()?;
-        check_ports(ports.serve, ports.mcp)?;
-        self.service()?;
-        let keys = self.keys(true)?.ok_or("no device keys")?;
-        let listener = loopback()?;
-        let port = listener.local_addr().map_err(|error| error.to_string())?.port();
-        let verifier = random::<32>()?;
-        let body = json!({
-            "signKey": keys.sign_key(),
-            "sealKey": keys.seal_key(),
-            "channel": channel,
-            "version": crate::VERSION,
-            "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-            "ports": ports,
-            "confirmChallenge": URL_SAFE_NO_PAD.encode(Sha256::digest(verifier)),
-            "loopbackPort": port,
-        });
-        let (code, value) = self.call(&keys, "POST", "/v1/requests", Some(&body)).await?;
-        if code != 201 {
-            return Err(refusal("request", code, &value));
-        }
-        let id = value.get("id").and_then(Value::as_str).ok_or("the service gave no request id")?.to_string();
-        let url = value.get("url").and_then(Value::as_str).ok_or("the service gave no sign-in address")?;
-        let mut saved = self.saved();
-        saved.request_id = Some(id.clone());
-        saved.ports = Some(ports);
-        self.save(&saved)?;
-        on_url(url);
-        let code = tokio::task::spawn_blocking(move || await_code(&listener, Duration::from_mins(15)))
-            .await
-            .map_err(|error| error.to_string())??;
-        let confirm = json!({ "code": code, "verifier": URL_SAFE_NO_PAD.encode(verifier) });
-        let (status, value) = self.call(&keys, "POST", &format!("/v1/requests/{id}/confirm"), Some(&confirm)).await?;
-        if status != 200 {
-            return Err(refusal("confirm", status, &value));
-        }
-        self.status().await
-    }
-
     pub async fn up(&self, consent: impl FnOnce(&Path, &[String]) -> bool) -> Result<Status, Failure> {
         self.refuse_other_route()?;
-        let keys = self
-            .keys(false)?
-            .ok_or_else(|| fail("no_tunnel", "No tunnel yet. Run local-studio tunnel request first."))?;
+        let keys = self.keys(false)?.ok_or_else(|| fail("no_tunnel", NO_ROUTE))?;
         let _lock = UpLock::take(&self.dir, false)?;
         let value = self.remote(&keys).await?;
         let status = self.status_from(&value, self.saved().ports.unwrap_or(DEFAULT_PORTS));
@@ -543,9 +491,7 @@ impl Tunnel {
     }
 
     pub async fn set_ports(&self, serve: Option<u16>, mcp: Option<u16>) -> Result<Status, Failure> {
-        let keys = self.keys(false)?.ok_or_else(|| {
-            fail("no_tunnel", "No hosted tunnel on this machine. Run local-studio tunnel request first.")
-        })?;
+        let keys = self.keys(false)?.ok_or_else(|| fail("no_tunnel", "No hosted tunnel on this machine."))?;
         let _lock = UpLock::take(&self.dir, true)?;
         let value = self.remote(&keys).await?;
         let status = self.status_from(&value, self.saved().ports.unwrap_or(DEFAULT_PORTS));
@@ -1149,7 +1095,9 @@ fn route_status(route: &Route) -> Status {
         "local-studio" => "Local Studio",
         other => other,
     };
-    let message = if carried {
+    let message = if route.is_hosted() {
+        "This machine is on the retired hosted route. Turn it off (local-studio tunnel off), then set up your own: local-studio tunnel setup --tailnet, or setup --cloudflare <hostname>.".to_string()
+    } else if carried {
         format!("{owner} runs this route, and it carries the phone address to local-studio-serve.")
     } else {
         format!("{owner} runs this route. It doesn't carry the phone address.")
@@ -1302,7 +1250,6 @@ fn refusal(what: &str, code: u16, value: &Value) -> Failure {
     let error = value.get("error").and_then(Value::as_str).unwrap_or("");
     let reason = match error {
         "has_tunnel" => "This machine already has a hosted tunnel.",
-        "waitlist_full" => "The waitlist is full. Use your own Cloudflare account: local-studio tunnel byo",
         "too_many_requests" | "rate_limited" => "Too many tries. Wait an hour and try again.",
         "slow_down" => "The tunnel service asked to slow down. Try again in a minute.",
         "bad_ports" => "Those ports aren't allowed: use two different loopback ports from 1024 to 65535.",
@@ -1317,57 +1264,6 @@ fn refusal(what: &str, code: u16, value: &Value) -> Failure {
     } else {
         fail(id, reason)
     }
-}
-
-fn loopback() -> Result<TcpListener, String> {
-    for _ in 0..20 {
-        let bytes = random::<2>()?;
-        let port = 49152 + u16::from_be_bytes(bytes) % (65535 - 49152);
-        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
-            return Ok(listener);
-        }
-    }
-    Err("no free loopback port for the sign-in".into())
-}
-
-fn await_code(listener: &TcpListener, wait: Duration) -> Result<String, String> {
-    listener.set_nonblocking(true).map_err(|error| error.to_string())?;
-    let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                if let Some(code) = answer(stream) {
-                    return Ok(code);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Err("The sign-in wasn't finished in 15 minutes. Request again.".into())
-}
-
-fn answer(mut stream: TcpStream) -> Option<String> {
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).ok()?;
-    let head = String::from_utf8_lossy(&buf[..n]);
-    let target = head.lines().next()?.strip_prefix("GET ")?.split(' ').next()?.to_string();
-    let code = target.strip_prefix("/confirmed?").and_then(|query| {
-        query.split('&').find_map(|pair| pair.strip_prefix("code=")).filter(|code| {
-            !code.is_empty() && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        })
-    });
-    let reply = if code.is_some() {
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nConfirmed. Go back to Local Studio.\n"
-    } else {
-        "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-    };
-    let _ = stream.write_all(reply.as_bytes());
-    code.map(ToString::to_string)
 }
 
 fn unseal(sealed: &Value, secret: &StaticSecret, request_id: &str, hostname: &str) -> Result<String, String> {
