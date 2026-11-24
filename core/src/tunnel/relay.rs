@@ -1,11 +1,14 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::stream::SplitSink;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde_json::Value;
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::{interval_at, sleep, sleep_until, timeout, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, USER_AGENT};
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
@@ -20,8 +23,10 @@ use crate::link::devices::random;
 const VERSION: u64 = 1;
 const KEY_CHARS: usize = 43;
 const CONNECT_PATH: &str = "/_relay/connect";
+const PING: &str = r#"{"v":1,"t":"ping"}"#;
 const REPLACED: u16 = 4000;
 const CONNECT: Duration = Duration::from_secs(10);
+const HELLO: Duration = Duration::from_secs(10);
 const STEADY: Duration = Duration::from_secs(60);
 const HANG_UP: Duration = Duration::from_millis(500);
 const FIRST_WAIT_MS: u64 = 1_000;
@@ -29,6 +34,7 @@ const LONGEST_WAIT_MS: u64 = 30_000;
 const MAX_MESSAGE: usize = 40 << 20;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type Sink = SplitSink<Socket, Message>;
 
 pub struct Config {
     pub url: String,
@@ -65,7 +71,7 @@ pub async fn run(config: Config, on: impl Fn(Event) + Send + Sync) -> Ended {
     loop {
         let mut up = None;
         let stop = match dial(&address, &config.key).await {
-            Ok(socket) => session(socket, &on, &mut up).await,
+            Ok(socket) => session(socket, &config, &on, &mut up).await,
             Err(stop) => stop,
         };
         match stop {
@@ -139,9 +145,47 @@ async fn dial(address: &str, key: &str) -> Result<Socket, Stop> {
     }
 }
 
-async fn session(mut socket: Socket, on: &(impl Fn(Event) + Send + Sync), up: &mut Option<Instant>) -> Stop {
+async fn write(mut sink: Sink, mut queue: mpsc::UnboundedReceiver<Message>, ping: Duration) {
+    let mut pings = interval_at(Instant::now() + ping, ping);
+    pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        let text = match socket.next().await {
+        let message = tokio::select! {
+            biased;
+            _ = pings.tick() => Message::text(PING),
+            next = queue.recv() => next.unwrap_or(Message::Close(None)),
+        };
+        let last = message.is_close();
+        if sink.send(message).await.is_err() || last {
+            return;
+        }
+    }
+}
+
+async fn session(
+    socket: Socket,
+    config: &Config,
+    on: &(impl Fn(Event) + Send + Sync),
+    up: &mut Option<Instant>,
+) -> Stop {
+    let ping = config.ping.max(Duration::from_millis(1));
+    let (sink, mut stream) = socket.split();
+    let (out, queue) = mpsc::unbounded_channel();
+    let mut writer = JoinSet::new();
+    writer.spawn(write(sink, queue, ping));
+    let mut deadline = Instant::now() + HELLO;
+    let stop = loop {
+        let next = tokio::select! {
+            biased;
+            next = stream.next() => next,
+            () = sleep_until(deadline) => {
+                break Stop::Lost(match up {
+                    Some(_) => "the relay stopped answering pings".into(),
+                    None => "the relay sent no hello within 10 s".into(),
+                });
+            }
+            _ = writer.join_next() => return Stop::Lost("the relay connection broke".into()),
+        };
+        let text = match next {
             None => return Stop::Lost("the relay closed the connection".into()),
             Some(Err(error)) => return Stop::Lost(format!("the relay connection broke: {error}")),
             Some(Ok(Message::Close(frame))) => match frame.map(|frame| u16::from(frame.code)) {
@@ -155,16 +199,18 @@ async fn session(mut socket: Socket, on: &(impl Fn(Event) + Send + Sync), up: &m
         let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
         let spoken = frame.get("v").and_then(Value::as_u64) == Some(VERSION);
         match frame.get("t").and_then(Value::as_str) {
-            Some("hello") if !spoken => {
-                timeout(HANG_UP, socket.close(None)).await.ok();
-                return Stop::Ended(Ended::Outdated);
-            }
+            Some("hello") if !spoken => break Stop::Ended(Ended::Outdated),
             Some("hello") if up.is_none() => {
                 *up = Some(Instant::now());
+                deadline = Instant::now() + 2 * ping;
                 on(Event::Connected);
             }
             Some("replaced") if spoken => return Stop::Ended(Ended::Replaced),
+            Some("pong") if spoken && up.is_some() => deadline = Instant::now() + 2 * ping,
             _ => {}
         }
-    }
+    };
+    out.send(Message::Close(None)).ok();
+    timeout(HANG_UP, writer.join_next()).await.ok();
+    stop
 }
