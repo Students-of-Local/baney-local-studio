@@ -115,14 +115,31 @@ const loadArchived = (dir: string, commit: string) =>
   });
 
 const SHA = /^[0-9a-f]{40}$/;
-const OWNED_FLAGS = new Set(["--network", "--net", "--gpus", "--name", "--rm", "-d", "--detach", "-p", "--publish", "--label", "--entrypoint", "--restart"]);
-const BLOCKED_FLAGS = new Set(["--privileged", "-v", "--volume", "--mount", "--device", "--security-opt", "--pid"]);
+const OWNED_FLAGS = new Set(["--network", "--net", "--gpus", "--name", "--rm", "-d", "--detach", "-p", "--publish", "--label", "--entrypoint", "--restart", "--ipc"]);
+const SIZE = /^\d+(\.\d+)?[bkmgt]?b?$/i;
+const ALLOWED_FLAGS = new Map<string, RegExp | null>([
+  ["--init", null],
+  ["--cap-add", /^(IPC_LOCK|SYS_NICE)$/],
+  ["--cpus", /^\d+(\.\d+)?$/],
+  ["--cpuset-cpus", /^\d+([,-]\d+)*$/],
+  ["--memory", SIZE],
+  ["--memory-swap", /^(-1|\d+(\.\d+)?[bkmgt]?b?)$/i],
+  ["--oom-score-adj", /^\d{1,4}$/],
+  ["--shm-size", SIZE],
+  ["--ulimit", /^[a-z]+=-?\d+(:-?\d+)?$/],
+  ["--user", /^\w[\w.-]*(:\w[\w.-]*)?$/],
+  ["--workdir", /^\/[\w./-]*$/],
+]);
+const IMAGE = /^\w[\w./:-]*@sha256:[0-9a-f]{64}$/;
+const REPO = /^\w[\w.-]*\/\w[\w.-]*$/;
 
 export const weightsOf = (l: Launch): Weight[] =>
   (Array.isArray(l.weights) ? l.weights : l.weights ? [l.weights] : []).flatMap((w) => {
     const d = Schema.decodeUnknownOption(Weight)(w);
     return d._tag === "Some" ? [d.value] : [];
   });
+
+export const weightFiles = (w: Weight): string[] => (Array.isArray(w.files) ? w.files.map(String) : typeof w.files === "string" && w.files ? [w.files] : []);
 
 const splitFlag = (f: string): string[] => {
   const t = f.trim();
@@ -132,7 +149,18 @@ const splitFlag = (f: string): string[] => {
   return i < 0 ? [t] : [t.slice(0, i), t.slice(i).trim()];
 };
 
-export const dockerFlags = (l: Launch): string[] => (l.flags ?? []).map(splitFlag).flatMap((parts) => (OWNED_FLAGS.has(parts[0] ?? "") ? [] : parts));
+const owned = (parts: string[]): boolean => OWNED_FLAGS.has(parts[0] ?? "");
+
+const allowed = ([name = "", value]: string[]): boolean => {
+  const takes = ALLOWED_FLAGS.get(name);
+  return takes === null ? value === undefined : takes !== undefined && value !== undefined && takes.test(value);
+};
+
+export const dockerFlags = (l: Launch): string[] => {
+  const flags = (l.flags ?? []).map(splitFlag);
+  const shm = l.shm ?? (flags.some(([name]) => name === "--ipc") ? "16g" : null);
+  return [...(shm ? ["--shm-size", shm] : []), ...flags.filter((parts) => !owned(parts) && allowed(parts)).flat()];
+};
 
 export const archivedReason = (key: string, e: Entry): string | null => {
   const l = e.launch;
@@ -140,17 +168,20 @@ export const archivedReason = (key: string, e: Entry): string | null => {
   if (p?.captured || p?.archived || p?.on === "captured" || key.includes("/archive")) return "archived captured configuration";
   if (l.kind === "host") return "host-specific launch, not a portable container";
   if (l.build) return "image is built from source";
-  if (!l.image?.includes("@sha256:")) return "image is not pinned by digest";
+  if (!IMAGE.test(l.image ?? "")) return "image is not pinned by digest";
   if (e.weights !== "baked-into-image" && !SHA.test(e.weights.split("@")[1] ?? "")) return "weights are not pinned";
   return null;
 };
 
 export const launchBlock = (e: Entry): string | null => {
   const l = e.launch;
-  const bad = (l.flags ?? []).map((f) => splitFlag(f)[0] ?? "").find((k) => !k.startsWith("-") || BLOCKED_FLAGS.has(k));
+  const bad = (l.flags ?? []).map(splitFlag).find((parts) => !owned(parts) && !allowed(parts));
+  const weights = weightsOf(l);
   if (l.backend && l.backend !== "nvidia") return `backend ${l.backend} is not supported by this controller`;
   if ((l.machines ?? 1) > 1) return `needs ${l.machines} machines; multi-machine launch is not supported`;
-  if (bad) return `needs host option ${bad}`;
+  if (bad) return `needs host option ${bad.join(" ")}`;
+  if (l.shm && !SIZE.test(l.shm)) return `shared memory size ${l.shm} is not a size`;
+  if (weights.some((w) => !REPO.test(w.repo) || !SHA.test(w.revision) || weightFiles(w).some((f) => f.startsWith("-")))) return "weights do not name a Hugging Face repository at a commit";
   return l.setup ? `manual setup required: ${l.setup}` : null;
 };
 

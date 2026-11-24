@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { LocalJob, type LocalRunRequest } from "./contracts.ts";
 import { type Config, exec, fail, fetchJson, home, lastLine, now, readJson, writeJson } from "./core.ts";
-import { archivedReason, type Catalog, dockerFlags, type Entry, launchBlock, weightsOf } from "./registry.ts";
+import { archivedReason, type Catalog, dockerFlags, type Entry, launchBlock, weightFiles, weightsOf } from "./registry.ts";
 
 const LABEL = "local-studio-controller";
 const LEGACY_LABEL = "local-studio-t3";
@@ -72,7 +72,6 @@ export const makeJobs = (deps: Deps) => {
         "--label", `${LABEL}.controller=${cfg.id}`, "--label", `${LABEL}.job=${id}`,
         "--gpus", `"device=${gpus.join(",")}"`,
         "-p", `127.0.0.1:${port}:${l.port}`,
-        ...(l.shm ? ["--shm-size", l.shm] : []),
         ...dockerFlags(l),
         ...Object.entries(l.env ?? {}).filter(([k]) => k !== "NVIDIA_VISIBLE_DEVICES" && k !== "CUDA_VISIBLE_DEVICES").flatMap(([k, v]) => ["-e", `${k}=${v}`]),
         ...(weights.some((w) => w.hub) ? ["-e", "HF_HUB_OFFLINE=1"] : []),
@@ -94,8 +93,7 @@ export const makeJobs = (deps: Deps) => {
         if (signal.aborted || existsSync(marker)) continue;
         if (!Bun.which("hf")) return `weights ${w.repo}@${w.revision.slice(0, 8)} are missing and the hf CLI is not installed`;
         update(id, { phase: "downloading", message: `downloading ${w.repo}@${w.revision.slice(0, 8)}` });
-        const files = Array.isArray(w.files) ? w.files.map(String) : typeof w.files === "string" && w.files ? [w.files] : [];
-        const r = yield* exec(["hf", "download", w.repo, ...files, "--revision", w.revision, ...(hub ? [] : ["--local-dir", host])], 24 * 3600_000, { signal, env: { HF_HOME: hfHome } });
+        const r = yield* exec(["hf", "download", w.repo, ...weightFiles(w), "--revision", w.revision, ...(hub ? [] : ["--local-dir", host])], 24 * 3600_000, { signal, env: { HF_HOME: hfHome } });
         if (signal.aborted) return null;
         if (r.code !== 0) return `download of ${w.repo} failed: ${lastLine(r)}`;
         if (!hub) writeFileSync(marker, `${w.repo}@${w.revision}\n`);
