@@ -17,6 +17,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::platform::Mode;
 
+#[cfg(feature = "link")]
+pub mod relay;
 mod setup;
 
 pub use setup::{
