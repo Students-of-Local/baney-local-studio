@@ -491,7 +491,13 @@ pub async fn download(
         let _ = std::fs::remove_file(&part);
         return Err(Refusal::Apply(format!("write {}: {error}", part.display())));
     }
-    if let Err(refusal) = verify_file(build, &part, &offer.sha256, &offer.signature, &offer.asset) {
+    let checked = {
+        let (build, offer, part) = (build.clone(), offer.clone(), part.clone());
+        tokio::task::spawn_blocking(move || verify_file(&build, &part, &offer.sha256, &offer.signature, &offer.asset))
+            .await
+            .map_err(|error| Refusal::Apply(format!("check the download: {error}")))?
+    };
+    if let Err(refusal) = checked {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(refusal);
     }

@@ -50,9 +50,16 @@ impl Key {
     }
 
     fn sign(&self, data: &[u8], file_name: &str) -> String {
-        let digest = Blake2b512::digest(data);
-        let signature = self.signing.sign(&digest).to_bytes();
-        let mut line = b"ED".to_vec();
+        self.signature(*b"ED", &Blake2b512::digest(data), file_name)
+    }
+
+    fn sign_legacy(&self, data: &[u8], file_name: &str) -> String {
+        self.signature(*b"Ed", data, file_name)
+    }
+
+    fn signature(&self, algorithm: [u8; 2], signed: &[u8], file_name: &str) -> String {
+        let signature = self.signing.sign(signed).to_bytes();
+        let mut line = algorithm.to_vec();
         line.extend_from_slice(&self.id);
         line.extend_from_slice(&signature);
         let trusted = format!("timestamp:1795300000\tfile:{file_name}");
@@ -66,6 +73,12 @@ impl Key {
         );
         STANDARD.encode(file)
     }
+}
+
+fn edited(signature: &str, edit: impl Fn(String) -> String) -> Result<String, String> {
+    let bytes = STANDARD.decode(signature).map_err(|error| error.to_string())?;
+    let text = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+    Ok(STANDARD.encode(edit(text)))
 }
 
 struct Smoke {
@@ -400,6 +413,14 @@ impl Smoke {
         let offer = self.offered(&build)?;
         expect(self.download(&build, &offer), |refusal| matches!(refusal, Refusal::BadSignature(_)))?;
         self.publish("wrong-file", V1, &body, Some(self.key.sign(&body, "local-studio-windows-x86_64.zip")), None)?;
+        let offer = self.offered(&build)?;
+        expect(self.download(&build, &offer), |refusal| matches!(refusal, Refusal::BadSignature(_)))?;
+        let other_file = self.key.sign(&body, "local-studio-windows-x86_64.zip");
+        let renamed = edited(&other_file, |text| text.replace("local-studio-windows-x86_64.zip", &self.asset))?;
+        self.publish("edited-comment", V1, &body, Some(renamed), None)?;
+        let offer = self.offered(&build)?;
+        expect(self.download(&build, &offer), |refusal| matches!(refusal, Refusal::BadSignature(_)))?;
+        self.publish("legacy", V1, &body, Some(self.key.sign_legacy(&body, &self.asset)), None)?;
         let offer = self.offered(&build)?;
         expect(self.download(&build, &offer), |refusal| matches!(refusal, Refusal::BadSignature(_)))?;
         self.publish("unsigned", V1, &body, None, None)?;
