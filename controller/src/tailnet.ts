@@ -1,8 +1,11 @@
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { LocalTailnet } from "./contracts.ts";
-import { type Config, decodeJson, exec, fail, fetchJson, lastLine, LEGACY_DIR } from "./core.ts";
+import { type Config, decodeJson, exec, fail, fetchJson, httpError, lastLine, LEGACY_DIR } from "./core.ts";
 import { normUrl } from "./graph.ts";
 
 const Peer = Schema.Struct({ HostName: Schema.String, OS: Schema.String, Online: Schema.Boolean, TailscaleIPs: Schema.Array(Schema.String) });
@@ -48,15 +51,25 @@ export const scanTailnet = (linked: Set<string>): Effect.Effect<LocalTailnet> =>
     return { available: true, devices: devices.sort((a, b) => a.name.localeCompare(b.name)) };
   });
 
-const RELEASE = process.env.LOCAL_STUDIO_CONTROLLER_RELEASE ?? "https://github.com/sybil-solutions/local-studio/releases/latest/download";
 const quote = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
+const SET_UP = "a controller is already set up on this machine; connect it instead";
+const PROBE = `D="$HOME/.local-studio-controller"; L="$HOME/${LEGACY_DIR}"
+if [ -e "$D/config.json" ] || [ -e "$L/config.json" ] || [ -e "$HOME/.local/bin/local-studio-controller" ]; then echo "${SET_UP}" >&2; exit 3; fi
+echo "controller-platform=$(uname -s)-$(uname -m)" | tr A-Z a-z | sed 's/x86_64/x64/;s/aarch64/arm64/'
+for b in "$(command -v bun)" "$HOME/.bun/bin/bun" /opt/homebrew/bin/bun /usr/local/bin/bun; do
+  case "$([ -x "$b" ] && "$b" --version 2>/dev/null < /dev/null)" in 1.[3-9].*|1.[1-9][0-9].*|[2-9].*) echo "controller-bun=$b"; break ;; esac
+done`;
 const SCRIPT = `set -e
-case "$(uname -s)-$(uname -m)" in Linux-x86_64) T=linux-x64;; Linux-aarch64|Linux-arm64) T=linux-arm64;; Darwin-arm64) T=darwin-arm64;; Darwin-x86_64) T=darwin-x64;; *) echo "unsupported $(uname -sm)" >&2; exit 2;; esac
-D="$HOME/.local-studio-controller"; L="$HOME/${LEGACY_DIR}"; B="$HOME/.local/bin/local-studio-controller"
-if [ -e "$D/config.json" ] || [ -e "$L/config.json" ] || curl -s -m 2 -o /dev/null "http://$HOST:18091/api/health"; then echo "a controller is already set up on this machine; connect it instead" >&2; exit 3; fi
-mkdir -p "$D" "$HOME/.local/bin" && chmod 700 "$D"
-curl -fsSL "$RELEASE/local-studio-controller-$T" -o "$B.tmp" && chmod 755 "$B.tmp" && mv "$B.tmp" "$B"
-umask 077 && printf '%s\\n' "$CFG" > "$D/config.json"
+umask 077
+D="$HOME/.local-studio-controller"; U="$D/$UPLOAD"; B="$HOME/.local/bin/local-studio-controller"
+trap 'rm -f "$U" "$B.$UPLOAD"; rmdir "$D" 2>/dev/null || true' EXIT
+refuse() { echo "$1" >&2; exit 3; }
+chmod 700 "$D" "$U"
+"$U" --version > /dev/null 2>&1 < /dev/null || refuse "this machine cannot run the controller; install Bun there first (bun.sh)"
+mkdir -p "$HOME/.local/bin"
+mv "$U" "$B.$UPLOAD"
+(set -C; printf '%s\\n' "$CFG" > "$D/config.json") 2>/dev/null || refuse "${SET_UP}"
+mv "$B.$UPLOAD" "$B"
 if [ "$(uname -s)" = Linux ]; then
   mkdir -p "$HOME/.config/systemd/user"
   printf '[Unit]\\nDescription=Local Studio controller\\n[Service]\\nEnvironment=LOCAL_STUDIO_CONTROLLER_HOST=%s\\nExecStart=%s\\nRestart=always\\n[Install]\\nWantedBy=default.target\\n' "$HOST" "$B" > "$HOME/.config/systemd/user/local-studio-controller.service"
@@ -71,16 +84,54 @@ else
   launchctl bootstrap "gui/$(id -u)" "$P" || launchctl bootstrap "user/$(id -u)" "$P"
 fi`;
 
+const own = async () => {
+  if (/\.[jt]s$/.test(Bun.main)) {
+    const built = await Bun.build({ entrypoints: [Bun.main], target: "bun" });
+    return built.outputs[0]!.text();
+  }
+  return (await Bun.file(Bun.main).text()).replace(/^#!.*\n/, "");
+};
+
+const program = (platform: string, bun: string | undefined, target: string) =>
+  Effect.gen(function* () {
+    const same = platform === `${process.platform}-${process.arch}`;
+    if (Bun.main.startsWith("/$bunfs/")) {
+      if (!same) return yield* fail(502, "DEPLOY_FAILED", `${target} is ${platform} and this controller was built for ${process.platform}-${process.arch}; deploy from a machine of the same kind`);
+      return yield* Effect.promise(() => Bun.file(process.execPath).bytes());
+    }
+    if (!bun && !same) return yield* fail(502, "DEPLOY_FAILED", `${target} is ${platform}: install Bun there first (bun.sh)`);
+    const text = yield* Effect.tryPromise({ try: own, catch: (e) => httpError(500, "BUILD_FAILED", String(e)) });
+    if (bun) return new TextEncoder().encode(`#!${bun}\n${text}`);
+    const dir = mkdtempSync(join(tmpdir(), "local-studio-deploy-"));
+    const entry = join(dir, "controller.js");
+    const out = join(dir, "controller");
+    writeFileSync(entry, text);
+    const r = yield* exec([process.execPath, "build", "--compile", entry, "--outfile", out], 120_000);
+    const bytes = r.code === 0 ? yield* Effect.promise(() => Bun.file(out).bytes()) : null;
+    rmSync(dir, { recursive: true, force: true });
+    return bytes ?? (yield* fail(500, "BUILD_FAILED", lastLine(r)));
+  });
+
 export const deployController = (config: Config, req: { ip: string; name: string; user?: string }) =>
   Effect.gen(function* () {
     if (!/^[\d.]+$/.test(req.ip) || !/^[\w.-]*$/.test(req.user ?? "")) return yield* fail(400, "BAD_TARGET", "deploy needs a tailnet IPv4 and a plain user name");
     const url = `http://${req.ip}:18091`;
     const name = req.name.replace(/[^\w.-]/g, "-") || req.ip;
     const cfg = JSON.stringify({ id: `${name}-${randomBytes(3).toString("hex")}`, name, url, fleetKey: config.fleetKey, peers: [] });
-    const env = Object.entries({ RELEASE, CFG: cfg, HOST: req.ip }).map(([k, v]) => `${k}=${quote(v)}`).join("\n");
     const target = req.user ? `${req.user}@${req.ip}` : req.ip;
-    const r = yield* exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new", target, "sh -s"], 180_000, { stdin: `${env}\n${SCRIPT}\n` });
-    if (r.code !== 0) return yield* fail(502, "DEPLOY_FAILED", `${target}: ${lastLine(r)}`);
+    if ((yield* Effect.option(fetchJson(`${url}/api/health`, 2_000)))._tag === "Some") return yield* fail(502, "DEPLOY_FAILED", `${target}: ${SET_UP}`);
+    const ssh = (command: string, stdin: string | Uint8Array, seconds = 180) =>
+      Effect.flatMap(exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "StrictHostKeyChecking=accept-new", target, command], seconds * 1_000, { stdin }), (r) =>
+        r.code === 0 ? Effect.succeed(r.stdout) : fail(502, "DEPLOY_FAILED", `${target}: ${r.code === 124 ? `no answer in ${seconds} s` : lastLine(r)}`),
+      );
+    const vars = (v: Record<string, string>) => Object.entries(v).map(([k, value]) => `${k}=${quote(value)}`).join("\n");
+    const said = yield* ssh("sh -s", `${PROBE}\n`);
+    const platform = /^controller-platform=((?:linux|darwin)-(?:x64|arm64))$/m.exec(said)?.[1];
+    const bun = /^controller-bun=(\/.+)$/m.exec(said)?.[1];
+    if (!platform) return yield* fail(502, "DEPLOY_FAILED", `${target} is not a Linux or macOS machine on x64 or arm64`);
+    const upload = `upload-${randomBytes(8).toString("hex")}`;
+    yield* ssh(`sh -c 'umask 077; D="$HOME/.local-studio-controller"; U="$D/${upload}"; mkdir -p "$D" && cat > "$U" || { rm -f "$U"; rmdir "$D"; exit 1; }'`, yield* program(platform, bun, target), 1_800);
+    yield* ssh("sh -s", `${vars({ CFG: cfg, HOST: req.ip, UPLOAD: upload })}\n${SCRIPT}\n`);
     for (let i = 0; i < 20; i++) {
       const h = yield* Effect.option(fetchJson(`${url}/api/health`, 1_500));
       if (h._tag === "Some" && h.value.status === 200) return url;

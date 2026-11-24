@@ -16,6 +16,10 @@ import { createPr, previewShare, secretValues } from "./share.ts";
 import { deployController, scanTailnet } from "./tailnet.ts";
 import { makeTelemetry } from "./telemetry.ts";
 
+if (process.argv[2] === "--version") {
+  console.log(VERSION);
+  process.exit(0);
+}
 let config = loadConfig();
 let catalog: Catalog = { info: { commit: null, error: "loading" }, cards: {}, recipes: new Map(), archived: [] };
 let rawGpus: RawGpu[] = [];

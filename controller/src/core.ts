@@ -97,11 +97,11 @@ export interface ExecResult {
   stderr: string;
 }
 
-export const exec = (argv: string[], timeoutMs: number, opts: { signal?: AbortSignal; env?: Record<string, string>; stdin?: string } = {}): Effect.Effect<ExecResult> =>
+export const exec = (argv: string[], timeoutMs: number, opts: { signal?: AbortSignal; env?: Record<string, string>; stdin?: string | Uint8Array } = {}): Effect.Effect<ExecResult> =>
   Effect.promise(async () => {
     let proc: Bun.Subprocess<"pipe" | "ignore", "pipe", "pipe">;
     try {
-      proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin), env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env } }) as never;
+      proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: opts.stdin === undefined ? "ignore" : typeof opts.stdin === "string" ? new TextEncoder().encode(opts.stdin) : opts.stdin, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env } }) as never;
     } catch (e) {
       return { code: 127, stdout: "", stderr: String(e) };
     }

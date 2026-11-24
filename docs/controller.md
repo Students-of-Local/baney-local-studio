@@ -35,7 +35,6 @@ The following environment variables change the defaults:
 | `LOCAL_STUDIO_CONTROLLER_HOME`    | `~/.local-studio-controller`                                               |
 | `LOCAL_STUDIO_CONTROLLER_PORT`    | `18091`                                                                    |
 | `LOCAL_STUDIO_CONTROLLER_HOST`    | `127.0.0.1`                                                                |
-| `LOCAL_STUDIO_CONTROLLER_RELEASE` | `https://github.com/sybil-solutions/local-studio/releases/latest/download` |
 
 To link machines by hand:
 
@@ -49,9 +48,9 @@ To link machines by hand:
 `GET /api/tailnet` lists online Linux and macOS devices from `tailscale status`, with or without a controller. `POST /api/tailnet/deploy` installs one, from your machine's controller:
 
 1. `ssh <tailnet-ip> sh -s` with `BatchMode`, so key-based access is required. A new host key is accepted.
-2. On the remote machine, it refuses if `~/.local-studio-controller/config.json` or `~/.local-studio-t3/config.json` exists or anything answers on port 18091. An existing controller is never replaced.
-3. It downloads the matching binary from `LOCAL_STUDIO_CONTROLLER_RELEASE`.
-4. It writes a config with your fleet key and the device's tailnet URL.
+2. It refuses if anything answers at the machine's port 18091, or if `~/.local-studio-controller/config.json`, `~/.local-studio-t3/config.json` or `~/.local/bin/local-studio-controller` exists there. An existing controller is never replaced.
+3. It sends its own code over that ssh connection; nothing is downloaded. Where the machine has [Bun](https://bun.sh) 1.3 or newer, that is one script run by it. Without Bun, a machine of the same system and processor gets a compiled binary, and any other is refused before anything is written. A controller that is itself a compiled binary sends that binary, and only to the same kind of machine. A machine that cannot run what it was sent is refused. A refused or failed install removes the upload and leaves no config.
+4. It writes a config with your fleet key and the device's tailnet URL. The key is never on a command line.
 5. It installs and starts the user service.
 6. It waits until `/api/health` answers, then adds the device to your peers.
 
