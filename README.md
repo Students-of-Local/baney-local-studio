@@ -137,6 +137,10 @@ Write your own: start from [examples/plugins/smoothstone](examples/plugins/smoot
 
 Every check drives the real binaries against a real model. See [AGENTS.md](AGENTS.md).
 
+## Privacy
+
+No telemetry, no account, no server of ours. [PRIVACY.md](PRIVACY.md) lists every network call, every file of another tool that is opened, and which of them can be turned off.
+
 ## Limits
 
 - macOS 26+ on Apple Silicon and Linux. Windows builds the core only, for now.
