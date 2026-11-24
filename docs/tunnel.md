@@ -10,7 +10,7 @@ A machine has at most one public route: one cloudflared process with one ingress
 | `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-authorization-server/mcp`, `/authorize`, `/token`, `/register`, `/revoke` | Tychicus serve (8787): browser use and computer use |
 | anything else | 404 |
 
-These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. One hostname serves both products, split by these exact paths: the tailnet route has one name per machine, and on the hosted route a second name would halve the zone's tunnel cap.
+These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. One hostname serves both products, split by these exact paths: the tailnet route has one name per machine.
 
 ## The route record
 
@@ -27,7 +27,7 @@ These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. On
 }
 ```
 
-- `route` is `hosted` (Local Studio's waitlist service), `cloudflare` (the person's own account and domain), or `tailnet` (`tailscale serve`, no Funnel).
+- `route` is `cloudflare` (the person's own account and domain) or `tailnet` (`tailscale serve`, no Funnel). Setup never writes `hosted` any more: that was the retired hosted route on Donovan's account. A route.json that still says `hosted` is shown by `status` and removed by `off`, and setup refuses next to it until it is off.
 - `aliases` are extra hostnames on the same tunnel with the same routes, kept only while a connector moves to `hostname`.
 - Ports are loopback, 1024 to 65535, different from each other, and never 18091 (the controller).
 
@@ -36,7 +36,6 @@ These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. On
 ```
 local-studio tunnel setup --cloudflare <name> [--alias <name>]...   the person's own Cloudflare account
 local-studio tunnel setup --tailnet                                 tailnet only, no Funnel
-local-studio tunnel request                                         the hosted route (waitlist)
 local-studio tunnel adopt [--hostname <name>]                       take over a Tychicus tunnel already on this machine
 local-studio tunnel status                                          the route, its health and the next step
 local-studio tunnel off                                             stop and remove the route; the Cloudflare tunnel and DNS stay
@@ -64,13 +63,13 @@ While both connectors run, Cloudflare sends each request to either one, and Tych
 
 `off` works on every channel. It removes Local Studio's service and yml, the tailnet paths it added, and route.json, asks `local-studio-serve allow-tunnel-host --remove` for each name, and stops a hosted cloudflared. The Cloudflare tunnel, its DNS records and the tailnet node stay. A route run by Tychicus is refused with `not_ours`.
 
-### Dev channel only, for now
+### Every channel, no waitlist
 
-Donovan, 2026-11-21: tunnel setup ships on the dev channel only (docs/channels.md). On stable and nightly, `setup`, `adopt` and `request` don't run and the settings screen shows a waitlist signup instead. The gate reads `local_studio_core::CHANNEL`, which builds stamp from `LOCAL_STUDIO_BUILD_CHANNEL` and local builds set to `dev`. `status` and `off` work on every channel, so a machine that moves off dev can still see and remove its route. The waitlist is a signup-only Worker on a free workers.dev address that stores emails and holds no Cloudflare API token; it moves to the hosted route's own account when that exists.
+Donovan, 2026-11-24: "NO more waitlist." `setup`, `adopt`, `status` and `off` run the same on stable, nightly and dev, and nothing answers `waitlist`. A person sets up their own route for free: Tailscale (`setup --tailnet`, no domain needed) or their own Cloudflare account and domain (`setup --cloudflare <hostname>`). `local-studio tunnel request` and the hosted route are gone. The hosted client commands (`up`, `down`, `release`, `ports`) remain only for a machine that already holds a hosted tunnel's keys.
 
 ### Agents can run it
 
-An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL or the command), `needs_dns`, `confirm` (adopt's plan, waiting for `--yes`), `needs_tychicus_join`, `needs_serve_allow_host` (tailnet: run the command it carries), `off`, `waitlist` (stable or nightly; carries the signup URL), or `error` with a code (exit 1). On stable and nightly, `status` with no route and no hosted request also answers `waitlist`. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
+An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL or the command), `needs_dns`, `confirm` (adopt's plan, waiting for `--yes`), `needs_tychicus_join`, `needs_serve_allow_host` (tailnet: run the command it carries), `off`, or `error` with a code (exit 1). `status` with no route answers `none` with `nextCommand` `local-studio tunnel setup --tailnet`, and its message names the Cloudflare choice too. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
 
 ### Going live
 
@@ -84,5 +83,5 @@ Before a route carries a path, Local Studio checks auth there (baney75/local-stu
 
 ## Not yet
 
-- The hosted route waits on Donovan's choice of a Cloudflare account and domain (`STABLE_SERVICE`).
+- The app has no tunnel screen yet: setup runs from the CLI, or from an agent through `--json`.
 - Tychicus's Funnel route (port 8443) opens the whole port, so it can't keep to exact paths; Local Studio doesn't use Funnel.
