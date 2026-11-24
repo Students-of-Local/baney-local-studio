@@ -893,9 +893,16 @@ fn codex_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     let tree = tree.canonicalize()?.to_string_lossy().into_owned();
     repo_with(&plain, "src/deep", "main.txt")?;
     let deep = project(run, &plain.join("src/deep"))?;
-    with_cli(run, CODEX, "codex-trust-plain", &deep, WorktreeChoice::Local)?;
+    let gone = with_cli(run, CODEX, "codex-trust-plain", &deep, WorktreeChoice::Local)?;
     let (top, src) = (deep.trim_end_matches("/src/deep"), deep.trim_end_matches("/deep"));
     codex_ran(run, "codex-trust-plain", "hello", "untrusted", &[top, src, &deep]);
+    run.studio.restart_thread(gone);
+    std::fs::remove_dir_all(&deep)?;
+    run.send("again");
+    let wanted = format!("This thread's folder is gone: {deep}");
+    run.check("codex-trust-plain: a send after its folder is deleted says so", |watch| {
+        watch.refused.iter().any(|refused| refused.contains(&wanted))
+    });
     let repo = project(run, &repo)?;
     let denied = with_cli(run, CODEX, "codex-trust-denied", &repo, WorktreeChoice::Local)?;
     asks_for(run, "Codex", "codex-trust-denied", &denied, &repo);

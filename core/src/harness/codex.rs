@@ -440,6 +440,9 @@ pub(crate) async fn read(account: Option<&Path>, thread: &str) -> Result<Vec<Age
 
 impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
+        if !Path::new(&launch.cwd).is_dir() {
+            return Err(format!("This thread's folder is gone: {}", launch.cwd));
+        }
         let approvals = Arc::new(Mutex::new(HashMap::new()));
         let turns = SharedTurns::default();
         let mut process =
