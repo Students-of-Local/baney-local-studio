@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ignore::WalkBuilder;
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use super::model::{FileContent, FileEntry, SearchHit};
 
@@ -210,61 +212,15 @@ pub(crate) fn read_file(project: &str, relative: &str) -> Result<(String, FileCo
     }
 }
 
-fn is_boundary(previous: Option<char>, current: char) -> bool {
-    match previous {
-        None => true,
-        Some(previous) => {
-            matches!(previous, '/' | '_' | '-' | '.' | ' ') || (previous.is_lowercase() && current.is_uppercase())
-        }
-    }
-}
-
-fn fuzzy_score(query: &[char], path: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(-i64::try_from(path.len()).unwrap_or(i64::MAX));
-    }
-    let name_start = path.rfind('/').map_or(0, |index| index + 1);
-    let characters: Vec<(usize, char)> = path.char_indices().collect();
-    let mut score: i64 = 0;
-    let mut query_index = 0;
-    let mut last_match: Option<usize> = None;
-    let mut previous: Option<char> = None;
-    for (position, (byte_index, character)) in characters.iter().enumerate() {
-        if query_index < query.len() && character.to_lowercase().eq(query[query_index].to_lowercase()) {
-            score += 1;
-            if last_match.is_some_and(|last| last + 1 == position) {
-                score += 6;
-            }
-            if is_boundary(previous, *character) {
-                score += 8;
-            }
-            if *byte_index >= name_start {
-                score += 3;
-                if *byte_index == name_start {
-                    score += 6;
-                }
-            }
-            last_match = Some(position);
-            query_index += 1;
-        }
-        previous = Some(*character);
-    }
-    if query_index < query.len() {
-        return None;
-    }
-    let name = &path[name_start..];
-    let needle: String = query.iter().collect::<String>().to_lowercase();
-    if name.to_lowercase().contains(&needle) {
-        score += 25;
-    }
-    Some(score * 16 - i64::try_from(path.len()).unwrap_or(i64::MAX))
-}
+type Ranked = Reverse<(u32, u32, Reverse<(usize, String)>, bool)>;
 
 pub(crate) fn search_files(project: &str, query: &str, limit: u32) -> Result<Vec<SearchHit>, String> {
     let root = root(project)?;
     let limit = if limit == 0 { DEFAULT_LIMIT } else { limit as usize };
-    let query: Vec<char> = query.chars().filter(|character| !character.is_whitespace()).collect();
-    let mut best: BinaryHeap<Reverse<(i64, Reverse<String>, bool)>> = BinaryHeap::new();
+    let query = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut buffer = Vec::new();
+    let mut best: BinaryHeap<Ranked> = BinaryHeap::new();
     let started = Instant::now();
     for (visited, entry) in walker(&root).build().enumerate() {
         if visited >= MAX_WALK_ENTRIES || started.elapsed() > SEARCH_BUDGET {
@@ -276,18 +232,18 @@ pub(crate) fn search_files(project: &str, query: &str, limit: u32) -> Result<Vec
         }
         let relative = relative_of(&root, entry.path());
         let directory = entry.file_type().is_some_and(|kind| kind.is_dir());
-        let Some(score) = fuzzy_score(&query, &relative) else { continue };
-        best.push(Reverse((score, Reverse(relative), directory)));
+        let Some(score) = query.score(Utf32Str::new(&relative, &mut buffer), &mut matcher) else { continue };
+        let name = relative.rsplit_once('/').map_or(relative.as_str(), |(_, name)| name);
+        let named = query.score(Utf32Str::new(name, &mut buffer), &mut matcher).unwrap_or(0);
+        best.push(Reverse((score, named, Reverse((relative.len(), relative)), directory)));
         if best.len() > limit {
             best.pop();
         }
     }
-    let mut hits: Vec<(i64, String, bool)> =
-        best.into_iter().map(|Reverse((score, Reverse(relative), directory))| (score, relative, directory)).collect();
-    hits.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    Ok(hits
+    Ok(best
+        .into_sorted_vec()
         .into_iter()
-        .map(|(_, relative, directory)| SearchHit {
+        .map(|Reverse((_, _, Reverse((_, relative)), directory))| SearchHit {
             preview: relative.rsplit_once('/').map_or("", |(parent, _)| parent).to_string(),
             relative: if directory { format!("{relative}/") } else { relative },
             line: None,

@@ -1016,12 +1016,21 @@ fn files(harness: &mut Harness, project: &str) -> anyhow::Result<()> {
     harness.pump_until("listing the parent rejected", move |view| view.answered(&id))?;
     ensure!(harness.view.failure(&request).is_some(), "parent listing must fail");
 
-    let request = harness.request();
-    harness.studio.search_files(request.clone(), project.clone(), "mainrs".to_string(), 5);
-    harness.answer("fuzzy file search", &request)?;
-    let hits = harness.view.hits.last().map(|(_, hits)| hits.clone()).unwrap_or_default();
-    println!("     file hits {:?}", hits.iter().map(|hit| &hit.relative).collect::<Vec<_>>());
-    ensure!(hits.first().is_some_and(|hit| hit.relative == "src/main.rs"), "src/main.rs ranks first");
+    let folder = Path::new(&project).join("main");
+    std::fs::create_dir_all(&folder)?;
+    std::fs::write(folder.join("z.rs"), "")?;
+    for query in ["mainrs", "main src", "SRC/Main", "main"] {
+        let request = harness.request();
+        harness.studio.search_files(request.clone(), project.clone(), query.to_string(), 5);
+        harness.answer("fuzzy file search", &request)?;
+        let hits = harness.view.hits.last().map(|(_, hits)| hits.clone()).unwrap_or_default();
+        println!("     file hits for {query:?} {:?}", hits.iter().map(|hit| &hit.relative).collect::<Vec<_>>());
+        let place = |relative: &str| hits.iter().position(|hit| hit.relative == relative);
+        let ahead = place("src/main.rs")
+            .is_some_and(|at| at == 0 || (query == "main" && place("main/z.rs").is_none_or(|other| at < other)));
+        ensure!(ahead, "src/main.rs ranks first for {query:?}");
+    }
+    std::fs::remove_dir_all(&folder)?;
     let request = harness.request();
     harness.studio.search_text(request.clone(), project.clone(), "hello".to_string(), 10);
     harness.answer("text search", &request)?;
