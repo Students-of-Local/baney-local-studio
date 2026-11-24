@@ -53,9 +53,27 @@ try {
     launch: { kind: "host", port: 8000, ctx: 4096 },
     proof: [{ captured: true }],
   };
+  const digest = `registry.example/engine@sha256:${"a".repeat(64)}`;
+  const weight = { repo: "org/model", revision: "b".repeat(40), at: "/model" };
+  const launched = (launch) => ({ ...captured, proof: [], launch: { port: 8000, ctx: 4096, image: digest, weights: weight, ...launch } });
+  const launches = {
+    plain: launched({}),
+    tuned: launched({ flags: ["--ipc host", "--network host", "--init", "--ulimit memlock=-1:-1", "--cap-add=IPC_LOCK", "--shm-size 16g", "--workdir /model", "--user root"] }),
+  };
+  const blocked = Object.fromEntries(
+    [
+      ...["--privileged", "--init --privileged", "--init=--privileged", "-v/:/host", "-v /:/host", "--volume=/:/host", "--volumes-from other", "--mount type=bind,src=/,dst=/host", "--cap-add SYS_ADMIN", "--cap-add=ALL", "--device /dev/mem", "--pid host", "--pid=host", "--userns host", "--uts host", "--cgroupns host", "--security-opt seccomp=unconfined", "--ulimit memlock=-1 --privileged", "--user root --privileged", "--workdir /a\n--privileged", "--env-file /etc/shadow", "--shm-size", "--unknown", "network_mode: host", ""].map((flag) => launched({ flags: [flag] })),
+      launched({ shm: "16g --privileged" }),
+      launched({ image: `-v/:/host@sha256:${"a".repeat(64)}` }),
+      launched({ image: "registry.example/engine@sha256:short" }),
+      launched({ weights: { ...weight, repo: "--local-dir=/" } }),
+      launched({ weights: { ...weight, files: ["--local-dir=/"] } }),
+      launched({ weights: { ...weight, revision: "main" } }),
+    ].map((entry, i) => [`blocked-${i}`, entry]),
+  );
   writeFileSync(
     join(root, "dist/catalog.json"),
-    JSON.stringify({ cards: {}, recipes: { captured } }),
+    JSON.stringify({ cards: {}, recipes: { captured, ...launches, ...blocked } }),
   );
   git("init", "-q");
   git("add", "-f", "dist/catalog.json");
@@ -222,6 +240,9 @@ try {
   assert(telemetry.history.days.at(-1).prompt > telemetry.history.days.at(-1).generation);
   assert.equal((await (await call(c, "/api/telemetry")).json()).live.decodeTps, null);
   assert.equal((await call(a, "/api/recipes/captured/run", {})).status, 409);
+  const refusal = async (id) => (await (await call(a, `/api/recipes/${id}/run`, { dryRun: true })).json()).error.code;
+  for (const id of Object.keys(launches)) assert.equal(await refusal(id), "GPUS_UNAVAILABLE", id);
+  for (const id of Object.keys(blocked)) assert.match(await refusal(id), /^RECIPE_(BLOCKED|ARCHIVED)$/, `${id} ${JSON.stringify(blocked[id].launch)}`);
   assert.equal((await call(a, "/api/peers", "{")).status, 400);
   assert.equal((await call(a, "/api/peers", { url: `http://127.0.0.1:${a}` })).status, 400);
   assert.equal((await call(a, "/v1/completions", { model: "not-live" })).status, 404);
