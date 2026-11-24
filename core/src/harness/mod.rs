@@ -284,7 +284,7 @@ pub(crate) async fn history(
         .await
         .map_err(|error| error.to_string()),
         Harness::Codex if native.is_empty() => Ok(Vec::new()),
-        Harness::Codex => codex::read(account.as_deref(), &cwd, &native).await,
+        Harness::Codex => codex::read(account.as_deref(), &native).await,
         Harness::Eukhe => Ok(Vec::new()),
     }
 }

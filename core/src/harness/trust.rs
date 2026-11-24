@@ -47,8 +47,8 @@ fn main_checkout(dot_git: &Path) -> Option<PathBuf> {
 pub(crate) fn folders(cwd: &str) -> BTreeSet<String> {
     let here = real(Path::new(cwd));
     let top = git_dir(&here).map_or_else(|| here.clone(), |(_, root)| root);
-    let paths = [here, top].into_iter().map(|path| path.to_string_lossy().into_owned());
-    paths.chain([cwd.to_string(), root(cwd)]).collect()
+    let inside = here.ancestors().take_while(|dir| dir.starts_with(&top));
+    inside.map(|dir| dir.to_string_lossy().into_owned()).chain([cwd.to_string(), root(cwd)]).collect()
 }
 
 pub(crate) fn has_config(harness: Harness, cwd: &str) -> bool {

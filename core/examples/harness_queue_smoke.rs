@@ -872,34 +872,54 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn codex_ran(run: &mut Run, label: &str, refused: bool) {
-    run.check(
-        &format!("{label}: \"hello\" ran {} project settings", if refused { "without" } else { "with" }),
-        |watch| {
-            watch.replied("reply to hello").is_some_and(|reply| reply.ends_with(" without project settings") == refused)
-        },
-    );
+fn codex_ran(run: &mut Run, label: &str, text: &str, level: &str, folders: &[&str]) {
+    let marks: String = folders.iter().map(|folder| format!(" [{level} {folder}]")).collect();
+    let reply = format!("reply to {text}");
+    if !run.check(&format!("{label}: {text:?} is answered"), |watch| watch.replied(&reply).is_some()) {
+        return;
+    }
+    let reply = run.watch.replied(&reply).cloned().unwrap_or_default();
+    if reply.ends_with(&marks) && reply.matches(" [").count() == folders.len() {
+        println!("ok   {label}: {text:?} ran with {level} folders {folders:?}");
+    } else {
+        run.watch.miss(format!("{label}: {text:?} did not run with {level} folders {folders:?}: {reply}"));
+    }
 }
 
 fn codex_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
-    let (repo, plain) = (root.join("codex-trust"), root.join("codex-plain"));
+    let (repo, plain, tree) = (root.join("codex-trust"), root.join("codex-plain"), root.join("codex-tree"));
     repo_with(&repo, ".codex", "config.toml")?;
-    repo_with(&plain, "src", "main.txt")?;
-    let plain = project(run, &plain)?;
-    with_cli(run, CODEX, "codex-trust-plain", &plain, WorktreeChoice::Local)?;
-    codex_ran(run, "codex-trust-plain", true);
+    git(&repo, &["worktree", "add", "-q", &tree.to_string_lossy(), "-b", "codex-tree"])?;
+    let tree = tree.canonicalize()?.to_string_lossy().into_owned();
+    repo_with(&plain, "src/deep", "main.txt")?;
+    let deep = project(run, &plain.join("src/deep"))?;
+    with_cli(run, CODEX, "codex-trust-plain", &deep, WorktreeChoice::Local)?;
+    let (top, src) = (deep.trim_end_matches("/src/deep"), deep.trim_end_matches("/deep"));
+    codex_ran(run, "codex-trust-plain", "hello", "untrusted", &[top, src, &deep]);
     let repo = project(run, &repo)?;
     let denied = with_cli(run, CODEX, "codex-trust-denied", &repo, WorktreeChoice::Local)?;
     asks_for(run, "Codex", "codex-trust-denied", &denied, &repo);
     answer(run, &denied, ApprovalAnswer::Deny);
-    codex_ran(run, "codex-trust-denied", true);
-    let allowed = with_cli(run, CODEX, "codex-trust-allowed", &repo, WorktreeChoice::Local)?;
-    asks_for(run, "Codex", "codex-trust-allowed", &allowed, &repo);
-    answer(run, &allowed, ApprovalAnswer::Approve);
-    codex_ran(run, "codex-trust-allowed", false);
-    let claude = root.join("trust").canonicalize()?.to_string_lossy().into_owned();
-    with_cli(run, CODEX, "codex-trust-claude", &claude, WorktreeChoice::Local)?;
-    codex_ran(run, "codex-trust-claude", false);
+    codex_ran(run, "codex-trust-denied", "hello", "untrusted", &[&repo]);
+    run.studio.restart_thread(denied.clone());
+    run.send("again");
+    codex_ran(run, "codex-trust-denied", "again", "untrusted", &[&repo]);
+    let linked = WorktreeChoice::Existing { path: tree.clone() };
+    let branch = with_cli(run, CODEX, "codex-trust-tree", &repo, linked)?;
+    asks_for(run, "Codex", "codex-trust-tree", &branch, &repo);
+    answer(run, &branch, ApprovalAnswer::Deny);
+    codex_ran(run, "codex-trust-tree", "hello", "untrusted", &[&tree, &repo]);
+    let both = with_cli(run, CODEX, "codex-trust-allowed", &repo, WorktreeChoice::Local)?;
+    asks_for(run, "Codex", "codex-trust-allowed", &both, &repo);
+    std::fs::write(Path::new(&repo).join("CLAUDE.md"), "project")?;
+    let claude = in_folder(run, "codex-trust-both", &repo, WorktreeChoice::Local)?;
+    asks(run, "codex-trust-both", &claude, &repo);
+    answer(run, &claude, ApprovalAnswer::Approve);
+    ran_with(run, "codex-trust-both", "hello", "all");
+    run.focus(&both);
+    codex_ran(run, "codex-trust-allowed", "hello", "trusted", &[&repo]);
+    with_cli(run, CODEX, "codex-trust-kept", &repo, WorktreeChoice::Local)?;
+    codex_ran(run, "codex-trust-kept", "hello", "trusted", &[&repo]);
     Ok(())
 }
 
