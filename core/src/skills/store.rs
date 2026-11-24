@@ -248,16 +248,18 @@ fn walk(root: &Root, files: &mut HashSet<PathBuf>, hidden: &mut Vec<Listed>) -> 
     };
     for path in paths {
         let Some((size, mut stamp)) = path.to_str().and_then(|_| stamp(&path, root.links)) else { continue };
-        if !files.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
-            continue;
-        }
-        if size > MAX_FILE {
-            hidden.push(root.hides(&path, format!("larger than {} KB", MAX_FILE / 1024)));
+        let real = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if files.contains(&real) {
             continue;
         }
         if found.len() == MAX_SKILLS {
             hidden.push(root.hides(&path, format!("more than {MAX_SKILLS} skills in one folder")));
             break;
+        }
+        files.insert(real);
+        if size > MAX_FILE {
+            hidden.push(root.hides(&path, format!("larger than {} KB", MAX_FILE / 1024)));
+            continue;
         }
         for name in BESIDE {
             stamp.push(' ');
@@ -303,8 +305,11 @@ fn due<'a>(known: &HashMap<PathBuf, Row>, roots: &Roots, found: &'a [Found]) -> 
     let here: HashSet<&Path> = found.iter().map(|found| found.path.as_path()).collect();
     let changed =
         |found: &&Found| known.get(&found.path).is_none_or(|row| row.stamp != found.stamp || row.owner != found.owner);
+    let inside = |path: &Path, top: &Path| {
+        path.starts_with(top) && !path.ancestors().take_while(|dir| *dir != top).any(|dir| dir.join(".git").exists())
+    };
     let elsewhere = |path: &Path, owner: &str| {
-        roots.trusted.contains(owner) && roots.here.as_ref().is_none_or(|top| !path.starts_with(top)) && path.exists()
+        roots.trusted.contains(owner) && roots.here.as_ref().is_none_or(|top| !inside(path, top)) && path.exists()
     };
     let lost = known.iter().filter(|(path, row)| !here.contains(path.as_path()) && !elsewhere(path, &row.owner));
     let lost = lost.map(|(_, row)| row.id).collect();

@@ -148,7 +148,8 @@ fn naming(smoke: &mut Smoke) -> Result<(), String> {
     put(&smoke.data.join("skills/beep\u{7}box\tb\u{9b}c/SKILL.md"), "---\nname: beeper\ndescription: Beep\n---\n")?;
     let beep = smoke.run(&["list"])?.stdout;
     let beep = String::from_utf8_lossy(&beep).lines().find(|line| line.starts_with("beeper")).map(str::to_string);
-    let clean = beep.is_some_and(|line| line.matches('\t').count() == 2 && !line.contains('\u{7}'));
+    let clean = beep
+        .is_some_and(|line| line.matches('\t').count() == 2 && !line.contains(|c: char| c.is_control() && c != '\t'));
     smoke.check("nor do a folder name's", clean);
     let raw = smoke.run(&["list", "--json"])?.stdout;
     smoke.check("nor do they in the JSON", !String::from_utf8_lossy(&raw).trim_end().contains(char::is_control));
@@ -236,12 +237,15 @@ fn links(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     smoke.check("but not one outside it", smoke.listed("linked")?.is_none());
     skill(&smoke.project.join("kept"), "cuckoo", "Cuckoo", "")?;
     let indexed = smoke.listed("cuckoo")?.is_some();
+    let aside = smoke.project.join("aside");
+    rename(smoke.project.join(".agents"), &aside).map_err(|error| error.to_string())?;
     remove_dir_all(smoke.project.join("kept")).map_err(|error| error.to_string())?;
     skill(&outside.join("nest"), "cuckoo", "Cuckoo", "")?;
     link(&outside.join("nest"), &smoke.project.join("kept"))?;
     let bytes = || read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string());
     let left = smoke.listed("cuckoo")?.is_none() && !bytes()?.windows(6).any(|part| part == b"Cuckoo");
-    smoke.check("a folder that becomes a link out leaves the index", indexed && left);
+    smoke.check("a project's only folder that becomes a link out leaves the index", indexed && left);
+    rename(&aside, smoke.project.join(".agents")).map_err(|error| error.to_string())?;
     link(&outside.join("linked"), &project.join("linked-too"))?;
     smoke.check("a project may not link a skill in", smoke.listed("linked")?.is_none());
     let mode = std::fs::metadata(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
@@ -276,6 +280,17 @@ fn trust(smoke: &mut Smoke) -> Result<(), String> {
     let bytes = read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
     let kept = bytes.windows(10).any(|part| part == b"kookaburra" || part == b"Build this");
     smoke.check("and its text leaves the index", !kept);
+    let nested = smoke.project.join("nested");
+    skill(&nested.join(".agents/skills"), "magpie", "Magpie", "")?;
+    create_dir_all(nested.join(".git")).map_err(|error| error.to_string())?;
+    let both = serde_json::json!({ "version": 1, "projects": [], "trusted": [smoke.project, nested] });
+    put(&smoke.data.join("state.json"), &both.to_string())?;
+    let listed = smoke.json(&["list", "--project", "nested"])?.to_string().contains("magpie");
+    let outer = smoke.listed("local-build")?.is_some() && smoke.listed("magpie")?.is_none();
+    let bytes = read(smoke.data.join("skills.sqlite")).map_err(|error| error.to_string())?;
+    let kept = bytes.windows(6).any(|part| part == b"Magpie");
+    smoke.check("a trusted checkout inside it keeps its own rows", listed && outer && kept);
+    remove_dir_all(&nested).map_err(|error| error.to_string())?;
     put(&smoke.data.join("state.json"), &state.to_string())?;
     Ok(())
 }
