@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use eukhe_types::daemon::{SessionEvent, StreamUpdate};
 use eukhe_types::session::AgentMessage;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, user,
-    Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
+    assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, trust,
+    user, Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
 
@@ -269,14 +269,13 @@ fn reviewer(access: AccessMode) -> &'static str {
 
 #[allow(clippy::too_many_lines)]
 fn start(
-    cwd: &str,
     account: Option<&Path>,
     sink: Option<Sink>,
     approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
     turns: SharedTurns,
 ) -> Result<Process, String> {
     let binary = program("LOCAL_STUDIO_CODEX_BIN", "codex");
-    let mut command = command(&binary, cwd);
+    let mut command = command(&binary, &crate::platform::home_or_root());
     command.arg("app-server");
     if let Some(account) = account {
         command.env("CODEX_HOME", account);
@@ -387,8 +386,7 @@ async fn initialize(rpc: &Rpc) -> Result<(), String> {
 }
 
 pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
-    let home = crate::platform::home_or_root();
-    let mut process = start(&home, None, None, Arc::default(), Arc::default())?;
+    let mut process = start(None, None, Arc::default(), Arc::default())?;
     let listed = async {
         initialize(&process.rpc).await?;
         process.rpc.call("model/list", json!({})).await
@@ -427,8 +425,8 @@ pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
         .collect())
 }
 
-pub(crate) async fn read(account: Option<&Path>, cwd: &str, thread: &str) -> Result<Vec<AgentMessage>, String> {
-    let mut process = start(cwd, account, None, Arc::default(), Arc::default())?;
+pub(crate) async fn read(account: Option<&Path>, thread: &str) -> Result<Vec<AgentMessage>, String> {
+    let mut process = start(account, None, Arc::default(), Arc::default())?;
     let read = async {
         initialize(&process.rpc).await?;
         process.rpc.call("thread/read", json!({ "threadId": thread, "includeTurns": true })).await
@@ -442,15 +440,13 @@ pub(crate) async fn read(account: Option<&Path>, cwd: &str, thread: &str) -> Res
 
 impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
+        if !Path::new(&launch.cwd).is_dir() {
+            return Err(format!("This thread's folder is gone: {}", launch.cwd));
+        }
         let approvals = Arc::new(Mutex::new(HashMap::new()));
         let turns = SharedTurns::default();
-        let mut process = start(
-            &launch.cwd,
-            launch.account.as_deref(),
-            Some(sink.clone()),
-            Arc::clone(&approvals),
-            Arc::clone(&turns),
-        )?;
+        let mut process =
+            start(launch.account.as_deref(), Some(sink.clone()), Arc::clone(&approvals), Arc::clone(&turns))?;
         let opened = async {
             initialize(&process.rpc).await?;
             let mut params = json!({
@@ -461,6 +457,12 @@ impl Codex {
             });
             if let Some(model) = launch.model.as_deref().filter(|model| !model.is_empty()) {
                 params["model"] = json!(model);
+            }
+            if !trust::own(&launch.cwd) {
+                let level = json!({ "trust_level": if launch.project { "trusted" } else { "untrusted" } });
+                let projects: Map<String, Value> =
+                    trust::folders(&launch.cwd).into_iter().map(|folder| (folder, level.clone())).collect();
+                params["config"] = json!({ "projects": projects });
             }
             if launch.resume {
                 params["threadId"] = json!(launch.native);

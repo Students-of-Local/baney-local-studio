@@ -28,6 +28,7 @@ struct Shared {
     turns: AtomicU64,
     answers: Mutex<Vec<(Value, Sender<String>)>>,
     thread: Mutex<String>,
+    trust: Mutex<String>,
 }
 
 impl Shared {
@@ -208,6 +209,7 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         };
         reply = format!("{reply} after {decision}");
     }
+    reply.push_str(&shared.trust.lock().unwrap_or_else(PoisonError::into_inner));
     let agent = format!("agent-{number}");
     shared.notify("item/started", &json!({ "item": { "id": agent, "type": "agentMessage" } }));
     let reply = json!({ "id": agent, "type": "agentMessage", "text": reply });
@@ -221,8 +223,21 @@ fn pause(variable: &str) {
     std::thread::sleep(Duration::from_millis(delay));
 }
 
+fn at_home() -> bool {
+    let home = std::env::var_os("HOME").and_then(|home| PathBuf::from(home).canonicalize().ok());
+    home.is_some() && home == std::env::current_dir().ok()
+}
+
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
+    if matches!(method, "thread/start" | "thread/resume") {
+        let projects = params["config"]["projects"].as_object().cloned().unwrap_or_default();
+        let levels = projects
+            .iter()
+            .map(|(folder, project)| format!(" [{} {folder}]", project["trust_level"].as_str().unwrap_or_default()));
+        *shared.trust.lock().unwrap_or_else(PoisonError::into_inner) = levels.collect();
+    }
     match method {
+        "initialize" if !at_home() => shared.refuse(id, "fake codex runs outside the home folder"),
         "model/list" => shared.respond(
             id,
             &json!({ "data": [{

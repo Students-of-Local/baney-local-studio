@@ -316,9 +316,9 @@ impl Actor {
             effort: flags.thinking_level.clone(),
             access: flags.access.unwrap_or(AccessMode::FullAccess),
             account,
-            project: harness != Harness::ClaudeCode || !flags.project_refused && self.cli_trusted(&cwd),
+            project: !flags.project_refused && self.cli_trusted(&cwd),
         };
-        let ask = !launch.project && !flags.project_refused && harness::trust::has_config(&launch.cwd);
+        let ask = !launch.project && !flags.project_refused && harness::trust::has_config(harness, &launch.cwd);
         self.generation += 2;
         let generation = self.generation - 1;
         let root = harness::trust::root(&cwd);
@@ -347,17 +347,18 @@ impl Actor {
 
     fn cli_ask_trust(&mut self, id: &str) {
         let Some(opening) = self.opening.get(id).filter(|opening| opening.held()) else { return };
-        let root = &opening.root;
+        let (root, cli) = (&opening.root, name(opening.launch.harness));
         let approval = Approval {
             request_id: TRUST.to_string(),
             step: 0,
-            command: format!("Use this project's own Claude Code settings: {root}"),
+            command: format!("Use this project's own {cli} settings: {root}"),
             effects: vec![
-                "Its hooks and MCP servers run without asking, and the answer is kept for this project's threads"
+                "Its hooks and MCP servers run without asking, and the answer is kept for this project's Claude Code and \
+                 Codex threads"
                     .to_string(),
                 "Deny keeps this thread on your own settings".to_string(),
             ],
-            agent: Some(name(Harness::ClaudeCode).to_string()),
+            agent: Some(cli.to_string()),
         };
         self.add_approval(id.to_string(), approval);
     }

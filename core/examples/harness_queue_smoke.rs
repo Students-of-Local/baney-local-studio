@@ -730,10 +730,12 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
     codex_unexpected_approval(run)?;
     claude_trust(run, root)?;
+    codex_trust(run, root)?;
     account_scenarios(run, root)
 }
 
 const CLAUDE: (&str, &str) = ("claude-code", "haiku");
+const CODEX: (&str, &str) = ("codex", "fake-mini");
 
 fn project(run: &mut Run, path: &Path) -> anyhow::Result<String> {
     let path = path.canonicalize()?.to_string_lossy().into_owned();
@@ -743,10 +745,14 @@ fn project(run: &mut Run, path: &Path) -> anyhow::Result<String> {
 }
 
 fn configured_repo(dir: &Path) -> anyhow::Result<()> {
+    repo_with(dir, ".claude", "settings.json")
+}
+
+fn repo_with(dir: &Path, folder: &str, file: &str) -> anyhow::Result<()> {
     scratch_repo(dir)?;
-    std::fs::create_dir_all(dir.join(".claude"))?;
-    std::fs::write(dir.join(".claude/settings.json"), "{}")?;
-    git(dir, &["add", ".claude"])?;
+    std::fs::create_dir_all(dir.join(folder))?;
+    std::fs::write(dir.join(folder).join(file), "{}")?;
+    git(dir, &["add", folder])?;
     git(dir, &["-c", "user.name=smoke", "-c", "user.email=smoke@localhost", "commit", "-q", "-m", "settings"])
 }
 
@@ -757,21 +763,35 @@ fn started(run: &mut Run, label: &str) -> anyhow::Result<String> {
 }
 
 fn in_folder(run: &mut Run, label: &str, project: &str, worktree: WorktreeChoice) -> anyhow::Result<String> {
-    run.begin_in(label, CLAUDE, None, AccessMode::Supervised, (Some(project.to_string()), worktree));
+    with_cli(run, CLAUDE, label, project, worktree)
+}
+
+fn with_cli(
+    run: &mut Run,
+    pick: (&str, &str),
+    label: &str,
+    project: &str,
+    worktree: WorktreeChoice,
+) -> anyhow::Result<String> {
+    run.begin_in(label, pick, None, AccessMode::Supervised, (Some(project.to_string()), worktree));
     let thread = started(run, label)?;
     run.focus(&thread);
     Ok(thread)
 }
 
 fn asks(run: &mut Run, label: &str, thread: &str, folder: &str) {
-    let before = fakes_running("fake_claude");
-    let card = format!("project-trust: Use this project's own Claude Code settings: {folder}");
+    asks_for(run, "Claude Code", label, thread, folder);
+}
+
+fn asks_for(run: &mut Run, cli: &str, label: &str, thread: &str, folder: &str) {
+    let before = clis_running();
+    let card = format!("project-trust: Use this project's own {cli} settings: {folder}");
     run.check(&format!("{label}: the folder is asked about"), |watch| {
         watch.asked.get(thread).is_some_and(|asked| *asked == [card.clone()])
     });
     run.until(Duration::from_secs(1), |_| false);
-    if fakes_running("fake_claude") != before || run.watch.replied("reply to hello").is_some() {
-        run.watch.miss(format!("{label}: Claude Code ran before the question was answered"));
+    if clis_running() != before || run.watch.replied("reply to hello").is_some() {
+        run.watch.miss(format!("{label}: {cli} ran before the question was answered"));
     }
 }
 
@@ -849,6 +869,64 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     let quit = project(run, &quit)?;
     let waiting = in_folder(run, "trust-quit", &quit, WorktreeChoice::Local)?;
     asks(run, "trust-quit", &waiting, &quit);
+    Ok(())
+}
+
+fn codex_ran(run: &mut Run, label: &str, text: &str, level: &str, folders: &[&str]) {
+    let marks = folders.iter().map(|folder| format!(" [{level} {folder}]")).collect::<Vec<_>>().concat();
+    let reply = format!("reply to {text}");
+    if !run.check(&format!("{label}: {text:?} is answered"), |watch| watch.replied(&reply).is_some()) {
+        return;
+    }
+    let reply = run.watch.replied(&reply).cloned().unwrap_or_default();
+    if reply.ends_with(&marks) && reply.matches(" [").count() == folders.len() {
+        println!("ok   {label}: {text:?} ran with {level} folders {folders:?}");
+    } else {
+        run.watch.miss(format!("{label}: {text:?} did not run with {level} folders {folders:?}: {reply}"));
+    }
+}
+
+fn codex_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
+    let (repo, plain, tree) = (root.join("codex-trust"), root.join("codex-plain"), root.join("codex-tree"));
+    repo_with(&repo, ".codex", "config.toml")?;
+    git(&repo, &["worktree", "add", "-q", &tree.to_string_lossy(), "-b", "codex-tree"])?;
+    let tree = tree.canonicalize()?.to_string_lossy().into_owned();
+    repo_with(&plain, "src/deep", "main.txt")?;
+    let deep = project(run, &plain.join("src/deep"))?;
+    let gone = with_cli(run, CODEX, "codex-trust-plain", &deep, WorktreeChoice::Local)?;
+    let (top, src) = (deep.trim_end_matches("/src/deep"), deep.trim_end_matches("/deep"));
+    codex_ran(run, "codex-trust-plain", "hello", "untrusted", &[top, src, &deep]);
+    run.studio.restart_thread(gone);
+    std::fs::remove_dir_all(&deep)?;
+    run.send("again");
+    let wanted = format!("This thread's folder is gone: {deep}");
+    run.check("codex-trust-plain: a send after its folder is deleted says so", |watch| {
+        watch.refused.iter().any(|refused| refused.contains(&wanted))
+    });
+    let repo = project(run, &repo)?;
+    let denied = with_cli(run, CODEX, "codex-trust-denied", &repo, WorktreeChoice::Local)?;
+    asks_for(run, "Codex", "codex-trust-denied", &denied, &repo);
+    answer(run, &denied, ApprovalAnswer::Deny);
+    codex_ran(run, "codex-trust-denied", "hello", "untrusted", &[&repo]);
+    run.studio.restart_thread(denied.clone());
+    run.send("again");
+    codex_ran(run, "codex-trust-denied", "again", "untrusted", &[&repo]);
+    let linked = WorktreeChoice::Existing { path: tree.clone() };
+    let branch = with_cli(run, CODEX, "codex-trust-tree", &repo, linked)?;
+    asks_for(run, "Codex", "codex-trust-tree", &branch, &repo);
+    answer(run, &branch, ApprovalAnswer::Deny);
+    codex_ran(run, "codex-trust-tree", "hello", "untrusted", &[&tree, &repo]);
+    let both = with_cli(run, CODEX, "codex-trust-allowed", &repo, WorktreeChoice::Local)?;
+    asks_for(run, "Codex", "codex-trust-allowed", &both, &repo);
+    std::fs::write(Path::new(&repo).join("CLAUDE.md"), "project")?;
+    let claude = in_folder(run, "codex-trust-both", &repo, WorktreeChoice::Local)?;
+    asks(run, "codex-trust-both", &claude, &repo);
+    answer(run, &claude, ApprovalAnswer::Approve);
+    ran_with(run, "codex-trust-both", "hello", "all");
+    run.focus(&both);
+    codex_ran(run, "codex-trust-allowed", "hello", "trusted", &[&repo]);
+    with_cli(run, CODEX, "codex-trust-kept", &repo, WorktreeChoice::Local)?;
+    codex_ran(run, "codex-trust-kept", "hello", "trusted", &[&repo]);
     Ok(())
 }
 
