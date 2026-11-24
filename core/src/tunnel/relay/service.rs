@@ -1,55 +1,16 @@
 use std::future::Future;
-use std::io::ErrorKind;
-use std::path::PathBuf;
 use std::time::Duration;
-
-use serde::{Deserialize, Serialize};
 
 use super::{Config, Ended, Event};
 use crate::link::devices::now_ms;
+use crate::tunnel::record::{Seen, AGAIN, STATE};
 use crate::tunnel::{fail, Failure, Ports, Tunnel, DEFAULT_PORTS};
 
 pub const WORKER_JS: &str = include_str!("../worker/relay.js");
 pub const WORKER_CONFIG: &str = include_str!("../worker/wrangler.jsonc");
-const RECORD: &str = "relay.json";
-const STATE: &str = "relay-state.json";
 const PING: Duration = Duration::from_secs(30);
-const AGAIN: &str = "run setup again: local-studio tunnel setup --relay";
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Record {
-    v: u32,
-    url: String,
-    name: String,
-    account_id: String,
-    key: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Seen {
-    state: String,
-    at: i64,
-    pid: u32,
-}
 
 impl Tunnel {
-    fn relay_path(&self) -> PathBuf {
-        self.dir.join(RECORD)
-    }
-
-    fn relay_record(&self) -> Result<Option<Record>, String> {
-        let path = self.relay_path();
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("{}: {error}", path.display())),
-        };
-        let bad = || format!("{} isn't a relay record Local Studio can read; {AGAIN}", path.display());
-        serde_json::from_slice(&bytes).ok().filter(|record: &Record| record.v == 1).map(Some).ok_or_else(bad)
-    }
-
     fn relay_note(&self, state: &str, line: &str, log: &impl Fn(&str)) {
         let now = Seen { state: state.to_string(), at: now_ms(), pid: std::process::id() };
         let wrote = serde_json::to_vec(&now)
@@ -61,7 +22,7 @@ impl Tunnel {
         log(line);
     }
 
-    fn relay_ports(&self, serve: Option<u16>, mcp: Option<u16>) -> Result<Ports, String> {
+    pub(in crate::tunnel) fn relay_ports(&self, serve: Option<u16>, mcp: Option<u16>) -> Result<Ports, String> {
         let route = self.route()?.map(|route| route.ports);
         Ok(Ports {
             serve: serve.or(route.and_then(|ports| ports.serve)).unwrap_or(DEFAULT_PORTS.serve),
@@ -108,11 +69,16 @@ impl Tunnel {
 
 fn ending(ended: Ended) -> (&'static str, String) {
     match ended {
-        Ended::Replaced => ("replaced", format!("another machine took this relay over; to take it back, {AGAIN}")),
-        Ended::Unauthorized => ("unauthorized", format!("the relay refused this machine's key; {AGAIN}")),
-        Ended::Outdated => {
-            ("outdated", format!("the relay speaks a newer protocol; update Local Studio, then {AGAIN}"))
+        Ended::Replaced => {
+            ("replaced", format!("another machine took this relay over; to take it back, run setup again: {AGAIN}"))
         }
+        Ended::Unauthorized => {
+            ("unauthorized", format!("the relay refused this machine's key; run setup again: {AGAIN}"))
+        }
+        Ended::Outdated => (
+            "outdated",
+            format!("the relay speaks a newer protocol; update Local Studio, then run setup again: {AGAIN}"),
+        ),
         Ended::BadConfig(why) => ("bad_config", why),
     }
 }

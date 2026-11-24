@@ -39,6 +39,7 @@ const CHECK_WAITS: [u64; 7] = [0, 1, 2, 4, 8, 15, 30];
 const DOH: [&str; 2] = ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"];
 const SERVICE_WAIT: Duration = Duration::from_secs(10);
 const RUN_TIMEOUT: Duration = Duration::from_mins(1);
+const WRANGLER: &str = "wrangler@4.163.0";
 const YML: &str = "cloudflared.yml";
 const TAILNET_RECORD: &str = "tailnet.json";
 
@@ -272,7 +273,7 @@ fn serve_program() -> PathBuf {
     tool("LS_SERVE_BIN", "local-studio-serve").unwrap_or_else(|| PathBuf::from("local-studio-serve"))
 }
 
-fn serve_disallow(hostname: &str) {
+pub(super) fn serve_disallow(hostname: &str) {
     let _ = serve_edit(hostname, true);
 }
 
@@ -477,11 +478,18 @@ impl Manager {
         }
     }
 
-    async fn install(&self, service: Service, program: &Path, args: &[String], log: &Path) -> Result<(), String> {
+    async fn install(
+        &self,
+        service: Service,
+        program: &Path,
+        args: &[String],
+        env: &[(&str, String)],
+        log: &Path,
+    ) -> Result<(), String> {
         let file = self.file(service);
         let text = match self {
-            Self::Launchd { .. } => plist(service.label, program, args, log),
-            Self::Systemd { .. } => unit(service.what, program, args),
+            Self::Launchd { .. } => plist(service.label, program, args, env, log),
+            Self::Systemd { .. } => unit(service.what, program, args, env),
         };
         if let Some(dir) = file.parent() {
             fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
@@ -608,10 +616,17 @@ fn xml(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn plist(label: &str, program: &Path, args: &[String], log: &Path) -> String {
+fn plist(label: &str, program: &Path, args: &[String], env: &[(&str, String)], log: &Path) -> String {
     let mut arguments = format!("\t\t<string>{}</string>\n", xml(&program.display().to_string()));
     for arg in args {
         let _ = writeln!(arguments, "\t\t<string>{}</string>", xml(arg));
+    }
+    let mut environment = String::new();
+    for (name, value) in env {
+        let _ = writeln!(environment, "\t\t<key>{name}</key>\n\t\t<string>{}</string>", xml(value));
+    }
+    if !environment.is_empty() {
+        environment = format!("\t<key>EnvironmentVariables</key>\n\t<dict>\n{environment}\t</dict>\n");
     }
     let log = xml(&log.display().to_string());
     format!(
@@ -624,7 +639,7 @@ fn plist(label: &str, program: &Path, args: &[String], log: &Path) -> String {
 \t<key>ProgramArguments</key>
 \t<array>
 {arguments}\t</array>
-\t<key>RunAtLoad</key>
+{environment}\t<key>RunAtLoad</key>
 \t<true/>
 \t<key>KeepAlive</key>
 \t<true/>
@@ -641,17 +656,25 @@ fn plist(label: &str, program: &Path, args: &[String], log: &Path) -> String {
 }
 
 fn systemd_word(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$"))
+    systemd_text(text).replace('$', "$$")
 }
 
-fn unit(what: &str, program: &Path, args: &[String]) -> String {
+fn systemd_text(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
+}
+
+fn unit(what: &str, program: &Path, args: &[String], env: &[(&str, String)]) -> String {
     let mut line = systemd_word(&program.display().to_string());
     for arg in args {
         line.push(' ');
         line.push_str(&systemd_word(arg));
     }
+    let environment = env.iter().fold(String::new(), |mut out, (name, value)| {
+        let _ = writeln!(out, "Environment={}", systemd_text(&format!("{name}={value}")));
+        out
+    });
     format!(
-        "[Unit]\nDescription={what}\n\n[Service]\nExecStart={line}\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription={what}\n\n[Service]\n{environment}ExecStart={line}\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -679,7 +702,7 @@ fn yml_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
-fn tychicus_route() -> Result<Option<(Value, PathBuf)>, Failure> {
+fn tychicus_route(kinds: &[&str]) -> Result<Option<(Value, PathBuf)>, Failure> {
     let dir = tychicus_dir()?;
     let path = dir.join("remote.json");
     let bytes = match fs::read(&path) {
@@ -689,11 +712,11 @@ fn tychicus_route() -> Result<Option<(Value, PathBuf)>, Failure> {
     };
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|error| fail("tychicus_config", format!("{}: {error}", path.display())))?;
-    Ok((value.get("route").and_then(Value::as_str) == Some("cloudflare")).then_some((value, dir)))
+    Ok(value.get("route").and_then(Value::as_str).is_some_and(|kind| kinds.contains(&kind)).then_some((value, dir)))
 }
 
 fn tychicus_tunnel() -> Result<Option<TychicusTunnel>, Failure> {
-    let Some((remote, dir)) = tychicus_route()? else { return Ok(None) };
+    let Some((remote, dir)) = tychicus_route(&["cloudflare"])? else { return Ok(None) };
     let yml_path = dir.join(YML);
     let yml = fs::read_to_string(&yml_path)
         .map_err(|error| fail("tychicus_config", format!("{}: {error}", yml_path.display())))?;
@@ -893,11 +916,32 @@ async fn resolves_here(hostname: &str) -> Result<(), String> {
     }
 }
 
-async fn probe(client: &reqwest::Client, base: &str, hostname: &str, mcp: bool, health: bool) -> Result<(), String> {
+#[derive(Clone, Copy, Default)]
+struct Want {
+    relay: bool,
+    health: bool,
+    mcp: bool,
+}
+
+async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want) -> Result<(), String> {
     let get = |path: &str| {
-        client.get(format!("{base}{path}")).header("Host", hostname).timeout(Duration::from_secs(15)).send()
+        client
+            .get(format!("{base}{path}"))
+            .header("Host", hostname)
+            .header("User-Agent", concat!("LocalStudio/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(15))
+            .send()
     };
-    if health {
+    if want.relay {
+        let path = "/_relay/health";
+        let answer = get(path).await.map_err(|error| format!("https://{hostname}{path}: {error}"))?;
+        let code = answer.status().as_u16();
+        let connected = answer.json::<Value>().await.is_ok_and(|value| value["connected"] == true);
+        if code != 200 || !connected {
+            return Err(format!("https://{hostname}{path} answered {code} without this machine connected."));
+        }
+    }
+    if want.health {
         let answer = get("/v1/health").await.map_err(|error| format!("https://{hostname}/v1/health: {error}"))?;
         let code = answer.status().as_u16();
         let ok = code == 200
@@ -907,7 +951,7 @@ async fn probe(client: &reqwest::Client, base: &str, hostname: &str, mcp: bool, 
             return Err(format!("https://{hostname}/v1/health answered {code}, not 200 from local-studio-serve."));
         }
     }
-    if mcp {
+    if want.mcp {
         let answer = get("/mcp").await.map_err(|error| format!("https://{hostname}/mcp: {error}"))?;
         let challenge = answer.headers().get("www-authenticate").and_then(|value| value.to_str().ok()).unwrap_or("");
         if answer.status().as_u16() != 401 || !challenge.contains("resource_metadata") {
@@ -935,12 +979,12 @@ fn dns_note(checks: &Value) -> &'static str {
 }
 
 impl Tunnel {
-    async fn check_once(&self, hostname: &str, mcp: bool, health: bool) -> Result<&'static str, String> {
+    async fn check_once(&self, hostname: &str, want: Want) -> Result<&'static str, String> {
         if let Some(base) = check_url() {
-            return probe(&self.http, &base, hostname, mcp, health).await.map(|()| "local");
+            return probe(&self.http, &base, hostname, want).await.map(|()| "local");
         }
         let base = check_origin(hostname);
-        let error = match probe(&self.http, &base, hostname, mcp, health).await {
+        let error = match probe(&self.http, &base, hostname, want).await {
             Ok(()) => return Ok("local"),
             Err(error) => error,
         };
@@ -956,7 +1000,7 @@ impl Tunnel {
             .resolve_to_addrs(hostname, &addrs)
             .build()
             .map_err(|error| error.to_string())?;
-        probe(&client, &base, hostname, mcp, health).await.map_err(|error| {
+        probe(&client, &base, hostname, want).await.map_err(|error| {
             format!("{error} (This computer's DNS has no answer for {hostname} yet, so this check used the address DNS over HTTPS gave.)")
         })?;
         Ok("public_only")
@@ -1020,7 +1064,7 @@ impl Tunnel {
                 let mut passed = false;
                 for wait in CHECK_WAITS {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
-                    match self.check_once(hostname, listens, health).await {
+                    match self.check_once(hostname, Want { relay: false, health, mcp: listens }).await {
                         Ok(found) => {
                             if found == "public_only" {
                                 dns = found;
@@ -1051,7 +1095,7 @@ impl Tunnel {
 
     fn refuse_for(&self, kind: &str) -> Result<(), Failure> {
         match self.route()? {
-            Some(route) if route.owner == "local-studio" && route.route == kind => Ok(()),
+            Some(route) if route.owner == "local-studio" && route.route == kind && self.on_relay()?.is_none() => Ok(()),
             Some(route) => {
                 let (owner, off) = if route.owner == "tychicus" {
                     ("Tychicus", "tychicus remote off")
@@ -1071,8 +1115,14 @@ impl Tunnel {
     }
 
     fn refuse_tychicus_tunnel(hostname: Option<&str>) -> Result<(), Failure> {
-        let Some((remote, _)) = tychicus_route()? else { return Ok(()) };
+        let Some((remote, _)) = tychicus_route(&["cloudflare", "relay"])? else { return Ok(()) };
         let old = remote.get("publicUrl").and_then(Value::as_str).unwrap_or("a Cloudflare hostname");
+        if remote["route"] == "relay" {
+            return Err(fail(
+                "tychicus_tunnel",
+                format!("Tychicus already runs a relay at {old} on this machine, and a machine has one tunnel. Turn it off first: tychicus remote off"),
+            ));
+        }
         let adopt = match hostname {
             Some(host) => format!("local-studio tunnel adopt --hostname {host} --yes"),
             None => "local-studio tunnel adopt --yes".to_string(),
@@ -1098,7 +1148,7 @@ impl Tunnel {
         self.private_write(YML, ingress(tunnel, credentials, hostnames, ports).as_bytes())?;
         let args = argv(&["tunnel", "--no-autoupdate", "--config", &yml.display().to_string(), "run"]);
         let log = self.dir.join("tunnel-service.log");
-        if let Err(error) = manager.install(OWN, cloudflared, &args, &log).await {
+        if let Err(error) = manager.install(OWN, cloudflared, &args, &[], &log).await {
             let _ = manager.remove(OWN).await;
             return Err(fail("service_failed", error));
         }
@@ -1609,6 +1659,7 @@ impl Tunnel {
                 serve_disallow(alias);
             }
         }
+        let worker = self.relay_off(&mut removed)?;
         if fs::remove_file(self.dir.join(YML)).is_ok() {
             removed.push(YML.to_string());
         }
@@ -1618,6 +1669,10 @@ impl Tunnel {
         }
         let message = if removed.is_empty() {
             "Nothing to turn off.".to_string()
+        } else if let Some(name) = worker {
+            format!(
+                "Off. The Worker {name} stays on your Cloudflare account and refuses every connector. To delete it: npx --yes {WRANGLER} delete --name {name}"
+            )
         } else {
             "Off. The Cloudflare tunnel, its DNS records and the tailnet node stay.".to_string()
         };

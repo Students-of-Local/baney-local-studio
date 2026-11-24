@@ -17,6 +17,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::platform::Mode;
 
+mod record;
 #[cfg(feature = "link")]
 pub mod relay;
 mod setup;
@@ -109,7 +110,15 @@ pub struct Status {
     pub next: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayState>,
     pub checked_at: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct RelayState {
+    pub state: String,
+    pub since: Option<i64>,
 }
 
 impl Status {
@@ -418,7 +427,7 @@ impl Tunnel {
         let keys = match (keys, route) {
             (Some(keys), Some(route)) if route.is_hosted() && self.service.is_some() => keys,
             (Some(keys), None) if self.service.is_some() => keys,
-            (_, Some(route)) => return Ok(route_status(&route)),
+            (_, Some(route)) => return Ok(self.relay_status(route_status(&route))),
             (_, None) => return Ok(local_status("none", NO_ROUTE, ports)),
         };
         self.flush_reports(&keys).await;
@@ -461,6 +470,7 @@ impl Tunnel {
             message,
             next: String::new(),
             next_command: None,
+            relay: None,
             checked_at: now_rfc3339(),
             state,
         }
@@ -1122,6 +1132,7 @@ fn route_status(route: &Route) -> Status {
         message,
         next: String::new(),
         next_command: None,
+        relay: None,
         checked_at: now_rfc3339(),
     }
     .stepped(false)
@@ -1247,6 +1258,7 @@ fn local_status(state: &str, message: &str, ports: Ports) -> Status {
         message: message.into(),
         next: String::new(),
         next_command: None,
+        relay: None,
         checked_at: now_rfc3339(),
     }
     .stepped(false)

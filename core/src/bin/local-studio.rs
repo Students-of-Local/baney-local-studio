@@ -505,6 +505,7 @@ fn show(value: &Value, as_json: bool) {
     }
     for (key, label) in [
         ("command", "run"),
+        ("nextCommand", "run"),
         ("template", "run"),
         ("url", "open"),
         ("mcpUrl", "MCP address"),
@@ -610,8 +611,11 @@ fn relay_run(flags: &[&str], as_json: bool) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "link"))]
+const NO_RELAY: &str = "this build has no relay: build local-studio with --features link";
+
+#[cfg(not(feature = "link"))]
 fn relay_run(_flags: &[&str], _as_json: bool) -> Result<(), String> {
-    Err("this build has no relay: build local-studio with --features link".into())
+    Err(NO_RELAY.into())
 }
 
 fn consent(yes: bool, as_json: bool) -> impl FnOnce(&Path, &[String]) -> bool {
