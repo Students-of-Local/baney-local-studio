@@ -54,7 +54,14 @@ jobs:
           workspaces: linux
           key: release
       - name: Build and bundle in the dev shell
-        run: nix develop ./linux --command bash -euc 'cd linux && cargo build --release && nu bundle.nu --profile release'
+        run: |
+          nix develop ./linux --command bash -euc '
+            cd linux
+            cargo build --release
+            nu bundle.nu --profile release
+            reported=$(target/release/bundle/local-studio-cli --version)
+            [ "$reported" = "local-studio $VERSION ($CHANNEL)" ] || { echo "::error::the bundled command line tool reports $reported, not local-studio $VERSION ($CHANNEL)"; exit 1; }
+          '
       - name: Upload to the draft
         env:
           GH_TOKEN: ${{ github.token }}

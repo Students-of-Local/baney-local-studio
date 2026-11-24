@@ -355,6 +355,7 @@ if [ "$os" = Darwin ]; then
   bin=${prefix:-$HOME/.local}/bin
   link=$bin/local-studio
   if [ -x "$cli" ]; then
+    cli=$(cd "${cli%/*}" && pwd)/local-studio-cli
     if [ -L "$link" ]; then
       case $(readlink "$link") in
         */"Local Studio"*.app/Contents/*) linkable=true ;;
