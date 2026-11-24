@@ -13,18 +13,22 @@ public struct OutboxEntry: Codable, Sendable, Hashable, Identifiable {
 
 public actor Outbox {
     private let file: URL
-    private var entries: [OutboxEntry]
+    private var entries: [OutboxEntry] = []
+    private var loaded = false
+    private var problem: String?
 
     public init(file: URL) {
         self.file = file
-        if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode([OutboxEntry].self, from: data) {
-            entries = saved
-        } else {
-            entries = []
-        }
+    }
+
+    /// What kept messages from being saved or read since the last call, for the user.
+    public func takeProblem() -> String? {
+        defer { problem = nil }
+        return problem
     }
 
     public func enqueue(thread: String, prompt: PromptDraft, delivery: Delivery) -> OutboxEntry {
+        load()
         let entry = OutboxEntry(
             args: SendArgs(request: "ios-" + UUID().uuidString.lowercased(), thread: thread, prompt: prompt, delivery: delivery),
             created: Date()
@@ -35,7 +39,8 @@ public actor Outbox {
     }
 
     public func pending() -> [OutboxEntry] {
-        entries
+        load()
+        return entries
     }
 
     public func markSent(_ request: String, epoch: String) {
@@ -69,20 +74,46 @@ public actor Outbox {
     }
 
     public func clear() {
+        loaded = true
         entries = []
         persist()
     }
 
+    /// A file that cannot be read stays as it is until it can; one that does not decode is kept under another name.
+    private func load() {
+        guard !loaded else {
+            return
+        }
+        do {
+            let data = try Data(contentsOf: file)
+            if let saved = try? JSONDecoder().decode([OutboxEntry].self, from: data) {
+                entries = saved + entries
+            } else {
+                try FileManager.default.moveItem(at: file, to: file.appendingPathExtension("unreadable-" + UUID().uuidString))
+                problem = "Messages waiting to be sent could not be read. They are kept in the app's folder."
+            }
+            loaded = true
+        } catch CocoaError.fileReadNoSuchFile {
+            loaded = true
+        } catch {
+            problem = "Messages waiting to be sent could not be read yet: \(error.localizedDescription)"
+        }
+    }
+
     private func persist() {
         do {
+            load()
+            guard loaded else {
+                return
+            }
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if entries.isEmpty {
-                try? FileManager.default.removeItem(at: file)
-            } else {
+            if !entries.isEmpty {
                 try JSONEncoder().encode(entries).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            } else if FileManager.default.fileExists(atPath: file.path) {
+                try FileManager.default.removeItem(at: file)
             }
         } catch {
-            return
+            problem = "Messages waiting to be sent are not saved, so keep Local Studio open: \(error.localizedDescription)"
         }
     }
 }

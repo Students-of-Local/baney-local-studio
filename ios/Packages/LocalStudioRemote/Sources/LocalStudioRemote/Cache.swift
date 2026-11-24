@@ -107,7 +107,11 @@ actor CacheStore {
 
     func removeCache(machine: String) {
         try? FileManager.default.removeItem(at: Self.cacheFile(in: directory, machine: machine))
-        try? FileManager.default.removeItem(at: Self.outboxFile(in: directory, machine: machine))
+        let outbox = Self.outboxFile(in: directory, machine: machine)
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.lastPathComponent.hasPrefix(outbox.lastPathComponent) {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     private func write<T: Encodable>(_ value: T, to file: URL) {

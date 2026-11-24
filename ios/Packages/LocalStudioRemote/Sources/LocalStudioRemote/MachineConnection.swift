@@ -44,6 +44,8 @@ public enum ConnectionEvent: Sendable {
     /// A send went out in an earlier server epoch and was never acknowledged. The phone doesn't
     /// retry it on its own (docs/remote.md, Requests): the snapshot shows whether it landed.
     case sendUnconfirmed(request: String)
+    /// Waiting messages could not be read or saved on the phone.
+    case outboxProblem(String)
 }
 
 enum DeliveryOutcome: Sendable {
@@ -216,6 +218,7 @@ public actor MachineConnection {
 
     public func send(_ thread: String, prompt: PromptDraft, delivery: Delivery) async -> String {
         let entry = await outbox.enqueue(thread: thread, prompt: prompt, delivery: delivery)
+        await reportOutbox()
         if live && busyRetry == nil {
             Task { await self.deliver(entry) }
         }
@@ -587,9 +590,17 @@ public actor MachineConnection {
         }
     }
 
+    private func reportOutbox() async {
+        if let problem = await outbox.takeProblem() {
+            sink.yield(.outboxProblem(problem))
+        }
+    }
+
     private func flushOutbox() async {
         let current = epoch ?? ""
-        for entry in await outbox.pending() {
+        let pending = await outbox.pending()
+        await reportOutbox()
+        for entry in pending {
             if let sent = entry.sentEpoch, sent != current {
                 await outbox.markUnconfirmed(entry.args.request)
                 sink.yield(.sendUnconfirmed(request: entry.args.request))
