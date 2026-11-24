@@ -873,7 +873,7 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
 }
 
 fn codex_ran(run: &mut Run, label: &str, text: &str, level: &str, folders: &[&str]) {
-    let marks: String = folders.iter().map(|folder| format!(" [{level} {folder}]")).collect();
+    let marks = folders.iter().map(|folder| format!(" [{level} {folder}]")).collect::<Vec<_>>().concat();
     let reply = format!("reply to {text}");
     if !run.check(&format!("{label}: {text:?} is answered"), |watch| watch.replied(&reply).is_some()) {
         return;

@@ -209,7 +209,7 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         };
         reply = format!("{reply} after {decision}");
     }
-    reply.push_str(&*shared.trust.lock().unwrap_or_else(PoisonError::into_inner));
+    reply.push_str(&shared.trust.lock().unwrap_or_else(PoisonError::into_inner));
     let agent = format!("agent-{number}");
     shared.notify("item/started", &json!({ "item": { "id": agent, "type": "agentMessage" } }));
     let reply = json!({ "id": agent, "type": "agentMessage", "text": reply });
