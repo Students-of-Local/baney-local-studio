@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use local_studio_core::tunnel::relay::{WORKER_CONFIG, WORKER_JS};
 use local_studio_core::tunnel::{SERVICE_LABEL, SERVICE_UNIT};
@@ -48,7 +48,7 @@ up() {
   if [ -f "$SHIM_STATE/refused" ]; then
     rm "$SHIM_STATE/refused"
     echo '{"state":"unauthorized","at":1,"pid":1}' > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
-  elif grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
+  elif [ ! -f "$SHIM_STATE/never" ] && grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
     touch "$SHIM_STATE/connected"
   fi
 }
@@ -218,6 +218,14 @@ impl<'a> Cases<'a> {
 
     fn hosts(&self) -> Result<Value, String> {
         Ok(read_json(&self.s.data.join("remote/serve.json"))?["allowTunnelHosts"].clone())
+    }
+
+    fn gone(&self, what: &str) -> Result<(), String> {
+        let left = ["relay.json", "relay-state.json", "route.json"].iter().find(|name| self.s.tunnel(name).exists());
+        ensure(left.is_none(), format!("{what} leaves {left:?}"))?;
+        ensure(!self.service_file().exists() && !self.state.join("up").exists(), format!("{what} leaves the service"))?;
+        ensure(!self.s.tunnel("relay").exists(), format!("{what} leaves the relay folder"))?;
+        ensure(self.hosts()? == json!([]), format!("{what} leaves the host allowed"))
     }
 
     fn live(&mut self, value: &Value) -> Result<(), String> {
@@ -419,5 +427,93 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
     c.no_key("S9 a failed deploy")?;
     c.set("deploy-fails", false)?;
     println!("ok: S9 again");
+    Ok(())
+}
+
+pub fn status(c: &mut Cases) -> Result<(), String> {
+    let again = "local-studio tunnel setup --relay";
+    let dead = {
+        let mut child = Command::new("true").stdin(Stdio::null()).spawn().map_err(text)?;
+        child.wait().map_err(text)?;
+        child.id()
+    };
+    let me = std::process::id();
+    for (state, pid, want, next, says) in [
+        ("connected", me, "connected", "ready", "connected to its relay"),
+        ("connecting", me, "connecting", "waiting", "connecting to its relay"),
+        ("disconnected", me, "disconnected", "waiting", "lost its relay"),
+        ("replaced", me, "replaced", "needs_setup", again),
+        ("unauthorized", me, "unauthorized", "needs_setup", again),
+        ("outdated", me, "outdated", "needs_setup", "Update Local Studio"),
+        ("bad_config", me, "bad_config", "needs_setup", again),
+        ("stopped", me, "stopped", "needs_setup", again),
+        ("connected", dead, "stopped", "needs_setup", again),
+    ] {
+        c.s.write("relay-state.json", &json!({"state":state,"at":1_700_000_000_001_i64,"pid":pid}).to_string())?;
+        let value = c.ls(&["tunnel", "status"], |_| {})?;
+        let message = value["message"].as_str().unwrap_or_default();
+        ensure(
+            value["relay"] == json!({"state":want,"since":(pid == me).then_some(1_700_000_000_001_i64)})
+                && value["next"] == next
+                && value["hostname"] == HOST
+                && message.contains(says)
+                && (next != "needs_setup" || value["nextCommand"] == again),
+            format!("status when {state}: {value}"),
+        )?;
+    }
+    fs::remove_file(c.s.tunnel("relay-state.json")).map_err(text)?;
+    let value = c.ls(&["tunnel", "status"], |_| {})?;
+    ensure(value["relay"] == json!({"state":"stopped","since":null}), format!("status with no state file: {value}"))?;
+    println!("ok: S12 status");
+    Ok(())
+}
+
+pub fn others(c: &mut Cases) -> Result<(), String> {
+    c.refused("another relay name", &["another"], "other_route")?;
+    c.refused("another account", &["smoke", "--account", OTHER], "other_route")?;
+    let value = c.ls(&["tunnel", "setup", "--cloudflare", "studio.example.com", "--yes"], |_| {})?;
+    ensure(value["code"] == "other_route", format!("a domain tunnel on the relay route: {value}"))?;
+    off(c)?;
+    let route = json!({"v":1,"owner":"local-studio","route":"cloudflare","hostname":"studio.example.com","aliases":[],"ports":{"mcp":8787,"serve":18094}});
+    c.s.write("route.json", &route.to_string())?;
+    c.refused("a domain tunnel", &["smoke"], "other_route")?;
+    fs::remove_file(c.s.tunnel("route.json")).map_err(text)?;
+    let tychicus = c.s.root.join("tychicus");
+    fs::create_dir_all(&tychicus).map_err(text)?;
+    for kind in ["cloudflare", "relay"] {
+        let remote = json!({"route":kind,"publicUrl":"https://tychicus.example.com","port":8787});
+        fs::write(tychicus.join("remote.json"), remote.to_string()).map_err(text)?;
+        let message = c.refused("a Tychicus route", &["smoke"], "tychicus_tunnel")?;
+        ensure(message.contains("tychicus remote off"), format!("how to turn Tychicus's off: {message}"))?;
+    }
+    fs::remove_file(tychicus.join("remote.json")).map_err(text)?;
+    println!("ok: S14 other routes");
+
+    c.set("never", true)?;
+    let value = c.setup(&["smoke"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(value["code"] == "going_live", format!("S10 going_live: {value}"))?;
+    ensure(
+        message.contains("refuses every connector until setup runs again"),
+        format!("S10 the Worker stays: {value}"),
+    )?;
+    c.gone("S10")?;
+    c.set("never", false)?;
+    c.no_key("S10")?;
+    println!("ok: S10 never connects");
+    Ok(())
+}
+
+pub fn off(c: &mut Cases) -> Result<(), String> {
+    c.s.write("relay-state.json", "{}")?;
+    let value = c.ls(&["tunnel", "off"], |_| {})?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(
+        value["state"] == "off" && message.contains("npx --yes wrangler@4.163.0 delete --name smoke"),
+        format!("S13 off names the Worker's delete command: {value}"),
+    )?;
+    c.gone("S13 off")?;
+    c.no_key("S13")?;
+    println!("ok: S13 off");
     Ok(())
 }
