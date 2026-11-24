@@ -351,6 +351,31 @@ if [ "$os" = Darwin ]; then
   [ "$reported" = "$expect_version" ] || { rm -rf "$incoming"; die "the app reports ${reported:-nothing}, not $expect_version $(sed -n 1p "$tmp/version.log")"; }
   swap_in "$incoming" "$target" "$apps/.$name.app.previous"
   say "Installed $name $version in $target"
+  cli=$target/Contents/MacOS/local-studio-cli
+  bin=${prefix:-$HOME/.local}/bin
+  link=$bin/local-studio
+  if [ -x "$cli" ]; then
+    cli=$(cd "${cli%/*}" && pwd)/local-studio-cli
+    if [ -L "$link" ]; then
+      case $(readlink "$link") in
+        */"Local Studio"*.app/Contents/*) linkable=true ;;
+        *) linkable=false ;;
+      esac
+    else
+      [ -e "$link" ] && linkable=false || linkable=true
+    fi
+    if [ "$linkable" = true ]; then
+      mkdir -p "$bin"
+      ln -sfn "$cli" "$link"
+      say "Linked $link to $cli"
+      case ":$PATH:" in
+        *":$bin:"*) ;;
+        *) echo "    $bin is not on PATH; add it to run local-studio from a terminal" ;;
+      esac
+    else
+      echo "    $link exists and is not a Local Studio link, so it was left alone; the command line tool is $cli"
+    fi
+  fi
   if [ "$open_app" = true ]; then open "$target"; fi
 else
   bundle=$(only_entry)
