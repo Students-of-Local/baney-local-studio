@@ -19,6 +19,7 @@ const REFUSED: &[&str] = &[
     " https://example.com",
     "ht\ntps://example.com",
     "httpsx://example.com",
+    "file:///tmp/a\u{2028}b\u{2029}c\u{202E}txt.exe",
 ];
 
 fn main() -> anyhow::Result<()> {
@@ -28,7 +29,8 @@ fn main() -> anyhow::Result<()> {
     for url in REFUSED {
         let message = refused_link(url);
         anyhow::ensure!(message.is_some(), "{url:?} was opened");
-        anyhow::ensure!(!message.unwrap_or_default().contains('\n'), "{url:?} broke the message over two lines");
+        let breaks = ['\n', '\u{2028}', '\u{2029}', '\u{202E}'];
+        anyhow::ensure!(!message.unwrap_or_default().contains(breaks), "{url:?} broke or turned the message");
     }
     println!("PASS links_smoke");
     Ok(())
