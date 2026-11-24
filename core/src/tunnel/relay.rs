@@ -16,9 +16,12 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream};
 
+use self::streams::Streams;
 use super::Ports;
 use crate::link::client::tls;
 use crate::link::devices::random;
+
+mod streams;
 
 const VERSION: u64 = 1;
 const KEY_CHARS: usize = 43;
@@ -172,10 +175,12 @@ async fn session(
     let (out, queue) = mpsc::unbounded_channel();
     let mut writer = JoinSet::new();
     writer.spawn(write(sink, queue, ping));
+    let mut streams = Streams::new(config.ports, out.clone());
     let mut deadline = Instant::now() + HELLO;
     let stop = loop {
         let next = tokio::select! {
             biased;
+            () = streams.reap() => continue,
             next = stream.next() => next,
             () = sleep_until(deadline) => {
                 break Stop::Lost(match up {
@@ -207,9 +212,11 @@ async fn session(
             }
             Some("replaced") if spoken => return Stop::Ended(Ended::Replaced),
             Some("pong") if spoken && up.is_some() => deadline = Instant::now() + 2 * ping,
+            Some(kind) if spoken && up.is_some() => streams.control(kind, &frame),
             _ => {}
         }
     };
+    drop(streams);
     out.send(Message::Close(None)).ok();
     timeout(HANG_UP, writer.join_next()).await.ok();
     stop
