@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 use super::{check_ports, fail, serve_allow, Failure, Ports, Route, RoutePorts, Tunnel, UpLock, DEFAULT_PORTS};
 use crate::platform::Mode;
 
+pub const CLOUDFLARE_SIGNUP: &str = "https://dash.cloudflare.com/sign-up";
+pub const CLOUDFLARE_ADD_DOMAIN: &str = "https://developers.cloudflare.com/fundamentals/manage-domains/add-site/";
+pub const AGENT_PROMPT: &str = "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it.";
 pub const SERVE_PATHS: [&str; 2] = ["/v1/health", "/v1/ws"];
 pub const MCP_PATHS: [&str; 9] = [
     "/mcp",
@@ -46,6 +49,35 @@ pub fn platform() -> &'static str {
     } else {
         "linux"
     }
+}
+
+#[must_use]
+pub fn byo(platform: &str) -> Value {
+    if platform == "windows" {
+        return json!({
+            "state": "byo",
+            "next": "byo",
+            "command": "local-studio tunnel setup --tailnet",
+            "message": "Own Cloudflare tunnels need a Mac or Linux machine for now. On Windows, keep Local Studio on your tailnet.",
+            "plan": ["Sign in to Tailscale, then run: local-studio tunnel setup --tailnet"],
+        });
+    }
+    json!({
+        "state": "byo",
+        "next": "byo",
+        "template": "local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes",
+        "url": CLOUDFLARE_SIGNUP,
+        "agentPrompt": AGENT_PROMPT,
+        "message": format!("Every Local Studio tunnel runs on your own free Cloudflare account and a domain you own. Do it yourself with the steps below, or tell a coding agent (Claude Code, Codex): \"{AGENT_PROMPT}\" It runs every step and hands you only the Cloudflare sign-in."),
+        "plan": [
+            format!("Make a free Cloudflare account ({CLOUDFLARE_SIGNUP}) and add a domain you own to it ({CLOUDFLARE_ADD_DOMAIN}). Cloudflare must run its DNS."),
+            "Run: local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes, with your domain in place of YOUR-DOMAIN. It downloads the pinned cloudflared and answers needs_signin with a cloudflared tunnel login command.",
+            "Run that login command, sign in to Cloudflare in the browser it opens and pick your domain.",
+            "Run the setup command again. It creates the tunnel local-studio-<this machine>, its DNS record and a login service, checks the public address, and answers ready with your MCP and phone addresses.",
+            "Check it any time with local-studio tunnel status. local-studio tunnel off removes it from this machine.",
+            "Already have a Tychicus tunnel here? Run local-studio tunnel adopt instead. No domain? local-studio tunnel setup --tailnet keeps Local Studio on your tailnet.",
+        ],
+    })
 }
 
 fn query(text: &str) -> String {

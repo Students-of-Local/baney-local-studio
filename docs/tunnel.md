@@ -34,6 +34,7 @@ These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. On
 ## Local Studio sets it up
 
 ```
+local-studio tunnel byo                                             the steps for a tunnel on the person's own Cloudflare account
 local-studio tunnel setup --cloudflare <name> [--alias <name>]...   the person's own Cloudflare account
 local-studio tunnel setup --tailnet                                 tailnet only, no Funnel
 local-studio tunnel adopt [--hostname <name>]                       take over a Tychicus tunnel already on this machine
@@ -42,6 +43,20 @@ local-studio tunnel off                                             stop and rem
 ```
 
 `setup` also takes `--serve <port>` and `--mcp <port>` (defaults 18094 on Cloudflare, 18093 on the tailnet, and 8787).
+
+### Your own Cloudflare tunnel, step by step
+
+This is what `local-studio tunnel byo` prints, and what anyone setting up a tunnel follows:
+
+1. Make a free Cloudflare account at https://dash.cloudflare.com/sign-up and add a domain you own to it (https://developers.cloudflare.com/fundamentals/manage-domains/add-site/). Cloudflare must run the domain's DNS. The free plan is enough.
+2. Run `local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes`, with your domain in place of `YOUR-DOMAIN`. It downloads the pinned cloudflared and, the first time, answers `needs_signin` with a `cloudflared tunnel login` command.
+3. Run that command, sign in to Cloudflare in the browser it opens, and pick your domain. cloudflared writes `~/.cloudflared/cert.pem`; Local Studio checks only that the file exists.
+4. Run the setup command again. It creates the tunnel `local-studio-<machine>`, its DNS record and a login service, checks the public address, and answers `ready` with the MCP address (`https://studio.YOUR-DOMAIN/mcp`) and the phone address (`wss://studio.YOUR-DOMAIN/v1/ws`).
+5. `local-studio tunnel status` shows it any time; `local-studio tunnel off` removes it from this machine and leaves the tunnel and DNS record in your Cloudflare account.
+
+**Or let an agent do it.** Tell a coding agent such as Claude Code or Codex: "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it." The guide's JSON carries that sentence as `agentPrompt`. Every step answers a state with the next command (below), so the agent runs them in order and stops only at `needs_signin`, where it hands the person the `cloudflared tunnel login` command (signing in to Cloudflare stays with the person), then polls `status --json`. Picking the hostname is the one question it asks.
+
+A machine that already runs a Tychicus tunnel uses `local-studio tunnel adopt` instead. Without a domain, `local-studio tunnel setup --tailnet` keeps Local Studio on the tailnet. Windows has no tunnel service yet, so there `byo` points at the tailnet route.
 
 ### Your own Cloudflare account
 
@@ -65,11 +80,11 @@ While both connectors run, Cloudflare sends each request to either one, and Tych
 
 ### Every channel, no waitlist
 
-Donovan, 2026-11-24: "NO more waitlist." `setup`, `adopt`, `status` and `off` run the same on stable, nightly and dev, and nothing answers `waitlist`. A person sets up their own route for free: Tailscale (`setup --tailnet`, no domain needed) or their own Cloudflare account and domain (`setup --cloudflare <hostname>`). `local-studio tunnel request` and the hosted route are gone. The hosted client commands (`up`, `down`, `release`, `ports`) remain only for a machine that already holds a hosted tunnel's keys.
+Donovan, 2026-11-24: "NO more waitlist." `setup`, `adopt`, `status` and `off` run the same on stable, nightly and dev, and nothing answers `waitlist`. Everyone is directed to set up a tunnel on their own free Cloudflare account and domain (`local-studio tunnel byo` prints the steps, or hands them to an agent), or Tailscale (`setup --tailnet`, no domain needed). `local-studio tunnel request` and the hosted route are gone. The hosted client commands (`up`, `down`, `release`, `ports`) remain only for a machine that already holds a hosted tunnel's keys.
 
 ### Agents can run it
 
-An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL or the command), `needs_dns`, `confirm` (adopt's plan, waiting for `--yes`), `needs_tychicus_join`, `needs_serve_allow_host` (tailnet: run the command it carries), `off`, or `error` with a code (exit 1). `status` with no route answers `none` with `nextCommand` `local-studio tunnel setup --tailnet`, and its message names the Cloudflare choice too. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
+An agent must be able to set a tunnel up for a person. Every `tunnel` command takes `--json`, never prompts when stdin isn't a terminal, and returns one state with the next step: `byo` (the guide; `byo --json` carries the steps as `plan`, the setup command as `template` and the sentence for an agent as `agentPrompt`), `none` (no route yet), `ready`, `needs_signin` (the person signs in to Cloudflare or Tailscale; the state carries the URL or the command), `needs_dns`, `confirm` (adopt's plan, waiting for `--yes`), `needs_tychicus_join`, `needs_serve_allow_host` (tailnet: run the command it carries), `off`, or `error` with a code (exit 1). `status` with no route answers `none` with `nextCommand` `local-studio tunnel byo`, and its message names the tailnet choice too. `--yes` accepts the steps that change the machine, such as adopting a Tychicus tunnel. Signing in stays with the person: an agent hands over the URL and polls `status --json`.
 
 ### Going live
 

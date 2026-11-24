@@ -72,6 +72,10 @@ Add a project folder and start a thread.
 
 Settings → General → Keyboard turns on vim keys (j/k, gg/G, h/l, / and a modal composer).
 
+### Reach it from anywhere
+
+Your phone, other machines and web assistants (claude.ai, ChatGPT, grok.com) reach Local Studio through a tunnel on your own free Cloudflare account and a domain you own. There is no hosted tunnel and no waitlist. Run `local-studio tunnel byo` for the steps, tell a coding agent "Set up my Local Studio tunnel: run local-studio tunnel byo --json and follow it.", or follow [Your own Cloudflare tunnel, step by step](docs/tunnel.md#your-own-cloudflare-tunnel-step-by-step). Without a domain, `local-studio tunnel setup --tailnet` keeps it on your tailnet.
+
 ## Plugins
 
 A Local Studio plugin is a folder, usually a git tree, with a `plugin.toml` at its root:

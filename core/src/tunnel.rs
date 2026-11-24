@@ -20,8 +20,8 @@ use crate::platform::Mode;
 mod setup;
 
 pub use setup::{
-    ingress, normalize_host, path_ports, platform, tailnet_mounts, tailnet_off, tailnet_on, MCP_PATHS, SERVE_PATHS,
-    SERVICE_LABEL, SERVICE_UNIT, TAILNET_SERVE_PORT,
+    byo, ingress, normalize_host, path_ports, platform, tailnet_mounts, tailnet_off, tailnet_on, AGENT_PROMPT,
+    CLOUDFLARE_ADD_DOMAIN, CLOUDFLARE_SIGNUP, MCP_PATHS, SERVE_PATHS, SERVICE_LABEL, SERVICE_UNIT, TAILNET_SERVE_PORT,
 };
 
 pub const DEFAULT_PORTS: Ports = Ports { serve: 18094, mcp: 8787 };
@@ -79,8 +79,8 @@ const STABLE_SERVICE: Option<&str> = None;
 const SEAL_ALG: &str = "X25519-HKDF-SHA256-A256GCM";
 const SEAL_INFO: &[u8] = b"ls-tunnels sealed token v1";
 const RUNNABLE: [&str; 3] = ["approved", "live", "down"];
-const NO_ROUTE: &str = "No tunnel on this machine. Set one up for free with Tailscale (local-studio tunnel setup --tailnet) or your own Cloudflare account (local-studio tunnel setup --cloudflare <hostname>).";
-const SETUP: &str = "local-studio tunnel setup --tailnet";
+const NO_ROUTE: &str = "No tunnel on this machine yet. Set one up on your own free Cloudflare account: local-studio tunnel byo shows the steps, or hands them to a coding agent. No domain? local-studio tunnel setup --tailnet.";
+const SETUP: &str = "local-studio tunnel byo";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ports {
