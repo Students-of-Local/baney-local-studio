@@ -59,7 +59,7 @@ To remove a controller, stop the user service on that machine and delete `~/.loc
 
 ## API
 
-All routes except `/api/health` require the fleet key.
+All routes except `/api/health` and `/api/cluster/hello` require the fleet key. A request without the key is answered only under a host name that is an IP address, a name without dots, a `.ts.net` name, or the host in `url`; any other gets 421.
 
 | Route                                                                                             | Purpose                                                               |
 | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
