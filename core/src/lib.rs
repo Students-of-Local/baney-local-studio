@@ -16,7 +16,7 @@ mod platform;
 pub mod plugins;
 mod scratch;
 mod session;
-mod skills;
+pub mod skills;
 mod store;
 mod studio;
 mod threads;
