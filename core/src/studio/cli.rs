@@ -392,6 +392,9 @@ impl Actor {
     }
 
     fn cli_launch(&mut self, id: &str, mut opening: Opening) {
+        if opening.launch.harness == Harness::Codex {
+            self.load_codex_models();
+        }
         let generation = opening.generation;
         let (sender, thread, first) = (self.cli.clone(), id.to_string(), opening.launch.clone());
         let task = tokio::spawn(async move {
@@ -1204,10 +1207,19 @@ impl Actor {
         self.dirty = true;
     }
 
-    pub(super) fn load_codex_models(&self) {
-        let itself = self.itself.clone();
+    pub(super) fn first_codex_models(&mut self) {
+        if self.codex_models.is_empty() && !self.store.projects.is_empty() {
+            self.load_codex_models();
+        }
+    }
+
+    fn load_codex_models(&mut self) {
+        if std::mem::replace(&mut self.codex_asked, true) {
+            return;
+        }
+        let (itself, data_dir) = (self.itself.clone(), self.data_dir.clone());
         tokio::spawn(async move {
-            if let Ok(models) = harness::codex_models().await {
+            if let Ok(models) = harness::codex_models(&data_dir).await {
                 itself.send(Command::HarnessModels { models });
             }
         });

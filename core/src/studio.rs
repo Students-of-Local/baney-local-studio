@@ -679,6 +679,7 @@ impl Studio {
             text.clone(),
         );
         workspace.start_kernel(daemon::kernel_program(config.launch.as_ref()));
+        let codex_models = harness::saved_codex_models(&data_dir);
         let settings = workspace.settings();
         let pull_requests = workspace.pull_requests_changed();
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -745,7 +746,8 @@ impl Studio {
             opening: HashMap::new(),
             loading: HashMap::new(),
             generation: 0,
-            codex_models: Vec::new(),
+            codex_models,
+            codex_asked: false,
             plugin_consent: Vec::new(),
             plugin_updates: std::collections::BTreeMap::new(),
             plugin_checked: None,
@@ -1306,6 +1308,7 @@ struct Actor {
     loading: HashMap<String, u64>,
     generation: u64,
     codex_models: Vec<ModelOption>,
+    codex_asked: bool,
     plugin_consent: Vec<String>,
     plugin_updates: std::collections::BTreeMap<String, plugins::hub::Available>,
     plugin_checked: Option<i64>,
@@ -1400,7 +1403,7 @@ impl Actor {
     ) {
         self.push_projects();
         self.push_models();
-        self.load_codex_models();
+        self.first_codex_models();
         self.plugins();
         let launch = self.launch.clone();
         self.bundled =
@@ -2049,6 +2052,7 @@ impl Actor {
     }
 
     fn projects_changed(&mut self) {
+        self.first_codex_models();
         self.save();
         self.push_projects();
         self.dirty = true;

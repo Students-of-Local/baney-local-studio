@@ -1,12 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use eukhe_types::daemon::{SessionEvent, StreamUpdate};
 use eukhe_types::session::AgentMessage;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -385,7 +386,54 @@ async fn initialize(rpc: &Rpc) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
+#[derive(Serialize, Deserialize)]
+struct Listed {
+    id: String,
+    name: String,
+    efforts: Vec<String>,
+}
+
+impl Listed {
+    fn read(model: &Value) -> Option<Self> {
+        let id = model.get("id").and_then(Value::as_str)?.to_string();
+        Some(Self {
+            name: model.get("displayName").and_then(Value::as_str).unwrap_or(&id).to_string(),
+            id,
+            efforts: model
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|effort| effort.get("reasoningEffort").and_then(Value::as_str).map(str::to_string))
+                .collect(),
+        })
+    }
+
+    fn option(self) -> ModelOption {
+        ModelOption {
+            provider: CODEX_PROVIDER.to_string(),
+            id: self.id,
+            name: format!("{} (Codex)", self.name),
+            reasoning: true,
+            thinking_levels: self.efforts,
+            context_window: CONTEXT_WINDOW,
+            configured: true,
+            service_tiers: Vec::new(),
+        }
+    }
+}
+
+fn models_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("harness").join("codex-models.json")
+}
+
+pub(crate) fn saved_models(data_dir: &Path) -> Vec<ModelOption> {
+    let listed: Option<Vec<Listed>> =
+        std::fs::read(models_file(data_dir)).ok().and_then(|text| serde_json::from_slice(&text).ok());
+    listed.unwrap_or_default().into_iter().map(Listed::option).collect()
+}
+
+pub(crate) async fn models(data_dir: &Path) -> Result<Vec<ModelOption>, String> {
     let mut process = start(None, None, Arc::default(), Arc::default())?;
     let listed = async {
         initialize(&process.rpc).await?;
@@ -395,34 +443,17 @@ pub(crate) async fn models() -> Result<Vec<ModelOption>, String> {
     if let Some(kill) = process.kill.take() {
         kill.send(()).ok();
     }
-    let data = listed?;
-    Ok(data
+    let listed = listed?;
+    let listed: Vec<Listed> = listed
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|model| model.get("hidden").and_then(Value::as_bool) != Some(true))
-        .filter_map(|model| {
-            let id = model.get("id").and_then(Value::as_str)?;
-            let name = model.get("displayName").and_then(Value::as_str).unwrap_or(id);
-            Some(ModelOption {
-                provider: CODEX_PROVIDER.to_string(),
-                id: id.to_string(),
-                name: format!("{name} (Codex)"),
-                reasoning: true,
-                thinking_levels: model
-                    .get("supportedReasoningEfforts")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|effort| effort.get("reasoningEffort").and_then(Value::as_str).map(str::to_string))
-                    .collect(),
-                context_window: CONTEXT_WINDOW,
-                configured: true,
-                service_tiers: Vec::new(),
-            })
-        })
-        .collect())
+        .filter_map(Listed::read)
+        .collect();
+    crate::workspace::settings::save_json(&models_file(data_dir), &listed)?;
+    Ok(listed.into_iter().map(Listed::option).collect())
 }
 
 pub(crate) async fn read(account: Option<&Path>, thread: &str) -> Result<Vec<AgentMessage>, String> {

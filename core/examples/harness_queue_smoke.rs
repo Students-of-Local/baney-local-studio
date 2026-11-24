@@ -48,6 +48,7 @@ struct Watch {
     misses: Vec<String>,
     settings: Option<Settings>,
     asked: BTreeMap<String, Vec<String>>,
+    codex: bool,
 }
 
 impl Watch {
@@ -111,6 +112,7 @@ fn apply(watch: &mut Watch, update: Update) {
             watch.thinking = info.thinking_level;
         }
         Update::Connection { state } => watch.connection = Some(state),
+        Update::Models { models, .. } => watch.codex = models.iter().any(|model| model.provider == CODEX.0),
         Update::Approvals { thread, approvals } => {
             let asked = approvals.into_iter().map(|approval| format!("{}: {}", approval.request_id, approval.command));
             watch.asked.insert(thread, asked.collect());
@@ -1059,11 +1061,26 @@ fn compact_during_open(run: &mut Run, started: &BTreeMap<String, String>) -> any
 
 fn reopened(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> anyhow::Result<()> {
     run.setup("daemon connected again", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
+    run.until(Duration::from_secs(1), |_| false);
+    listed(run, "after a restart", 1, true);
     select_spawns_nothing(run, started)?;
     send_during_open(run, started)?;
     stop_during_open(run, started)?;
     trust_after_restart(run, started, root)?;
-    compact_during_open(run, started)
+    compact_during_open(run, started)?;
+    listed(run, "after a Codex thread opened again", 2, true);
+    Ok(())
+}
+
+fn listed(run: &mut Run, when: &str, wanted: usize, shown: bool) {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let asked = std::fs::read_to_string(home.join("codex-listed")).unwrap_or_default().lines().count();
+    if asked == wanted && run.watch.codex == shown {
+        println!("ok   Codex was asked for its models {asked} times {when}, shown {shown}");
+    } else {
+        let codex = run.watch.codex;
+        run.watch.miss(format!("Codex was asked for its models {asked} times {when}, not {wanted}; shown {codex}"));
+    }
 }
 
 fn git(work: &Path, args: &[&str]) -> anyhow::Result<()> {
@@ -1147,8 +1164,12 @@ fn main() -> anyhow::Result<()> {
     let mut run = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: 0 };
     let outcome = (|| {
         run.setup("daemon connected", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
+        run.until(Duration::from_secs(1), |_| false);
+        listed(&mut run, "before a project is added", 0, false);
         studio.add_project(work.to_string_lossy().into_owned());
         run.setup("project added", |watch| watch.projects.len() == 1)?;
+        run.check("Codex models are listed once a project is added", |watch| watch.codex);
+        listed(&mut run, "after a project is added", 1, true);
         private_settings(&root, "{}")?;
         scenarios(&mut run, &root)
     })();

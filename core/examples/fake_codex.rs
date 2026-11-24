@@ -17,6 +17,7 @@ const SKILL_READ: &str = "cat ~/.codex/skills/writing/SKILL.md";
 const LIMITED: &str = "limited";
 const LIMIT_WORDS: &str = "You've hit your usage limit. Try again later.";
 const RESET_SECONDS: u64 = 2 * 60 * 60;
+const LISTED: &str = "codex-listed";
 const ROLLOUT_DAY: &str = "2026/11/21";
 
 #[derive(Default)]
@@ -238,14 +239,20 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
     }
     match method {
         "initialize" if !at_home() => shared.refuse(id, "fake codex runs outside the home folder"),
-        "model/list" => shared.respond(
-            id,
-            &json!({ "data": [{
-                "id": "fake-mini",
-                "displayName": "Fake mini",
-                "supportedReasoningEfforts": [{ "reasoningEffort": "low" }, { "reasoningEffort": "medium" }],
-            }] }),
-        ),
+        "model/list" => {
+            if let Some(home) = std::env::var_os("HOME") {
+                let log = std::fs::OpenOptions::new().create(true).append(true).open(PathBuf::from(home).join(LISTED));
+                log.and_then(|mut log| writeln!(log, "model/list")).ok();
+            }
+            shared.respond(
+                id,
+                &json!({ "data": [{
+                    "id": "fake-mini",
+                    "displayName": "Fake mini",
+                    "supportedReasoningEfforts": [{ "reasoningEffort": "low" }, { "reasoningEffort": "medium" }],
+                }] }),
+            );
+        }
         "thread/start" => {
             pause(START_DELAY);
             let thread = format!("fake-thread-{}", std::process::id());
