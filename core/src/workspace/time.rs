@@ -1,5 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use jiff::tz::{Offset, TimeZone};
+use jiff::Timestamp;
+
 pub(crate) const DAY_MS: i64 = 86_400_000;
 
 pub(crate) fn now_ms() -> i64 {
@@ -10,6 +13,16 @@ pub(crate) fn now_ms() -> i64 {
 
 pub(crate) fn days_since_epoch(ms: i64) -> i64 {
     ms.div_euclid(DAY_MS)
+}
+
+pub(crate) fn local_ms(zone: &TimeZone, ms: i64) -> i64 {
+    Timestamp::from_millisecond(ms).map_or(ms, |at| ms + i64::from(zone.to_offset(at).seconds()) * 1000)
+}
+
+pub(crate) fn instant_ms(zone: &TimeZone, local: i64) -> i64 {
+    Timestamp::from_millisecond(local)
+        .and_then(|at| zone.to_timestamp(Offset::UTC.to_datetime(at)))
+        .map_or(local, Timestamp::as_millisecond)
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
