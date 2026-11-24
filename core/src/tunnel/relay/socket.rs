@@ -16,8 +16,8 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::WebSocketStream;
 
-use super::streams::{pairs, Feed, Out, BAD_ANSWER, WS_BINARY, WS_TEXT};
-use super::{limits, HANG_UP};
+use super::streams::{pairs, Feed, Out, BAD_ANSWER, HEAD, WS_BINARY, WS_TEXT};
+use super::{limits, HANG_UP, RELAY_TAKES};
 
 const NORMAL: u16 = 1000;
 const REASON_BYTES: usize = 123;
@@ -54,7 +54,8 @@ impl Socket {
         }
         let chosen = pairs(response.headers().iter().filter(|(name, _)| **name == SEC_WEBSOCKET_PROTOCOL));
         let upgraded = hyper::upgrade::on(response).await.map_err(|_| BAD_ANSWER)?;
-        let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, Some(limits())).await;
+        let limits = Some(limits(RELAY_TAKES - HEAD));
+        let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, limits).await;
         out.head(101, &chosen).await;
         let (mut sink, mut stream) = socket.split();
         let up = async {

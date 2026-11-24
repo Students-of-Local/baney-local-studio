@@ -46,9 +46,11 @@ const PUBLIC_HOST: &str = "relay.example.com";
 const MARK: &str = "x-relay-smoke";
 const BIG: usize = 3_201 * 65_521;
 const BLOCK: u32 = 65_521;
+const RELAY_TAKES: usize = 32 << 20;
+const FRAME_HEAD: usize = 5;
 
-fn roomy() -> WebSocketConfig {
-    WebSocketConfig::default().max_message_size(Some(64 << 20)).max_frame_size(Some(64 << 20))
+fn limits(most: usize) -> WebSocketConfig {
+    WebSocketConfig::default().max_message_size(Some(most)).max_frame_size(Some(most))
 }
 
 fn noise(bytes: u32) -> Vec<u8> {
@@ -169,7 +171,7 @@ impl Answer {
 impl Link {
     async fn open(smoke: &Smoke, stream: TcpStream, pongs: bool) -> anyhow::Result<Self> {
         let client = stream.peer_addr()?.port();
-        let socket = accept_async_with_config(stream, Some(roomy())).await?;
+        let socket = accept_async_with_config(stream, Some(limits(RELAY_TAKES))).await?;
         let (sink, mut stream) = socket.split();
         let link = Self {
             client,
@@ -465,7 +467,8 @@ impl Origin {
     async fn socket(&self, request: Request<Incoming>, kind: &str, size: usize) {
         let Ok(upgraded) = hyper::upgrade::on(request).await else { return };
         self.sockets.fetch_add(1, Ordering::AcqRel);
-        let mut socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(roomy())).await;
+        let limits = Some(limits(64 << 20));
+        let mut socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, limits).await;
         if kind == "close" {
             let code = CloseCode::from(u16::try_from(size).unwrap_or_default());
             socket.close(Some(CloseFrame { code, reason: "origin".into() })).await.ok();
@@ -1027,8 +1030,13 @@ async fn w4_large(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     link.socket(1, "/v1/ws").await?;
     link.echo(1, 3, &noise(17 << 20)).await?;
     link.echo(1, 2, &vec![b'x'; 17 << 20]).await?;
-    link.socket(2, &format!("/v1/ws?send={}", 41 << 20)).await?;
-    link.ws_close(2, 1000, "").await?;
+    let most = RELAY_TAKES - FRAME_HEAD;
+    link.socket(2, &format!("/v1/ws?send={most}")).await?;
+    let whole =
+        |got: &Message| got.len() == RELAY_TAKES && got.is_binary() && got.clone().into_data()[..5] == [3, 0, 0, 0, 2];
+    link.until("32 MiB frame", |frames| frames.iter().any(whole).then_some(())).await?;
+    link.socket(3, &format!("/v1/ws?send={}", most + 1)).await?;
+    link.ws_close(3, 1000, "").await?;
     link.echo(1, 2, b"still here").await
 }
 
