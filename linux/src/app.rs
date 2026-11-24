@@ -1081,6 +1081,10 @@ impl App {
     }
 
     pub fn open_link(self: &Rc<Self>, url: &str) {
+        if let Some(refused) = local_studio_core::refused_link(url) {
+            self.show_notice(&refused);
+            return;
+        }
         let web = url
             .split_once("://")
             .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"));

@@ -9,6 +9,7 @@ mod highlight;
 mod images;
 #[cfg(feature = "link")]
 pub mod link;
+mod links;
 mod model;
 mod oneshot;
 mod platform;
@@ -30,6 +31,7 @@ pub use local_studio_version::{CHANNEL, VERSION};
 
 pub use access::{default_access, model_tier, ModelTier};
 pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
+pub use links::refused_link;
 pub use model::{
     AccessMode, Approval, ApprovalAnswer, Block, CatalogPlugin, CommandKind, Connection, ConsentAnswer, ConsentNeed,
     ConsentRequest, ConsentRow, ContextUsage, DaemonMismatch, Delivery, FileChange, Goal, Harness, ImageAttachment,

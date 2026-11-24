@@ -119,7 +119,8 @@ fn create() -> (gtk::TextView, Rc<RefCell<Doc>>) {
             return;
         }
         let Some(url) = link_at(&view, &clicked.borrow(), x, y) else { return };
-        if view.activate_action("win.open-link", Some(&url.to_variant())).is_err() {
+        let handled = view.activate_action("win.open-link", Some(&url.to_variant())).is_ok();
+        if !handled && local_studio_core::refused_link(&url).is_none() {
             let window = view.root().and_downcast::<gtk::Window>();
             gtk::UriLauncher::new(&url).launch(window.as_ref(), None::<&gio::Cancellable>, |_| {});
         }

@@ -51,8 +51,12 @@ struct RootView: View {
             PaletteLayer(store: store)
         }
         .background(Theme.canvas)
-        .environment(\.openURL, OpenURLAction { [panels = store.workspace.panels] url in
-            panels.openLink(url) ? .handled : .systemAction
+        .environment(\.openURL, OpenURLAction { [store, panels = store.workspace.panels] url in
+            if let refused = refusedLink(url: url.absoluteString) {
+                store.post(.info, refused)
+                return .handled
+            }
+            return panels.openLink(url) ? .handled : .systemAction
         })
         .ignoresSafeArea(.container, edges: .top)
         .toolbar {
