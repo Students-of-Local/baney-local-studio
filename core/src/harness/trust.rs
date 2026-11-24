@@ -27,6 +27,9 @@ pub(crate) fn root(cwd: &str) -> String {
 }
 
 fn main_checkout(dot_git: &Path) -> Option<PathBuf> {
+    if dot_git.is_symlink() {
+        return None;
+    }
     let text = std::fs::read_to_string(dot_git).ok()?;
     let target = dot_git.parent()?.join(text.trim().strip_prefix("gitdir:")?.trim()).canonicalize().ok()?;
     let back = std::fs::read_to_string(target.join("gitdir")).ok()?;
@@ -39,7 +42,8 @@ fn main_checkout(dot_git: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn has_config(cwd: &str) -> bool {
-    let cwd = real(Path::new(cwd));
-    let top = git_dir(&cwd).map_or_else(|| cwd.clone(), |(_, root)| root);
-    cwd.ancestors().take_while(|dir| dir.starts_with(&top)).any(|dir| CONFIG.iter().any(|name| dir.join(name).exists()))
+    let (cwd, home) = (real(Path::new(cwd)), home());
+    cwd.ancestors()
+        .take_while(|dir| home.as_deref() != Some(*dir))
+        .any(|dir| CONFIG.iter().any(|name| dir.join(name).exists()))
 }

@@ -806,7 +806,7 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     run.focus(&denied);
     run.studio.restart_thread(denied);
     run.send("again");
-    ran_with(run, "trust-denied", "again", "all");
+    ran_with(run, "trust-denied", "again", "user");
     let linked = WorktreeChoice::Existing { path: tree.to_string_lossy().into_owned() };
     in_folder(run, "trust-tree", &repo, linked)?;
     ran_with(run, "trust-tree", "hello", "all");
@@ -818,6 +818,18 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     run.check("trust-forged: Stop takes the question away", |watch| {
         watch.asked.get(&copy).is_some_and(Vec::is_empty) && watch.noticed("bravo")
     });
+    let alias = root.join("trust-alias");
+    std::fs::create_dir_all(alias.join(".claude"))?;
+    std::os::unix::fs::symlink(tree.join(".git"), alias.join(".git"))?;
+    let alias = project(run, &alias)?;
+    let copy = in_folder(run, "trust-alias", &alias, WorktreeChoice::Local)?;
+    asks(run, "trust-alias", &copy, &alias);
+    let under = root.join("trust-parent/app");
+    scratch_repo(&under)?;
+    std::fs::write(root.join("trust-parent/CLAUDE.md"), "parent")?;
+    let under = project(run, &under)?;
+    let parent = in_folder(run, "trust-parent", &under, WorktreeChoice::Local)?;
+    asks(run, "trust-parent", &parent, &under);
     let quit = root.join("trust-quit");
     configured_repo(&quit)?;
     let quit = project(run, &quit)?;

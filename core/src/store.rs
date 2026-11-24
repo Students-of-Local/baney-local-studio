@@ -21,6 +21,7 @@ pub(crate) struct StoredProject {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ThreadFlags {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) project: Option<String>,

@@ -12,7 +12,8 @@ use crate::harness::accounts::{self, Parks};
 use crate::harness::{self, Driver, Envelope, Event, Failure, Image, Launch, OpenReport, Sink, Stop};
 use crate::images;
 use crate::model::{
-    AccessMode, Approval, ApprovalAnswer, Harness, ModelOption, ModelRef, NoticeLevel, NotificationKind, Update,
+    AccessMode, Approval, ApprovalAnswer, Harness, ImageAttachment, ModelOption, ModelRef, NoticeLevel,
+    NotificationKind, PromptDraft, Update,
 };
 use crate::session::LiveState;
 use crate::store::{HeldImage, HeldPrompt};
@@ -314,7 +315,7 @@ impl Actor {
             effort: flags.thinking_level.clone(),
             access: flags.access.unwrap_or(AccessMode::FullAccess),
             account,
-            project: harness != Harness::ClaudeCode || self.cli_trusted(&cwd),
+            project: harness != Harness::ClaudeCode || !flags.project_refused && self.cli_trusted(&cwd),
         };
         let ask = !launch.project && !flags.project_refused && harness::trust::has_config(&launch.cwd);
         self.generation += 2;
@@ -350,8 +351,9 @@ impl Actor {
             step: 0,
             command: format!("Use this project's own Claude Code settings: {root}"),
             effects: vec![
-                "Its hooks and MCP servers run without asking, in every thread of this project".to_string(),
-                "Deny starts this thread with your own settings only".to_string(),
+                "Its hooks and MCP servers run without asking, and the answer is kept for this project's threads"
+                    .to_string(),
+                "Deny keeps this thread on your own settings".to_string(),
             ],
             agent: Some(name(Harness::ClaudeCode).to_string()),
         };
@@ -378,7 +380,9 @@ impl Actor {
         for thread in answered {
             self.settle_approval(&thread, TRUST);
             if let Some(mut opening) = self.opening.remove(&thread) {
+                let flags = self.store.flags(&thread);
                 opening.launch.project = trusted;
+                opening.launch.effort = flags.thinking_level;
                 self.cli_launch(&thread, opening);
             }
         }
@@ -506,9 +510,20 @@ impl Actor {
         }
         let mut reported = false;
         for waiting in opening.waiting {
-            if let Waiting::Send { request: Some(request), .. } = waiting {
-                self.mailbox.push(Update::RequestFailed { request, message: error.clone() });
-                reported = true;
+            match waiting {
+                Waiting::Send { request: Some(request), .. } => {
+                    self.mailbox.push(Update::RequestFailed { request, message: error.clone() });
+                    reported = true;
+                }
+                Waiting::Send { text, images, .. } => {
+                    let images = images.into_iter().filter_map(|image| {
+                        let data = crate::images::decode_base64(&image.data)?;
+                        Some(ImageAttachment { mime_type: image.mime_type, data })
+                    });
+                    let draft = PromptDraft { text, images: images.collect(), files: Vec::new() };
+                    self.mailbox.push(Update::ComposerDraft { thread: id.to_string(), draft });
+                }
+                Waiting::Compact => {}
             }
         }
         if !reported {
