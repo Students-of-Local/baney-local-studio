@@ -23,6 +23,7 @@ The controller is a small Bun service (`controller/`). It watches the inference 
 | `linkPeers`             | Optional. Machines reached over a desktop link; a node poll they answer 503 `busy` is not a miss. See [docs/fleet-links.md](fleet-links.md) |
 | `linkToken`             | Optional. The bearer sent to link peers instead of `fleetKey`; dropped with the last link peer |
 | `excludePorts`          | Local ports never treated as inference servers (18095, the link proxy, always is) |
+| `enginePorts`           | More local ports to ask for models; see [Discovery](#discovery)                  |
 | `engineKeys`            | API keys for local engines, by port                                              |
 | `registry`, `modelsDir` | Recipe registry checkout and weights directory                                   |
 | `cluster`               | Optional. Tailnet discovery, GPU lending and pooled models; see [Clustering](#clustering) |
@@ -89,7 +90,7 @@ The registry backs captured fleet configurations up next to the catalog. They ar
 
 ## Discovery
 
-Every scan (about every 10 seconds) the controller lists the machine's TCP listeners and asks each one for `GET /v1/models`, with the port's `engineKeys` entry as a bearer token. New ports get 1.5 seconds to answer; ports that already answered get 10 seconds, so a busy engine that answers slowly stays loaded.
+Every scan (about every 10 seconds) the controller lists the machine's TCP listeners and asks the ones that can be an engine for `GET /v1/models`, with the port's `engineKeys` entry as a bearer token. Those are the ports of launched jobs, the ports in `enginePorts` and `engineKeys`, the usual engine ports (`PORTS` in `controller/src/discovery.ts`), and any port whose process is a known server such as vLLM, SGLang, llama.cpp or Ollama (`SERVERS` there, matched on the first words of its command line). Nothing is sent to any other listener. An engine in a container, or run by another user, shows no process: if its port is not a usual one, add it to `enginePorts`. New ports get 1.5 seconds to answer; ports that already answered get 10 seconds, so a busy engine that answers slowly stays loaded.
 
 | Endpoint `state` | Meaning                                                                                                     |
 | ---------------- | ----------------------------------------------------------------------------------------------------------- |

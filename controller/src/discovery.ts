@@ -25,6 +25,14 @@ const FORGET_MS = 10 * 60_000;
 const NEW_PROBE_MS = 1_500;
 const KNOWN_PROBE_MS = 10_000;
 export const MISSES = 3;
+const PORTS = new Set([1234, 1337, 2242, 4000, 4891, 5000, 5001, 8000, 8001, 8080, 8081, 9997, 11434, 11435, 23333, 30000, 52415]);
+const SERVERS = new Set(["aphrodite", "exo", "gpt4all", "jan", "koboldcpp", "litellm", "llama-server", "llama_cpp", "llamafile", "lmdeploy", "local-ai", "localai", "mlx_lm", "mlx_vlm", "ollama", "rapid-mlx", "sglang", "tabbyapi", "text-generation-launcher", "text-generation-router", "vllm", "xinference"]);
+
+export const isServer = (command: string): boolean =>
+  command.trim().split(/\s+/).slice(0, 4).some((word) => {
+    const name = word.split("/").pop()?.toLowerCase().replace(/\.(exe|py)$/, "") ?? "";
+    return SERVERS.has(name) || SERVERS.has(name.split(/[.:]/)[0] ?? "");
+  });
 
 const listener = (addr: string, pid: number | null): Listener[] => {
   const i = addr.lastIndexOf(":");
@@ -62,7 +70,16 @@ export const listeners: Effect.Effect<Listener[] | null> = Effect.gen(function* 
   return [...seen.values()].sort((a, b) => a.port - b.port).slice(0, 512);
 });
 
+const commands = (pids: number[]): Effect.Effect<Map<number, string> | null> =>
+  Effect.gen(function* () {
+    if (!pids.length) return new Map();
+    const r = yield* exec(["ps", "-ww", "-o", "pid=,args=", "-p", pids.join(",")], 5_000);
+    const found = new Map([...r.stdout.matchAll(/^\s*(\d+)\s+(.*)$/gm)].map((m) => [Number(m[1]), m[2] ?? ""] as const));
+    return found.size ? found : null;
+  });
+
 export const makeScanner = (controllerId: string, jobPort: (port: number) => string | null) => {
+  const processes = new Map<string, boolean>();
   const negative = new Map<string, number>();
   const known = new Map<number, Endpoint>();
   const current = () => [...known.values()].sort((a, b) => a.port - b.port);
@@ -112,13 +129,25 @@ export const makeScanner = (controllerId: string, jobPort: (port: number) => str
       known.set(l.port, { ...prev, ...base, live: loaded, state: loaded ? "loaded" : "unreachable", failures, error, latencyMs: prev.latencyMs ?? null });
     });
 
+  const engines = (all: Listener[], named: Set<number>) =>
+    Effect.gen(function* () {
+      const tag = (l: Listener) => `${l.port}:${l.pid}`;
+      const other = all.filter((l) => !PORTS.has(l.port) && !named.has(l.port) && !jobPort(l.port));
+      const fresh = other.filter((l) => !processes.has(tag(l)));
+      const found = yield* commands([...new Set(fresh.flatMap((l) => l.pid ?? []))]);
+      for (const l of fresh) if (found) processes.set(tag(l), isServer(found.get(l.pid ?? -1) ?? ""));
+      const tags = new Set(other.map(tag));
+      for (const t of processes.keys()) if (!tags.has(t)) processes.delete(t);
+      return all.filter((l) => !tags.has(tag(l)) || (processes.get(tag(l)) ?? known.has(l.port)));
+    });
+
   return {
     current,
-    scan: (exclude: Set<number>, keys: Record<string, string>) =>
+    scan: (exclude: Set<number>, named: readonly number[], keys: Record<string, string>) =>
       Effect.gen(function* () {
         const all = yield* listeners;
         if (!all) return;
-        const ls = all.filter((l) => !exclude.has(l.port));
+        const ls = yield* engines(all.filter((l) => !exclude.has(l.port)), new Set([...named, ...Object.keys(keys).map(Number)]));
         const listening = new Set(ls.map((l) => l.port));
         yield* Effect.forEach(ls, (l) => probe(l, keys), { concurrency: 24, discard: true });
         for (const [p, ep] of known) {

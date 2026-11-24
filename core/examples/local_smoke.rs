@@ -284,6 +284,7 @@ fn main() -> anyhow::Result<()> {
             "name": "smoke-box",
             "fleetKey": format!("local-smoke-{}", std::process::id()),
             "excludePorts": exclude,
+            "enginePorts": [local.port],
             "registry": { "url": "", "dir": root.join("registry"), "ref": "none" },
             "modelsDir": root.join("models"),
         })
