@@ -295,7 +295,7 @@ pub(crate) fn git_head(cwd: &str) -> GitHead {
     GitHead { branch, worktree }
 }
 
-fn git_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn git_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
     start.ancestors().find_map(|dir| {
         let candidate = dir.join(".git");
         candidate.exists().then(|| (candidate, dir.to_path_buf()))

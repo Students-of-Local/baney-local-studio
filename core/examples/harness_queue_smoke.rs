@@ -8,8 +8,9 @@ use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
-    AccessMode, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel, NotificationKind,
-    PromptDraft, Settings, Studio, StudioConfig, ThreadSettings, TranscriptOp, Update, Waker, WorktreeChoice,
+    AccessMode, ApprovalAnswer, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel,
+    NotificationKind, PromptDraft, Settings, Studio, StudioConfig, StudioError, ThreadSettings, TranscriptOp, Update,
+    Waker, WorktreeChoice,
 };
 use serde_json::{Map, Value};
 
@@ -45,6 +46,7 @@ struct Watch {
     refused: Vec<String>,
     misses: Vec<String>,
     settings: Option<Settings>,
+    asked: BTreeMap<String, Vec<String>>,
 }
 
 impl Watch {
@@ -108,6 +110,10 @@ fn apply(watch: &mut Watch, update: Update) {
             watch.thinking = info.thinking_level;
         }
         Update::Connection { state } => watch.connection = Some(state),
+        Update::Approvals { thread, approvals } => {
+            let asked = approvals.into_iter().map(|approval| format!("{}: {}", approval.request_id, approval.command));
+            watch.asked.insert(thread, asked.collect());
+        }
         Update::Settings { settings } => watch.settings = Some(settings),
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
         Update::Threads { threads } => watch.rows = threads.into_iter().map(|row| row.id).collect(),
@@ -218,7 +224,19 @@ impl Run {
         self.start_with(label, (provider, model), thinking, AccessMode::FullAccess)
     }
 
-    fn begin(&mut self, label: &str, (provider, model): (&str, &str), thinking: Option<&str>, access: AccessMode) {
+    fn begin(&mut self, label: &str, pick: (&str, &str), thinking: Option<&str>, access: AccessMode) {
+        let project = self.watch.projects.first().cloned();
+        self.begin_in(label, pick, thinking, access, (project, WorktreeChoice::Local));
+    }
+
+    fn begin_in(
+        &mut self,
+        label: &str,
+        (provider, model): (&str, &str),
+        thinking: Option<&str>,
+        access: AccessMode,
+        (project, worktree): (Option<String>, WorktreeChoice),
+    ) {
         self.watch.thread = None;
         self.watch.busy = false;
         self.watch.replies.clear();
@@ -228,10 +246,10 @@ impl Run {
             model: Some(model.to_string()),
             thinking_level: thinking.map(str::to_string),
             access: Some(access),
-            worktree: WorktreeChoice::Local,
+            worktree,
         };
         let draft = format!("draft-{label}");
-        self.studio.start_thread(draft, self.watch.projects.first().cloned(), prompt("hello"), settings);
+        self.studio.start_thread(draft, project, prompt("hello"), settings);
     }
 
     fn start_with(
@@ -697,7 +715,125 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
     codex_unexpected_approval(run)?;
+    claude_trust(run, root)?;
     account_scenarios(run, root)
+}
+
+const CLAUDE: (&str, &str) = ("claude-code", "haiku");
+
+fn project(run: &mut Run, path: &Path) -> anyhow::Result<String> {
+    let path = path.canonicalize()?.to_string_lossy().into_owned();
+    run.studio.add_project(path.clone());
+    run.setup(&format!("project {path} added"), |watch| watch.projects.contains(&path))?;
+    Ok(path)
+}
+
+fn configured_repo(dir: &Path) -> anyhow::Result<()> {
+    scratch_repo(dir)?;
+    std::fs::create_dir_all(dir.join(".claude"))?;
+    std::fs::write(dir.join(".claude/settings.json"), "{}")?;
+    git(dir, &["add", ".claude"])?;
+    git(dir, &["-c", "user.name=smoke", "-c", "user.email=smoke@localhost", "commit", "-q", "-m", "settings"])
+}
+
+fn started(run: &mut Run, label: &str) -> anyhow::Result<String> {
+    let draft = format!("draft-{label}");
+    run.setup(&format!("{label}: thread started"), |watch| watch.started.contains_key(&draft))?;
+    run.watch.started.get(&draft).cloned().context("thread id")
+}
+
+fn in_folder(run: &mut Run, label: &str, project: &str, worktree: WorktreeChoice) -> anyhow::Result<String> {
+    run.begin_in(label, CLAUDE, None, AccessMode::Supervised, (Some(project.to_string()), worktree));
+    let thread = started(run, label)?;
+    run.focus(&thread);
+    Ok(thread)
+}
+
+fn asks(run: &mut Run, label: &str, thread: &str, folder: &str) {
+    let before = fakes_running("fake_claude");
+    let card = format!("project-trust: Use this project's own Claude Code settings: {folder}");
+    run.check(&format!("{label}: the folder is asked about"), |watch| {
+        watch.asked.get(thread).is_some_and(|asked| *asked == [card.clone()])
+    });
+    run.until(Duration::from_secs(1), |_| false);
+    if fakes_running("fake_claude") != before || run.watch.replied("reply to hello").is_some() {
+        run.watch.miss(format!("{label}: Claude Code ran before the question was answered"));
+    }
+}
+
+fn answer(run: &mut Run, thread: &str, answer: ApprovalAnswer) {
+    run.studio.answer_approval(thread.to_string(), "project-trust".to_string(), answer);
+}
+
+fn ran_with(run: &mut Run, label: &str, text: &str, sources: &str) {
+    let reply = format!("reply to {text} ");
+    if !run.check(&format!("{label}: {text:?} is answered"), |watch| watch.replied(&reply).is_some()) {
+        return;
+    }
+    let reply = run.watch.replied(&reply).cloned().unwrap_or_default();
+    if reply.ends_with(&format!("with {sources} settings")) {
+        println!("ok   {label}: {text:?} ran with {sources} settings");
+    } else {
+        run.watch.miss(format!("{label}: {text:?} did not run with {sources} settings: {reply}"));
+    }
+}
+
+fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
+    let (repo, forged, tree) = (root.join("trust"), root.join("forged"), root.join("trust-tree"));
+    configured_repo(&repo)?;
+    git(&repo, &["worktree", "add", "-q", &tree.to_string_lossy(), "-b", "tree"])?;
+    std::fs::create_dir_all(forged.join(".claude"))?;
+    std::fs::write(forged.join(".git"), format!("gitdir: {}\n", repo.join(".git/worktrees/trust-tree").display()))?;
+    let first = run.watch.projects.first().cloned().context("first project")?;
+    in_folder(run, "trust-plain", &first, WorktreeChoice::Local)?;
+    ran_with(run, "trust-plain", "hello", "user");
+    let repo = project(run, &repo)?;
+    let denied = in_folder(run, "trust-denied", &repo, WorktreeChoice::Local)?;
+    asks(run, "trust-denied", &denied, &repo);
+    answer(run, &denied, ApprovalAnswer::Deny);
+    ran_with(run, "trust-denied", "hello", "user");
+    let second = in_folder(run, "trust-second", &repo, WorktreeChoice::Local)?;
+    asks(run, "trust-second", &second, &repo);
+    let third = in_folder(run, "trust-third", &repo, WorktreeChoice::Local)?;
+    asks(run, "trust-third", &third, &repo);
+    answer(run, &second, ApprovalAnswer::Approve);
+    ran_with(run, "trust-third", "hello", "all");
+    if run.watch.asked.get(&third).is_some_and(|asked| !asked.is_empty()) {
+        run.watch.miss("one answer left the project's other thread asking".to_string());
+    }
+    run.focus(&second);
+    ran_with(run, "trust-second", "hello", "all");
+    run.focus(&denied);
+    run.studio.restart_thread(denied);
+    run.send("again");
+    ran_with(run, "trust-denied", "again", "all");
+    let linked = WorktreeChoice::Existing { path: tree.to_string_lossy().into_owned() };
+    in_folder(run, "trust-tree", &repo, linked)?;
+    ran_with(run, "trust-tree", "hello", "all");
+    let forged = project(run, &forged)?;
+    let copy = in_folder(run, "trust-forged", &forged, WorktreeChoice::Local)?;
+    asks(run, "trust-forged", &copy, &forged);
+    run.send("bravo");
+    run.studio.abort(copy.clone());
+    run.check("trust-forged: Stop takes the question away", |watch| {
+        watch.asked.get(&copy).is_some_and(Vec::is_empty) && watch.noticed("bravo")
+    });
+    let quit = root.join("trust-quit");
+    configured_repo(&quit)?;
+    let quit = project(run, &quit)?;
+    let waiting = in_folder(run, "trust-quit", &quit, WorktreeChoice::Local)?;
+    asks(run, "trust-quit", &waiting, &quit);
+    Ok(())
+}
+
+fn trust_after_restart(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> anyhow::Result<()> {
+    let thread = started.get("draft-trust-quit").context("trust-quit thread")?.clone();
+    let quit = root.join("trust-quit").canonicalize()?.to_string_lossy().into_owned();
+    run.focus(&thread);
+    asks(run, "trust-quit after a restart", &thread, &quit);
+    answer(run, &thread, ApprovalAnswer::AlwaysAllowSession);
+    ran_with(run, "trust-quit after a restart", "hello", "all");
+    Ok(())
 }
 
 fn fakes_running(name: &str) -> usize {
@@ -817,11 +953,12 @@ fn compact_during_open(run: &mut Run, started: &BTreeMap<String, String>) -> any
     Ok(())
 }
 
-fn reopened(run: &mut Run, started: &BTreeMap<String, String>) -> anyhow::Result<()> {
+fn reopened(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> anyhow::Result<()> {
     run.setup("daemon connected again", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
     select_spawns_nothing(run, started)?;
     send_during_open(run, started)?;
     stop_during_open(run, started)?;
+    trust_after_restart(run, started, root)?;
     compact_during_open(run, started)
 }
 
@@ -840,6 +977,18 @@ fn scratch_repo(work: &Path) -> anyhow::Result<()> {
     std::fs::write(work.join("README.md"), "Scratch repo for the harness queue smoke.\n")?;
     git(work, &["add", "README.md"])?;
     git(work, &["-c", "user.name=smoke", "-c", "user.email=smoke@localhost", "commit", "-q", "-m", "init"])
+}
+
+fn reopen(config: &StudioConfig, signal: &Arc<Signal>) -> anyhow::Result<Arc<Studio>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Studio::new(config.clone(), Arc::clone(signal) as Arc<dyn Waker>) {
+            Err(StudioError::Owned { .. }) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            opened => return Ok(opened?),
+        }
+    }
 }
 
 fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
@@ -901,9 +1050,9 @@ fn main() -> anyhow::Result<()> {
         println!("     restart Studio on the same data dir");
         let started = std::mem::take(&mut run.watch.started);
         let signal = Arc::new(Signal::default());
-        let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+        let studio = reopen(&config, &signal)?;
         let mut again = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: run.sent };
-        let outcome = reopened(&mut again, &started);
+        let outcome = reopened(&mut again, &started, &root);
         studio.shutdown();
         misses.append(&mut again.watch.misses);
         outcome
