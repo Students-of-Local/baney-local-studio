@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, posix } from "node:path";
 import { randomBytes } from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -75,7 +75,7 @@ export const makeJobs = (deps: Deps) => {
         ...dockerFlags(l),
         ...Object.entries(l.env ?? {}).filter(([k]) => k !== "NVIDIA_VISIBLE_DEVICES" && k !== "CUDA_VISIBLE_DEVICES").flatMap(([k, v]) => ["-e", `${k}=${v}`]),
         ...(weights.some((w) => w.hub) ? ["-e", "HF_HUB_OFFLINE=1"] : []),
-        ...weights.flatMap((w) => ["-v", w.hub ? `${w.host}:${w.w.at}` : `${w.host}:${w.w.at}:ro`]),
+        ...weights.flatMap((w) => ["-v", w.hub ? `${join(w.host, "hub")}:${posix.join(w.w.at, "hub")}:ro` : `${w.host}:${w.w.at}:ro`]),
         ...(configFile ? ["-v", `${configFile.path}:${configFile.at}:ro`] : []),
         ...(ep[0] ? ["--entrypoint", ep[0]] : []),
         l.image ?? "",
