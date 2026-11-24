@@ -12,6 +12,9 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use tokio_tungstenite::tungstenite::{Message, WebSocket};
 
+#[path = "support/relay_setup_cases.rs"]
+mod cases;
+
 const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 const RUN_KEY: &str = "RunKeyRunKeyRunKeyRunKeyRunKeyRunKeyRunKey_";
 const QUICK: Duration = Duration::from_secs(10);
@@ -258,13 +261,18 @@ fn run() -> Result<(), String> {
     let root = fs::canonicalize(&root).map_err(text)?;
     let smoke = Smoke { bin, home: root.join("home"), data: root.join("data"), root };
     println!("scratch: {}", smoke.root.display());
-    s11_run(&smoke)
+    let mut setup = cases::Cases::start(&smoke)?;
+    cases::before(&mut setup)?;
+    cases::live(&mut setup)?;
+    let data = smoke.root.join("run-data");
+    s11_run(&Smoke { data, bin: smoke.bin.clone(), root: smoke.root.clone(), home: smoke.home.clone() })
 }
 
 fn s11_run(s: &Smoke) -> Result<(), String> {
-    let out = s.command(&["tunnel", "relay", "run"]).output().map_err(text)?;
+    let mut service = s.service("run-none", &[])?;
+    let status = until("the exit with no relay.json", QUICK, || service.child.try_wait().ok().flatten())?;
     ensure(
-        out.status.code() == Some(1) && !s.tunnel("relay-state.json").exists(),
+        status.code() == Some(1) && !s.tunnel("relay-state.json").exists(),
         "relay run with no relay.json exits 1 at once and writes nothing",
     )?;
     let relay = StandIn::start()?;
