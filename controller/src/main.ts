@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { clusterSettings, makeCluster } from "./cluster.ts";
@@ -225,8 +226,19 @@ const publish = (req: LocalShareRequest) =>
     return yield* createPr(cached.preview, req.dryRun === true);
   });
 
-const body = async <S extends Schema.Top>(req: Request, schema: S): Promise<S["Type"]> => {
-  const text = await req.text();
+const readUpTo = async (req: Request, limit: number): Promise<string> => {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of req.body ?? []) {
+    size += chunk.byteLength;
+    if (size > limit) throw httpError(413, "BODY_TOO_LARGE", `the request body is over ${limit} bytes`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString();
+};
+
+const body = async <S extends Schema.Top>(req: Request, schema: S, limit?: number): Promise<S["Type"]> => {
+  const text = limit ? await readUpTo(req, limit) : await req.text();
   const value = decodeJson(schema, text || "{}");
   if (value === undefined) throw httpError(400, "BAD_REQUEST", "request body is not JSON matching the schema");
   return value;
@@ -237,6 +249,12 @@ const authorized = (req: Request): boolean => {
   const key = Buffer.from(bearer ?? req.headers.get("x-api-key") ?? req.headers.get("x-local-studio-key") ?? "");
   const want = Buffer.from(config.fleetKey);
   return key.length === want.length && timingSafeEqual(key, want);
+};
+
+const ownHost = (req: Request): boolean => {
+  const name = URL.parse(`http://${req.headers.get("host") ?? ""}`)?.hostname.replace(/\.$/, "");
+  if (!name) return false;
+  return isIP(name.replace(/^\[|\]$/g, "")) > 0 || !name.includes(".") || name.endsWith(".ts.net") || name === URL.parse(config.url)?.hostname;
 };
 
 const run = <A>(e: Effect.Effect<A, HttpError>) => Effect.runPromise(e);
@@ -255,8 +273,8 @@ const handle = async (req: Request, peer: string | null): Promise<Response> => {
   const match = (re: RegExp) => (post ? re.exec(p)?.[1] : undefined);
   if (req.method === "GET" && p === "/api/health") return json({ ok: true, id: config.id, name: config.name, version: VERSION, api: 2, cluster: clusterSettings(config).discover });
   if (post && p === "/api/cluster/hello") {
-    if (!clusterSettings(config).discover || Number(req.headers.get("content-length") ?? 0) > 4096) return json({ error: { code: "NOT_FOUND", message: `${req.method} ${p}` } }, 404);
-    return json(await run(cluster.hello(await body(req, LocalHelloRequest))));
+    if (!clusterSettings(config).discover) return json({ error: { code: "NOT_FOUND", message: `${req.method} ${p}` } }, 404);
+    return json(await run(cluster.hello(await body(req, LocalHelloRequest, 4096))));
   }
   if (!authorized(req)) return json({ error: { code: "UNAUTHORIZED", message: "fleet key required" } }, 401);
   if (req.method === "GET" && (p === "/v1/models" || p === "/models")) return listModels(gw);
@@ -349,6 +367,7 @@ const serve = (hostname: string) =>
     idleTimeout: 0,
     maxRequestBodySize: 256 * 1024 * 1024,
     fetch: async (req, server) => {
+      if (!ownHost(req) && !authorized(req)) return json({ error: { code: "WRONG_HOST", message: "this controller does not answer to that host name without the fleet key" } }, 421);
       const res = await handle(req, server.requestIP(req)?.address ?? null).catch(errorResponse);
       res.headers.set(LOCAL_STUDIO_CONTROLLER_HEADER, config.id);
       return res;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -40,6 +40,15 @@ const call = (port, path, body, headers = auth) =>
       ? {}
       : { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body) }),
     signal: AbortSignal.timeout(10_000),
+  });
+const asHost = (port, host, headers = {}) =>
+  new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, path: "/api/health", headers: { ...headers, host }, timeout: 10_000 }, (res) => {
+      res.resume();
+      res.on("end", () => resolve([res.statusCode, "x-local-studio-controller" in res.headers]));
+    });
+    req.on("error", reject);
+    req.end();
   });
 const snapshot = async (port) => (await call(port, "/api/snapshot")).json();
 
@@ -228,6 +237,11 @@ try {
   }
   const [a, b, c] = ports;
   assert.equal((await call(a, "/api/snapshot", undefined, {})).status, 401);
+  for (const host of [`127.0.0.1:${a}`, `localhost:${a}`, "[::1]", "seat1", "seat1.tail0.ts.net.", "100.64.0.9:18091"])
+    assert.deepEqual(await asHost(a, host), [200, true], `health answers ${host}`);
+  for (const host of ["rebound.example", `127.0.0.1.rebound.example:${a}`, "rebound.example.", "ts.net.example", "nts.net"])
+    assert.deepEqual(await asHost(a, host), [421, false], `health refuses ${host}`);
+  assert.deepEqual(await asHost(a, "proxy.example", auth), [200, true], "the fleet key answers any host");
   await waitFor(async () => {
     const s = await snapshot(a);
     return (

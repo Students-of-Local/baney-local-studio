@@ -447,6 +447,9 @@ try {
     const odd = await call(B, "/api/cluster/hello", { id: "x", nonce, target: own }, { "content-type": "application/json" });
     assert.equal(odd.status, 400, `hello must refuse the nonce ${nonce}`);
   }
+  const padded = JSON.stringify({ id: "x", nonce: randomBytes(24).toString("base64url"), target: `http://127.0.0.1:${A}`, pad: "x".repeat(8192) });
+  const chunked = await fetch(`http://127.0.0.1:${B}/api/cluster/hello`, { method: "POST", headers: { "content-type": "application/json" }, body: new Blob([padded]).stream(), duplex: "half" });
+  assert.equal(chunked.status, 413, "hello must count the bytes of a chunked body");
   const health = await (await call(A, "/api/health", undefined, {})).json();
   assert.equal(health.cluster, true);
 
