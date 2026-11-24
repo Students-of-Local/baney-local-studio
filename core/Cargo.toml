@@ -11,7 +11,7 @@ ffi = ["dep:uniffi"]
 wire = []
 # Test seams for scripts/tests/plugin-grants-test.sh and the update_check_smoke example. Never on in a shipped build.
 test-hooks = []
-link = ["wire", "dep:snow", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:webpki-roots", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+link = ["wire", "tokio/signal", "dep:snow", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:webpki-roots", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dependencies]
 eukhe-client.workspace = true
