@@ -12,6 +12,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 jobs:
+  changes:
+    name: What changed
+    runs-on: ubuntu-24.04
+    outputs:
+      apps: ${{ steps.c.outputs.apps }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: c
+        run: scripts/ci-apps.sh
+
   core:
     name: Core (Linux)
     runs-on: ubuntu-24.04
@@ -78,6 +90,7 @@ jobs:
       - run: scripts/tests/privacy-hosts-test.sh
       - run: scripts/tests/sign-in-files-test.sh
       - run: scripts/tests/relay-bundle-test.sh
+      - run: scripts/tests/ci-apps-test.sh
       - name: Version strings sort local < dev < nightly < stable
         run: |
           set -euo pipefail
@@ -94,6 +107,8 @@ jobs:
 
   macos:
     name: macOS
+    needs: changes
+    if: needs.changes.outputs.apps == 'true'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,6 +125,8 @@ jobs:
 
   macos-app:
     name: macOS app
+    needs: changes
+    if: needs.changes.outputs.apps == 'true'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,6 +150,8 @@ jobs:
 
   ios-app:
     name: iPhone app
+    needs: changes
+    if: needs.changes.outputs.apps == 'true'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
