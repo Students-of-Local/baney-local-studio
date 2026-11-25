@@ -2433,6 +2433,7 @@ impl Actor {
             thread.run_started_at = thread.run_started_at.or_else(|| transcript.last_user_at()).or(Some(now_ms()));
         }
         let last_user_at = transcript.last_user_at();
+        thread.skill.asked |= state.busy && create::answering(transcript.items());
         thread.resources = None;
         thread.live = Some(Live {
             active: attach.active_session_id.clone(),
@@ -2465,6 +2466,7 @@ impl Actor {
                 self.emit_focus(id, !shown);
             }
         }
+        self.skill_turn_missed(id);
         self.dirty = true;
         Ok(())
     }
@@ -4133,7 +4135,9 @@ impl Actor {
             }
             return;
         };
-        self.threads.entry(id.to_string()).or_default().stopping = Some(Instant::now());
+        let thread = self.threads.entry(id.to_string()).or_default();
+        thread.stopping = Some(Instant::now());
+        thread.skill.asked = false;
         let abort = DaemonCommand::Abort { id: None, active_session_id: active, rest: Map::default() };
         match self.probe(abort, PROBE_TIMEOUT_MS).await {
             Ok(_) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string() }),

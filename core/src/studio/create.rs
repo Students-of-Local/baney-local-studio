@@ -130,6 +130,13 @@ impl Actor {
         }
     }
 
+    pub(super) fn skill_turn_missed(&mut self, id: &str) {
+        let Some(thread) = self.threads.get(id) else { return };
+        if thread.skill.asked && thread.live.as_ref().is_some_and(|live| !live.state.busy) {
+            self.skill_turn_ended(id);
+        }
+    }
+
     pub(super) fn save_skill(&mut self, request: String, id: String, draft: &str, text: String) {
         if let Err(message) = self.start_skill_save(&request, id, draft, text) {
             self.mailbox.push(Update::RequestFailed { request, message });
