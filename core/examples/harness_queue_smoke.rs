@@ -1634,6 +1634,43 @@ fn forks(config: &StudioConfig, root: &Path) -> anyhow::Result<Vec<String>> {
     if moved.as_deref() != Some(second.to_string_lossy().as_ref()) {
         misses.push(format!("fork-limited: expected the second account, got {moved:?}"));
     }
+    misses.extend(lost_forks(config, root, &origins)?);
+    Ok(misses)
+}
+
+fn lost_forks(config: &StudioConfig, root: &Path, origins: &[Origin]) -> anyhow::Result<Vec<String>> {
+    let mut misses = Vec::new();
+    for origin in origins.iter().filter(|origin| origin.thread != "fork-limited") {
+        let name = origin.thread;
+        let native = thread_flag(root, name, "nativeSession").context("the fork has no session of its own")?;
+        let own = origin.file.with_file_name(format!("{native}.jsonl"));
+        let own = if own.exists() {
+            own
+        } else {
+            origin.file.with_file_name(format!("rollout-2026-11-21T00-00-00-{native}.jsonl"))
+        };
+        std::fs::remove_file(&own).with_context(|| format!("remove {}", own.display()))?;
+        if name == "fork-codex" {
+            std::fs::remove_file(&origin.file)?;
+        }
+        let watch = opened(config, |run| {
+            run.focus(name);
+            run.send(&format!("again {name}"));
+            run.check(&format!("{name}: a message after its copy is gone is answered in a new session"), |watch| {
+                watch.replied(&format!("reply to again {name}")).is_some() && !watch.busy
+            });
+            if run.watch.replied("from elsewhere").is_some() {
+                run.watch.miss(format!("{name}: the other session came back after its copy was lost"));
+            }
+            if run.watch.warnings.iter().any(|text| text.contains("continues in a new")) {
+                println!("ok   {name}: the lost copy is mentioned");
+            } else {
+                run.watch.miss(format!("{name}: no warning that its copy is gone: {:?}", run.watch.warnings));
+            }
+            Ok(())
+        })?;
+        misses.extend(watch.misses);
+    }
     Ok(misses)
 }
 

@@ -134,10 +134,11 @@ fn cli_session(flags: &ThreadFlags, cwd: &str) -> Session {
     let native = flags.native_session.clone().unwrap_or_default();
     let account = flags.account.as_deref().map(Path::new);
     let exists = |session: &str| harness::claude_session_exists(account, cwd, session);
+    let origin = flags.fork_of.clone().filter(|_| !flags.forked);
     let (resume, fork) = match flags.harness {
         Harness::ClaudeCode if exists(&native) => (true, None),
-        Harness::ClaudeCode => (false, flags.fork_of.clone().filter(|origin| exists(origin))),
-        Harness::Codex if native.is_empty() => (false, flags.fork_of.clone()),
+        Harness::ClaudeCode => (false, origin.filter(|origin| exists(origin))),
+        Harness::Codex if native.is_empty() => (false, origin),
         Harness::Codex => (true, None),
         Harness::Eukhe => (false, None),
     };
@@ -319,9 +320,14 @@ impl Actor {
         if let Some(mut stale) = self.drivers.remove(id) {
             stale.driver.kill();
         }
+        self.cli_forked(id);
         let flags = self.store.flags(id);
         let cwd = self.cli_cwd(id);
         let Session { native, resume, fork } = cli_session(&flags, &cwd);
+        if harness == Harness::ClaudeCode && flags.fork_of.is_some() && !resume && fork.is_none() {
+            let lost = "Claude Code no longer has this thread's session; it continues in a new one.".to_string();
+            self.mailbox.notice(NoticeLevel::Warning, lost);
+        }
         let account = flags.account.as_deref().map(PathBuf::from);
         let configured = harness::trust::has_config(harness, &cwd);
         let launch = Launch {
@@ -348,6 +354,15 @@ impl Actor {
             self.cli_launch(id, opening);
         }
         Ok(())
+    }
+
+    fn cli_forked(&mut self, id: &str) {
+        let flags = self.store.flags(id);
+        let pending = flags.harness == Harness::ClaudeCode && flags.fork_of.is_some() && !flags.forked;
+        if pending && cli_session(&flags, &self.cli_cwd(id)).resume {
+            self.store.update(id, |flags| flags.forked = true);
+            self.save();
+        }
     }
 
     fn cli_trusted(&self, cwd: &str) -> bool {
@@ -417,7 +432,6 @@ impl Actor {
         let project = (!self.store.flags(id).project_refused).then_some(opening.launch.cwd.as_str());
         opening.launch.skills = crate::skills::entry(&self.data_dir, self.plugins_dir.as_deref(), project);
         let generation = opening.generation;
-        let origin = self.store.flags(id).fork_of;
         let (sender, thread, first) = (self.cli.clone(), id.to_string(), opening.launch.clone());
         let task = tokio::spawn(async move {
             let opened = Driver::open(first.clone(), Sink::new(&thread, generation, sender.clone())).await;
@@ -427,8 +441,7 @@ impl Actor {
                         && (first.resume || first.fork.is_some())
                         && session_gone(&error) =>
                 {
-                    let fork = origin.filter(|_| first.fork.is_none());
-                    let fresh = Launch { resume: false, native: String::new(), fork, ..first };
+                    let fresh = Launch { resume: false, native: String::new(), fork: None, ..first };
                     let sink = Sink::new(&thread, generation + 1, sender.clone());
                     (generation + 1, Driver::open(fresh, sink).await, Some(error))
                 }
@@ -468,10 +481,13 @@ impl Actor {
         let flags = self.store.flags(id);
         if flags.native_session.as_deref() != Some(opened.native.as_str()) {
             let native = opened.native.clone();
-            self.store.update(id, |flags| flags.native_session = Some(native));
+            self.store.update(id, |flags| {
+                flags.native_session = Some(native);
+                flags.forked = flags.fork_of.is_some();
+            });
             self.save();
         }
-        if self.threads.get(id).is_none_or(|thread| thread.live.is_none()) || launch.resume || launch.fork.is_some() {
+        if self.threads.get(id).is_none_or(|thread| thread.live.is_none()) || launch.resume || flags.fork_of.is_some() {
             self.cli_live(id, &opened.history);
         }
         if let Some(note) = note {
@@ -1082,6 +1098,7 @@ impl Actor {
             thread.stopping = None;
         }
         self.answered(id);
+        self.cli_forked(id);
         self.cli_restart_due(id);
         if let Some(cli) = self.drivers.get(id).filter(|cli| cli.restart && cli.unanswered > 0) {
             self.later(SETTLE, Command::CliSettle { thread: id.to_string(), epoch: cli.epoch });

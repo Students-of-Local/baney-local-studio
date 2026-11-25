@@ -298,7 +298,12 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
         }
         "thread/resume" => {
             pause(RESUME_DELAY);
-            shared.respond(id, &shared.thread(&params["threadId"]));
+            let fork = params["threadId"].as_str().filter(|thread| thread.starts_with("fake-fork-"));
+            if fork.and_then(Shared::store).is_some_and(|file| !file.exists()) {
+                shared.refuse(id, "no rollout found for this thread");
+            } else {
+                shared.respond(id, &shared.thread(&params["threadId"]));
+            }
         }
         "thread/fork" => {
             let fork = format!("fake-fork-{}", std::process::id());
