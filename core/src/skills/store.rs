@@ -13,11 +13,13 @@ use crate::{frontmatter, harness::trust, plugins};
 const FILE: &str = "skills.sqlite";
 const SKILL: &str = "SKILL.md";
 const BUILT_IN: &str = ".system";
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 const MAX_FILE: u64 = 256 * 1024;
 const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
 const FRESH: Duration = Duration::from_secs(2);
+const FOLDERS: [&str; 3] = [".agents", ".claude", ".eukhe"];
+const BESIDE: [&str; 3] = ["asks.txt", "names.txt", "where.txt"];
 
 struct Root {
     dir: PathBuf,
@@ -46,6 +48,7 @@ struct Found {
     path: PathBuf,
     source: String,
     owner: String,
+    links: bool,
     stamp: String,
 }
 
@@ -60,11 +63,11 @@ struct Row {
 
 pub struct Store {
     file: PathBuf,
-    db: Connection,
+    pub(super) db: Connection,
     roots: Roots,
-    seen: HashMap<i64, Listed>,
+    pub(super) seen: HashMap<i64, Listed>,
     hidden: Vec<Listed>,
-    checked: Option<Instant>,
+    pub(super) checked: Option<Instant>,
 }
 
 impl Root {
@@ -102,7 +105,7 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
                 project.ancestors().find(|dir| dir.join(".git").exists()).filter(|top| Some(*top) != home.as_deref());
             let top = top.unwrap_or(&project);
             here = Some(top.to_path_buf());
-            let folders = [".agents", ".claude", ".eukhe"].map(|dir| top.join(dir).join("skills"));
+            let folders = FOLDERS.map(|dir| top.join(dir).join("skills"));
             list.extend(folders.iter().filter_map(|dir| Root::project(dir, top, &owner)));
         }
     }
@@ -137,7 +140,7 @@ impl Store {
         })
     }
 
-    fn sound<T>(&mut self, step: impl Fn(&mut Self) -> rusqlite::Result<T>) -> Result<T, String> {
+    pub(super) fn sound<T>(&mut self, step: impl Fn(&mut Self) -> rusqlite::Result<T>) -> Result<T, String> {
         let file = self.file.clone();
         let first = shared(&file, || step(self));
         let outcome = match first {
@@ -158,7 +161,7 @@ impl Store {
         outcome.map_err(|error| format!("{}: {error}", self.file.display()))
     }
 
-    fn refresh(&mut self) -> rusqlite::Result<()> {
+    pub(super) fn refresh(&mut self) -> rusqlite::Result<()> {
         if self.checked.is_some_and(|checked| checked.elapsed() < FRESH) {
             return Ok(());
         }
@@ -171,11 +174,17 @@ impl Store {
             let write = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             stored = rows(&write)?;
             let (changed, gone) = due(&stored, &self.roots, &found);
-            for id in gone {
-                drop_skill(&write, id)?;
+            let replaced = changed.iter().any(|found| stored.get(&found.path).is_some_and(|row| !row.stamp.is_empty()));
+            for id in &gone {
+                drop_skill(&write, *id)?;
             }
             for found in changed {
                 add(&write, found)?;
+            }
+            if replaced || !gone.is_empty() {
+                write.execute_batch(
+                    "INSERT INTO whole (whole) VALUES ('optimize'); INSERT INTO parts (parts) VALUES ('optimize');",
+                )?;
             }
             stored = rows(&write)?;
             write.commit()?;
@@ -199,6 +208,23 @@ impl Store {
         self.hidden = hidden;
         self.checked = Some(Instant::now());
         Ok(())
+    }
+
+    pub(super) fn current(&self) -> rusqlite::Result<bool> {
+        let stored = rows(&self.db)?;
+        Ok(self.seen.iter().all(|(id, skill)| stored.get(&skill.path).is_some_and(|row| row.id == *id)))
+    }
+
+    pub(super) fn named(&self, name: &str) -> rusqlite::Result<Option<i64>> {
+        let (key, spelled) = (text::key(name), name.trim().to_lowercase());
+        let exact = self.seen.iter().find(|(_, skill)| skill.problem.is_none() && skill.name.to_lowercase() == spelled);
+        if exact.is_some() || key.is_empty() {
+            return Ok(exact.map(|(id, _)| *id));
+        }
+        let mut rows = self.db.prepare("SELECT skill FROM names WHERE key = ?1 ORDER BY old, skill")?;
+        let ids = rows.query_map([key], |row| row.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        let mut named = ids.into_iter().filter_map(|id| Some((id, self.seen.get(&id)?)));
+        Ok(named.clone().find(|(_, skill)| skill.problem.is_none()).or_else(|| named.next()).map(|(id, _)| id))
     }
 }
 
@@ -232,19 +258,27 @@ fn walk(root: &Root, files: &mut HashSet<PathBuf>, hidden: &mut Vec<Listed>) -> 
         None => Box::new(skill_files(root)),
     };
     for path in paths {
-        let Some((size, stamp)) = path.to_str().and_then(|_| stamp(&path, root.links)) else { continue };
-        if !files.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
-            continue;
-        }
-        if size > MAX_FILE {
-            hidden.push(root.hides(&path, format!("larger than {} KB", MAX_FILE / 1024)));
+        let Some((size, mut stamp)) = path.to_str().and_then(|_| stamp(&path, root.links)) else { continue };
+        let real = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if files.contains(&real) {
             continue;
         }
         if found.len() == MAX_SKILLS {
             hidden.push(root.hides(&path, format!("more than {MAX_SKILLS} skills in one folder")));
             break;
         }
-        found.push(Found { path, source: root.source.clone(), owner: root.owner.clone(), stamp });
+        files.insert(real);
+        if size > MAX_FILE {
+            hidden.push(root.hides(&path, format!("larger than {} KB", MAX_FILE / 1024)));
+            continue;
+        }
+        for name in BESIDE {
+            stamp.push(' ');
+            let beside = self::stamp(&path.with_file_name(name), root.links);
+            stamp.push_str(&beside.map(|(_, stamp)| stamp).unwrap_or_default());
+        }
+        let (source, owner) = (root.source.clone(), root.owner.clone());
+        found.push(Found { path, source, owner, links: root.links, stamp });
     }
     found
 }
@@ -282,8 +316,14 @@ fn due<'a>(known: &HashMap<PathBuf, Row>, roots: &Roots, found: &'a [Found]) -> 
     let here: HashSet<&Path> = found.iter().map(|found| found.path.as_path()).collect();
     let changed =
         |found: &&Found| known.get(&found.path).is_none_or(|row| row.stamp != found.stamp || row.owner != found.owner);
+    let inside = |path: &Path, top: &Path| {
+        let folder =
+            path.ancestors().find(|dir| FOLDERS.iter().any(|name| dir.ends_with(Path::new(name).join("skills"))));
+        let above = folder.and_then(Path::parent).unwrap_or(path);
+        path.starts_with(top) && !above.ancestors().take_while(|dir| *dir != top).any(|dir| dir.join(".git").exists())
+    };
     let elsewhere = |path: &Path, owner: &str| {
-        roots.trusted.contains(owner) && roots.here.as_ref().is_none_or(|top| !path.starts_with(top)) && path.exists()
+        roots.trusted.contains(owner) && roots.here.as_ref().is_none_or(|top| !inside(path, top)) && path.exists()
     };
     let lost = known.iter().filter(|(path, row)| !here.contains(path.as_path()) && !elsewhere(path, &row.owner));
     let lost = lost.map(|(_, row)| row.id).collect();
@@ -297,16 +337,21 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     if let Some(old) = old {
         drop_skill(db, old)?;
     }
-    let mut stamp = found.stamp.as_str();
+    let mut kept = found.stamp.as_str();
     let (content, unread) = match std::fs::read_to_string(&found.path) {
         Ok(content) => (content, None),
         Err(error) if error.kind() == ErrorKind::InvalidData => {
             (String::new(), Some("cannot be read as text".to_string()))
         }
         Err(error) => {
-            stamp = "";
+            kept = "";
             (String::new(), Some(error.to_string()))
         }
+    };
+    let extra = |name: &str| {
+        let path = found.path.with_file_name(name);
+        let small = stamp(&path, found.links).is_some_and(|(size, _)| size <= MAX_FILE);
+        small.then(|| std::fs::read_to_string(path).ok()).flatten()
     };
     let field =
         |key: &str| frontmatter::field(&content, key).map(|value| text::line(&value)).filter(|value| !value.is_empty());
@@ -314,15 +359,54 @@ fn add(db: &Connection, found: &Found) -> rusqlite::Result<()> {
     let description = field("description");
     let problem = unread.or_else(|| description.is_none().then(|| "no description in its front matter".to_string()));
     let description = description.unwrap_or_default();
+    let body = frontmatter::strip(&content);
+    let sections = text::sections(&body);
+    let chars = u32::try_from(body.chars().count()).unwrap_or(u32::MAX);
+    let spoken = name.replace(['-', '_'], " ");
+    let beside = BESIDE.map(|name| extra(name).unwrap_or_default());
     db.execute(
-        "INSERT INTO skills (id, path, stamp, owner, name, descr, problem) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![old, path, stamp, found.owner, name, description, problem],
+        "INSERT INTO skills (id, path, stamp, owner, name, descr, chars, problem)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![old, path, kept, found.owner, name, description, chars, problem],
     )?;
+    let id = db.last_insert_rowid();
+    db.execute(
+        "INSERT INTO whole (rowid, name, descr, asks, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, spoken, description, beside.join("\n"), body],
+    )?;
+    let mut part = db.prepare_cached("INSERT INTO parts (rowid, name, head, body) VALUES (?1, ?2, ?3, ?4)")?;
+    let pieces =
+        sections.iter().flat_map(|part| text::pieces(&part.text).into_iter().map(|piece| (part.head.as_str(), piece)));
+    for (row, (head, piece)) in (id << 20..).zip([("", description.as_str())].into_iter().chain(pieces)) {
+        part.execute(params![row, spoken, head, piece])?;
+    }
+    let mut named = db.prepare_cached("INSERT INTO names (skill, key, old) VALUES (?1, ?2, ?3)")?;
+    named.execute(params![id, text::key(&name), false])?;
+    for old in beside[1].lines().map(text::key).filter(|key| !key.is_empty()) {
+        named.execute(params![id, old, true])?;
+    }
+    let listed = text::listed_places(&sections, extra("where.txt").as_deref());
+    let linked = text::linked_places(&body);
+    let mut place = db.prepare_cached("INSERT OR IGNORE INTO places (skill, place, listed) VALUES (?1, ?2, ?3)")?;
+    for (places, listed) in [(listed, true), (linked, false)] {
+        for at in places {
+            place.execute(params![id, at, listed])?;
+        }
+    }
     Ok(())
 }
 
 fn drop_skill(db: &Connection, id: i64) -> rusqlite::Result<()> {
-    db.execute("DELETE FROM skills WHERE id = ?1", [id]).map(|_| ())
+    for sql in [
+        "DELETE FROM skills WHERE id = ?1",
+        "DELETE FROM whole WHERE rowid = ?1",
+        "DELETE FROM parts WHERE rowid >= ?1 << 20 AND rowid < (?1 + 1) << 20",
+        "DELETE FROM names WHERE skill = ?1",
+        "DELETE FROM places WHERE skill = ?1",
+    ] {
+        db.execute(sql, [id])?;
+    }
+    Ok(())
 }
 
 fn damaged(error: &rusqlite::Error) -> bool {
@@ -381,9 +465,17 @@ fn prepare(file: &Path) -> rusqlite::Result<Connection> {
     let write = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if write.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? != VERSION {
         write.execute_batch(
-            "DROP TABLE IF EXISTS skills;
-             CREATE TABLE skills (id INTEGER PRIMARY KEY, path TEXT UNIQUE, stamp TEXT, owner TEXT, name TEXT,
-                                  descr TEXT, problem TEXT);",
+            "DROP TABLE IF EXISTS skills; DROP TABLE IF EXISTS whole; DROP TABLE IF EXISTS parts;
+             DROP TABLE IF EXISTS names; DROP TABLE IF EXISTS places;
+             CREATE TABLE skills (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, stamp TEXT, owner TEXT, name TEXT,
+                                  descr TEXT, chars INTEGER, problem TEXT);
+             CREATE VIRTUAL TABLE whole USING fts5 (name, descr, asks, body, content='', contentless_delete=1,
+                                  tokenize='porter unicode61 remove_diacritics 2');
+             CREATE VIRTUAL TABLE parts USING fts5 (name, head, body,
+                                  tokenize='porter unicode61 remove_diacritics 2');
+             CREATE TABLE names (skill INTEGER, key TEXT, old INTEGER);
+             CREATE INDEX names_key ON names (key);
+             CREATE TABLE places (skill INTEGER, place TEXT, listed INTEGER, PRIMARY KEY (skill, place));",
         )?;
         write.pragma_update(None, "user_version", VERSION)?;
     }

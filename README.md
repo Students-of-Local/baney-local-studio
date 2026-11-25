@@ -121,7 +121,7 @@ local-studio plugin list
 local-studio plugin revoke <id> [capability]...
 ```
 
-On Linux the installed command (`local-studio`, or `local-studio-nightly` and `local-studio-dev` on those channels) hands `import`, `plugin`, `tunnel`, `fleet` and `update` to the `local-studio-cli` beside it. On macOS the tool ships inside the app as `Contents/MacOS/local-studio-cli`, and `scripts/install.sh` links `~/.local/bin/local-studio` to it unless that path already holds something else.
+On Linux the installed command (`local-studio`, or `local-studio-nightly` and `local-studio-dev` on those channels) hands `import`, `plugin`, `skills`, `tunnel`, `fleet` and `update` to the `local-studio-cli` beside it. On macOS the tool ships inside the app as `Contents/MacOS/local-studio-cli`, and `scripts/install.sh` links `~/.local/bin/local-studio` to it unless that path already holds something else.
 
 How consent, partial grants, channels and updates work: [docs/plugins.md](docs/plugins.md).
 
