@@ -118,6 +118,14 @@ export async function agentsMayRead(): Promise<(meta?: ThreadMeta, data?: Thread
 	};
 }
 
+/**
+ * Metadata for a chat brought in from an export file: it keeps its own createdAt, which decides
+ * whether agents may read it (agentsMayRead), and only lastModified moves to order the list.
+ */
+export function importedMeta<T extends { lastModified: string }>(meta: T, at: string): T {
+	return { ...meta, lastModified: at };
+}
+
 /** Private threads are never mirrored or served; either record carrying the mark is enough. */
 export function isPrivate(meta?: ThreadMeta, data?: ThreadData): boolean {
 	return meta?.localStudioPrivate === true || data?.localStudioPrivate === true;

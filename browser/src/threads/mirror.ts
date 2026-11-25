@@ -25,6 +25,8 @@ type Send = (message: ExtThreadsMirror) => boolean;
 
 let send: Send = () => false;
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Moves on every sharing change, so a write that began before it is dropped instead of landing after its clear. */
+let generation = 0;
 
 export async function mirrorEnabled(): Promise<boolean> {
 	const data = await chrome.storage.local.get(MIRROR_KEY).catch(() => ({}) as Record<string, unknown>);
@@ -33,12 +35,14 @@ export async function mirrorEnabled(): Promise<boolean> {
 
 /** Render one thread and send it, or send its deletion when it's gone or private. */
 export async function mirrorThread(id: string): Promise<void> {
+	const started = generation;
 	if (!validThreadId(id) || !(await mirrorEnabled())) return;
 	const { meta, data } = await readThread(id);
 	if (!data || !meta || !(await agentsMayRead())(meta, data)) {
 		send({ type: "threads_mirror", op: "delete", id });
 		return;
 	}
+	if (started !== generation) return;
 	send({
 		type: "threads_mirror",
 		op: "put",
@@ -71,6 +75,7 @@ export function scheduleMirror(id: string): void {
 
 /** Send every readable thread, and the list of ids so the host drops files of deleted ones. */
 export async function resyncMirror(): Promise<void> {
+	const started = generation;
 	// Off: make sure no copy is left, even one written before it was turned off while no host ran.
 	if (!(await mirrorEnabled())) {
 		send({ type: "threads_mirror", op: "clear" });
@@ -78,6 +83,7 @@ export async function resyncMirror(): Promise<void> {
 	}
 	const may = await agentsMayRead();
 	const metas = (await listThreadMeta()).filter((m) => validThreadId(m.id) && may(m)).slice(0, RESYNC_LIMIT);
+	if (started !== generation) return;
 	send({ type: "threads_mirror", op: "sync", ids: metas.map((m) => m.id) });
 	for (const m of metas) await mirrorThread(m.id).catch(() => undefined);
 }
@@ -91,6 +97,7 @@ export function startThreadMirror(sender: Send): void {
 	});
 	chrome.storage.onChanged.addListener((changes, area) => {
 		if (area !== "local" || !(MIRROR_KEY in changes || SHARE_OLDER_KEY in changes)) return;
+		generation++;
 		if (changes[MIRROR_KEY]?.newValue === false) send({ type: "threads_mirror", op: "clear" });
 		else void resyncMirror().catch(() => undefined);
 	});

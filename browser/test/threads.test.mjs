@@ -298,3 +298,82 @@ test("the side panel's session store marks a thread saved in private mode privat
 		["local-studio-thread-changed:plain", "local-studio-thread-changed:secret", "local-studio-thread-changed:secret", "local-studio-thread-changed:plain", "local-studio-thread-changed:plain"],
 	);
 });
+
+test("an imported chat keeps its creation time, so one from before agent access began stays hidden", async () => {
+	installFakeChrome();
+	const old = thread("imported1", { createdAt: "2026-10-20T10:00:00.000Z" });
+	const importedAt = "2026-11-25T09:00:00.000Z";
+	const imported = store.importedMeta(meta(old), importedAt);
+	assert.equal(imported.createdAt, old.createdAt);
+	assert.equal(imported.lastModified, importedAt);
+	store.setThreadSource({ list: async () => [imported], read: async () => ({ meta: imported, data: old }) });
+	try {
+		await chrome.storage.local.set({ "threads.sharedSince": "2026-10-26T00:00:00.000Z" });
+		assert.equal((await store.agentsMayRead())(imported, old), false, "an imported chat from before the cutoff passed it");
+		assert.equal((await bridge.handleThreads("threads.list", {})).total, 0);
+		assert.deepEqual((await bridge.handleThreads("threads.search", { query: "lisbon" })).hits, []);
+		await assert.rejects(() => bridge.handleThreads("threads.read", { id: "imported1" }), (e) => e.code === "not_found");
+	} finally {
+		store.setThreadSource(undefined);
+	}
+});
+
+test("a mirror write in flight when sharing is turned off never lands after the clear", async () => {
+	installFakeChrome();
+	const mirror = await import("../src/threads/mirror.ts");
+	const t = thread("race1");
+	let release;
+	const gate = new Promise((r) => {
+		release = r;
+	});
+	store.setThreadSource({
+		list: async () => {
+			await gate;
+			return [meta(t)];
+		},
+		read: async () => {
+			await gate;
+			return { meta: meta(t), data: t };
+		},
+	});
+	await chrome.storage.local.set({ "threads.sharedSince": "2026-10-01T00:00:00.000Z" });
+	const sent = [];
+	mirror.startThreadMirror((m) => {
+		sent.push(m);
+		return true;
+	});
+	try {
+		const writing = mirror.mirrorThread("race1");
+		const syncing = mirror.resyncMirror();
+		await new Promise((r) => setTimeout(r, 30));
+		await chrome.storage.local.set({ [mirror.MIRROR_KEY]: false });
+		await new Promise((r) => setTimeout(r, 30));
+		release();
+		await writing;
+		await syncing;
+		assert.deepEqual(sent.map((m) => m.op), ["clear"], "a write that began before the switch went off landed after the clear");
+	} finally {
+		store.setThreadSource(undefined);
+	}
+});
+
+test("threads.search counts a thread only when every word is in it", async () => {
+	installFakeChrome();
+	await chrome.storage.local.set({ "threads.sharedSince": "2026-10-01T00:00:00.000Z" });
+	const said = (id, text) => thread(id, { title: `Chat ${id}`, messages: [{ role: "user", content: text, timestamp: 1 }] });
+	const threads = [said("both1", "flight prices to Paris"), said("flight1", "my flight was late"), said("prices1", "the prices went up")];
+	store.setThreadSource({
+		list: async () => threads.map((t) => meta(t)),
+		read: async (id) => {
+			const t = threads.find((x) => x.id === id);
+			return t ? { meta: meta(t), data: t } : {};
+		},
+	});
+	try {
+		const search = await bridge.handleThreads("threads.search", { query: "flight prices" });
+		assert.deepEqual(search.hits.map((h) => h.id), ["both1"]);
+		assert.deepEqual((await bridge.handleThreads("threads.search", { query: "Chat flight" })).hits.map((h) => h.id).sort(), ["both1", "flight1"], "the title counts toward every word");
+	} finally {
+		store.setThreadSource(undefined);
+	}
+});

@@ -10,6 +10,7 @@ import { Download, FileDown, FileUp, Pencil, Trash2 } from "lucide";
 import "../components/HeaderMenu.js";
 import type { HeaderMenuItem } from "../components/HeaderMenu.js";
 import { Toast } from "../components/Toast.js";
+import { importedMeta } from "../threads/store.js";
 
 type ExportedSession = {
 	session: SessionData;
@@ -346,15 +347,7 @@ export class LocalStudioSessionListDialog extends DialogBase {
 						const importTime = new Date(baseTime.getTime() - offsetSeconds * 1000);
 						const importTimeISO = importTime.toISOString();
 
-						// Update metadata timestamps
-						const updatedMetadata = {
-							...metadata,
-							lastModified: importTimeISO,
-							createdAt: importTimeISO,
-						};
-
-						// Save with updated metadata
-						await storage.sessions.save(session, updatedMetadata);
+						await storage.sessions.save(session, importedMeta(metadata, importTimeISO));
 						imported++;
 					} catch (err) {
 						console.error(`Failed to import session ${metadata.title}:`, err);

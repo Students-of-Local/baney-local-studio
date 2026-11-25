@@ -112,14 +112,15 @@ export async function handleThreads(method: string, params: Params): Promise<unk
 				if (hits.length >= limit) break;
 				const { data } = await readThread(meta.id);
 				if (!data || !may(meta, data)) continue;
+				const text = [redactSecrets(meta.title ?? ""), ...renderMessages(data.messages).map((m) => m.text)];
+				if (!matches(text.join("\n"), query)) continue;
 				const found = snippets(data, query);
-				if (found.length || matches(redactSecrets(meta.title ?? ""), query))
-					hits.push({
-						id: meta.id,
-						title: redactSecrets(meta.title),
-						lastModified: meta.lastModified,
-						snippets: found,
-					});
+				hits.push({
+					id: meta.id,
+					title: redactSecrets(meta.title),
+					lastModified: meta.lastModified,
+					snippets: found,
+				});
 			}
 			return {
 				hits,
