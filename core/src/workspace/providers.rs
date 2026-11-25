@@ -13,7 +13,7 @@ use super::model::{
     ProviderKey, ProviderKind, ProviderModel, ProviderStatus,
 };
 use super::{ModelsReloader, Workspace};
-use crate::model::{ModelOption, Update};
+use crate::model::{ModelOption, NoticeLevel, Update};
 use crate::platform::Mode;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,6 +25,8 @@ pub(super) const NO_KEY: &str = "none";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ENDPOINT_HEADER: &str = "x-local-studio-endpoint";
 const EXCERPT: usize = 200;
+const SERVER_TIMEOUT: Duration = Duration::from_millis(1500);
+const SERVER_BYTES: usize = 1 << 20;
 const ANTHROPIC: &str = "anthropic";
 pub(crate) const CLAUDE_SIGN_IN: &str = "Eukhe's Claude models are hidden: its Claude subscription sign-in identifies as Claude Code and can get the Anthropic account restricted. Use Claude Code (your claude CLI sign-in) for Claude, or save an Anthropic API key.";
 
@@ -134,6 +136,24 @@ pub(super) struct ProviderState {
     catalog: Option<Vec<ModelOption>>,
     errors: Vec<String>,
     fleet: Vec<LocalController>,
+    servers: Vec<Server>,
+}
+
+#[derive(Clone)]
+struct Server {
+    name: String,
+    base_url: String,
+    port: u16,
+    models: Vec<ProviderModel>,
+}
+
+impl Server {
+    fn added(&self, providers: &Map<String, Value>) -> bool {
+        providers
+            .values()
+            .filter_map(|entry| text(entry, "baseUrl"))
+            .any(|url| url.trim_end_matches('/') == self.base_url)
+    }
 }
 
 #[derive(Default)]
@@ -365,7 +385,26 @@ fn engine_provider(controller: &LocalController, port: u16) -> String {
     format!("local-{}-{port}", slug(&controller.name))
 }
 
-fn engines(fleet: &[LocalController], providers: &Map<String, Value>) -> Vec<LocalEngine> {
+fn engines(state: &ProviderState, providers: &Map<String, Value>) -> Vec<LocalEngine> {
+    let fleet = fleet_engines(&state.fleet, providers);
+    let here = |port: u16| {
+        let own = state.fleet.iter().filter(|controller| controller.local);
+        own.flat_map(|controller| &controller.endpoints)
+            .any(|endpoint| endpoint.port == port && fleet.iter().any(|engine| engine.id == endpoint.id))
+    };
+    let found = state.servers.iter().filter(|server| !here(server.port)).map(|server| LocalEngine {
+        id: server.base_url.clone(),
+        controller: server.name.clone(),
+        port: server.port,
+        base_url: server.base_url.clone(),
+        models: server.models.iter().map(|model| model.id.clone()).collect(),
+        provider: String::new(),
+        added: server.added(providers),
+    });
+    found.chain(fleet.iter().cloned()).collect()
+}
+
+fn fleet_engines(fleet: &[LocalController], providers: &Map<String, Value>) -> Vec<LocalEngine> {
     fleet
         .iter()
         .filter(|controller| controller.reachable && controller.has_controller)
@@ -702,6 +741,46 @@ async fn discover(base_url: &str, api: ProviderApi, key: Option<&str>) -> Result
     Err(missing)
 }
 
+fn server_at(preset: EndpointPreset) -> Option<Server> {
+    let url = Url::parse(&preset.base_url).ok()?;
+    let host = url.host_str()?.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()?;
+    if url.scheme() != "http" || !host.is_loopback() {
+        return None;
+    }
+    let base_url = preset.base_url.trim_end_matches('/').to_string();
+    Some(Server { name: preset.name, base_url, port: url.port_or_known_default()?, models: Vec::new() })
+}
+
+async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Server> {
+    let asked = client.get(format!("{}/models", server.base_url)).send().await;
+    let mut response = asked.ok().filter(|response| response.status().is_success())?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len() + chunk.len() > SERVER_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    server.models = parse_models(&serde_json::from_slice(&body).ok()?);
+    (!server.models.is_empty()).then_some(server)
+}
+
+async fn find_servers(presets: Vec<EndpointPreset>) -> Result<Vec<Server>, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(SERVER_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Could not look for model servers on this computer: {error}"))?;
+    let asked =
+        presets.into_iter().filter_map(server_at).map(|server| tokio::spawn(ask_server(client.clone(), server)));
+    let mut servers = Vec::new();
+    for server in asked.collect::<Vec<_>>() {
+        servers.extend(server.await.map_err(|error| error.to_string())?);
+    }
+    Ok(servers)
+}
+
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tokio::task::spawn_blocking(work).await.map_err(|error| error.to_string())?
 }
@@ -787,7 +866,7 @@ impl Workspace {
             }
             Update::Providers {
                 providers: statuses(&state, &files),
-                engines: engines(&state.fleet, &files.providers),
+                engines: engines(&state, &files.providers),
                 errors,
             }
         };
@@ -801,6 +880,44 @@ impl Workspace {
             let fleet = workspace.inner.local.fleet(&workspace.current_settings()).await;
             workspace.fleet_seen(fleet);
         });
+    }
+
+    pub(crate) fn find_local_servers(&self, presets: Vec<EndpointPreset>) {
+        let workspace = self.clone();
+        self.inner.runtime.spawn(async move {
+            match find_servers(presets).await {
+                Ok(servers) => {
+                    workspace.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).servers = servers;
+                    workspace.publish_providers();
+                }
+                Err(text) => workspace.push(Update::Notice { level: NoticeLevel::Warning, text }),
+            }
+        });
+    }
+
+    fn server(&self, engine: &str) -> Option<Server> {
+        let state = self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
+        state.servers.iter().find(|server| server.base_url == engine).cloned()
+    }
+
+    async fn add_server(&self, request: String, agent: PathBuf, server: Server) -> Result<Vec<Update>, String> {
+        let _guard = self.inner.providers_lock.lock().await;
+        let taken = self.taken_ids();
+        let message = format!("Added {}.", server.name);
+        blocking(move || {
+            edit_models(&agent, |providers| {
+                if !server.added(providers) {
+                    let id = unique_id(&server.name, providers, &taken);
+                    let api = ProviderApi::OpenAiCompatible;
+                    let entry = provider_entry(None, &server.name, &server.base_url, api, &server.models);
+                    providers.insert(id, entry);
+                }
+                Ok(())
+            })
+        })
+        .await?;
+        self.reload_models(request, message);
+        Ok(Vec::new())
     }
 
     fn taken_ids(&self) -> BTreeSet<String> {
@@ -990,6 +1107,9 @@ impl Workspace {
         let reply = request.clone();
         self.answer(request, async move {
             let agent = workspace.agent()?;
+            if let Some(server) = workspace.server(&engine) {
+                return workspace.add_server(reply, agent, server).await;
+            }
             let found = {
                 let state = workspace.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
                 state.fleet.iter().find_map(|controller| {
