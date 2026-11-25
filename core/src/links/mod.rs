@@ -1,3 +1,4 @@
+pub(crate) mod open;
 pub(crate) mod studio;
 
 const SCHEMES: &[&str] = &["http", "https", "mailto"];
