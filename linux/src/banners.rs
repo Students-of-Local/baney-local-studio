@@ -1,7 +1,6 @@
 use adw::prelude::*;
 use local_studio_core::{DaemonMismatch, KernelState};
 
-use crate::format;
 use crate::state::State;
 
 pub struct Banners {
@@ -32,7 +31,7 @@ impl Banners {
     pub fn render_daemon(&self, mismatch: Option<&DaemonMismatch>) {
         match mismatch {
             Some(mismatch) => {
-                self.daemon.set_title(&format::escape(&mismatch.message));
+                self.daemon.set_title(&mismatch.message);
                 self.daemon.set_revealed(true);
             }
             None => self.daemon.set_revealed(false),
@@ -43,7 +42,7 @@ impl Banners {
         match state {
             Some(KernelState::Installing { detail }) => {
                 let detail = detail.as_deref().unwrap_or("Downloading Python and the kernel packages.");
-                self.kernel.set_title(&format::escape(&format!("Installing the Python kernel… {detail}")));
+                self.kernel.set_title(&format!("Installing the Python kernel… {detail}"));
                 self.kernel.set_button_label(Some("Hide"));
                 self.kernel.set_action_name(None);
                 self.kernel.remove_css_class("ls-banner-error");
@@ -52,7 +51,7 @@ impl Banners {
                 }
             }
             Some(KernelState::Failed { message }) => {
-                self.kernel.set_title(&format::escape(&format!("The Python kernel could not be installed: {message}")));
+                self.kernel.set_title(&format!("The Python kernel could not be installed: {message}"));
                 self.kernel.set_button_label(Some("Retry"));
                 self.kernel.set_action_name(Some("win.install-kernel"));
                 self.kernel.add_css_class("ls-banner-error");
@@ -63,7 +62,7 @@ impl Banners {
     }
 
     pub fn show_notice(&self, text: &str) {
-        self.notice.set_title(&format::escape(text));
+        self.notice.set_title(text);
         self.notice.set_revealed(true);
     }
 
@@ -74,9 +73,8 @@ impl Banners {
         });
         match missing {
             Some(name) => {
-                self.provider.set_title(&format::escape(&format!(
-                    "{name} is not signed in. Sign in with the eukhe CLI or pick another model."
-                )));
+                self.provider
+                    .set_title(&format!("{name} is not signed in. Sign in with the eukhe CLI or pick another model."));
                 self.provider.set_revealed(true);
             }
             None => self.provider.set_revealed(false),

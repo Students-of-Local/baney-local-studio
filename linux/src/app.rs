@@ -1149,7 +1149,7 @@ impl App {
     }
 
     fn show_banner(&self, text: &str) {
-        self.banner.set_title(&format::escape(text));
+        self.banner.set_title(text);
         self.banner.set_revealed(true);
     }
 
