@@ -106,10 +106,11 @@ pdf	Can you go through this link to a report and tell me what it says about prof
 pdf	I tried to get the words out of a document and got nothing back at all. Why is it blank, and can you still read it?
 pdf	Pull the table of quarterly figures out of this online paper and tell me which page each number sits on.
 pdf	Find where the authors describe how they ran the study in this document and give me a short rundown with the page numbers.
-polycarp-browser	Can you log into my email in Chrome and tell me if there's anything from my landlord? I'm already signed in there.
-polycarp-browser	I just built a little app running on localhost:3000, can you click around it and make sure the signup page works and grab a screenshot?
-polycarp-browser	Go to the company's contact page and put my name and email in the form, then submit it for me.
-polycarp-browser	Open my analytics dashboard in the browser, scroll down and read me the numbers from this week's table.
+local-studio-browser	Can you log into my email in Chrome and tell me if there's anything from my landlord? I'm already signed in there.
+local-studio-browser	I just built a little app running on localhost:3000, can you click around it and make sure the signup page works and grab a screenshot?
+local-studio-browser	Go to the company's contact page and put my name and email in the form, then submit it for me.
+local-studio-browser	Open my analytics dashboard in the browser, scroll down and read me the numbers from this week's table.
+local-studio-browser	I want Reddit to be dark with bigger text whenever I go there, and the right column gone.
 proton	Can you dig through my encrypted email and find the message from my landlord about the lease renewal?
 proton	I need a link to my Taxes folder in my private cloud storage that anyone can open but only to view, and it should stop working after a week
 proton	What do I have on my schedule next week? Also put a dentist appointment on Thursday at 3.

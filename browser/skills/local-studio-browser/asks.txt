@@ -6,3 +6,5 @@ scroll down and grab a screenshot of the pricing page
 click through the wizard on this site until I hit the confirm step
 this page keeps timing out when I load it, can you see what's happening
 grab the latest posts from my signed-in feed tab
+make this site dark every time I open it
+hide the shorts and the sidebar on youtube for good
