@@ -1096,22 +1096,23 @@ impl Route {
         }
     }
 
-    fn off_command(&self) -> String {
-        if self.owner == "local-studio" {
-            return "local-studio tunnel off".to_string();
+    fn turn_off(&self) -> &'static str {
+        match self.owner.as_str() {
+            "local-studio-browser" => "Turn it off: local-studio-browser remote off",
+            "local-studio" => "Turn it off: local-studio tunnel off",
+            _ => "Turn it off there.",
         }
-        format!("{} remote off", self.owner)
     }
 
     fn refusal(&self) -> Failure {
         fail(
             "other_route",
             format!(
-                "This machine already has a {} route for {}, run by {}, and a machine has one tunnel. Turn it off first: {}",
+                "This machine already has a {} route for {}, run by {}, and a machine has one tunnel. {}",
                 self.route,
                 self.hostname,
                 self.owner_name(),
-                self.off_command()
+                self.turn_off()
             ),
         )
     }
@@ -1123,9 +1124,9 @@ fn route_status(route: &Route) -> Status {
     let message = if route.is_hosted() {
         "This machine is on the retired hosted route. Turn it off (local-studio tunnel off), then set up your own: local-studio tunnel setup --tailnet, or setup --cloudflare <hostname>.".to_string()
     } else if carried {
-        format!("{owner} runs this route, and it carries the phone address to local-studio-serve.")
+        format!("This route is run by {owner}, and it carries the phone address to local-studio-serve.")
     } else {
-        format!("{owner} runs this route. It doesn't carry the phone address.")
+        format!("This route is run by {owner}. It doesn't carry the phone address.")
     };
     Status {
         route: match route.route.as_str() {

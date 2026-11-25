@@ -46,7 +46,6 @@ case "$1" in
   bootout)
     label=${2##*/}
     [ -f "$svc/$label" ] || { echo "Boot-out failed: 3: No such process" >&2; exit 3; }
-    [ -f "$SHIM_STATE/fail-stop-$label" ] && { echo "Boot-out failed: 5: Input/output error" >&2; exit 5; }
     rm -f "$svc/$label" ;;
 esac
 exit 0
@@ -60,14 +59,13 @@ mkdir -p "$svc"
 last=
 for a; do last=$a; done
 case "$1" in
-  start|restart)
+  restart)
     [ -f "$HOME/.config/systemd/user/$2" ] || exit 5
     touch "$svc/$2" ;;
   is-active)
     if [ -f "$svc/$2" ] && [ ! -f "$SHIM_STATE/fail-$2" ]; then echo active; else echo inactive; exit 3; fi ;;
   stop) rm -f "$svc/$2" ;;
   disable)
-    [ -f "$SHIM_STATE/fail-stop-$last" ] && { echo "Failed to disable unit" >&2; exit 1; }
     touch "$svc/disabled-$last"
     rm -f "$svc/$last" ;;
   enable) rm -f "$svc/disabled-$last" ;;
@@ -298,6 +296,7 @@ fn answer(mut stream: TcpStream, log: &Path, state: &Path) -> std::io::Result<()
     let (code, extra, body) = match path.as_str() {
         "/v1/health" if refuses(state, &host) => (403, String::new(), "{}"),
         "/v1/health" => (200, String::new(), r#"{"ok":true}"#),
+        "/mcp" if state.join("not-joined").exists() => (421, String::new(), "{}"),
         "/mcp" => (
             401,
             format!(
@@ -758,6 +757,19 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     ensure(!Smoke::has(&lines, "tunnel create"), "setup again must reuse the tunnel")?;
     Smoke::at(&lines, "check studio.example.com /mcp 401")?;
 
+    let unjoined = s.state.join("not-joined");
+    fs::write(&unjoined, "").map_err(|e| e.to_string())?;
+    let (code, value) = s.ls(&again)?;
+    fs::remove_file(&unjoined).map_err(|e| e.to_string())?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(
+        code == 0
+            && value["checks"]["mcp"] == "not_joined"
+            && message.ends_with("local-studio-browser remote join")
+            && s.route_path().exists(),
+        format!("a server that hasn't joined the name is ready, naming the join: {value}"),
+    )?;
+
     bad_serve(s, &again)?;
 
     let (code, value) = s.ls(&again)?;
@@ -948,6 +960,7 @@ fn service_fails(s: &Smoke) -> Result<(), String> {
     ensure(!s.route_path().exists(), "a failed service leaves no route.json")?;
     ensure(!s.service_file().exists() && !s.service_running(), "a failed service is removed")?;
     ensure(!Smoke::has(&s.since(mark), "check "), "a failed service is never checked from outside")?;
+    off(s)?;
     println!("ok: setup --cloudflare removes a service that doesn't stay running");
     Ok(())
 }
@@ -955,6 +968,8 @@ fn service_fails(s: &Smoke) -> Result<(), String> {
 fn browser_route(s: &Smoke) -> Result<(), String> {
     let route = json!({"v":1,"owner":"local-studio-browser","route":"cloudflare","hostname":"old.example.com","aliases":[],"ports":{"mcp":8787}});
     fs::write(s.route_path(), route.to_string()).map_err(|e| e.to_string())?;
+    let serve = s.serve_path();
+    let before = fs::read(&serve).ok();
     let mark = s.mark();
     for (args, code) in [
         (&["tunnel", "setup", "--cloudflare", "studio.example.com", "--yes", "--json"][..], "other_route"),
@@ -969,7 +984,22 @@ fn browser_route(s: &Smoke) -> Result<(), String> {
             format!("{} on browser use's route: {value}", args.join(" ")),
         )?;
     }
-    ensure(s.since(mark).is_empty() && s.route_path().exists(), "browser use's route stays as it is")?;
+    let kept = fs::read_to_string(s.route_path()).map_err(|e| e.to_string())?;
+    ensure(
+        s.since(mark).is_empty() && kept == route.to_string() && fs::read(&serve).ok() == before,
+        "browser use's route stays as it is",
+    )?;
+    let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(code == 0 && message.starts_with("This route is run by browser use."), format!("its status: {value}"))?;
+    let other = json!({"v":1,"owner":"acme-tool","route":"cloudflare","hostname":"old.example.com","aliases":[],"ports":{"mcp":8787}});
+    fs::write(s.route_path(), other.to_string()).map_err(|e| e.to_string())?;
+    let (code, value) = s.ls(&["tunnel", "setup", "--tailnet", "--yes", "--json"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(
+        code == 1 && value["code"] == "other_route" && message.ends_with("Turn it off there."),
+        format!("a route of an unknown owner gets no command: {value}"),
+    )?;
     fs::remove_file(s.route_path()).map_err(|e| e.to_string())?;
     println!("ok: a route run by browser use is refused, naming how to turn it off");
     Ok(())

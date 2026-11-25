@@ -790,7 +790,7 @@ fn ready(route: &Route, checks: &Value, message: &str) -> Value {
         "mcpUrl": format!("https://{}/mcp", route.hostname),
         "wsUrl": format!("wss://{}/v1/ws", route.hostname),
         "checks": checks,
-        "message": format!("{message}{}", dns_note(checks)),
+        "message": format!("{message}{}", notes(checks)),
     })
 }
 
@@ -831,7 +831,9 @@ struct Want {
     mcp: bool,
 }
 
-async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want) -> Result<(), String> {
+struct Joined(bool);
+
+async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want) -> Result<Joined, String> {
     let get = |path: &str| {
         client
             .get(format!("{base}{path}"))
@@ -861,6 +863,9 @@ async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want)
     }
     if want.mcp {
         let answer = get("/mcp").await.map_err(|error| format!("https://{hostname}/mcp: {error}"))?;
+        if answer.status().as_u16() == 421 {
+            return Ok(Joined(false));
+        }
         let challenge = answer.headers().get("www-authenticate").and_then(|value| value.to_str().ok()).unwrap_or("");
         if answer.status().as_u16() != 401 || !challenge.contains("resource_metadata") {
             return Err(format!(
@@ -869,25 +874,30 @@ async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want)
             ));
         }
     }
-    Ok(())
+    Ok(Joined(true))
 }
 
-fn dns_note(checks: &Value) -> &'static str {
+fn notes(checks: &Value) -> String {
+    let mut text = String::new();
     if checks["dns"] == "public_only" {
-        " This computer's DNS still has the old answer for the new name, so the checks looked it up over DNS over HTTPS. That clears on its own, and nothing is needed."
-    } else {
-        ""
+        text.push_str(" This computer's DNS still has the old answer for the new name, so the checks looked it up over DNS over HTTPS. That clears on its own, and nothing is needed.");
     }
+    if checks["mcp"] == "not_joined" {
+        text.push_str(
+            " Browser use is running here but doesn't answer this name yet. Run: local-studio-browser remote join",
+        );
+    }
+    text
 }
 
 impl Tunnel {
-    async fn check_once(&self, hostname: &str, want: Want) -> Result<&'static str, String> {
+    async fn check_once(&self, hostname: &str, want: Want) -> Result<(Joined, &'static str), String> {
         if let Some(base) = check_url() {
-            return probe(&self.http, &base, hostname, want).await.map(|()| "local");
+            return probe(&self.http, &base, hostname, want).await.map(|joined| (joined, "local"));
         }
         let base = check_origin(hostname);
         let error = match probe(&self.http, &base, hostname, want).await {
-            Ok(()) => return Ok("local"),
+            Ok(joined) => return Ok((joined, "local")),
             Err(error) => error,
         };
         let Err(local) = resolves_here(hostname).await else { return Err(error) };
@@ -902,10 +912,10 @@ impl Tunnel {
             .resolve_to_addrs(hostname, &addrs)
             .build()
             .map_err(|error| error.to_string())?;
-        probe(&client, &base, hostname, want).await.map_err(|error| {
+        let joined = probe(&client, &base, hostname, want).await.map_err(|error| {
             format!("{error} (This computer's DNS has no answer for {hostname} yet, so this check used the address DNS over HTTPS gave.)")
         })?;
-        Ok("public_only")
+        Ok((joined, "public_only"))
     }
 
     async fn public_lookup(&self, hostname: &str) -> Result<Vec<SocketAddr>, String> {
@@ -954,6 +964,7 @@ impl Tunnel {
     async fn public_checks(&self, hostnames: &[String], ports: Ports, health: bool) -> Result<Value, String> {
         let listens = listening(ports.mcp);
         let mut dns = "local";
+        let mut mcp = if listens { "ok" } else { "not_listening" };
         if health || listens {
             for hostname in hostnames {
                 let mut last = String::new();
@@ -961,9 +972,12 @@ impl Tunnel {
                 for wait in CHECK_WAITS {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     match self.check_once(hostname, Want { relay: false, health, mcp: listens }).await {
-                        Ok(found) => {
+                        Ok((Joined(joined), found)) => {
                             if found == "public_only" {
                                 dns = found;
+                            }
+                            if !joined {
+                                mcp = "not_joined";
                             }
                             passed = true;
                             break;
@@ -976,8 +990,7 @@ impl Tunnel {
                 }
             }
         }
-        let mcp_state = if listens { "ok" } else { "not_listening" };
-        Ok(json!({ "health": if health { "ok" } else { "unchecked" }, "mcp": mcp_state, "dns": dns }))
+        Ok(json!({ "health": if health { "ok" } else { "unchecked" }, "mcp": mcp, "dns": dns }))
     }
 
     #[must_use]
@@ -1192,7 +1205,7 @@ impl Tunnel {
             value["command"] = json!(command);
             value["message"] = json!(format!(
                 "The tailnet paths are up, but local-studio-serve hasn't allowed {dns} on its local listener, so the phone path isn't checked yet. Update local-studio-serve, then run: {command} ({why}){}",
-                dns_note(&checks)
+                notes(&checks)
             ));
         }
         Ok(value)
@@ -1218,11 +1231,11 @@ impl Tunnel {
             return Err(fail(
                 "not_ours",
                 format!(
-                    "The {} route for {} is run by {}, not Local Studio. Turn it off there: {}",
+                    "The {} route for {} is run by {}, not Local Studio. {}",
                     route.route,
                     route.hostname,
                     route.owner_name(),
-                    route.off_command()
+                    route.turn_off()
                 ),
             ));
         }

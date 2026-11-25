@@ -445,7 +445,7 @@ impl Tunnel {
             let checked = self.check_once(host, Want { relay: true, ..Want::default() }).await;
             let mine = self.relay_seen().map_or_else(|| "connecting".to_string(), |seen| seen.state);
             let error = match checked {
-                Ok(dns) if mine == "connected" => break dns,
+                Ok((_, dns)) if mine == "connected" => break dns,
                 Ok(_) => format!("The relay answers, but this machine's own connection to it is {mine}."),
                 Err(error) => error,
             };
