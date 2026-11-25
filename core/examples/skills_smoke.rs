@@ -741,6 +741,67 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn shipped(smoke: &mut Smoke) -> Result<(), String> {
+    let text = |error: std::io::Error| error.to_string();
+    let app = smoke.data.with_file_name("app");
+    let dir = app.join("share/local-studio/app-skills");
+    skill(&dir, "bulbs", "Sell lamps", "A filament price")?;
+    skill(&dir, "harbor", "Moor a boat", "Tie it to the cleat.")?;
+    create_dir_all(app.join("bin")).map_err(text)?;
+    let own = std::mem::replace(&mut smoke.binary, app.join("bin/local-studio"));
+    std::fs::copy(&own, &smoke.binary).map_err(text)?;
+    let source = |skill: Option<Value>| skill.and_then(|skill| skill["source"].as_str().map(str::to_string));
+    let (harbor, bulbs) = (source(smoke.listed("harbor")?), source(smoke.listed("bulbs")?));
+    smoke.check("skills beside the app are listed as shipped", harbor.as_deref() == Some("shipped"));
+    let hidden = smoke.problem("another skill has this name")?;
+    smoke.check("a skill of yours comes before a shipped one of its name", bulbs.as_deref() == Some("yours") && hidden);
+    let only = smoke.json(&["list", "--shipped"])?;
+    let sound = |skill: &Value| skill["source"] == "shipped" && skill["problem"].is_null();
+    let rows = only.as_array().is_some_and(|rows| rows.len() == 2 && rows.iter().all(sound));
+    smoke.check(
+        "--shipped lists only shipped skills, also one yours hides",
+        rows && names(&only) == ["bulbs", "harbor"],
+    );
+    let hits = smoke.json(&["search", "--shipped", "marmalade jam filament"])?;
+    smoke.check("--shipped searches only them", names(&hits) == ["bulbs"]);
+    let read = smoke.json(&["read", "--shipped", "bulbs"])?;
+    smoke.check("--shipped reads the shipped one", read.to_string().contains("filament"));
+    let refused = !smoke.run(&["read", "--shipped", "kitchen"])?.status.success();
+    smoke.check("--shipped reads none of yours", refused);
+    let mut child = smoke.command(&["mcp", "--shipped"]);
+    let mut child = child.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(text)?;
+    let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err("the shipped skills server has no pipes".to_string());
+    };
+    let client = json!({ "name": "smoke", "version": "1" });
+    let opened = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client });
+    let call = json!({ "name": "skill_search", "arguments": { "words": "marmalade cleat" } });
+    let mut lines = BufReader::new(from).lines();
+    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": opened })).map_err(text)?;
+    lines.next().ok_or("no answer")?.map_err(text)?;
+    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).map_err(text)?;
+    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call })).map_err(text)?;
+    let found = lines.next().ok_or("no answer")?.map_err(text)?;
+    drop(to);
+    child.wait().map_err(text)?;
+    smoke.check("the MCP server does too", found.contains("harbor") && !found.contains("kitchen"));
+    smoke.check("and yours are all still listed after", smoke.listed("kitchen")?.is_some());
+    let both = smoke.run(&["list", "--shipped", "--project", "."])?.status.code() == Some(2);
+    smoke.check("--shipped with a project is a usage error", both);
+    remove_dir_all(&dir).map_err(text)?;
+    for (what, target) in
+        [("your own skills", smoke.data.join("skills")), ("a folder that holds them", smoke.data.clone())]
+    {
+        std::os::unix::fs::symlink(&target, &dir).map_err(text)?;
+        let listed = smoke.json(&["list", "--shipped"])?;
+        smoke.check(&format!("{what} are never the shipped ones"), names(&listed).is_empty());
+        smoke.check("and stay yours", source(smoke.listed("kitchen")?).as_deref() == Some("yours"));
+        remove_file(&dir).map_err(text)?;
+    }
+    smoke.binary = own;
+    remove_dir_all(&app).map_err(text)
+}
+
 fn many(smoke: &mut Smoke) -> Result<(), String> {
     let personal = smoke.home.join(".agents/skills");
     let filler = "Open the panel, pick the row, check the total, save the sheet and close it.\n".repeat(60);
@@ -871,7 +932,7 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     let items = at.list("Mar", "@marmalade")?;
     smoke.check(
         "@mar lists its skill first",
-        items.first() == Some(&row(MentionKind::Skill, "marmalade", "Cook oranges", "yours", "")),
+        items.first() == Some(&row(MentionKind::Skill, "marmalade", "Cook oranges", "Yours", "")),
     );
     let order = ["@marmalade", "@marzipan", "@smart-mart", "@outdoors"];
     smoke.check("then names holding it, then skills found by words, hidden ones never", {
@@ -886,14 +947,14 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     let state = json!({ "version": 1, "projects": [], "trusted": [at.project] });
     put(&data.join("state.json"), &state.to_string())?;
     let items = at.list("mar", "@marmot")?;
-    let trusted = row(MentionKind::Skill, "marmot", "Dig", "project", "");
+    let trusted = row(MentionKind::Skill, "marmot", "Dig", "Project", "");
     smoke.check("and a trusted project's is", items.contains(&trusted));
     let nowhere = at.list_in(None, "mar", 0, "@marmalade")?;
     let own = titles(&nowhere).contains(&"@marmalade") && !titles(&nowhere).contains(&"@marmot");
     smoke.check("with no project, skills are still listed, and no files", own && files(&nowhere) == 0);
     smoke.check("@kite finds a skill by its text", titles(&at.list("kite", "@outdoors")?) == ["@outdoors"]);
     let make = row(MentionKind::Skill, "create", "Make a skill from this thread", "Create", "");
-    let mut own = row(MentionKind::Skill, "create", "Draw", "yours", "");
+    let mut own = row(MentionKind::Skill, "create", "Draw", "Yours", "");
     (own.title, own.insert) = ("$create".to_string(), "$create ".to_string());
     for query in ["cr", "Create"] {
         let items = at.list(query, "$create")?;
@@ -1029,6 +1090,7 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     #[cfg(unix)]
     links(smoke, &own)?;
     served(smoke, &own)?;
+    shipped(smoke)?;
     index(smoke)?;
     many(smoke)?;
     mentions(smoke)

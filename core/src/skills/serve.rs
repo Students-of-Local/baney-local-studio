@@ -9,6 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
+use super::store::SHIPPED_DIR;
 use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
@@ -22,10 +23,11 @@ const CLOSEST: &str =
     "These are the closest, not always a fit. Read one only if it is about this task: skill_read {\"name\": ...}. \
      If none is, work without one.";
 
-struct Server {
-    data: PathBuf,
-    plugins: Option<PathBuf>,
-    project: Option<PathBuf>,
+pub struct Server {
+    pub data: PathBuf,
+    pub plugins: Option<PathBuf>,
+    pub project: Option<PathBuf>,
+    pub shipped: bool,
 }
 
 fn tool(name: &'static str, about: &'static str, wanted: &str, asks: &[(&str, &str)]) -> Tool {
@@ -70,7 +72,10 @@ fn tools() -> Vec<Tool> {
 impl Server {
     fn call(&self, tool: &str, given: &Map<String, Value>) -> Result<String, String> {
         let text = |key: &str| given.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty());
-        let open = || Store::open(&self.data, roots(&self.data, self.plugins.as_deref(), self.project.as_deref())?);
+        let open = || {
+            let roots = roots(&self.data, self.plugins.as_deref(), self.project.as_deref())?;
+            Store::open(&self.data, if self.shipped { roots.only_shipped() } else { roots })
+        };
         match tool {
             "skill_search" => {
                 let (words, place, within) = (text("words"), text("for"), text("in"));
@@ -161,14 +166,15 @@ pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) 
         None => args.push("--no-project"),
     }
     let mut env = Map::new();
-    if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
-        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(whole(Path::new(&agent))?));
+    for name in ["EUKHE_CODING_AGENT_DIR", SHIPPED_DIR] {
+        if let Some(dir) = std::env::var_os(name).filter(|dir| !dir.is_empty()) {
+            env.insert(name.to_string(), json!(whole(Path::new(&dir))?));
+        }
     }
     Some(json!({ "command": binary, "args": args, "env": env }))
 }
 
-pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: Option<PathBuf>) -> Result<(), String> {
-    let server = Server { data, plugins, project };
+pub fn serve(server: Server) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| error.to_string())?.block_on(async {
         let running = server.serve(rmcp::transport::stdio()).await.map_err(|error| error.to_string())?;
