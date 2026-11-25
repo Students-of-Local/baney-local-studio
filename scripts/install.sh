@@ -50,9 +50,9 @@ while [ $# -gt 0 ]; do
 done
 
 case $channel in
-  stable) name="Local Studio"; slug=local-studio; bundle_id=org.local.studio.macos; app_id=dev.localstudio.LocalStudio ;;
-  nightly) name="Local Studio Nightly"; slug=local-studio-nightly; bundle_id=org.local.studio.macos.nightly; app_id=dev.localstudio.LocalStudio.Nightly ;;
-  dev) name="Local Studio Dev"; slug=local-studio-dev; bundle_id=org.local.studio.macos.dev; app_id=dev.localstudio.LocalStudio.Dev ;;
+  stable) name="Local Studio"; slug=local-studio; scheme=localstudio; bundle_id=org.local.studio.macos; app_id=dev.localstudio.LocalStudio ;;
+  nightly) name="Local Studio Nightly"; slug=local-studio-nightly; scheme=localstudio-nightly; bundle_id=org.local.studio.macos.nightly; app_id=dev.localstudio.LocalStudio.Nightly ;;
+  dev) name="Local Studio Dev"; slug=local-studio-dev; scheme=localstudio-dev; bundle_id=org.local.studio.macos.dev; app_id=dev.localstudio.LocalStudio.Dev ;;
   *) die "unknown channel $channel; expected nightly, stable or dev" ;;
 esac
 
@@ -395,11 +395,15 @@ else
 [Desktop Entry]
 Type=Application
 Name=$name
-Exec="$target/local-studio"
+Exec="$target/local-studio" %u
+MimeType=x-scheme-handler/$scheme;
 Terminal=false
 Categories=Development;
 StartupWMClass=$app_id
 EOF
+  if command -v update-desktop-database > /dev/null && ! update-desktop-database -q "$root/share/applications"; then
+    echo "    update-desktop-database failed, so $scheme:// links may not open $name"
+  fi
   say "Installed $name $version in $target (command: $root/bin/$slug)"
   case ":$PATH:" in
     *":$root/bin:"*) ;;

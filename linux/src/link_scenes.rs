@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::glib;
-use local_studio_core::{Block, ItemKind, LinkTarget, Settings, TranscriptOp, Update};
+use local_studio_core::{Block, ItemKind, LinkTarget, Settings, TranscriptOp, Update, CHANNEL};
 use webkit::prelude::*;
 
 use crate::app::App;
@@ -14,6 +14,7 @@ use crate::state::Page;
 const SCENES: [&str; 3] = ["link-app", "link-system", "link-app-off-thread"];
 const BUTTONS: &str = "link-buttons";
 const PRESSED: &str = "link-buttons-pressed";
+const SYSTEM: &str = "link-from-system";
 const LABEL: &str = "Open the studio";
 const OFFER: &str = "Done. [Open the **studio** harmless](localstudio://app/the%20studio) or \
     [harmless](localstudio://settings/Providers), then [harmless](localstudio://reveal?path=~/Documents/report.pdf) \
@@ -44,11 +45,11 @@ fn target(scene: &str) -> Option<LinkTarget> {
 
 pub fn scenes() -> Vec<&'static str> {
     let web: &[&str] = if url().is_some() { &SCENES } else { &[] };
-    web.iter().copied().chain([BUTTONS, PRESSED]).collect()
+    web.iter().copied().chain([BUTTONS, PRESSED, SYSTEM]).collect()
 }
 
 pub fn stage(app: &Rc<App>, scene: &str) -> bool {
-    if [BUTTONS, PRESSED].contains(&scene) {
+    if [BUTTONS, PRESSED, SYSTEM].contains(&scene) {
         conversation(app, false);
         reply(app, OFFER);
         return true;
@@ -108,6 +109,21 @@ fn press(app: &Rc<App>) -> Result<(), String> {
     click_text(app, &view, "Open Providers settings")
 }
 
+fn system(app: &Rc<App>) -> Result<(), String> {
+    let scheme = if CHANNEL == "stable" { "localstudio".to_string() } else { format!("localstudio-{CHANNEL}") };
+    for rest in ["app/Terminal", "file?path=/etc/hostname", "system/displays", "settings/Skills"] {
+        crate::app_links::from_system(app, &format!("{scheme}://{rest}"));
+    }
+    if app.settings.borrow().is_some() {
+        return Err("a link from the system that may not act opened settings".to_string());
+    }
+    crate::app_links::from_system(app, &format!("{scheme}://settings/archive"));
+    if app.settings.borrow().is_none() {
+        return Err("a settings link from the system did not open settings".to_string());
+    }
+    Ok(())
+}
+
 fn click_text(app: &Rc<App>, view: &gtk::TextView, shown: &str) -> Result<(), String> {
     let (from, _) = view
         .buffer()
@@ -137,6 +153,9 @@ fn release(view: &gtk::TextView, at: &gtk::TextIter) -> Result<(i32, i32), Strin
 pub fn click(app: &Rc<App>, scene: &str) -> Result<(), String> {
     if scene == PRESSED {
         return press(app);
+    }
+    if scene == SYSTEM {
+        return system(app);
     }
     if target(scene).is_none() {
         return Ok(());
@@ -174,14 +193,14 @@ pub fn ready(app: &Rc<App>, scene: &str) -> bool {
 }
 
 pub fn finish(scene: &str) -> bool {
-    scene == PRESSED || target(scene).is_some()
+    [PRESSED, SYSTEM].contains(&scene) || target(scene).is_some()
 }
 
 pub fn check(app: &Rc<App>, scene: &str) -> Result<(), String> {
     if scene == BUTTONS {
         return buttons(app);
     }
-    if scene == PRESSED && app.settings.borrow().is_none() {
+    if [PRESSED, SYSTEM].contains(&scene) && app.settings.borrow().is_none() {
         return Err("settings is not open".to_string());
     }
     let (Some(target), Some(url)) = (target(scene), url()) else { return Ok(()) };

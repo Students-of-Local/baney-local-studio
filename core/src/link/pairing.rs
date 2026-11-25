@@ -6,16 +6,9 @@ use base64::Engine;
 use serde_json::Value;
 
 use super::devices::{Devices, KEY_BYTES};
+pub use crate::links::scheme;
 
 pub const DEFAULT_PORT: u16 = 18093;
-
-#[must_use]
-pub fn scheme(channel: &str) -> String {
-    match channel {
-        "stable" | "" => "localstudio".to_string(),
-        other => format!("localstudio-{other}"),
-    }
-}
 
 #[must_use]
 pub fn encode(text: &str) -> String {

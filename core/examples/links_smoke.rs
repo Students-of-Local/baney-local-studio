@@ -1,7 +1,9 @@
 #[path = "support/links_run.rs"]
 mod links_run;
 
-use local_studio_core::{link_words, outside_link, refused_link, studio_link, LinkWords, StudioLink};
+use local_studio_core::{
+    link_words, outside_link, refused_link, studio_link, system_link, LinkWords, StudioLink, CHANNEL,
+};
 
 const OPENED: &[&str] =
     &["https://example.com/a?b=c#d", "HTTP://example.com", "http://127.0.0.1:8080/", "mailto:someone@example.com"];
@@ -179,14 +181,22 @@ fn words() -> anyhow::Result<()> {
 }
 
 fn outside() -> anyhow::Result<()> {
+    let scheme = if CHANNEL == "stable" { "localstudio".to_string() } else { format!("localstudio-{CHANNEL}") };
     for rest in ["settings/providers", "settings/Archive", "thread/abc"] {
         let url = format!("localstudio://{rest}");
+        let system = system_link(&format!("{scheme}://{rest}"));
+        anyhow::ensure!(system.is_some() && system == outside_link(&url), "{scheme}://{rest} did not act");
+        for other in ["localstudio", "localstudio-nightly", "localstudio-dev", "localstudio-"] {
+            let system = system_link(&format!("{other}://{rest}"));
+            anyhow::ensure!(system.is_some() == (other == scheme), "{other}://{rest} in a {CHANNEL} build: {system:?}");
+        }
         anyhow::ensure!(outside_link(&url).is_some_and(|link| Some(link) == studio_link(&url)), "{url} did not act");
     }
     let inside =
         "settings/sites browser/history system/displays app/x reveal?path=/a file?path=/a shortcut/x thread/a/b";
     for rest in inside.split(' ') {
         anyhow::ensure!(outside_link(&format!("localstudio://{rest}")).is_none(), "{rest} acts from outside");
+        anyhow::ensure!(system_link(&format!("{scheme}://{rest}")).is_none(), "{rest} acts from the system");
     }
     Ok(())
 }

@@ -118,7 +118,7 @@ fn run_cli() -> glib::ExitCode {
 
 #[derive(Clone)]
 enum Mode {
-    App,
+    App(Option<String>),
     Smoke,
     SmokeKernel(bool),
     SmokeProviders,
@@ -128,7 +128,8 @@ enum Mode {
 fn parse() -> Result<Mode, String> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        None => Ok(Mode::App),
+        None => Ok(Mode::App(None)),
+        Some(url) if url.starts_with("localstudio") && url.contains("://") => Ok(Mode::App(Some(url.to_string()))),
         Some("--smoke") => Ok(Mode::Smoke),
         Some("--smoke-kernel") => match args.next().as_deref() {
             None | Some("install") => Ok(Mode::SmokeKernel(true)),
@@ -171,10 +172,14 @@ fn main() -> glib::ExitCode {
         }
     }
     let flags = match mode {
-        Mode::App => gio::ApplicationFlags::default(),
+        Mode::App(_) => gio::ApplicationFlags::HANDLES_OPEN,
         Mode::Smoke | Mode::SmokeKernel(_) | Mode::SmokeProviders | Mode::Snapshot(..) => {
             gio::ApplicationFlags::NON_UNIQUE
         }
+    };
+    let link: Vec<String> = match &mode {
+        Mode::App(Some(url)) => vec!["local-studio".to_string(), url.clone()],
+        _ => Vec::new(),
     };
     let application = adw::Application::builder().application_id("dev.localstudio.LocalStudio").flags(flags).build();
     let failed = Rc::new(Cell::new(false));
@@ -189,7 +194,7 @@ fn main() -> glib::ExitCode {
         let app = App::build(application);
         activation.replace(Some(Rc::clone(&app)));
         match &mode {
-            Mode::App => {
+            Mode::App(_) => {
                 app.interactive.set(true);
                 app.start_core();
                 app.window.present();
@@ -218,7 +223,15 @@ fn main() -> glib::ExitCode {
             app.core.stop();
         }
     });
-    let code = application.run_with_args::<&str>(&[]);
+    let opened = Rc::clone(&holder);
+    application.connect_open(move |application, files, _| {
+        application.activate();
+        let app = opened.borrow().clone();
+        if let (Some(app), Some(file)) = (app, files.first()) {
+            app_links::from_system(&app, &file.uri());
+        }
+    });
+    let code = application.run_with_args(&link);
     if failed.get() {
         glib::ExitCode::FAILURE
     } else {
