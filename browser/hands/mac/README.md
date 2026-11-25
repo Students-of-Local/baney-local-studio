@@ -77,7 +77,7 @@ swift test                       # HandsCore; needs engine/lib, because the help
 cd ../../cli && TYCHICUS_HANDS_CONFORMANCE_BIN=$PWD/../hands/mac/.build/release/tychicus-hands node --test test/hands-conformance.test.mjs
 ```
 
-CI (`.github/workflows/hands-mac.yml`) runs `scripts/package.sh` and `swift test` on a macOS runner, and the conformance
+CI (`.github/workflows/browser-hands-mac.yml`) runs `scripts/package.sh` and `swift test` on a macOS runner, and the conformance
 suite against the signed binary at Default and Read Only. The runner gives the helper no Accessibility grant: window verbs answer
 `permission_denied`, which the suite accepts, so CI proves the wire and the cap, not acting on windows.
 

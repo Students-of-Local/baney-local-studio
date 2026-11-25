@@ -12,24 +12,28 @@ name: Hands (Linux)
 on:
   pull_request:
     paths:
-      - "hands/**"
-      - "cli/src/computer.ts"
-      - "cli/test/hands-*.mjs"
-      - "cli/test/helpers/hands-conformance.mjs"
-      - "cli/test/helpers/fake-hands.mjs"
-      - "docs/hands-protocol.md"
-      - ".github/workflows/hands-linux.yml"
+      - "browser/hands/**"
+      - "browser/cli/src/computer.ts"
+      - "browser/cli/test/hands-*.mjs"
+      - "browser/cli/test/helpers/hands-conformance.mjs"
+      - "browser/cli/test/helpers/fake-hands.mjs"
+      - "browser/docs/hands-protocol.md"
+      - ".github/workflows/browser-hands-linux.yml"
   push:
     branches: [main]
     paths:
-      - "hands/**"
-      - "cli/src/computer.ts"
-      - "cli/test/hands-*.mjs"
-      - "cli/test/helpers/hands-conformance.mjs"
-      - "cli/test/helpers/fake-hands.mjs"
-      - "docs/hands-protocol.md"
-      - ".github/workflows/hands-linux.yml"
+      - "browser/hands/**"
+      - "browser/cli/src/computer.ts"
+      - "browser/cli/test/hands-*.mjs"
+      - "browser/cli/test/helpers/hands-conformance.mjs"
+      - "browser/cli/test/helpers/fake-hands.mjs"
+      - "browser/docs/hands-protocol.md"
+      - ".github/workflows/browser-hands-linux.yml"
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: browser
 
 permissions:
   contents: read
@@ -70,7 +74,7 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends $pkgs
 
       - name: Build the helper (static, x86_64 musl)
-        working-directory: hands/linux
+        working-directory: browser/hands/linux
         run: |
           rustup target add x86_64-unknown-linux-musl
           cargo test --locked
@@ -80,14 +84,14 @@ jobs:
 
       - name: Build the helper (static, aarch64 musl)
         if: matrix.desktop == 'x11'
-        working-directory: hands/linux
+        working-directory: browser/hands/linux
         run: |
           rustup target add aarch64-unknown-linux-musl
           cargo build --locked --release --target aarch64-unknown-linux-musl
           file target/aarch64-unknown-linux-musl/release/tychicus-hands | tee /dev/stderr | grep -q "ARM aarch64.*statically linked"
 
       - name: Install and build the CLI without install scripts
-        working-directory: cli
+        working-directory: browser/cli
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           node node_modules/esbuild/install.js
@@ -129,6 +133,6 @@ jobs:
         with:
           name: tychicus-hands-linux
           path: |
-            hands/linux/target/x86_64-unknown-linux-musl/release/tychicus-hands
-            hands/linux/target/aarch64-unknown-linux-musl/release/tychicus-hands
+            browser/hands/linux/target/x86_64-unknown-linux-musl/release/tychicus-hands
+            browser/hands/linux/target/aarch64-unknown-linux-musl/release/tychicus-hands
           if-no-files-found: error

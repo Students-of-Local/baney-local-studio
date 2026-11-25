@@ -296,7 +296,7 @@ managing verbs and lending refused).
   connector never reports it.
 - The Linux helper runs it in CI against its own static binary in a headless desktop (Xvfb with openbox, and headless
   sway), at Full, Default and Read Only, beside `cli/test/hands-linux-live.test.mjs`, which drives every verb on a GTK
-  fixture (`.github/workflows/hands-linux.yml`).
+  fixture (`.github/workflows/browser-hands-linux.yml`).
 - The Mac helper runs it in CI against the signed release build (`hands/mac/scripts/package.sh`) on a macOS runner, at
-  Default and Read Only (`.github/workflows/hands-mac.yml`). The runner gives it no Accessibility grant, so window verbs
+  Default and Read Only (`.github/workflows/browser-hands-mac.yml`). The runner gives it no Accessibility grant, so window verbs
   answer `permission_denied`: that run proves the wire and the cap, not acting on windows.

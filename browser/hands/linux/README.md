@@ -92,4 +92,4 @@ test/headless-session.sh x11 -- sh -c 'cd ../../cli && TYCHICUS_HANDS_CONFORMANC
 ```
 
 The session needs Xvfb, openbox and xdotool (or sway and grim), at-spi2-core, dbus, gdbus, and PyGObject with GTK 3.
-CI installs them with apt and runs both desktops (`.github/workflows/hands-linux.yml`).
+CI installs them with apt and runs both desktops (`.github/workflows/browser-hands-linux.yml`).

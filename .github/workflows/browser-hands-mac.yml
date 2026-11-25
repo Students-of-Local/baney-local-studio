@@ -9,22 +9,26 @@ name: Hands (Mac)
 on:
   pull_request:
     paths:
-      - "hands/mac/**"
-      - "cli/src/computer.ts"
-      - "cli/test/hands-*.mjs"
-      - "cli/test/helpers/hands-conformance.mjs"
-      - "docs/hands-protocol.md"
-      - ".github/workflows/hands-mac.yml"
+      - "browser/hands/mac/**"
+      - "browser/cli/src/computer.ts"
+      - "browser/cli/test/hands-*.mjs"
+      - "browser/cli/test/helpers/hands-conformance.mjs"
+      - "browser/docs/hands-protocol.md"
+      - ".github/workflows/browser-hands-mac.yml"
   push:
     branches: [main]
     paths:
-      - "hands/mac/**"
-      - "cli/src/computer.ts"
-      - "cli/test/hands-*.mjs"
-      - "cli/test/helpers/hands-conformance.mjs"
-      - "docs/hands-protocol.md"
-      - ".github/workflows/hands-mac.yml"
+      - "browser/hands/mac/**"
+      - "browser/cli/src/computer.ts"
+      - "browser/cli/test/hands-*.mjs"
+      - "browser/cli/test/helpers/hands-conformance.mjs"
+      - "browser/docs/hands-protocol.md"
+      - ".github/workflows/browser-hands-mac.yml"
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: browser
 
 permissions:
   contents: read
@@ -55,11 +59,11 @@ jobs:
 
       # After the build above: the test build links the helper too, and that needs engine/lib.
       - name: Core tests
-        working-directory: hands/mac
+        working-directory: browser/hands/mac
         run: swift test
 
       - name: Conformance against the signed helper, at Default and Read Only
-        working-directory: cli
+        working-directory: browser/cli
         run: |
           for mode in default read_only; do
             if [ "$mode" = read_only ]; then defaults write tychicus-hands agentAccessMode read_only; else defaults delete tychicus-hands agentAccessMode 2>/dev/null || true; fi

@@ -179,7 +179,7 @@ Removing the old extension deletes everything stored under it. In this order:
 (cd cli && npm run bench:dom)      # 44-page DOM benchmark against cli/test/dom-bench/floor.json
 ```
 
-CI runs the same on every push and pull request (`.github/workflows/ci.yml`), plus the headless
+CI runs the same on every push and pull request (`.github/workflows/browser-ci.yml`), plus the headless
 end-to-end tests.
 
 ## Platforms

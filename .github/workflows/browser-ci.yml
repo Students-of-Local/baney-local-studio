@@ -1,0 +1,313 @@
+# Runs when browser/ changes: the skill lint and its red-team tests, the build, types and tests, the CLI on Windows, the
+# built extension in a real Chromium, an install from an empty home folder, and the market eval against its floors.
+# No job gets a write token or a secret.
+name: Browser
+
+on:
+  pull_request:
+    paths: ["browser/**", ".github/workflows/browser-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["browser/**", ".github/workflows/browser-ci.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: browser
+
+permissions:
+  contents: read
+
+# Only superseded pull request runs are cancelled; every commit on main finishes its checks.
+concurrency:
+  group: browser-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  skills:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install the CLI without install scripts
+        working-directory: browser/cli
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          # esbuild ships its binary through an install script; fetch it explicitly, pinned by the lockfile.
+          node node_modules/esbuild/install.js
+
+      - name: Build the CLI
+        working-directory: browser/cli
+        run: npm run build
+
+      - name: Lint every skill
+        run: node cli/dist/index.js skill lint skills
+
+      - name: Red-team the lint
+        working-directory: browser/cli
+        run: node --test test/skill-lint.test.mjs
+
+      # A pull request that weakens the lint must still pass the base branch's lint.
+      - name: Lint with the base branch's lint
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth 1 origin "$BASE_SHA"
+          base="$RUNNER_TEMP/base"
+          git -c core.hooksPath=/dev/null worktree add --detach "$base" "$BASE_SHA"
+          (cd "$base/browser/cli" && npm ci --ignore-scripts --no-audit --no-fund && node node_modules/esbuild/install.js && npm run build)
+          node "$base/browser/cli/dist/index.js" skill lint skills
+
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # The compiled helper's real-executable tests (cli/test/compiled.test.mjs) need Bun.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      # Clones pinned pi-mono and mini-lit into vendor/ (gitignored), applies the patch, installs.
+      - name: Check out the pinned siblings and install
+        run: ./scripts/setup-siblings.sh
+
+      - name: Build
+        env:
+          TABKYRA_NO_BUMP: "1"
+        run: |
+          npm run build
+          (cd cli && npm run build)
+
+      - name: Lint, type check and test
+        run: |
+          npx biome check .
+          npx tsc --noEmit
+          node scripts/check-theme.mjs
+          node --import tsx --test test/*.test.mjs
+          (cd cli && npx tsc --noEmit && npm test)
+
+      - name: The tychicus command answers and no polycarp-browser command is installed
+        working-directory: browser/cli
+        run: |
+          npm link
+          tychicus --help > /dev/null
+          if command -v polycarp-browser && [ "$(readlink -f "$(command -v polycarp-browser)")" = "$(readlink -f "$(command -v tychicus)")" ]; then
+            echo "npm link installed polycarp-browser as Tychicus" >&2; exit 1
+          fi
+
+  # The CLI's Windows code paths: the native host registry keys, the Windows service, paths and the hub.
+  cli-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # bash, not pwsh: pwsh ends a multi-line step with its last command's exit code (test/ci-windows-shell.test.mjs).
+    defaults:
+      run:
+        working-directory: browser/cli
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - name: The Windows cases, on Windows
+        run: |
+          node --test test/windows-service.test.mjs test/cli.test.mjs test/legacy-socket.test.mjs test/cloudflare-tunnel.test.mjs test/release-upgrade-windows.test.mjs
+          node --experimental-strip-types --test test/hub-devices.test.mjs test/file-rules.test.mjs
+      # install.ps1 against a local stand-in for the release pages (the test uses only Node's own modules).
+      - name: The one-command installer for Windows
+        run: node --test ../test/install-script.test.mjs
+
+  # The suites that drive the built extension in a real Chromium: the extension, native host and MCP server end to end
+  # (test:e2e) and the side panel. The DOM benchmark runs in market-evals. Playwright's Chromium runs in the new
+  # headless mode, which loads extensions, so no display server is needed.
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Check out the pinned siblings and install
+        run: ./scripts/setup-siblings.sh
+
+      - name: Build the extension and the CLI
+        env:
+          TABKYRA_NO_BUMP: "1"
+        run: |
+          npm run build
+          (cd cli && npm run build)
+
+      - name: Install Playwright's Chromium
+        working-directory: browser/cli
+        run: npx playwright-core install --with-deps chromium
+
+      # Ubuntu 24.04 blocks the unprivileged user namespaces Chromium's sandbox needs; the tests launch Chromium directly.
+      - name: Let Chromium's sandbox start
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: End-to-end bridge test
+        working-directory: browser/cli
+        run: npm run test:e2e
+
+      - name: End-to-end side panel test
+        working-directory: browser/cli
+        run: npm run test:e2e:panel
+
+  # A user's install, end to end: package the Linux release, then cli/test/clean-install.mjs installs it from an empty
+  # home folder with README.md's one command (install.sh, served from a local copy of the release), loads the extension
+  # the installer printed and reads a page through MCP; it runs the by-hand steps too. The token lets gh check that a
+  # build no release workflow attested is refused.
+  clean-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      # Plain POSIX sh: it runs under dash on Debian and Ubuntu, and under macOS's sh.
+      - name: Lint install.sh
+        run: shellcheck --shell=sh scripts/install.sh
+
+      - name: Check out the pinned siblings and install
+        run: ./scripts/setup-siblings.sh
+
+      - name: Build the extension and the CLI
+        env:
+          TABKYRA_NO_BUMP: "1"
+        run: |
+          npm run build
+          (cd cli && npm run build)
+
+      - name: Package the Linux release
+        run: node scripts/package-release.mjs --out "$RUNNER_TEMP/release" --targets linux-x64
+
+      - name: Install Playwright's Chromium
+        working-directory: browser/cli
+        run: npx playwright-core install --with-deps chromium
+
+      - name: Let Chromium's sandbox start
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install from an empty home folder to the first page text
+        working-directory: browser/cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node test/clean-install.mjs --release "$RUNNER_TEMP/release"
+
+  # The market eval (evals/market/README.md): the scores and speeds "best on the market" is measured by. The
+  # DOM benchmark gates on tool calls, not wall time (a shared runner's clock is too noisy for per-case time); the
+  # speed ceilings are medians measured on this runner (the market-floors workflow).
+  market-evals:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # The judge: on a pull request, the base branch's check.mjs, copied out of the checkout, so a
+      # pull request that changes the check can't approve its own lower floor or skip a part of the gate.
+      - name: Pick the judge
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          judge="$RUNNER_TEMP/judge/check.mjs"
+          mkdir -p "$RUNNER_TEMP/judge"
+          cp evals/market/check.mjs "$judge"
+          if [ -n "$BASE_SHA" ]; then
+            git fetch --no-tags --depth 1 origin "$BASE_SHA"
+            git show "$BASE_SHA:browser/evals/market/check.mjs" > "$judge"
+          fi
+          echo "MARKET_JUDGE=$judge" >> "$GITHUB_ENV"
+
+      - name: No floor lower than on the base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node "$MARKET_JUDGE" --ratchet "$BASE_SHA"
+
+      - name: Check out the pinned siblings and install
+        run: ./scripts/setup-siblings.sh
+
+      - name: Build the extension and the CLI
+        env:
+          TABKYRA_NO_BUMP: "1"
+        run: |
+          npm run build
+          (cd cli && npm run build)
+
+      - name: Install Playwright's Chromium
+        working-directory: browser/cli
+        run: npx playwright-core install --with-deps chromium
+
+      # Ubuntu 24.04 blocks the unprivileged user namespaces Chromium's sandbox needs; the tests launch Chromium directly.
+      - name: Let Chromium's sandbox start
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Market eval
+        run: node evals/market/run.mjs --no-check
+
+      # --require-all: every part floors.json scores must have run.
+      - name: Every score at its floor, every speed under its ceiling
+        run: node "$MARKET_JUDGE" --require-all evals/market/results/last.json
+
+      - name: Keep the run's numbers
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: market-evals
+          path: browser/evals/market/results/last.json
+          if-no-files-found: ignore

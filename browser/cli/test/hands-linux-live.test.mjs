@@ -4,7 +4,7 @@
 //   hands/linux/test/headless-session.sh x11 -- env TYCHICUS_HANDS_LIVE_BIN=$PWD/hands/linux/target/release/tychicus-hands \
 //     node --test cli/test/hands-linux-live.test.mjs
 //
-// CI runs it the same way under Xvfb with openbox and under headless sway (.github/workflows/hands-linux.yml).
+// CI runs it the same way under Xvfb with openbox and under headless sway (.github/workflows/browser-hands-linux.yml).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

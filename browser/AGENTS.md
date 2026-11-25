@@ -12,7 +12,7 @@ If the user did not give you a concrete task, read README.md first.
 - NEVER commit unless the user asks.
 
 ## Testing
-CI runs exactly these on every pull request (`.github/workflows/ci.yml`). Run the ones
+CI runs exactly these on every pull request (`.github/workflows/browser-ci.yml`). Run the ones
 your change touches before you say it works:
 
 ```bash

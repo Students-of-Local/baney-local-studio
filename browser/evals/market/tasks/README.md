@@ -46,5 +46,5 @@ node evals/market/tasks/server.mjs                # just the site, to look at it
 ```
 
 CI runs the task set and the speed check through the market eval (`../README.md`), gated on `../floors.json`, in
-the `market-evals` job of `.github/workflows/ci.yml`. The task loop and the speed loop are `loop.mjs`, shared with the
+the `market-evals` job of `.github/workflows/browser-ci.yml`. The task loop and the speed loop are `loop.mjs`, shared with the
 rival runner (`../rivals/`), so every tool is measured by the same code.

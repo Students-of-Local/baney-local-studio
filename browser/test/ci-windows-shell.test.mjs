@@ -1,12 +1,12 @@
 // A `run:` step on a Windows runner uses pwsh unless it says otherwise, and pwsh ends a multi-line script with the
 // last command's exit code: a failing first line is hidden by a passing second one. So every Windows step that runs
-// more than one command must use bash, which CI's runners start with -e. This reads ci.yml line by line; it knows
+// more than one command must use bash, which CI's runners start with -e. This reads browser-ci.yml line by line; it knows
 // only the shapes that file uses (jobs at two spaces, steps at six).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const ciPath = new URL("../.github/workflows/ci.yml", import.meta.url);
+const ciPath = new URL("../../.github/workflows/browser-ci.yml", import.meta.url);
 
 /** The Windows steps in `yaml` that run several commands without bash, as "job: step" names. */
 export function maskedWindowsSteps(yaml) {
