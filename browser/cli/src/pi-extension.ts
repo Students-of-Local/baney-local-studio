@@ -174,11 +174,21 @@ class Bridge {
 		const id = ++this.seq;
 		return new Promise((resolve, reject) => {
 			const socket = this.socket!;
-			this.pending.set(id, { socket, resolve, reject });
-			socket.write(encode({ type: "request", id, method, params }));
-			setTimeout(() => {
+			const timer = setTimeout(() => {
 				if (this.pending.delete(id)) reject(new Error(\`\${method} timed out\`));
 			}, 120000);
+			this.pending.set(id, {
+				socket,
+				resolve: (v) => {
+					clearTimeout(timer);
+					resolve(v);
+				},
+				reject: (e) => {
+					clearTimeout(timer);
+					reject(e);
+				},
+			});
+			socket.write(encode({ type: "request", id, method, params }));
 		});
 	}
 }

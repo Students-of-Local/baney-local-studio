@@ -133,7 +133,7 @@ test("a client frame that is no message drops that client only", { skip: !posix 
 		const closed = new Promise((r) => bad.once("close", r));
 		bad.on("error", () => undefined);
 		bad.resume();
-		bad.write(bytes);
+		bad.end(bytes);
 		await closed;
 	}
 	const good = connect(path);
