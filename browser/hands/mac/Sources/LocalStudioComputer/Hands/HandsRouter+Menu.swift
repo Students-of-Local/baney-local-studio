@@ -228,7 +228,7 @@ extension HandsRouter {
         let read = HandsEngine.shared.snapshotInline(window: target, interactive: false, compact: false, depth: 12, evidence: true)
         if case .failed(let e) = read { return e }
         guard case .ok(let d) = read, let ref = MenuPath.cancelRef(d["tree"] ?? .null, title: title) else {
-            return HandsError(.actionFailed, "the panel has no Cancel button Tychicus can press", suggestion: "", retry: .never)
+            return HandsError(.actionFailed, "the panel has no Cancel button Local Studio can press", suggestion: "", retry: .never)
         }
         pressed?()
         if case .failed(let e) = HandsEngine.shared.actInline(window: target, ref: ref, kind: .click, evidence: true, check: scope, cancelled: cancelled) { return e }

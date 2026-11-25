@@ -34,13 +34,18 @@ enum WindowShot {
         func get() -> Swift.Result<Result, HandsError>? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
+    /// What a missing Screen Recording grant means, for the program macOS checks it against.
+    static func notAllowed(_ program: AccessibilityGrant.Program) -> String {
+        "macOS hasn't allowed \(program.name) to record the screen, so windows can't be captured"
+    }
+
     static func capture(window id: UInt32, named name: String?, cursor: CursorMark? = nil, check: @escaping () -> HandsError?) -> Swift.Result<Result, HandsError> {
         if let name, !HandoffPath.isPlainFileName(name) {
             return .failure(HandsError(.badArguments, "out must be a file name, not a path", suggestion: "Pass just a name like `page.png`; shots are written in \(folder.path).", retry: .safe))
         }
         guard CGPreflightScreenCaptureAccess() else {
             let program = AccessibilityGrant.responsibleProgram()
-            return .failure(HandsError(.permissionDenied, "macOS hasn't allowed \(program.name) to record the screen, so windows can't be captured",
+            return .failure(HandsError(.permissionDenied, notAllowed(program),
                                        suggestion: "Ask the person to open System Settings > Privacy & Security > Screen & System Audio Recording and add \(program.name) (\(program.path)), then try again. `computer_snapshot` reads the window without it.", retry: .safe))
         }
         guard #available(macOS 14, *) else {

@@ -4,7 +4,7 @@ import HandsCore
 /// The `HandsHost` a stdio helper can give: windows from Accessibility and the window server, the agent workspace from
 /// `AgentWorkspace` (none yet), and `open` as a separate copy started in the background. Main thread only,
 /// like every `HandsHost` closure.
-final class TychicusHost {
+final class ComputerHost {
     /// The number the agent workspace has when no window manager keeps one: what `windows` reports as agent_workspace.
     static let ownWorkspace = 9
     /// The number every other window gets: somewhere that isn't the agent workspace.
