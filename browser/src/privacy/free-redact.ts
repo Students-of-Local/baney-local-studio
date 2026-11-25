@@ -18,10 +18,17 @@ function passesLuhn(digits: string): boolean {
 	return sum % 10 === 0;
 }
 
+/** A number a card can have: its first digits and length, then the check digit. Ids, timestamps and ISBNs start with 1 or 9. */
+function isCard(digits: string): boolean {
+	const shape =
+		/^(?:3[47]\d{13}|3[0689]\d{12}(?:\d\d)?|35\d{14}|4(?:\d{12}|\d{15}|\d{18})|5\d{15}|2[2-7]\d{14}|6\d{15,18}|8[12]\d{14}|9792\d{12})$/;
+	return shape.test(digits) && passesLuhn(digits);
+}
+
 /**
  * Card numbers in a run of digit groups. A card sits beside its expiry, CVV or another number as often as alone, so every
  * stretch of whole groups that has a card's length is checked, not only the run. A stretch inside a longer run needs
- * groups of three digits or more and a first digit cards use, so a calendar's days or a list of years stays.
+ * groups of three digits or more, so a calendar's days or a list of years stays.
  */
 function redactCards(run: string): string {
 	const groups = [...run.matchAll(/\d+/g)];
@@ -30,10 +37,9 @@ function redactCards(run: string): string {
 		let digits = "";
 		for (let j = i; j < groups.length && digits.length < 19; j++) {
 			digits += groups[j][0];
-			if (digits.length < 13 || digits.length > 19 || !passesLuhn(digits)) continue;
+			if (!isCard(digits)) continue;
 			const whole = i === 0 && j === groups.length - 1;
-			const plausible = /^(?:2[2-9]|[3-8])/.test(digits) && groups.slice(i, j + 1).every((g) => g[0].length > 2);
-			if (whole || plausible) card.fill(true, i, j + 1);
+			if (whole || groups.slice(i, j + 1).every((g) => g[0].length > 2)) card.fill(true, i, j + 1);
 		}
 	}
 	let out = "";
@@ -48,7 +54,7 @@ function redactCards(run: string): string {
 
 export function redactForFree(text: string): string {
 	return redactKnownSecrets(text)
-		.replace(/\b\d(?:[ -]?\d){12,}\b/g, redactCards)
+		.replace(/\b\d(?:[ \u00a0-]{0,2}\d){12,}\b/g, redactCards)
 		.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]");
 }
 

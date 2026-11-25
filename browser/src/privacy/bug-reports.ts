@@ -17,15 +17,24 @@ export interface BugEntry {
 	stack?: string;
 }
 
-/** Private keys, bearer headers and keys with a known prefix. Leaves addresses and long ids alone. */
+/**
+ * Keys by the prefix their maker gives them, each with its own separator and length, so "skincare-products" or
+ * "npm_config_registry" is not one. A bare sk-, pk- or rk- also needs a digit or a capital: page code has names like "sk-fading-circle".
+ */
+const KNOWN_KEY =
+	/\b(?:sk-(?:ant|proj|or|svcacct)-[\w-]{10,}|[spr]k_(?:live|test)_\w{10,}|[spr]k[-_](?=[\w-]*[\dA-Z])[\w-]{16,}|gh[pousr]_\w{16,}|github_pat_\w{10,}|glpat-[\w-]{10,}|xox[abeprs]-[\w-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}\b|AIza[\w-]{10,}|ya29\.[\w.-]{10,}|eyJ[\w-]{10,}|(?:npm|hf)_[A-Za-z0-9]{20,})/g;
+
+/** Private keys, authorization headers and keys with a known prefix. Leaves addresses and long ids alone. */
 export function redactKnownSecrets(text: string): string {
 	return text
 		.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[private-key]")
 		.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g, "$1 [secret]")
 		.replace(
-			/\b(sk|pk|rk|ghp|gho|ghu|ghs|github_pat|glpat|xox[abprs]|AKIA|ASIA|AIza|ya29|eyJ|npm_|hf_|sk-ant|sk-proj|sk-or)[\w-]{10,}/g,
-			"[secret]",
-		);
+			/\b(authorization["'\\]*\s*[:=]\s*["'\\]*(?:bearer|basic|token))\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+			"$1 [secret]",
+		)
+		.replace(/\b(bearer)\s+(?=\S*\d)[A-Za-z0-9._~+/=-]{16,}/gi, "$1 [secret]")
+		.replace(KNOWN_KEY, "[secret]");
 }
 
 /**
@@ -79,7 +88,6 @@ export function redact(text: string): string {
 				"[ip]",
 			)
 			.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "[email]")
-			.replace(/\b(sk|pk|rk|ghp|gho|ghu|ghs|github_pat|xox[abprs]|AKIA|AIza|ya29|eyJ)[\w-]{10,}/g, "[secret]")
 			.replace(/[A-Za-z0-9_+/-]{32,}={0,2}/g, "[long-token]")
 			.replace(/\/(Users|home)\/[^/\s]+/g, "/$1/[user]")
 			.replace(/[A-Z]:\\Users\\[^\\\s]+/g, "C:\\Users\\[user]")

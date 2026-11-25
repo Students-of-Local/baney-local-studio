@@ -371,6 +371,31 @@ test("a card beside its expiry, CVV or another number never reaches a free model
 		assert.equal(redactForFree(text), text);
 });
 
+test("Free mode takes out bare access tokens and lowercase headers, and leaves words, page code and long ids", async () => {
+	const { redactForFree } = await import("../src/privacy/free-redact.ts");
+	const token = ["Ab3Cd4", "Ef5Gh6", "Ij7Kl8", "Mn9"].join("");
+	for (const [text, clean] of [
+		[`access_token":"${"ya" + "29"}.a0${token}_x-y.z"`, 'access_token":"[secret]"'],
+		[`authorization: bearer ${token}`, "authorization: bearer [secret]"],
+		[`"authorization":"basic ${"dXNlcjpw" + "YXNzd29y"}"`, '"authorization":"basic [secret]"'],
+		[`curl with BEARER ${token}`, "curl with BEARER [secret]"],
+		[`${"sk" + "_live_"}${token} ${"sk" + "-"}${token} ${"gho" + "_"}${token}`, "[secret] [secret] [secret]"],
+		["4111\u00a01111\u00a01111\u00a01111 and 4111  1111  1111  1111", "[card number] and [card number]"],
+		["378282246310005, 30569309025904, 6011111111111117, 2223003122003222", "[card number], [card number], [card number], [card number]"],
+	])
+		assert.equal(redactForFree(text), clean);
+	for (const text of [
+		"https://shop.example/skincare-products",
+		"#skip-to-content .skeleton-loader .sk-fading-circle-dots",
+		"skateboarding skill-creator npm_config_registry hf_hub_download_file ASIA-pacific-region",
+		"the bearer responsibilities and basic troubleshooting-guidelines",
+		"https://x.com/u/status/1153826337396867073",
+		"at 1761234567895",
+		"isbn 9780306406157",
+	])
+		assert.equal(redactForFree(text), text);
+});
+
 test("keys and cards in tool calls and reasoning never reach a free model", async () => {
 	const { redactContext } = await import("../src/privacy/free-redact.ts");
 	const key = "ghp_" + "abcdefghijklmnopqrst";
