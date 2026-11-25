@@ -4036,10 +4036,14 @@ impl Actor {
         let ended = open && !self.run_open(id);
         let idle = !self.running(id);
         if ended || (was && idle) {
-            let failed = self.threads.get(id).is_some_and(|thread| thread.failed_at.is_some());
-            if let Some(thread) = self.threads.get_mut(id) {
+            let error = self.run_error(id);
+            let failed = self.threads.get_mut(id).is_some_and(|thread| {
                 thread.ended_by_events = !idle;
-            }
+                if error.is_some() {
+                    thread.failed_at = thread.failed_at.or_else(|| Some(now_ms()));
+                }
+                thread.failed_at.is_some()
+            });
             self.run_finished(id, failed);
             self.refresh_saved().await;
         }
@@ -4523,6 +4527,10 @@ impl Actor {
         self.dirty = true;
     }
 
+    fn run_error(&self, id: &str) -> Option<String> {
+        self.threads.get(id).and_then(|thread| thread.live.as_ref()).and_then(|live| live.transcript.failure())
+    }
+
     fn run_finished(&mut self, id: &str, failed: bool) {
         let now = now_ms();
         if self.focused.as_deref() != Some(id) {
@@ -4534,7 +4542,8 @@ impl Actor {
         }
         let title = self.title(id);
         let (kind, body) = if failed {
-            (NotificationKind::Failed, "The run failed.".to_string())
+            let error = self.run_error(id).unwrap_or_else(|| "The run failed.".to_string());
+            (NotificationKind::Failed, truncate(&error, BODY_LIMIT))
         } else {
             let answer = self
                 .threads
@@ -4743,12 +4752,17 @@ impl Actor {
                 thread.skill.asked |= create::answering(live.transcript.items());
             }
             SessionEvent::TurnEnd { error: Some(error), .. } => {
+                failure = thread.failed_at.is_none().then(|| error.clone());
                 thread.failed_at = Some(now);
-                failure = Some(error.clone());
             }
             SessionEvent::AutoRetryEnd { success: false, final_error, .. } => {
+                let error = final_error.clone().unwrap_or_else(|| "The retries ran out.".to_string());
+                failure = thread.failed_at.is_none().then_some(error);
                 thread.failed_at = Some(now);
-                failure = Some(final_error.clone().unwrap_or_else(|| "The retries ran out.".to_string()));
+            }
+            SessionEvent::AgentEnd { .. } if thread.failed_at.is_none() => {
+                failure = live.transcript.failure();
+                thread.failed_at = failure.as_ref().map(|_| now);
             }
             SessionEvent::SessionActionUpdate { .. } => live.sending.clear(),
             _ => {}
