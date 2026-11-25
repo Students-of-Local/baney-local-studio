@@ -228,6 +228,16 @@ fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn sessions_let_go(agent_dir: &Path) -> anyhow::Result<()> {
+    let leases = agent_dir.join("session-leases");
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    while std::fs::read_dir(&leases).is_ok_and(|mut held| held.next().is_some()) {
+        ensure!(Instant::now() < deadline, "a session worker still holds a lease in {}", leases.display());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
 fn seed(config: StudioConfig, work: &Path) -> anyhow::Result<[(&'static str, String); 2]> {
     let mut session = Session::open(config)?;
     let outcome = (|| {
@@ -333,6 +343,7 @@ fn main() -> anyhow::Result<()> {
     let stopped = stop_daemon(&socket);
     let threads = seeded?;
     stopped?;
+    sessions_let_go(&agent_dir)?;
     grow_eukhe(&agent_dir.join("sessions"))?;
     grow_claude(&home.join(".claude"))?;
     let measured = measure(config, root.join("other").to_string_lossy().into_owned(), &threads);
