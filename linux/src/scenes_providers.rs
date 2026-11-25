@@ -7,7 +7,8 @@ use local_studio_core::{
 use crate::app::App;
 use crate::fixtures::{conversation, provider, providers};
 
-pub const SCENES: [&str; 3] = ["providers-pane", "providers-endpoint-dialog", "providers-endpoint-edit"];
+pub const SCENES: [&str; 4] =
+    ["providers-pane", "providers-endpoint-dialog", "providers-endpoint-edit", "welcome-providers"];
 
 fn models() -> Vec<ProviderModel> {
     [
@@ -79,6 +80,31 @@ pub fn stage(app: &Rc<App>, scene: &str) {
             conversation(app, false);
             app.apply(updates());
             crate::providers::present(app, Some(endpoint()));
+        }
+        "welcome-providers" => {
+            app.apply(vec![Update::Connection { state: local_studio_core::Connection::Ready }]);
+            let carousel = crate::wizard::present(app);
+            let server = |name: &str, port: u16, models: &[&str], added: bool| LocalEngine {
+                id: format!("http://127.0.0.1:{port}/v1"),
+                controller: name.to_string(),
+                port,
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                models: models.iter().map(ToString::to_string).collect(),
+                provider: String::new(),
+                added,
+            };
+            app.apply(vec![Update::Providers {
+                providers: providers()
+                    .into_iter()
+                    .map(|provider| ProviderStatus { configured: false, ..provider })
+                    .collect(),
+                engines: vec![
+                    server("Ollama", 11434, &["qwen3:4b", "hf.co/LiquidAI/LFM3-1.7B-GGUF:Q4_K_M"], false),
+                    server("LM Studio", 1234, &["gpt-oss-20b"], true),
+                ],
+                errors: Vec::new(),
+            }]);
+            carousel.scroll_to(&carousel.nth_page(1), false);
         }
         _ => crate::scenes_pickers::stage(app, scene),
     }

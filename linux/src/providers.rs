@@ -85,7 +85,9 @@ fn dot(on: bool) -> gtk::Box {
 fn track(app: &App, provider: &str) -> String {
     let request = app.ask(Target::Provider);
     REQUESTS.with(|requests| requests.borrow_mut().insert(request.clone(), provider.to_string()));
-    app.state.borrow_mut().provider_pending.insert(provider.to_string());
+    let mut state = app.state.borrow_mut();
+    state.provider_pending.insert(provider.to_string());
+    state.provider_error = None;
     request
 }
 
@@ -364,7 +366,7 @@ fn engines_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
     group
 }
 
-fn engine_row(app: &Weak<App>, state: &State, engine: &LocalEngine) -> adw::ActionRow {
+pub fn engine_row(app: &Weak<App>, state: &State, engine: &LocalEngine) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(format::escape(&engine.models.join(", ")))
         .subtitle(format::escape(&format!("{} · port {}", engine.controller, engine.port)))
@@ -387,6 +389,7 @@ fn engine_row(app: &Weak<App>, state: &State, engine: &LocalEngine) -> adw::Acti
             let request = track(&app, &id);
             let id = id.clone();
             app.core.run(|studio| studio.use_local_engine(request, id));
+            app.render(Dirty { settings: true, ..Dirty::default() });
         });
         row.add_suffix(&button);
     }
