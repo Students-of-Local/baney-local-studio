@@ -1095,6 +1095,11 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
         std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
         std::env::set_var(LEDGER_ENV, &ledger_out);
+        let tools = web.join("local-studio-browser");
+        let (stub, started) = (web.join("server.py"), root.join("tools.jsonl"));
+        executable(&tools, &format!("#!/bin/sh\nexec {} local-studio {}\n", stub.display(), started.display()))?;
+        std::env::set_var("LOCAL_STUDIO_BROWSER_BIN", &tools);
+        std::fs::write(data.join("settings.json"), r#"{"browserUse":true,"computerUse":true}"#)?;
         let socket = root.join("d.sock");
         let config = StudioConfig {
             socket_path: Some(socket.to_string_lossy().into_owned()),

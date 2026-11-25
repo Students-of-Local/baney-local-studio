@@ -20,6 +20,7 @@ pub mod skills;
 mod store;
 mod studio;
 mod threads;
+mod tools;
 mod transcript;
 pub mod tunnel;
 pub mod update;

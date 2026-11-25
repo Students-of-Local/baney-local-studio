@@ -26,7 +26,7 @@ enum PagesFixtures {
             onboardingCompleted: true, customThemes: "", glassOpacity: 80, snapshotEnabled: true, snapshotIncludeText: true,
             snapshotPlaySound: true, snapshotSound: .softPop, snapshotFlash: true, snapshotAnimations: true,
             harnessAccounts: HarnessAccounts(claude: [], codex: [], labels: []), switchAccountsOnLimit: true,
-            automaticUpdates: true
+            automaticUpdates: true, browserUse: false, computerUse: false
         )
     }
 

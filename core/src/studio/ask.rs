@@ -189,6 +189,10 @@ impl Actor {
                 servers
             }
         };
+        if self.store.flags(id).local_only.is_none() {
+            let local = self.thread_model(id).is_some_and(|(provider, _)| Self::local_provider(&provider));
+            servers.extend(crate::tools::server(&self.workspace.effective_settings(None), id, local));
+        }
         let before = self.ask_sent.get(active).and_then(Value::as_array);
         if before == Some(&servers) {
             return;

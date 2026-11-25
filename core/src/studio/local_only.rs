@@ -6,6 +6,7 @@ use crate::harness;
 use crate::model::{Delivery, ModelKey, NoticeLevel, PromptDraft, Update};
 use crate::plugins::{self, Plugin};
 use crate::store::HeldPrompt;
+use crate::tools;
 use crate::workspace::{configured_providers, Provider};
 
 const SIDE_MODELS: [&str; 10] = [
@@ -129,6 +130,15 @@ impl Actor {
             );
             self.refuse(id, plugin, text, None, prompt, request);
             return Ok(Gate::Refused);
+        }
+        if self.holds_tools(active) {
+            if self.running(id) {
+                if !again {
+                    self.hold(id, prompt, delivery, request);
+                }
+                return Ok(Gate::Held);
+            }
+            self.drop_tools(active).await?;
         }
         let (open, clashes) = self.network_servers(active, &plugins).await?;
         if !open.is_empty() || !clashes.is_empty() {
@@ -302,6 +312,28 @@ impl Actor {
             .collect();
         let (clashes, open) = listed.into_iter().partition(|server| ours.contains(server));
         Ok((open, clashes))
+    }
+
+    fn holds_tools(&self, active: &str) -> bool {
+        self.ask_sent
+            .get(active)
+            .and_then(Value::as_array)
+            .is_some_and(|sent| sent.iter().any(|one| one["name"] == tools::SERVER))
+    }
+
+    async fn drop_tools(&mut self, active: &str) -> Result<(), String> {
+        let sent = self.ask_sent.get(active).and_then(Value::as_array).cloned().unwrap_or_default();
+        let servers = Value::Array(sent.into_iter().filter(|one| one["name"] != tools::SERVER).collect());
+        let command = DaemonCommand::ReplaceAcpMcpServers {
+            id: None,
+            active_session_id: active.to_string(),
+            owner_id: plugins::ask::NOTE_TYPE.to_string(),
+            servers: servers.clone(),
+            rest: Map::default(),
+        };
+        self.call(command).await.map_err(|error| format!("Could not take browser and computer use off: {error}"))?;
+        self.ask_sent.insert(active.to_string(), servers);
+        Ok(())
     }
 
     async fn pin_local(
