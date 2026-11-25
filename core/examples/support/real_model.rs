@@ -13,7 +13,7 @@ pub const CONTEXT_ENV: &str = "LOCAL_STUDIO_SMOKE_CONTEXT";
 pub const IMAGE_ENV: &str = "LOCAL_STUDIO_SMOKE_IMAGE_MODEL";
 const BASE: &str = "http://127.0.0.1:11434/v1";
 const CONTEXT: u64 = 32_768;
-const MAX_TOKENS: u64 = 8_192;
+const MAX_TOKENS: u64 = 1_024;
 const PRICE_PER_MILLION: f64 = 1.0;
 const STREAM_IDLE_MS: u64 = 900_000;
 
