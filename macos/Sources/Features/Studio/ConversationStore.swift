@@ -516,14 +516,17 @@ final class ConversationStore {
         var draft = draft
         if let held = skillDrafts[thread], held.id == draft?.id {
             draft?.text = held.text
+            draft?.marked = held.marked
         }
         guard skillDrafts[thread] != draft else { return }
         skillDrafts[thread] = draft
     }
 
     func keepSkillText(thread: String, draft: String, text: String) {
-        guard skillDrafts[thread]?.id == draft else { return }
-        skillDrafts[thread]?.text = text
+        guard var held = skillDrafts[thread], held.id == draft else { return }
+        held.text = text
+        held.marked = skillMarks(text: text, files: held.files)
+        skillDrafts[thread] = held
     }
 
     func setSavingSkill(thread: String, _ saving: Bool) {

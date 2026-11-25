@@ -48,7 +48,7 @@ private struct SkillDraftCardBody: View {
                     .foregroundStyle(Theme.secondaryText)
             }
             if !draft.marked.isEmpty {
-                SkillWarning(text: draft.warning)
+                SkillWarning(text: SkillDraft.warning(draft.marked.count))
             }
             HStack(spacing: 6) {
                 if draft.marked.isEmpty {
@@ -113,15 +113,16 @@ struct SkillDraftSheet: View {
     }
 
     var body: some View {
+        let marked = skillMarks(text: text, files: draft.files)
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Review \(draft.name)")
                         .font(.system(size: 22, weight: .medium, design: .serif))
                         .fixedSize(horizontal: false, vertical: true)
-                    if !draft.marked.isEmpty {
-                        SkillWarning(text: draft.warning)
-                        ForEach(Array(draft.marked.enumerated()), id: \.offset) { _, line in
+                    if !marked.isEmpty {
+                        SkillWarning(text: SkillDraft.warning(marked.count))
+                        ForEach(Array(marked.enumerated()), id: \.offset) { _, line in
                             Text(line)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(Theme.secondaryText)
@@ -256,9 +257,9 @@ extension SkillDraft {
         replaces ? "Replace" : "Save"
     }
 
-    var warning: String {
-        let lines = marked.count == 1 ? "1 line" : "\(marked.count) lines"
-        return "\(lines) may hold a password or a key. Read \(marked.count == 1 ? "it" : "them") before you save."
+    static func warning(_ marked: Int) -> String {
+        let lines = marked == 1 ? "1 line" : "\(marked) lines"
+        return "\(lines) may hold a password or a key. Read \(marked == 1 ? "it" : "them") before you save."
     }
 
     var facts: String {

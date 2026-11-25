@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
+use local_studio_core::skills::skill_marks;
 use local_studio_core::{ColorScheme, ModelKey, Settings, SkillDraft, SkillFile, Update};
 
 use crate::app::{App, Dirty, Target};
@@ -201,7 +202,7 @@ pub fn set(app: &App, thread: String, draft: Option<SkillDraft>) {
     match draft {
         Some(mut draft) => {
             if let Some(held) = state.skill_drafts.remove(&thread).filter(|held| held.id == draft.id) {
-                draft.text = held.text;
+                (draft.text, draft.marked) = (held.text, held.marked);
             }
             state.skill_drafts.insert(thread, draft)
         }
@@ -259,6 +260,23 @@ fn text_view(text: &str, editable: bool) -> gtk::TextView {
     view
 }
 
+fn show_marks(marks: &gtk::Box, lines: &[String]) {
+    while let Some(old) = marks.first_child() {
+        marks.remove(&old);
+    }
+    marks.set_visible(!lines.is_empty());
+    let (row, text) = warning();
+    text.set_label(&private(lines.len()));
+    marks.append(&row);
+    for line in lines {
+        let marked = label("command");
+        marked.add_css_class("ls-mono");
+        marked.set_label(line);
+        marked.set_selectable(true);
+        marks.append(&marked);
+    }
+}
+
 fn present(app: &Rc<App>, thread: String, draft: &SkillDraft) {
     let dialog = adw::Dialog::builder().title("Review Skill").content_width(680).content_height(640).build();
     let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -273,18 +291,9 @@ fn present(app: &Rc<App>, thread: String, draft: &SkillDraft) {
     for set in [gtk::Label::set_margin_start, gtk::Label::set_margin_end, gtk::Label::set_margin_bottom] {
         set(&error, 16);
     }
-    if !draft.marked.is_empty() {
-        let (row, text) = warning();
-        text.set_label(&private(draft.marked.len()));
-        column.append(&row);
-        for line in &draft.marked {
-            let marked = label("command");
-            marked.add_css_class("ls-mono");
-            marked.set_label(line);
-            marked.set_selectable(true);
-            column.append(&marked);
-        }
-    }
+    let marks = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    show_marks(&marks, &draft.marked);
+    column.append(&marks);
     if !draft.left.is_empty() {
         let left = label("ls-meta");
         left.set_label(&format!("Left out of the skill: code blocks labeled {}.", draft.left.join(", ")));
@@ -309,10 +318,13 @@ fn present(app: &Rc<App>, thread: String, draft: &SkillDraft) {
     let scroller = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&column).build();
     toolbar.set_content(Some(&scroller));
     dialog.set_child(Some(&toolbar));
+    let buffer = view.buffer();
     let typed = move || {
         let buffer = view.buffer();
         buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).to_string()
     };
+    let (text, files) = (typed.clone(), draft.files.clone());
+    buffer.connect_changed(move |_| show_marks(&marks, &skill_marks(&text(), &files)));
     let (weak, target) = (Rc::downgrade(app), thread.clone());
     let (id, text) = (draft.id.clone(), typed.clone());
     save.connect_clicked(move |_| {
@@ -327,7 +339,10 @@ fn present(app: &Rc<App>, thread: String, draft: &SkillDraft) {
         let mut state = app.state.borrow_mut();
         if let Some(draft) = state.skill_drafts.get_mut(&closed).filter(|draft| draft.id == id) {
             draft.text = typed();
+            draft.marked = skill_marks(&draft.text, &draft.files);
         }
+        drop(state);
+        app.render(Dirty { composer: true, ..Dirty::default() });
     });
     OPEN.with(|slot| slot.replace(Some(Open { thread, dialog: dialog.clone(), save, error })));
     dialog.present(Some(&app.window));

@@ -8,6 +8,7 @@ use serde::Serialize;
 use super::store::{Store, BESIDE, SKILL};
 use super::text;
 use crate::frontmatter;
+use crate::SkillFile;
 
 const MOST_TEXT: usize = 64 * 1024;
 const MOST_FILES: usize = 20;
@@ -124,7 +125,7 @@ impl Draft {
         if files.len() > MOST_FILES {
             return Err(format!("A skill has at most {MOST_FILES} files."));
         }
-        let marked = texts().flat_map(|text| text.lines()).filter(|line| private(line)).map(text::line).collect();
+        let marked = marks(texts());
         Ok(Self { name, description, folder, text, files, marked, left })
     }
 
@@ -271,6 +272,16 @@ fn beside(path: &str) -> Result<String, String> {
         return Err(format!("The reply names a file a skill cannot hold: {}", text::plain(path)));
     }
     Ok(path.to_string())
+}
+
+fn marks<'a>(texts: impl Iterator<Item = &'a String>) -> Vec<String> {
+    texts.flat_map(|text| text.lines()).filter(|line| private(line)).map(text::line).collect()
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+#[must_use]
+pub fn skill_marks(text: &str, files: &[SkillFile]) -> Vec<String> {
+    marks(files.iter().map(|file| &file.text).chain([&text.to_string()]))
 }
 
 fn private(line: &str) -> bool {
