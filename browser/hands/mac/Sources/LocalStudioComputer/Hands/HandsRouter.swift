@@ -364,7 +364,7 @@ final class HandsRouter {
         if let id = req.int("window") {
             if !all.contains(where: { Int($0.id) == id }) { (all, agent) = listWindows(fresh: true) }
             guard let w = all.first(where: { Int($0.id) == id }) ?? UInt32(exactly: id).flatMap({ childWindow($0) }) else {
-                return .failure(HandsError(.windowNotFound, "no window \(id) that Tychicus tracks", suggestion: "Run `computer_windows` for the ids you can use.", retry: .safe))
+                return .failure(HandsError(.windowNotFound, "no window \(id) that Local Studio tracks", suggestion: "Run `computer_windows` for the ids you can use.", retry: .safe))
             }
             let d = decide(w, agent, session: req.session ?? "")
             if case .denied(let e) = d { return .failure(e) }
@@ -376,7 +376,7 @@ final class HandsRouter {
         guard !ofApp.isEmpty else {
             let running = NSWorkspace.shared.runningApplications.contains { $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame || $0.bundleIdentifier == name }
             return .failure(HandsError(running ? .windowNotFound : .appNotFound,
-                                       running ? "\(name) has no window Tychicus tracks" : "\(name) isn't running",
+                                       running ? "\(name) has no window Local Studio tracks" : "\(name) isn't running",
                                        suggestion: running ? "Open one with `computer_open \(name)`." : "Start it on the agent workspace with `computer_open \(name)`.", retry: .safe))
         }
         let decided = ofApp.map { ($0, decide($0, agent)) }
@@ -581,7 +581,7 @@ final class HandsRouter {
         let sid = String(ref[ref.index(after: ref.startIndex)..<colon])
         lock.lock(); let snap = snaps[sid]; snaps[sid]?.at = Date(); lock.unlock()
         guard let snap else {
-            return .failure(HandsError(.unknownRef, "Tychicus didn't print \(ref)", suggestion: "Take a snapshot of the window and use the refs it prints.", retry: .afterSnapshot))
+            return .failure(HandsError(.unknownRef, "Local Studio didn't print \(ref)", suggestion: "Take a snapshot of the window and use the refs it prints.", retry: .afterSnapshot))
         }
         let (all, agent) = listWindows()
         guard let w = all.first(where: { $0.id == snap.window }) ?? childWindow(snap.window) else {
@@ -990,7 +990,7 @@ final class HandsRouter {
         var data: [String: JSONValue] = (reply.info ?? [:]).mapValues(JSONValue.string)
         let (frontAfter, returnsAfter) = onMain { (NSWorkspace.shared.frontmostApplication?.processIdentifier, AgentLaunchFocus.shared.returns) }
         data["focus"] = .object(["changed": .bool(frontAfter != frontBefore), "returned": .bool(returnsAfter > returnsBefore)])
-        if frontAfter != frontBefore { data["focus_note"] = "the app in front changed while it opened; Tychicus did not switch workspaces, and gives the keyboard back when an agent's launch takes it" }
+        if frontAfter != frontBefore { data["focus_note"] = "the app in front changed while it opened; Local Studio did not switch workspaces, and gives the keyboard back when an agent's launch takes it" }
         if let window {
             data["window"] = .int(Int(window.id)); data["pid"] = .int(Int(window.pid))
             data["reused"] = .bool(false)
@@ -1009,7 +1009,7 @@ final class HandsRouter {
             // overlapped another open of the same running app gets none.
             childLocked { sessionWindows.endOpen(token) }
             data["note"] = .string(OpenNote.text(start, app: display)
-                + (missLater ? ". If no window of it is on the agent workspace \(Int(OpenMiss.claimWait)) s after the open, Tychicus quits that copy" : ""))
+                + (missLater ? ". If no window of it is on the agent workspace \(Int(OpenMiss.claimWait)) s after the open, Local Studio quits that copy" : ""))
         }
         return .success(.object(data))
     }
@@ -1049,7 +1049,7 @@ final class HandsRouter {
                 return (nil, HandsError(.actionFailed, "\(display) showed only a dialog (\(dialog)), so that copy was quit",
                                         suggestion: "The same open would show it again: check the file, or open another one.", retry: .never))
             }
-            return (nil, HandsError(.actionFailed, "\(display) opened no window Tychicus could put on the agent workspace, so that copy was quit",
+            return (nil, HandsError(.actionFailed, "\(display) opened no window Local Studio could put on the agent workspace, so that copy was quit",
                                     suggestion: "Run `open` again.", retry: .safe))
         case .leave:
             Trace.log("agent open \(display): pid \(pid) has no window on the agent workspace; not this request's copy, left alone")

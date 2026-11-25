@@ -1,17 +1,21 @@
 import AppKit
 import HandsCore
 
-// `tychicus-hands mcp [--connector]`: Tychicus's computer-use helper, a stdio MCP server speaking the hands protocol
-// (docs/hands-protocol.md in the Tychicus repo). Its tools act on Mac apps in the background through Accessibility.
+// `local-studio-computer mcp [--connector]`: Local Studio's computer-use helper, a stdio MCP server speaking the hands protocol
+// (docs/hands-protocol.md in the Local Studio repo). Its tools act on Mac apps in the background through Accessibility.
 // `--connector` is for an assistant on another machine: never more than Default access, and no managing verbs.
 
-let usage = "usage: tychicus-hands mcp [--connector]\n"
+let usage = "usage: local-studio-computer mcp [--connector]\n       local-studio-computer grants --json\n"
 let version = "0.1.0"
 
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
 case "--version", "version":
-    print("tychicus-hands \(version)")
+    print("local-studio-computer \(version)")
+    exit(0)
+case "grants" where args.dropFirst() == ["--json"]:
+    // What macOS allows, for the Local Studio app's settings page. It never asks macOS to prompt.
+    print(AccessibilityGrant.report().text)
     exit(0)
 case "mcp":
     break
@@ -21,7 +25,7 @@ default:
 }
 let connector = args.dropFirst().contains("--connector")
 if let extra = args.dropFirst().first(where: { $0 != "--connector" }) {
-    FileHandle.standardError.write(Data("tychicus-hands: unknown option \(extra)\n\(usage)".utf8))
+    FileHandle.standardError.write(Data("local-studio-computer: unknown option \(extra)\n\(usage)".utf8))
     exit(2)
 }
 
@@ -32,7 +36,7 @@ NSApp.setActivationPolicy(.prohibited)
 // The engine's state folder, set before any engine queue exists (setenv isn't safe against other threads).
 HandsEngine.prepareEnvironment()
 
-let host = TychicusHost(workspace: NoAgentWorkspace())
+let host = ComputerHost(workspace: NoAgentWorkspace())
 let router = connector ? HandsRouter(cap: { $0.forRemote }, remote: true) : HandsRouter()
 router.host = host.hands
 _ = AgentLaunchFocus.shared

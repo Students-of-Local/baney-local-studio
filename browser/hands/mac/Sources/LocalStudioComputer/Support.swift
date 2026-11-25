@@ -4,13 +4,13 @@ import HandsCore
 // What the hands code used from the app it came from, cut down to what a stdio helper needs. Each type keeps the
 // name the hands code calls, so those files stay close to their history.
 
-/// Where the helper keeps its files: `~/.local/share/tychicus/hands` (TYCHICUS_HANDS_HOME overrides it, for tests).
+/// Where the helper keeps its files: `~/.local/share/local-studio-browser/hands` (LOCAL_STUDIO_COMPUTER_HOME overrides it, for tests).
 enum Wire {
     static var supportDir: URL {
-        if let home = ProcessInfo.processInfo.environment["TYCHICUS_HANDS_HOME"], !home.isEmpty {
+        if let home = ProcessInfo.processInfo.environment["LOCAL_STUDIO_COMPUTER_HOME"], !home.isEmpty {
             return URL(fileURLWithPath: home, isDirectory: true)
         }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/tychicus", isDirectory: true)
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/local-studio-browser", isDirectory: true)
     }
 
     /// What `open` answers the router with: the shape an app session's reply has.
@@ -27,12 +27,12 @@ enum Spaces {
     static var folder: URL { Wire.supportDir }
 }
 
-/// A log on stderr, which the MCP client keeps out of the conversation. Quiet unless TYCHICUS_HANDS_TRACE=1.
+/// A log on stderr, which the MCP client keeps out of the conversation. Quiet unless LOCAL_STUDIO_COMPUTER_TRACE=1.
 enum Trace {
-    static let on = ProcessInfo.processInfo.environment["TYCHICUS_HANDS_TRACE"] == "1"
+    static let on = ProcessInfo.processInfo.environment["LOCAL_STUDIO_COMPUTER_TRACE"] == "1"
     static func log(_ s: String) {
         guard on else { return }
-        FileHandle.standardError.write(Data("tychicus-hands: \(s)\n".utf8))
+        FileHandle.standardError.write(Data("local-studio-computer: \(s)\n".utf8))
     }
 }
 

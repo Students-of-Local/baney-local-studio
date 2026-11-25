@@ -199,8 +199,8 @@ extension HandsRouter {
             case .success(let p): pressed = p
             }
             guard pressed else {
-                return .failure(HandsError(.notSupported, "window \(w.id) of \(w.app) has no close button Tychicus can press",
-                                           suggestion: "Leave it open; Tychicus never quits an app for an agent.", retry: .never))
+                return .failure(HandsError(.notSupported, "window \(w.id) of \(w.app) has no close button Local Studio can press",
+                                           suggestion: "Leave it open; Local Studio never quits an app for an agent.", retry: .never))
             }
             var data: [String: JSONValue] = ["window": .int(Int(w.id)), "app": .string(w.app), "pressed": "close", "target": targetJSON(w, scope)]
             if let opened = openedChildren(pid: w.pid, before: before, session: session) {
