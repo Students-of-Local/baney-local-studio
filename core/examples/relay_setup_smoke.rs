@@ -200,7 +200,6 @@ impl Smoke {
             .env("TMPDIR", self.root.join("tmp"))
             .env("HOME", &self.home)
             .env("LOCAL_STUDIO_DATA_DIR", &self.data)
-            .env("TYCHICUS_CONFIG_DIR", self.root.join("tychicus"))
             .stdin(Stdio::null());
         command
     }

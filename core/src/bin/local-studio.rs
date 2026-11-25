@@ -25,7 +25,6 @@ const USAGE: &str = "usage: local-studio --version
        local-studio tunnel setup --relay [<name>] [--account <id>] [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --tailnet [--serve <port>] [--mcp <port>] [--yes] [--json]
-       local-studio tunnel adopt [--hostname <name>] [--yes] [--json]
        local-studio tunnel off [--json]
        local-studio tunnel up [--yes] [--json]
        local-studio tunnel down | release [--json]
@@ -82,7 +81,6 @@ fn main() -> ExitCode {
         }
         ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), json),
         ["tunnel", "setup", flags @ ..] => setup(flags, json),
-        ["tunnel", "adopt", flags @ ..] => adopt(flags, json),
         ["tunnel", "off"] => run_state(|t| Box::pin(t.off()), json),
         ["tunnel", "up"] => run_tunnel(|t| Box::pin(t.up(consent(false, json))), json),
         ["tunnel", "up", "--yes"] => run_tunnel(|t| Box::pin(t.up(consent(true, json))), json),
@@ -682,35 +680,6 @@ fn setup_relay(
     _as_json: bool,
 ) -> Result<(), String> {
     Err(NO_RELAY.into())
-}
-
-fn adopt(flags: &[&str], json: bool) -> Result<(), String> {
-    let usage = "usage: local-studio tunnel adopt [--hostname <name>] [--yes] [--json]";
-    let (mut hostname, mut yes) = (None, false);
-    let mut rest = flags.iter();
-    while let Some(flag) = rest.next() {
-        match *flag {
-            "--hostname" => hostname = Some(rest.next().ok_or(usage)?.to_string()),
-            "--yes" => yes = true,
-            _ => return Err(usage.to_string()),
-        }
-    }
-    let go = move |plan: &Value| {
-        if yes {
-            return true;
-        }
-        if json || !std::io::stdin().is_terminal() {
-            return false;
-        }
-        for step in plan.get("plan").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-            println!("  - {step}");
-        }
-        print!("Adopt Tychicus's tunnel this way? [y/N] ");
-        let _ = std::io::stdout().flush();
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
-    };
-    run_state(move |t| Box::pin(t.adopt(hostname, go, consent(yes, json))), json)
 }
 
 fn given_ports(flags: &[&str]) -> Result<(Option<u16>, Option<u16>), String> {

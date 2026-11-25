@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{
-    check_ports, fail, serve_allow, serve_edit, Failure, Ports, Route, RoutePorts, Tunnel, UpLock, DEFAULT_PORTS,
-};
+use super::{check_ports, fail, serve_allow, serve_edit, Failure, Ports, Route, Tunnel, UpLock, DEFAULT_PORTS};
 use crate::platform::Mode;
 
 #[cfg(feature = "link")]
@@ -36,8 +34,6 @@ pub const TAILNET_SERVE_PORT: u16 = 18093;
 pub const SERVICE_LABEL: &str = "com.localstudio.tunnel";
 pub const SERVICE_UNIT: &str = "local-studio-tunnel.service";
 const OWN: Service = Service { label: SERVICE_LABEL, unit: SERVICE_UNIT, what: "Local Studio's tunnel" };
-const TYCHICUS: Service =
-    Service { label: "com.tychicus.cloudflared", unit: "tychicus-cloudflared.service", what: "Tychicus's tunnel" };
 const CHECK_WAITS: [u64; 7] = [0, 1, 2, 4, 8, 15, 30];
 const DOH: [&str; 2] = ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"];
 const SERVICE_WAIT: Duration = Duration::from_secs(10);
@@ -84,7 +80,7 @@ pub fn byo(platform: &str) -> Value {
             "Run: local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes, with your domain in place of YOUR-DOMAIN. It downloads the pinned cloudflared and answers needs_signin with a cloudflared tunnel login command. Run that command, sign in and pick your domain, the same way as above.".to_string(),
             "Run the setup command again. It creates the tunnel local-studio-<this machine>, its DNS record and a login service, checks the public address, and answers ready with your MCP and phone addresses.".to_string(),
             "Only your own devices? local-studio tunnel setup --tailnet keeps Local Studio on your tailnet.".to_string(),
-            "Check it any time with local-studio tunnel status. local-studio tunnel off removes it from this machine. Already have a Tychicus tunnel here? Run local-studio tunnel adopt instead.".to_string(),
+            "Check it any time with local-studio tunnel status. local-studio tunnel off removes it from this machine.".to_string(),
         ],
     })
 }
@@ -306,13 +302,6 @@ fn home() -> Result<PathBuf, Failure> {
 
 fn cloudflared_dir() -> Result<PathBuf, Failure> {
     Ok(home()?.join(".cloudflared"))
-}
-
-fn tychicus_dir() -> Result<PathBuf, Failure> {
-    match std::env::var_os("TYCHICUS_CONFIG_DIR").filter(|value| !value.is_empty()) {
-        Some(dir) => Ok(PathBuf::from(dir)),
-        None => Ok(home()?.join(".config").join("tychicus")),
-    }
 }
 
 fn machine_slug() -> String {
@@ -560,45 +549,6 @@ impl Manager {
         Err(format!("{} {} failed: {}", self.name(), args.join(" "), out.text()))
     }
 
-    async fn start(&self, service: Service) -> Result<(), String> {
-        let args = match self {
-            Self::Launchd { domain, .. } => argv(&["bootstrap", domain, &self.file(service).display().to_string()]),
-            Self::Systemd { .. } => argv(&["start", service.unit]),
-        };
-        let out = self.call(&args).await?;
-        if out.ok() || self.running(service).await {
-            return Ok(());
-        }
-        Err(format!("{} {} failed: {}", self.name(), args.join(" "), out.text()))
-    }
-
-    async fn retire(&self, service: Service) -> Result<(), String> {
-        let args = match self {
-            Self::Launchd { .. } => argv(&["disable", &self.target(service)]),
-            Self::Systemd { .. } => argv(&["disable", "--now", service.unit]),
-        };
-        let out = self.call(&args).await?;
-        if !out.ok() {
-            return Err(format!("{} {} failed: {}", self.name(), args.join(" "), out.text()));
-        }
-        match self {
-            Self::Launchd { .. } => self.stop(service).await,
-            Self::Systemd { .. } => Ok(()),
-        }
-    }
-
-    async fn restore(&self, service: Service) -> Result<(), String> {
-        let args = match self {
-            Self::Launchd { .. } => argv(&["enable", &self.target(service)]),
-            Self::Systemd { .. } => argv(&["enable", service.unit]),
-        };
-        let out = self.call(&args).await?;
-        if !out.ok() {
-            return Err(format!("{} {} failed: {}", self.name(), args.join(" "), out.text()));
-        }
-        self.start(service).await
-    }
-
     async fn remove(&self, service: Service) -> Result<bool, String> {
         let file = self.file(service);
         if !file.exists() {
@@ -692,64 +642,6 @@ fn unit(what: &str, program: &Path, args: &[String], env: &[(&str, String)]) -> 
     format!(
         "[Unit]\nDescription={what}\n\n[Service]\n{environment}ExecStart={line}\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
     )
-}
-
-struct TychicusTunnel {
-    hostname: String,
-    tunnel: String,
-    credentials: PathBuf,
-    port: Option<u16>,
-}
-
-fn unquote(text: &str) -> String {
-    let text = text.trim();
-    for quote in ['\'', '"'] {
-        if let Some(inner) = text.strip_prefix(quote).and_then(|rest| rest.strip_suffix(quote)) {
-            return inner.to_string();
-        }
-    }
-    text.to_string()
-}
-
-fn yml_field(text: &str, key: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        let line = line.trim().trim_start_matches("- ").trim();
-        line.strip_prefix(key).and_then(|rest| rest.strip_prefix(':')).map(unquote).filter(|value| !value.is_empty())
-    })
-}
-
-fn tychicus_route(kinds: &[&str]) -> Result<Option<(Value, PathBuf)>, Failure> {
-    let dir = tychicus_dir()?;
-    let path = dir.join("remote.json");
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(fail("tychicus_config", format!("{}: {error}", path.display()))),
-    };
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| fail("tychicus_config", format!("{}: {error}", path.display())))?;
-    Ok(value.get("route").and_then(Value::as_str).is_some_and(|kind| kinds.contains(&kind)).then_some((value, dir)))
-}
-
-fn tychicus_tunnel() -> Result<Option<TychicusTunnel>, Failure> {
-    let Some((remote, dir)) = tychicus_route(&["cloudflare"])? else { return Ok(None) };
-    let yml_path = dir.join(YML);
-    let yml = fs::read_to_string(&yml_path)
-        .map_err(|error| fail("tychicus_config", format!("{}: {error}", yml_path.display())))?;
-    let bad = |what: &str| fail("tychicus_config", format!("{} has no {what}.", yml_path.display()));
-    let tunnel = yml_field(&yml, "tunnel").filter(|id| is_uuid(&id.to_lowercase())).ok_or_else(|| bad("tunnel id"))?;
-    let credentials = yml_field(&yml, "credentials-file")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| bad("credentials-file path"))?;
-    let hostname = remote
-        .get("publicUrl")
-        .and_then(Value::as_str)
-        .and_then(normalize_host)
-        .or_else(|| yml_field(&yml, "hostname").as_deref().and_then(normalize_host))
-        .ok_or_else(|| bad("hostname"))?;
-    let port = remote.get("port").and_then(Value::as_u64).and_then(|port| u16::try_from(port).ok());
-    Ok(Some(TychicusTunnel { hostname, tunnel: tunnel.to_lowercase(), credentials, port }))
 }
 
 fn needs_signin_cloudflare(cloudflared: &Path) -> Value {
@@ -888,9 +780,10 @@ fn plan_mounts(state: &ServeState, wanted: &[(String, String)]) -> Result<Vec<(S
 
 fn ready(route: &Route, checks: &Value, message: &str) -> Value {
     let ports = route.ports;
-    json!({
+    let joined = checks["mcp"] != "not_joined";
+    let mut value = json!({
         "state": "ready",
-        "next": "ready",
+        "next": if joined { "ready" } else { "needs_join" },
         "route": route.route,
         "hostname": route.hostname,
         "aliases": route.aliases.clone().unwrap_or_default(),
@@ -898,8 +791,12 @@ fn ready(route: &Route, checks: &Value, message: &str) -> Value {
         "mcpUrl": format!("https://{}/mcp", route.hostname),
         "wsUrl": format!("wss://{}/v1/ws", route.hostname),
         "checks": checks,
-        "message": format!("{message}{}", dns_note(checks)),
-    })
+        "message": format!("{message}{}", notes(checks)),
+    });
+    if !joined {
+        value["command"] = json!(super::JOIN);
+    }
+    value
 }
 
 fn check_url() -> Option<String> {
@@ -939,7 +836,9 @@ struct Want {
     mcp: bool,
 }
 
-async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want) -> Result<(), String> {
+struct Joined(bool);
+
+async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want) -> Result<Joined, String> {
     let get = |path: &str| {
         client
             .get(format!("{base}{path}"))
@@ -969,6 +868,9 @@ async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want)
     }
     if want.mcp {
         let answer = get("/mcp").await.map_err(|error| format!("https://{hostname}/mcp: {error}"))?;
+        if answer.status().as_u16() == 421 {
+            return Ok(Joined(false));
+        }
         let challenge = answer.headers().get("www-authenticate").and_then(|value| value.to_str().ok()).unwrap_or("");
         if answer.status().as_u16() != 401 || !challenge.contains("resource_metadata") {
             return Err(format!(
@@ -977,31 +879,28 @@ async fn probe(client: &reqwest::Client, base: &str, hostname: &str, want: Want)
             ));
         }
     }
-    Ok(())
+    Ok(Joined(true))
 }
 
-fn merge_dns(checks: &mut Value, other: &Value) {
-    if other["dns"] == "public_only" {
-        checks["dns"] = json!("public_only");
-    }
-}
-
-fn dns_note(checks: &Value) -> &'static str {
+fn notes(checks: &Value) -> String {
+    let mut text = String::new();
     if checks["dns"] == "public_only" {
-        " This computer's DNS still has the old answer for the new name, so the checks looked it up over DNS over HTTPS. That clears on its own, and nothing is needed."
-    } else {
-        ""
+        text.push_str(" This computer's DNS still has the old answer for the new name, so the checks looked it up over DNS over HTTPS. That clears on its own, and nothing is needed.");
     }
+    if checks["mcp"] == "not_joined" {
+        text.push_str(super::UNJOINED);
+    }
+    text
 }
 
 impl Tunnel {
-    async fn check_once(&self, hostname: &str, want: Want) -> Result<&'static str, String> {
+    async fn check_once(&self, hostname: &str, want: Want) -> Result<(Joined, &'static str), String> {
         if let Some(base) = check_url() {
-            return probe(&self.http, &base, hostname, want).await.map(|()| "local");
+            return probe(&self.http, &base, hostname, want).await.map(|joined| (joined, "local"));
         }
         let base = check_origin(hostname);
         let error = match probe(&self.http, &base, hostname, want).await {
-            Ok(()) => return Ok("local"),
+            Ok(joined) => return Ok((joined, "local")),
             Err(error) => error,
         };
         let Err(local) = resolves_here(hostname).await else { return Err(error) };
@@ -1016,10 +915,10 @@ impl Tunnel {
             .resolve_to_addrs(hostname, &addrs)
             .build()
             .map_err(|error| error.to_string())?;
-        probe(&client, &base, hostname, want).await.map_err(|error| {
+        let joined = probe(&client, &base, hostname, want).await.map_err(|error| {
             format!("{error} (This computer's DNS has no answer for {hostname} yet, so this check used the address DNS over HTTPS gave.)")
         })?;
-        Ok("public_only")
+        Ok((joined, "public_only"))
     }
 
     async fn public_lookup(&self, hostname: &str) -> Result<Vec<SocketAddr>, String> {
@@ -1065,15 +964,10 @@ impl Tunnel {
             .collect())
     }
 
-    async fn public_checks(
-        &self,
-        hostnames: &[String],
-        ports: Ports,
-        health: bool,
-        mcp: bool,
-    ) -> Result<Value, String> {
-        let listens = mcp && listening(ports.mcp);
+    async fn public_checks(&self, hostnames: &[String], ports: Ports, health: bool) -> Result<Value, String> {
+        let listens = listening(ports.mcp);
         let mut dns = "local";
+        let mut mcp = if listens { "ok" } else { "not_listening" };
         if health || listens {
             for hostname in hostnames {
                 let mut last = String::new();
@@ -1081,9 +975,12 @@ impl Tunnel {
                 for wait in CHECK_WAITS {
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     match self.check_once(hostname, Want { relay: false, health, mcp: listens }).await {
-                        Ok(found) => {
+                        Ok((Joined(joined), found)) => {
                             if found == "public_only" {
                                 dns = found;
+                            }
+                            if !joined {
+                                mcp = "not_joined";
                             }
                             passed = true;
                             break;
@@ -1096,12 +993,7 @@ impl Tunnel {
                 }
             }
         }
-        let mcp_state = match (mcp, listens) {
-            (_, true) => "ok",
-            (true, false) => "not_listening",
-            (false, false) => "unchecked",
-        };
-        Ok(json!({ "health": if health { "ok" } else { "unchecked" }, "mcp": mcp_state, "dns": dns }))
+        Ok(json!({ "health": if health { "ok" } else { "unchecked" }, "mcp": mcp, "dns": dns }))
     }
 
     #[must_use]
@@ -1112,43 +1004,9 @@ impl Tunnel {
     fn refuse_for(&self, kind: &str) -> Result<(), Failure> {
         match self.route()? {
             Some(route) if route.owner == "local-studio" && route.route == kind && self.on_relay()?.is_none() => Ok(()),
-            Some(route) => {
-                let (owner, off) = if route.owner == "tychicus" {
-                    ("Tychicus", "tychicus remote off")
-                } else {
-                    ("Local Studio", "local-studio tunnel off")
-                };
-                Err(fail(
-                    "other_route",
-                    format!(
-                        "This machine already has a {} route for {}, run by {owner}, and a machine has one tunnel. Turn it off first: {off}",
-                        route.route, route.hostname
-                    ),
-                ))
-            }
+            Some(route) => Err(route.refusal()),
             None => Ok(()),
         }
-    }
-
-    fn refuse_tychicus_tunnel(hostname: Option<&str>) -> Result<(), Failure> {
-        let Some((remote, _)) = tychicus_route(&["cloudflare", "relay"])? else { return Ok(()) };
-        let old = remote.get("publicUrl").and_then(Value::as_str).unwrap_or("a Cloudflare hostname");
-        if remote["route"] == "relay" {
-            return Err(fail(
-                "tychicus_tunnel",
-                format!("Tychicus already runs a relay at {old} on this machine, and a machine has one tunnel. Turn it off first: tychicus remote off"),
-            ));
-        }
-        let adopt = match hostname {
-            Some(host) => format!("local-studio tunnel adopt --hostname {host} --yes"),
-            None => "local-studio tunnel adopt --yes".to_string(),
-        };
-        Err(fail(
-            "tychicus_tunnel",
-            format!(
-                "Tychicus already runs a Cloudflare tunnel for {old} on this machine, and a machine has one tunnel. Take it over without a gap: {adopt}. Or turn it off first: tychicus remote off"
-            ),
-        ))
     }
 
     async fn start_service(
@@ -1188,7 +1046,7 @@ impl Tunnel {
         ports: Ports,
     ) -> Result<(Value, Vec<String>), Failure> {
         let refused = self.start_service(manager, cloudflared, tunnel, credentials, hostnames, ports).await?;
-        match self.public_checks(hostnames, ports, true, true).await {
+        match self.public_checks(hostnames, ports, true).await {
             Ok(mut checks) => {
                 checks["serveAllowed"] = json!(refused.is_empty());
                 Ok((checks, refused))
@@ -1234,7 +1092,6 @@ impl Tunnel {
         check_ports(ports.serve, ports.mcp)?;
         let _lock = UpLock::take(&self.dir, false)?;
         self.refuse_for("cloudflare")?;
-        Self::refuse_tychicus_tunnel(Some(&host))?;
         let manager = Manager::detect().await?;
         let cloudflared =
             self.cloudflared(consent, &format!("local-studio tunnel setup --cloudflare {host} --yes")).await?;
@@ -1286,7 +1143,6 @@ impl Tunnel {
         check_ports(ports.serve, ports.mcp)?;
         let _lock = UpLock::take(&self.dir, false)?;
         self.refuse_for("tailnet")?;
-        Self::refuse_tychicus_tunnel(None)?;
         let bin = tailscale_program().ok_or_else(|| {
             fail(
                 "tailscale_missing",
@@ -1331,7 +1187,7 @@ impl Tunnel {
         }
         self.save_tailnet_record(&record)?;
         let allowed = allow_host(&dns).await;
-        let checks = match self.public_checks(std::slice::from_ref(&dns), ports, allowed.is_ok(), true).await {
+        let checks = match self.public_checks(std::slice::from_ref(&dns), ports, allowed.is_ok()).await {
             Ok(checks) => checks,
             Err(error) => {
                 let left = self.unmount(&bin, &added).await;
@@ -1343,7 +1199,7 @@ impl Tunnel {
         };
         let route = new_route("tailnet", &dns, &[], ports);
         self.write_route(&route)?;
-        let mut value = ready(&route, &checks, "Live on your tailnet only. No Funnel.");
+        let mut value = ready(&route, &checks, "Live on your tailnet. This route uses no Funnel.");
         value["mounted"] = json!(added.iter().map(|(path, _)| path).collect::<Vec<_>>());
         if let Err(why) = allowed {
             let command = format!("local-studio-serve allow-host {dns} --json");
@@ -1352,7 +1208,7 @@ impl Tunnel {
             value["command"] = json!(command);
             value["message"] = json!(format!(
                 "The tailnet paths are up, but local-studio-serve hasn't allowed {dns} on its local listener, so the phone path isn't checked yet. Update local-studio-serve, then run: {command} ({why}){}",
-                dns_note(&checks)
+                notes(&checks)
             ));
         }
         Ok(value)
@@ -1371,262 +1227,6 @@ impl Tunnel {
         left
     }
 
-    pub async fn adopt(
-        &self,
-        hostname: Option<String>,
-        go: impl FnOnce(&Value) -> bool,
-        consent: impl FnOnce(&Path, &[String]) -> bool,
-    ) -> Result<Value, Failure> {
-        settle(self.adopt_steps(hostname.as_deref(), go, consent).await)
-    }
-
-    async fn adopt_steps(
-        &self,
-        hostname: Option<&str>,
-        go: impl FnOnce(&Value) -> bool,
-        consent: impl FnOnce(&Path, &[String]) -> bool,
-    ) -> Result<Value, Halt> {
-        let _lock = UpLock::take(&self.dir, false)?;
-        let old = tychicus_tunnel()?.ok_or_else(|| {
-            fail(
-                "no_tychicus_tunnel",
-                "Tychicus runs no Cloudflare tunnel on this machine, so there is nothing to adopt. Set one up: local-studio tunnel setup --cloudflare <hostname>",
-            )
-        })?;
-        if !old.credentials.exists() {
-            return Err(fail(
-                "no_credentials",
-                format!(
-                    "Tychicus's tunnel names {} for its credentials, and that file isn't on this machine, so it can't be adopted.",
-                    old.credentials.display()
-                ),
-            )
-            .into());
-        }
-        if let Some(route) = self.route()? {
-            return Err(fail(
-                "other_route",
-                format!(
-                    "This machine already has a {} route for {}, run by {}. Turn it off first: local-studio tunnel off",
-                    route.route, route.hostname, route.owner
-                ),
-            )
-            .into());
-        }
-        let host = match hostname {
-            Some(raw) => normalize_host(raw)
-                .ok_or_else(|| fail("bad_hostname", format!("{raw} isn't a hostname, such as studio.example.com.")))?,
-            None => old.hostname.clone(),
-        };
-        let aliases = if host == old.hostname { Vec::new() } else { vec![old.hostname.clone()] };
-        let ports = Ports { serve: DEFAULT_PORTS.serve, mcp: old.port.unwrap_or(DEFAULT_PORTS.mcp) };
-        check_ports(ports.serve, ports.mcp)?;
-        let mut names = vec![host.clone()];
-        names.extend(aliases.iter().cloned());
-        let manager = Manager::detect().await?;
-        let command = match hostname {
-            Some(_) => format!("local-studio tunnel adopt --hostname {host} --yes"),
-            None => "local-studio tunnel adopt --yes".to_string(),
-        };
-        let plan = self.adopt_plan(&manager, &old, &names, ports, &command);
-        if !go(&plan) {
-            return Ok(plan);
-        }
-        let cloudflared = self.cloudflared(consent, &command).await?;
-        cloudflared.verify()?;
-        if host != old.hostname {
-            if !cloudflared_dir()?.join("cert.pem").exists() {
-                return Ok(needs_signin_cloudflare(cloudflared.path()));
-            }
-            route_dns(cloudflared.path(), &old.tunnel, &host).await?;
-        }
-        let was_running = manager.running(TYCHICUS).await;
-        let mut stopped = false;
-        let switched =
-            self.adopt_switch(&manager, cloudflared.path(), &old, &names, ports, was_running, &mut stopped).await;
-        let (route, checks, refused) = match switched {
-            Ok(done) => done,
-            Err(cause) => {
-                let new = (host != old.hostname).then_some(host.as_str());
-                return Err(self.roll_back(&manager, &cause, stopped, was_running, new).await.into());
-            }
-        };
-        let mut value = self.adopt_join(&route, checks, &names, ports, &old.tunnel).await;
-        value["message"] = json!(with(value["message"].as_str().unwrap_or_default(), &refused));
-        Ok(value)
-    }
-
-    async fn adopt_join(
-        &self,
-        route: &Route,
-        mut checks: Value,
-        names: &[String],
-        ports: Ports,
-        tunnel: &str,
-    ) -> Value {
-        let (tychicus, stuck) = match join_tychicus().await {
-            Ok(()) => match self.public_checks(names, ports, false, true).await {
-                Ok(after) => {
-                    checks["mcp"] = after["mcp"].clone();
-                    merge_dns(&mut checks, &after);
-                    ("joined", None)
-                }
-                Err(error) => {
-                    checks["mcp"] = json!("failed");
-                    (
-                        "joined",
-                        Some(format!(
-                            "Local Studio runs the tunnel now and Tychicus joined, but Tychicus serve doesn't answer /mcp on every name yet: {error} Check Tychicus, then run tychicus remote join again."
-                        )),
-                    )
-                }
-            },
-            Err(why) => (
-                "not_joined",
-                Some(format!(
-                    "Local Studio runs the tunnel now. Tychicus still needs to join it: run tychicus remote join. ({why})"
-                )),
-            ),
-        };
-        let mut value = ready(route, &checks, "Local Studio runs Tychicus's tunnel now.");
-        value["tunnelId"] = json!(tunnel);
-        value["tychicus"] = json!(tychicus);
-        if let Some(message) = stuck {
-            value["state"] = json!("needs_tychicus_join");
-            value["next"] = json!("needs_tychicus_join");
-            value["command"] = json!("tychicus remote join");
-            value["message"] = json!(format!("{message}{}", dns_note(&checks)));
-        }
-        value
-    }
-
-    fn adopt_plan(
-        &self,
-        manager: &Manager,
-        old: &TychicusTunnel,
-        names: &[String],
-        ports: Ports,
-        command: &str,
-    ) -> Value {
-        let mut steps = Vec::new();
-        if names.len() > 1 {
-            steps.push(format!("Add the DNS record {} to tunnel {}.", names[0], old.tunnel));
-        }
-        steps.push(format!(
-            "Write {} with the eleven paths for {}, using the same tunnel and its credentials file {} (never read).",
-            self.dir.join(YML).display(),
-            names.join(" and "),
-            old.credentials.display()
-        ));
-        steps.push(format!("Install and start {} ({}).", OWN.what, manager.file(OWN).display()));
-        steps.push(format!("Check that {} answers /mcp while both connectors run.", old.hostname));
-        steps.push(format!(
-            "Disable and stop {} ({}) so it doesn't start again at login, keeping its files, then check /v1/health on {} and /mcp on {} with Local Studio's connector alone.",
-            TYCHICUS.what,
-            manager.file(TYCHICUS).display(),
-            names.join(" and "),
-            old.hostname
-        ));
-        steps.push(format!("Write {}.", self.route_path().display()));
-        steps.push(format!("Run tychicus remote join, then check /mcp on {}.", names.join(" and ")));
-        json!({
-            "state": "confirm",
-            "next": "confirm",
-            "route": "cloudflare",
-            "hostname": names[0],
-            "aliases": &names[1..],
-            "tunnelId": old.tunnel,
-            "ports": RoutePorts::from(ports),
-            "plan": steps,
-            "command": command,
-            "message": format!("Adopt Tychicus's Cloudflare tunnel for {} without a gap. Nothing changes until you confirm: {command}", old.hostname),
-        })
-    }
-
-    async fn roll_back(
-        &self,
-        manager: &Manager,
-        cause: &str,
-        stopped: bool,
-        was_running: bool,
-        new: Option<&str>,
-    ) -> Failure {
-        let _ = manager.remove(OWN).await;
-        let _ = fs::remove_file(self.dir.join(YML));
-        let mut message = format!("{cause} Adopting was rolled back: Local Studio's tunnel service was removed");
-        if stopped {
-            match manager.restore(TYCHICUS).await {
-                Ok(()) if manager.wait_running(TYCHICUS).await => {
-                    message.push_str(", and Tychicus's tunnel runs again.");
-                }
-                Ok(()) => {
-                    let _ = write!(
-                        message,
-                        ", but Tychicus's tunnel didn't come back up. Check {}.",
-                        manager.file(TYCHICUS).display()
-                    );
-                }
-                Err(error) => {
-                    let _ = write!(message, ", but Tychicus's tunnel didn't start again: {error}");
-                }
-            }
-        } else if was_running {
-            message.push_str("; Tychicus's tunnel kept running.");
-        } else {
-            message.push('.');
-        }
-        if let Some(host) = new {
-            let _ = write!(message, " The DNS record for {host} stays on the tunnel.");
-        }
-        fail("adopt_rolled_back", message)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn adopt_switch(
-        &self,
-        manager: &Manager,
-        cloudflared: &Path,
-        old: &TychicusTunnel,
-        names: &[String],
-        ports: Ports,
-        was_running: bool,
-        stopped: &mut bool,
-    ) -> Result<(Route, Value, Vec<String>), String> {
-        let refused = self
-            .start_service(manager, cloudflared, &old.tunnel, &old.credentials, names, ports)
-            .await
-            .map_err(|failure| failure.message)?;
-        let told = |error: String| with(&error, &refused);
-        let accepted = std::slice::from_ref(&old.hostname);
-        let mut checks = json!({ "health": "unchecked", "mcp": "unchecked", "dns": "local" });
-        if was_running {
-            let both = self
-                .public_checks(accepted, ports, false, true)
-                .await
-                .map_err(|error| told(format!("While both tunnel connectors ran: {error}")))?;
-            merge_dns(&mut checks, &both);
-            *stopped = true;
-            manager.retire(TYCHICUS).await.map_err(told)?;
-        }
-        let after = |error: String| {
-            if was_running {
-                told(format!("After Tychicus's tunnel stopped: {error}"))
-            } else {
-                told(error)
-            }
-        };
-        let health = self.public_checks(names, ports, true, false).await.map_err(after)?;
-        let served = self.public_checks(accepted, ports, false, true).await.map_err(after)?;
-        checks["health"] = health["health"].clone();
-        checks["mcp"] = served["mcp"].clone();
-        merge_dns(&mut checks, &health);
-        merge_dns(&mut checks, &served);
-        checks["serveAllowed"] = json!(refused.is_empty());
-        let route = new_route("cloudflare", &names[0], &names[1..], ports);
-        self.write_route(&route).map_err(told)?;
-        Ok((route, checks, refused))
-    }
-
     pub async fn off(&self) -> Result<Value, Failure> {
         let _lock = UpLock::take(&self.dir, true)?;
         let route = self.route()?;
@@ -1634,8 +1234,11 @@ impl Tunnel {
             return Err(fail(
                 "not_ours",
                 format!(
-                    "The {} route for {} is run by {}, not Local Studio. Turn it off there: {} remote off",
-                    route.route, route.hostname, route.owner, route.owner
+                    "The {} route for {} is run by {}, not Local Studio. {}",
+                    route.route,
+                    route.hostname,
+                    route.owner_name(),
+                    route.turn_off()
                 ),
             ));
         }
@@ -1753,20 +1356,4 @@ fn undo_note(left: &[String]) -> String {
     } else {
         format!("Removing {} failed too; check tailscale serve status.", left.join(", "))
     }
-}
-
-async fn join_tychicus() -> Result<(), String> {
-    let bin = tool("LS_TYCHICUS", "tychicus").ok_or("tychicus isn't on PATH")?;
-    let out = run(&bin, &argv(&["remote", "join", "--json"])).await?;
-    if out.ok() {
-        return Ok(());
-    }
-    if out.code == 2 {
-        return Err("this tychicus has no remote join yet; update Tychicus".into());
-    }
-    let said = serde_json::from_str::<Value>(out.stdout.trim())
-        .ok()
-        .and_then(|value| value.get("message").and_then(Value::as_str).map(ToString::to_string))
-        .unwrap_or_else(|| out.text());
-    Err(format!("tychicus remote join exited {}: {said}", out.code))
 }
