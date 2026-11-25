@@ -21,6 +21,11 @@ const NPX: &str = r#"#!/bin/sh
 shift 2
 case "$1" in
   whoami) cat "$SHIM_STATE/whoami"; grep -q '"loggedIn":true' "$SHIM_STATE/whoami" || exit 1 ;;
+  deployments)
+    [ -f "$SHIM_STATE/exists" ] && { echo "[]"; exit 0; }
+    [ -f "$SHIM_STATE/lookup-fails" ] && { echo "fetch failed" >&2; exit 1; }
+    echo "This Worker does not exist on your account. [code: 10007]" >&2
+    exit 1 ;;
   deploy)
     [ -f "$SHIM_STATE/no-subdomain" ] && { echo "You need to register a workers.dev subdomain before publishing to workers.dev" >&2; exit 1; }
     [ -f "$SHIM_STATE/deploy-fails" ] && { echo "early words"; printf '%0400d\n' 0; echo "deploy broke $(tail -n 1 "$SHIM_STATE/stdin.log" 2>/dev/null)"; exit 1; }
@@ -263,8 +268,9 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
     c.whoami(TWO)?;
     let value = c.halted("needs_account", &["smoke"])?;
     let listed = json!([{"id":ACCOUNT,"name":"Smoke"},{"id":OTHER,"name":"Other"}]);
-    let next = format!("local-studio tunnel setup --relay smoke --account {ACCOUNT}");
-    ensure(value["accounts"] == listed && value["nextCommand"] == next, format!("S3 lists both: {value}"))?;
+    let given = format!("local-studio tunnel setup --relay smoke --serve 18194 --mcp {}", c.mcp);
+    let next = format!("{given} --account ID");
+    ensure(value["accounts"] == listed && value["template"] == next, format!("S3 lists both, picks none: {value}"))?;
     c.set("no-subdomain", true)?;
     let value = c.halted("needs_subdomain", &["smoke", "--account", OTHER])?;
     let url = format!("https://dash.cloudflare.com/{OTHER}/workers/onboarding");
@@ -278,6 +284,19 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
         c.refused("an account that isn't listed", &["smoke", "--account", id], "bad_account")?;
     }
     println!("ok: S4 bad account");
+
+    c.set("lookup-fails", true)?;
+    c.refused("a lookup that fails", &["smoke"], "relay_lookup")?;
+    c.set("lookup-fails", false)?;
+    c.set("exists", true)?;
+    let deploys = c.log("npx.log").matches("wrangler@4.163.0 deploy ").count();
+    let value = c.halted("confirm", &["smoke"])?;
+    let named = value["message"].as_str().is_some_and(|said| said.contains("already has a Worker named smoke"));
+    ensure(named && value["nextCommand"] == format!("{given} --yes"), format!("S17 asks first: {value}"))?;
+    let after = c.log("npx.log").matches("wrangler@4.163.0 deploy ").count();
+    ensure(after == deploys, "S17 a Worker already there is never deployed over without a yes")?;
+    c.set("exists", false)?;
+    println!("ok: S17 the name is taken");
 
     c.set("deploy-fails", true)?;
     let message = c.refused("a failed deploy", &["smoke"], "relay_deploy")?;
@@ -308,7 +327,8 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
 
 pub fn live(c: &mut Cases) -> Result<(), String> {
     c.set("refused", true)?;
-    let value = c.setup(&["smoke"])?;
+    c.set("exists", true)?;
+    let value = c.setup(&["smoke", "--yes"])?;
     c.live(&value)?;
     ensure(!c.state.join("early-record").exists(), "relay.json is written only after the secret put")?;
     let checks = c.log("checks.log");
@@ -324,7 +344,12 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
     }
     let npx = c.log("npx.log");
     ensure(npx.contains("WRANGLER_SEND_METRICS=false"), "wrangler's metrics are off")?;
-    for args in ["whoami --json", "deploy --name smoke", "secret put RELAY_KEY --name smoke"] {
+    for args in [
+        "whoami --json",
+        "deployments list --name smoke --json",
+        "deploy --name smoke",
+        "secret put RELAY_KEY --name smoke",
+    ] {
         ensure(npx.contains(&format!("npx --yes wrangler@4.163.0 {args}\n")), format!("wrangler runs {args}"))?;
     }
     let cwd = c.s.tunnel("relay").display().to_string();
