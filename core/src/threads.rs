@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::model::{Harness, Project, Shelf, Subagent, ThreadRow, ThreadSearchHit, ThreadStatus};
 use crate::session::model_ref;
+use crate::skills;
 use crate::store::{StoredProject, ThreadFlags};
 use crate::workspace::model::PullRequest;
 
@@ -245,7 +246,8 @@ pub(crate) fn child_row(agent_id: &str, entry: &Value) -> Option<ChildRow> {
 }
 
 pub(crate) fn clean_title(text: &str) -> String {
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
+    let typed = skills::typed(text);
+    let line = typed.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
     if line.chars().count() <= TITLE_LIMIT {
         return line.to_string();
     }

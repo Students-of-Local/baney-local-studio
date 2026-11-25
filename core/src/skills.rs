@@ -22,6 +22,8 @@ pub use serve::{serve, SERVER};
 pub use store::{roots, Listed, Roots, Store};
 pub use text::plain;
 
+const BLOCKS: [(&str, &str); 2] = [("<skill name=\"", "\n</skill>\n\n"), ("<plugin name=\"", "\n</plugin>\n\n")];
+
 const SESSION_COMMANDS: [(&str, &str); 7] = [
     ("compact", "Compact the conversation context"),
     ("refine", "Refine the last answer"),
@@ -370,6 +372,25 @@ impl Resources {
             }
         };
         Some(Expansion { text, plugins: vec![plugin.id.clone()] })
+    }
+}
+
+pub(crate) fn typed(sent: &str) -> String {
+    let mut text = sent;
+    let made = text.strip_prefix(CREATE).filter(|rest| rest.is_empty() || rest.starts_with("\n\n"));
+    text = made.map_or(text, str::trim_start);
+    while let Some(after) = BLOCKS.iter().find_map(|(open, close)| {
+        let block = text.strip_prefix(open)?;
+        block.find(close).map(|at| &block[at + close.len()..])
+    }) {
+        if after.is_empty() {
+            break;
+        }
+        text = after;
+    }
+    match made {
+        Some(_) => format!("{MAKE} {text}").trim_end().to_string(),
+        None => text.to_string(),
     }
 }
 

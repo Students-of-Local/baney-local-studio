@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{AccessMode, ContextUsage, Goal, Harness, ModelOption, ModelRef, QueuedMessage, ThreadInfo};
+use crate::skills;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct LiveState {
@@ -50,7 +51,7 @@ impl Queue {
                 .enumerate()
                 .map(|(index, text)| {
                     let id = format!("{name}:{index}");
-                    QueuedMessage { sending: sending.contains(&id), id, text: text.clone(), steering }
+                    QueuedMessage { sending: sending.contains(&id), id, text: skills::typed(text), steering }
                 })
                 .collect::<Vec<_>>()
         };
