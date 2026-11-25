@@ -30,13 +30,9 @@ fn asks(item: &Item) -> bool {
     matches!(&item.kind, ItemKind::User { text, .. } if skills::asked(text))
 }
 
-fn answers(items: &[Item]) -> impl Iterator<Item = &[Item]> {
-    let asked = items.iter().enumerate().rev().filter(|(_, item)| asks(item));
-    asked.map(|(at, _)| {
-        let after = &items[at + 1..];
-        let next = after.iter().position(|item| matches!(item.kind, ItemKind::User { .. }));
-        &after[..next.unwrap_or(after.len())]
-    })
+fn replies(items: &[Item]) -> impl Iterator<Item = &[Item]> {
+    let asked = items.iter().position(asks).map(|at| &items[at..]);
+    asked.into_iter().flat_map(|after| after.split(|item| matches!(item.kind, ItemKind::User { .. })).rev())
 }
 
 fn parse(answer: &[Item]) -> Result<Draft, String> {
@@ -71,8 +67,7 @@ impl Actor {
     fn skill_answer(&self, thread: &str) -> Option<Draft> {
         let live = self.view(thread)?;
         let items = live.transcript.items();
-        let running = live.state.busy && answering(items);
-        answers(items).skip(usize::from(running)).find_map(|answer| parse(answer).ok())
+        replies(items).skip(usize::from(live.state.busy)).find_map(|reply| parse(reply).ok())
     }
 
     fn skill_draft(&self, thread: &str) -> Option<SkillDraft> {
@@ -104,7 +99,7 @@ impl Actor {
     pub(super) fn skill_turn_ended(&mut self, id: &str) {
         let Some(live) = self.view(id) else { return };
         let items = live.transcript.items();
-        let Some(answer) = answers(items).next().filter(|_| !(live.state.busy && answering(items))) else { return };
+        let Some(answer) = replies(items).next().filter(|_| !(live.state.busy && answering(items))) else { return };
         let failed = matches!(answer.last().map(|item| &item.kind), Some(ItemKind::Assistant { error: Some(_), .. }));
         let (parsed, ours) = (parse(answer), answering(items));
         let Some(thread) = self.threads.get_mut(id) else { return };
