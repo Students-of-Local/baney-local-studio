@@ -1219,13 +1219,13 @@ fn compact_during_open(run: &mut Run, started: &BTreeMap<String, String>) -> any
 fn reopened(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> anyhow::Result<()> {
     run.setup("daemon connected again", |watch| matches!(watch.connection, Some(Connection::Ready)))?;
     run.until(Duration::from_secs(1), |_| false);
-    listed(run, "after a restart", 1, true);
+    listed(run, "after a restart", 2, true);
     select_spawns_nothing(run, started)?;
     send_during_open(run, started)?;
     stop_during_open(run, started)?;
     trust_after_restart(run, started, root)?;
     compact_during_open(run, started)?;
-    listed(run, "after a Codex thread opened again", 2, true);
+    listed(run, "after a Codex thread opened again", 3, true);
     Ok(())
 }
 
@@ -1617,8 +1617,8 @@ fn main() -> anyhow::Result<()> {
         listed(&mut run, "before a project is added", 0, false);
         studio.add_project(work.to_string_lossy().into_owned());
         run.setup("project added", |watch| watch.projects.len() == 1)?;
-        run.check("Codex models are listed once a project is added", |watch| watch.codex);
-        listed(&mut run, "after a project is added", 1, true);
+        run.check("Codex models are listed once a project is added, though Codex refused once", |watch| watch.codex);
+        listed(&mut run, "after a project is added", 2, true);
         private_settings(&root, "{}")?;
         scenarios(&mut run, &root)
     })();
@@ -1638,11 +1638,11 @@ fn main() -> anyhow::Result<()> {
     let outcome = outcome.and_then(|()| reopens_while_programs_start(&config)).and_then(|()| {
         let saved = root.join("data/harness/codex-models.json");
         std::env::set_var(fakes[1].0, root.join("no-codex"));
-        misses.append(&mut models_at_open(&config, "with Codex gone", (2, false))?.misses);
+        misses.append(&mut models_at_open(&config, "with Codex gone", (3, false))?.misses);
         std::env::set_var(fakes[1].0, examples.with_file_name(fakes[1].1));
         std::fs::remove_file(&saved)?;
         std::fs::create_dir_all(saved.join("in the way"))?;
-        let mut watch = models_at_open(&config, "with no place to save the list", (3, true))?;
+        let mut watch = models_at_open(&config, "with no place to save the list", (4, true))?;
         if !watch.warnings.iter().any(|text| text.starts_with("Could not save the Codex model list")) {
             watch.miss("the list that could not be saved is not mentioned".to_string());
         }

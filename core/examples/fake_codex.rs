@@ -274,8 +274,13 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
         "initialize" if !at_home() => shared.refuse(id, "fake codex runs outside the home folder"),
         "model/list" => {
             if let Some(home) = std::env::var_os("HOME") {
-                let log = std::fs::OpenOptions::new().create(true).append(true).open(PathBuf::from(home).join(LISTED));
+                let path = PathBuf::from(home).join(LISTED);
+                let log = std::fs::OpenOptions::new().create(true).append(true).open(&path);
                 log.and_then(|mut log| writeln!(log, "model/list")).ok();
+                if std::fs::read_to_string(path).is_ok_and(|log| log.lines().count() == 1) {
+                    shared.refuse(id, "fake codex refuses the first model/list");
+                    return;
+                }
             }
             shared.respond(
                 id,
