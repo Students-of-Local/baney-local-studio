@@ -100,6 +100,7 @@ fn named(installed: &[Plugin], (listed, hits): &Found, query: &str) -> Vec<Menti
     if query.is_empty() {
         return installed.iter().map(plugin).collect();
     }
+    let listed: Vec<&Listed> = listed.iter().filter(|skill| !skill.behind(installed)).collect();
     let first = CREATE.starts_with(query).then(|| Mention {
         badge: "Create".to_string(),
         ..mention(MentionKind::Skill, CREATE, "Make a skill from this thread")
@@ -114,7 +115,7 @@ fn named(installed: &[Plugin], (listed, hits): &Found, query: &str) -> Vec<Menti
             ranked.push((rank, name, row()));
         }
     };
-    for found in listed {
+    for found in &listed {
         add(&[&found.name], &|| skill(&found.name, &found.description, &found.source));
     }
     for found in installed {

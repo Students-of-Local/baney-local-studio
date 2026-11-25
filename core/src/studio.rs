@@ -669,6 +669,7 @@ impl Studio {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
     #[allow(clippy::too_many_lines)]
     pub fn new(config: StudioConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, StudioError> {
+        crate::skills::app();
         let socket = daemon::socket_path(config.socket_path.as_deref());
         let plugins_dir = plugins::plugins_dir(config.data_dir.as_deref());
         let data_dir =

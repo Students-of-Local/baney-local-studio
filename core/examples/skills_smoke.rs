@@ -741,6 +741,35 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn asked(
+    smoke: &Smoke,
+    server: &[&str],
+    tool: &str,
+    given: &Value,
+    between: impl FnOnce() -> std::io::Result<()>,
+) -> Result<String, String> {
+    let text = |error: std::io::Error| error.to_string();
+    let mut child = smoke.command(server).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(text)?;
+    let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err("the skills server has no pipes".to_string());
+    };
+    let client = json!({ "name": "smoke", "version": "1" });
+    let opened = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client });
+    let call = json!({ "name": tool, "arguments": given });
+    let mut lines = BufReader::new(from).lines();
+    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": opened })).map_err(text)?;
+    lines.next().ok_or("no answer")?.map_err(text)?;
+    between().map_err(text)?;
+    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).map_err(text)?;
+    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call })).map_err(text)?;
+    let answer = lines.next().ok_or("no answer")?.map_err(text)?;
+    drop(to);
+    child.wait().map_err(text)?;
+    Ok(answer)
+}
+
+#[cfg(unix)]
 fn shipped(smoke: &mut Smoke) -> Result<(), String> {
     let text = |error: std::io::Error| error.to_string();
     let app = smoke.data.with_file_name("app");
@@ -768,23 +797,20 @@ fn shipped(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("--shipped reads the shipped one", read.to_string().contains("filament"));
     let refused = !smoke.run(&["read", "--shipped", "kitchen"])?.status.success();
     smoke.check("--shipped reads none of yours", refused);
-    let mut child = smoke.command(&["mcp", "--shipped"]);
-    let mut child = child.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(text)?;
-    let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
-        return Err("the shipped skills server has no pipes".to_string());
-    };
-    let client = json!({ "name": "smoke", "version": "1" });
-    let opened = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client });
-    let call = json!({ "name": "skill_search", "arguments": { "words": "marmalade cleat" } });
-    let mut lines = BufReader::new(from).lines();
-    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": opened })).map_err(text)?;
-    lines.next().ok_or("no answer")?.map_err(text)?;
-    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).map_err(text)?;
-    writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call })).map_err(text)?;
-    let found = lines.next().ok_or("no answer")?.map_err(text)?;
-    drop(to);
-    child.wait().map_err(text)?;
-    smoke.check("the MCP server does too", found.contains("harbor") && !found.contains("kitchen"));
+    let next = app.join("bin/next");
+    let upgrade = || std::fs::copy(&own, &next).and_then(|_| std::fs::rename(&next, app.join("bin/local-studio")));
+    let words = json!({ "words": "marmalade cleat" });
+    let found = asked(smoke, &["mcp", "--shipped"], "skill_search", &words, upgrade)?;
+    smoke.check("the MCP server does too, also after the app is updated", {
+        found.contains("harbor") && !found.contains("kitchen")
+    });
+    let named = skill(&dir, "open", "Open a valve", "Turn the handle.")?;
+    let open = asked(smoke, &["mcp"], "skill_read", &json!({ "name": "open" }), || Ok(()))?;
+    let handle = asked(smoke, &["mcp"], "skill_search", &json!({ "words": "valve handle" }), || Ok(()))?;
+    smoke.check("a plugin comes before a shipped skill of its name", {
+        open.contains("open-skill") && !open.contains("handle") && !handle.contains("open (shipped)")
+    });
+    remove_dir_all(named).map_err(text)?;
     smoke.check("and yours are all still listed after", smoke.listed("kitchen")?.is_some());
     let both = smoke.run(&["list", "--shipped", "--project", "."])?.status.code() == Some(2);
     smoke.check("--shipped with a project is a usage error", both);
@@ -798,6 +824,12 @@ fn shipped(smoke: &mut Smoke) -> Result<(), String> {
         smoke.check("and stay yours", source(smoke.listed("kitchen")?).as_deref() == Some("yours"));
         remove_file(&dir).map_err(text)?;
     }
+    let inside = smoke
+        .command(&["list", "--shipped", "--json"])
+        .env("LOCAL_STUDIO_SKILLS_DIR", smoke.data.join("skills"))
+        .output();
+    let inside = inside.map_err(text)?.stdout;
+    smoke.check("nor when the environment names them", inside.trim_ascii() == b"[]");
     smoke.binary = own;
     remove_dir_all(&app).map_err(text)
 }
@@ -902,6 +934,7 @@ fn mentions(smoke: &mut Smoke) -> Result<(), String> {
     }
     let project = project.canonicalize().map_err(text)?;
     std::env::set_var("HOME", top.join("home"));
+    std::env::set_var("LOCAL_STUDIO_SKILLS_DIR", top.join("shipped"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", top.join("home/agent"));
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
     std::env::set_var("EUKHE_DAEMON_SOCKET", top.join("d.sock"));
@@ -967,15 +1000,15 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
         let items = at.list(name, "@src/main.rs")?;
         smoke.check(&format!("@{name} lists files only"), !items.is_empty() && files(&items) == items.len());
     }
-    let offered = at.list("gan", "@gantrel")?;
-    let offer = offered.iter().find(|item| item.title == "@gantrel");
+    let offer = at.list("gan", "@gantrel")?.into_iter().find(|item| item.title == "@gantrel");
     let install = |item: &Mention| item.badge == "Install" && item.install == "gantrel" && item.insert == "@gantrel ";
-    smoke.check("@gan offers the catalog's gantrel", offer.is_some_and(install));
+    smoke.check("@gan offers the catalog's gantrel", offer.as_ref().is_some_and(install));
     let empty = at.list("", "@marble.txt")?;
     let shown = titles(&empty).contains(&"@marble.txt");
     smoke.check("an empty @ lists files, and no plugin that isn't installed", shown && files(&empty) == empty.len());
     let manifest =
         "id = \"gantrel\"\nname = \"Crane\"\nversion = \"0.1.0\"\ndescription = \"Lift\"\ncapabilities = []\n";
+    skill(&data.with_file_name("shipped"), "gantrel", "Shipped", "")?;
     put(&data.join("plugins/gantrel/plugin.toml"), manifest)?;
     let plugin = row(MentionKind::Plugin, "gantrel", "Lift", "Plugin", "");
     for query in ["gan", "crane"] {
@@ -1090,6 +1123,7 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     #[cfg(unix)]
     links(smoke, &own)?;
     served(smoke, &own)?;
+    #[cfg(unix)]
     shipped(smoke)?;
     index(smoke)?;
     many(smoke)?;
