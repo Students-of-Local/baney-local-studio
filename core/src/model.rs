@@ -112,6 +112,9 @@ pub struct ThreadRow {
     #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "ffi", uniffi(default = None))]
     pub machine: Option<String>,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = false))]
+    pub browser: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

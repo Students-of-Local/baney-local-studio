@@ -71,6 +71,7 @@ mod cli;
 mod create;
 mod local_only;
 mod remote;
+mod saved;
 mod t3;
 
 use local_only::Gate;
@@ -577,6 +578,7 @@ enum Command {
     },
     HarnessModelsFailed,
     T3Poll,
+    RefreshSaved,
     T3Loaded {
         data: Option<Box<crate::workspace::t3::T3Data>>,
         print: crate::workspace::t3::Fingerprint,
@@ -731,6 +733,7 @@ impl Studio {
         let (ask_socket, ask_task) = start_ask_server(&runtime, &data_dir, &ask_tokens, &inbox, &mailbox).unzip();
         let failed = Arc::clone(&mailbox);
         let saver = Saver::new(&store, move |error| unsaved(&failed, &error));
+        let sessions = session_dir.clone().or_else(|| Some(daemon::agent_dir()?.join("sessions")));
         let actor = Actor {
             socket,
             session_dir,
@@ -801,6 +804,10 @@ impl Studio {
                 poller.send(Command::T3Poll);
             }
         });
+        if let Some(sessions) = sessions {
+            let finder = inbox.clone();
+            runtime.spawn(saved::watch(sessions, move || finder.send(Command::RefreshSaved)));
+        }
         runtime.spawn(actor.run(receiver, cli_events));
         Ok(Arc::new(Self {
             commands,
@@ -2070,6 +2077,11 @@ impl Actor {
             Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
             Command::T3Poll => self.t3_poll(false, None),
+            Command::RefreshSaved => {
+                if self.client.is_some() {
+                    self.refresh_saved().await;
+                }
+            }
             Command::T3Refresh => self.t3_poll(true, None),
             Command::T3Import { choices } => self.t3_poll(true, Some(choices)),
             Command::T3Loaded { data, print, import } => self.t3_loaded(data, print, import),
@@ -4585,7 +4597,7 @@ impl Actor {
                 }
                 if self.watched(&id) {
                     self.mailbox.push(Update::Approvals { thread: id.clone(), approvals: Vec::new() });
-                    if reason != "replaced" {
+                    if reason != "replaced" && !threads::from_browser(&id) {
                         self.mailbox.notice(NoticeLevel::Info, format!("The thread's session closed ({reason})."));
                     }
                 }

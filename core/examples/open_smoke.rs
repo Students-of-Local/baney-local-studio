@@ -14,6 +14,8 @@ use local_studio_core::{
 };
 use serde_json::{json, Map, Value};
 
+#[path = "support/browser_chat.rs"]
+mod browser_chat;
 #[allow(dead_code)]
 #[path = "support/harness.rs"]
 mod harness;
@@ -26,6 +28,7 @@ const STEP_TIMEOUT: Duration = Duration::from_mins(5);
 const MESSAGES: usize = 10_000;
 const RUNS: usize = 5;
 const REST: Duration = Duration::from_secs(3);
+const CHAT_LISTED: Duration = Duration::from_secs(15);
 const AGAIN_MS: u128 = 150;
 const DEBUG_AGAIN_MS: u128 = 5_000;
 const CLAUDE: &str = "Claude Code";
@@ -42,6 +45,7 @@ struct Watch {
     resets: usize,
     replied: bool,
     usage: Option<UsageReport>,
+    notices: Vec<String>,
 }
 
 impl Watch {
@@ -91,7 +95,10 @@ impl Session {
                         ..
                     } => self.watch.replied |= matches!(item.kind, ItemKind::Assistant { .. }),
                     Update::Usage { report, .. } => self.watch.usage = Some(report),
-                    Update::Notice { level, text } => println!("     notice {level:?}: {text}"),
+                    Update::Notice { level, text } => {
+                        println!("     notice {level:?}: {text}");
+                        self.watch.notices.push(text);
+                    }
                     _ => {}
                 }
             }
@@ -279,7 +286,32 @@ fn changed_elsewhere(session: &mut Session, config: StudioConfig, away: &str) ->
     Ok(())
 }
 
-fn measure(config: impl Fn() -> StudioConfig, other: String, threads: &[(&'static str, String)]) -> anyhow::Result<()> {
+fn panel_chat(session: &mut Session, agent_dir: &Path, work: &Path, socket: &Path) -> anyhow::Result<()> {
+    let sessions = agent_dir.join("sessions");
+    ensure!(session.watch.threads.iter().all(|row| !row.browser), "a thread of the app is marked as a browser chat");
+    browser_chat::write(&sessions, work, 1)?;
+    let written = Instant::now();
+    session.pump("the side panel's chat listed", |watch| {
+        watch.threads.iter().any(|row| row.id == browser_chat::ID && row.browser)
+    })?;
+    ensure!(written.elapsed() < CHAT_LISTED, "the side panel's chat was listed after {:?}", written.elapsed());
+    session.show(browser_chat::ID, 2)?;
+    session.watch.notices.clear();
+    browser_chat::rewrite(socket, &sessions, work, 2)?;
+    let written = Instant::now();
+    session.pump("the side panel's new turn shown", |watch| watch.items(browser_chat::ID) >= 4)?;
+    ensure!(written.elapsed() < CHAT_LISTED, "the side panel's new turn was shown after {:?}", written.elapsed());
+    ensure!(session.watch.notices.is_empty(), "the app said {:?}", session.watch.notices);
+    println!("ok   a side panel chat is listed, opened, and shows its next turn without a notice");
+    Ok(())
+}
+
+fn measure(
+    config: impl Fn() -> StudioConfig,
+    agent_dir: &Path,
+    work: &Path,
+    threads: &[(&'static str, String)],
+) -> anyhow::Result<()> {
     let mut session = Session::open(config())?;
     let outcome = (|| {
         session.pump("threads listed", |watch| {
@@ -305,7 +337,9 @@ fn measure(config: impl Fn() -> StudioConfig, other: String, threads: &[(&'stati
             let most = if cfg!(debug_assertions) && *name == CLAUDE { DEBUG_AGAIN_MS } else { AGAIN_MS };
             ensure!(times[RUNS / 2] < most, "{name}: a {MESSAGES} message thread opens again within {most} ms");
         }
-        changed_elsewhere(&mut session, StudioConfig { data_dir: Some(other), ..config() }, &threads[1].1)
+        let other = agent_dir.with_file_name("other").to_string_lossy().into_owned();
+        changed_elsewhere(&mut session, StudioConfig { data_dir: Some(other), ..config() }, &threads[1].1)?;
+        panel_chat(&mut session, agent_dir, work, &agent_dir.with_file_name("d.sock"))
     })();
     session.studio.shutdown();
     outcome
@@ -346,7 +380,7 @@ fn main() -> anyhow::Result<()> {
     sessions_let_go(&agent_dir)?;
     grow_eukhe(&agent_dir.join("sessions"))?;
     grow_claude(&home.join(".claude"))?;
-    let measured = measure(config, root.join("other").to_string_lossy().into_owned(), &threads);
+    let measured = measure(config, &agent_dir, &work, &threads);
     let stopped = stop_daemon(&socket);
     measured?;
     stopped?;
