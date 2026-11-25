@@ -1,0 +1,50 @@
+mac none settings/sites -> ! Sites is in the extension's settings: open the side panel, then Settings.
+linux none settings/providers -> ! Local Studio opens this itself.
+linux none thread/abc -> ! Local Studio opens this itself.
+windows none browser/history -> ! Browser pages open from a link in the side panel.
+mac none system/displays -> /usr/bin/open|x-apple.systempreferences:com.apple.Displays-Settings.extension
+mac none system/screen-recording -> /usr/bin/open|x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture
+windows none system/displays -> C:\Windows\explorer.exe|ms-settings:display
+windows none system/passwords -> ! Passwords has no settings page on this computer.
+linux gnome system/displays -> $R/gnome/gnome-control-center|display
+linux gnome system/about -> $R/gnome/gnome-control-center|system|about
+linux gnome system/storage -> ! Storage has no settings page on this computer.
+linux kde system/displays -> $R/kde/systemsettings|kcm_kscreen
+linux kde system/wifi -> $R/kde/systemsettings|kcm_networkmanagement
+linux none system/displays -> ! This computer has no settings program Local Studio knows.
+mac none file?path=~/docs/x.command -> ! That kind of file doesn't open from a link. Show it instead.
+mac none file?path=~/docs/x.app -> ! That kind of file doesn't open from a link. Show it instead.
+mac none file?path=~/docs/Tool -> ! That kind of file doesn't open from a link. Show it instead.
+mac none file?path=~/docs/deck.pages/ -> ! That kind of file doesn't open from a link. Show it instead.
+linux gnome file?path=~/docs/x.sh -> ! That kind of file doesn't open from a link. Show it instead.
+linux gnome file?path=~/docs/runner -> ! That kind of file doesn't open from a link. Show it instead.
+linux gnome file?path=~/docs/trap.pdf -> ! That kind of file doesn't open from a link. Show it instead.
+windows none file?path=~/docs/x.sh -> ! That kind of file doesn't open from a link. Show it instead.
+mac none file?path=~/docs/missing.pdf -> ! missing.pdf is not there.
+mac none file?path=$R/home/docs/a.PDF -> /usr/bin/open|$R/home/docs/a.PDF
+linux gnome file?path=~/docs/b -> $R/gnome/xdg-open|$R/home/docs/a.PDF
+linux kde file?path=~/docs/ -> $R/kde/xdg-open|$R/home/docs
+linux none file?path=~/docs -> ! This computer has no xdg-open, which Local Studio needs for that.
+windows none file?path=~/docs/a.PDF -> C:\Windows\explorer.exe|$R/home/docs/a.PDF
+mac none reveal?path=~/docs/trap.pdf -> /usr/bin/open|-R|$R/home/docs/trap.pdf
+windows none reveal?path=~/docs/x.sh -> C:\Windows\explorer.exe|/select,$R/home/docs/x.sh
+mac none reveal?path=~/docs/gone -> /usr/bin/open|-R|$R/home/docs/gone
+linux gnome reveal?path=~/docs/missing -> ! missing is not there.
+linux gnome reveal?path=~/docs/it's%20%22100%25%22%5D.txt -> $R/gnome/gdbus|call|--session|--dest|org.freedesktop.FileManager1|--object-path|/org/freedesktop/FileManager1|--method|org.freedesktop.FileManager1.ShowItems|['file://$R/home/docs/it%27s%20%22100%25%22%5D.txt']|
+linux gnome reveal?path=~/docs/it%27s%0A.txt -> no link
+linux kde reveal?path=~/docs/x.sh -> $R/kde/xdg-open|$R/home/docs
+linux none reveal?path=~/docs/x.sh -> ! This computer has no xdg-open, which Local Studio needs for that.
+mac none app/Calculator -> /usr/bin/open|-a|Calculator
+windows none app/Calculator -> ! Opening apps from a link is not there yet on Windows.
+linux gnome app/calculator -> $R/gnome/gtk-launch|org.fake.Calc
+linux gnome app/ORG.fake.calc -> $R/gnome/gtk-launch|org.fake.Calc
+linux gnome app/Other -> ! There is no app named Other here.
+linux gnome app/Gone -> ! There is no app named Gone here.
+linux gnome app/Site -> ! There is no app named Site here.
+linux gnome app/Dash -> ! There is no app named Dash here.
+linux gnome app/Inner -> ! There is no app named Inner here.
+linux gnome app/Folder -> ! There is no app named Folder here.
+linux gnome app/Far -> $R/gnome/gtk-launch|far
+linux kde app/Calculator -> ! This computer has no gtk-launch, which Local Studio needs for that.
+mac none shortcut/Focus%20On -> /usr/bin/shortcuts|run|Focus On
+linux gnome shortcut/Focus -> ! Shortcuts run on a Mac.
