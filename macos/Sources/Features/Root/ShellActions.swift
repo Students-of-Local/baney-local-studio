@@ -208,6 +208,8 @@ extension StudioStore {
         case .settings(let section) where outsideLink(url: url) != nil:
             if let pane = SettingsPane.allCases.first(where: { $0.linkName == section }) {
                 openSettings(pane)
+            } else {
+                post(.info, "Local Studio has no such settings page on a Mac.")
             }
         case .thread(let id):
             if inbox.thread(id) != nil {
