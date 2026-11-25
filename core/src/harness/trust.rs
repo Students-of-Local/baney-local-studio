@@ -7,6 +7,7 @@ use crate::threads::git_dir;
 
 const CLAUDE: &[&str] = &[".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md"];
 const CODEX: &[&str] = &[".codex"];
+const SKILLS: &[&str] = &[".agents/skills", ".claude/skills", ".eukhe/skills"];
 
 fn real(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -46,8 +47,7 @@ fn main_checkout(dot_git: &Path) -> Option<PathBuf> {
 
 pub(crate) fn folders(cwd: &str, allowed: bool) -> BTreeSet<String> {
     let (here, home) = (real(Path::new(cwd)), home());
-    let top = git_dir(&here).map(|(_, root)| root).filter(|root| Some(root) != home.as_ref());
-    let top = top.unwrap_or_else(|| here.clone());
+    let top = top(&here, home.as_deref());
     here.ancestors()
         .take_while(|dir| home.as_deref() != Some(*dir))
         .filter(|dir| dir.starts_with(&top) || (!allowed && configured(dir, CODEX)))
@@ -55,6 +55,11 @@ pub(crate) fn folders(cwd: &str, allowed: bool) -> BTreeSet<String> {
         .chain([cwd.to_string(), root(cwd)])
         .filter(|folder| home.as_deref() != Some(Path::new(folder)))
         .collect()
+}
+
+fn top(here: &Path, home: Option<&Path>) -> PathBuf {
+    let top = git_dir(here).map(|(_, root)| root).filter(|root| Some(root.as_path()) != home);
+    top.unwrap_or_else(|| here.to_path_buf())
 }
 
 fn configured(dir: &Path, names: &[&str]) -> bool {
@@ -67,4 +72,5 @@ pub(crate) fn has_config(harness: Harness, cwd: &str) -> bool {
     let (here, home, main) = (real(Path::new(cwd)), home(), PathBuf::from(root(cwd)));
     here.ancestors().take_while(|dir| home.as_deref() != Some(*dir)).any(|dir| configured(dir, names))
         || (codex && home.as_ref() != Some(&main) && configured(&main, names))
+        || configured(&top(&here, home.as_deref()), SKILLS)
 }

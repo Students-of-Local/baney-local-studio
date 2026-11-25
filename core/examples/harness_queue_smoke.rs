@@ -988,6 +988,18 @@ fn codex_trust_edges(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     answer(run, &denied, ApprovalAnswer::Deny);
     codex_ran(run, "codex-trust-main", "hello", "untrusted", &[&main, &tree]);
 
+    let only = root.join("skills-only");
+    repo_with(&only, ".agents/skills/bungee", "SKILL.md")?;
+    let only = project(run, &only)?;
+    let codex = with_cli(run, CODEX, "codex-trust-only", &only, WorktreeChoice::Local)?;
+    asks_for(run, "Codex", "codex-trust-only", &codex, &only);
+    answer(run, &codex, ApprovalAnswer::Deny);
+    codex_ran(run, "codex-trust-only", "hello", "untrusted", &[&only]);
+    let claude = in_folder(run, "trust-only", &only, WorktreeChoice::Local)?;
+    asks(run, "trust-only", &claude, &only);
+    answer(run, &claude, ApprovalAnswer::Approve);
+    ran_with(run, "trust-only", "hello", "all");
+
     let home = root.join("home");
     git(&home, &["init", "-q"])?;
     std::fs::create_dir_all(home.join("code/app"))?;
