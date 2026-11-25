@@ -1012,16 +1012,17 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let studio = Arc::clone(&harness.studio);
         let project = harness.view.projects[0].id.clone();
         let before = server_starts(ledger_out, "plugin-ledger").len();
-        let short = "Reply with the single word ok. Do not call any tools.";
-        studio.start_thread("busy".to_string(), Some(project), prompt(short), settings(LOCAL, mid()));
+        let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
+        studio.start_thread("busy".to_string(), Some(project), prompt(long), settings(LOCAL, mid()));
         harness.pump_until("busy thread started", STEP, |view| view.thread("busy").is_some())?;
         let thread = harness.view.thread("busy").context("busy thread")?;
         studio.select_thread(Some(thread.clone()));
-        harness.pump_until("busy thread answered", STEP, |view| view.idle(&thread) && view.items(&thread).len() > 1)?;
-        ensure!(held(socket, &thread)?, "the busy thread was not offered Local Studio's own tools");
-        let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
-        studio.send("long".to_string(), thread.clone(), prompt(long), Delivery::Queue);
         harness.pump_until("busy thread working", STEP, |view| !view.idle(&thread))?;
+        studio.abort(thread.clone());
+        harness.pump_until("busy thread stopped", STEP, |view| view.idle(&thread))?;
+        ensure!(held(socket, &thread)?, "the busy thread was not offered Local Studio's own tools");
+        studio.send("long".to_string(), thread.clone(), prompt(long), Delivery::Queue);
+        harness.pump_until("busy thread working again", STEP, |view| !view.idle(&thread))?;
         studio.send("queued".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
         harness
             .pump_until("still working after the queued /ledger", Duration::from_secs(2), |view| !view.idle(&thread))?;
