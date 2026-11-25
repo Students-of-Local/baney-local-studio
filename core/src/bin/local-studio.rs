@@ -505,6 +505,14 @@ fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: 
     if let Some(ws) = &status.ws_url {
         println!("  phone address: {ws}");
     }
+    if let Some(relay) = &status.relay {
+        let since = relay.since.and_then(|at| jiff::Timestamp::from_millisecond(at).ok());
+        let since = since.map(|at| format!(" since {at:.0}")).unwrap_or_default();
+        println!("  relay: {}{since}", relay.state);
+    }
+    if let Some(command) = status.next_command.as_ref().filter(|command| !status.message.contains(*command)) {
+        println!("  next: {command}");
+    }
     if let Some(at) = &status.release_at {
         println!("  released on {at} if left down");
     }
@@ -525,6 +533,7 @@ fn show(value: &Value, as_json: bool) {
     }
     for (key, label) in [
         ("command", "run"),
+        ("nextCommand", "run"),
         ("template", "run"),
         ("url", "open"),
         ("mcpUrl", "MCP address"),
@@ -630,8 +639,11 @@ fn relay_run(flags: &[&str], as_json: bool) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "link"))]
+const NO_RELAY: &str = "this build has no relay: build local-studio with --features link";
+
+#[cfg(not(feature = "link"))]
 fn relay_run(_flags: &[&str], _as_json: bool) -> Result<(), String> {
-    Err("this build has no relay: build local-studio with --features link".into())
+    Err(NO_RELAY.into())
 }
 
 fn consent(yes: bool, as_json: bool) -> impl FnOnce(&Path, &[String]) -> bool {

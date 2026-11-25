@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+use local_studio_core::tunnel::{SERVICE_LABEL, SERVICE_UNIT};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -303,6 +304,9 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
     let mut service = s.service("run-bad-url", &[])?;
     s.stays(&mut service, &relay, "bad_config")?;
     s.stop(&mut service, &["connecting to", "https://<host>", "stopped"])?;
+    let out = s.command(&["tunnel", "status", "--json"]).output().map_err(text)?;
+    let said: Value = serde_json::from_slice(&out.stdout).map_err(text)?;
+    ensure(said["relay"]["state"] == "bad_config", format!("a relay.json for another address is bad_config: {said}"))?;
 
     let extra = json!({"v":1,"url":relay.url,"name":"smoke","accountId":ACCOUNT,"key":RUN_KEY,"more":RUN_KEY});
     for (name, record) in [("run-extra", extra.to_string()), ("run-cut", format!("{{\"v\":1,\"key\":\"{RUN_KEY}"))] {
@@ -311,6 +315,57 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
         s.stays(&mut service, &relay, "bad_config")?;
         s.stop(&mut service, &["relay.json isn't a relay record", "stopped"])?;
     }
+    s.record(&relay.url)?;
+    let mut service = s.service("run-off", &[])?;
+    let _link = relay.open(RUN_KEY, 1)?;
+    s.state(&service, "connected")?;
+    for name in ["relay-state.json", "relay.json"] {
+        fs::remove_file(s.tunnel(name)).map_err(text)?;
+    }
+    let status = until("the exit after relay.json goes", QUICK, || service.child.try_wait().ok().flatten())?;
+    ensure(
+        status.code() == Some(0) && !s.tunnel("relay-state.json").exists(),
+        "a relay turned off under a running connector ends it and leaves no state",
+    )?;
+    let record = json!({"v":1,"url":"https://smoke.workers.dev","name":"smoke","accountId":ACCOUNT,"key":RUN_KEY});
+    s.write("relay.json", &record.to_string())?;
+    let seen = json!({"state":"connected","at":1_700_000_000_001_i64,"pid":std::process::id()});
+    s.write("relay-state.json", &seen.to_string())?;
+    let out = s.command(&["tunnel", "status"]).output().map_err(text)?;
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    ensure(
+        shown.contains("connected to its relay") && shown.contains("relay: connected since 2023-11-14T22:13:20Z"),
+        format!("status without --json shows the relay: {shown}"),
+    )?;
+    taken(s)?;
     println!("ok: S11 relay run: connecting, connected, disconnected, unauthorized, replaced, outdated, bad_config");
+    Ok(())
+}
+
+fn taken(s: &Smoke) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let state = s.tunnel("relay-state.json");
+    let seen = json!({"state":"replaced","at":1_700_000_000_001_i64,"pid":std::process::id()}).to_string();
+    s.write("relay-state.json", &seen)?;
+    let manager = s.root.join("stopping-manager");
+    let stopped =
+        format!("#!/bin/sh\necho '{}' > '{}'\nexit 113\n", seen.replace("replaced", "stopped"), state.display());
+    fs::write(&manager, stopped).map_err(text)?;
+    fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).map_err(text)?;
+    for (dir, file) in
+        [("Library/LaunchAgents", format!("{SERVICE_LABEL}.plist")), (".config/systemd/user", SERVICE_UNIT.into())]
+    {
+        let dir = s.home.join(dir);
+        fs::create_dir_all(&dir).map_err(text)?;
+        fs::write(dir.join(file), "").map_err(text)?;
+    }
+    let mut off = s.command(&["tunnel", "off"]);
+    let out = off.env("LS_LAUNCHCTL", &manager).env("LS_SYSTEMCTL", &manager).output().map_err(text)?;
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    ensure(
+        shown.contains("Another machine uses the Worker smoke") && !shown.contains("delete --name") && !state.exists(),
+        format!("off on a relay another machine took never says how to delete its Worker: {shown}"),
+    )?;
+    println!("ok: off on a relay another machine took");
     Ok(())
 }
