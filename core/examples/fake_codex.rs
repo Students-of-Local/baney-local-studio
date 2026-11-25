@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 
 #[path = "support/mcp.rs"]
 mod mcp;
+#[path = "support/skill.rs"]
+mod skill;
 
 const SLOW: Duration = Duration::from_millis(1500);
 const LAG: Duration = Duration::from_millis(1500);
@@ -205,8 +207,10 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         shared.completed(&turn, "failed", Some(STOP_WORDS));
         return;
     }
-    let mut reply = format!("reply to {text}");
-    if text.contains("skill") {
+    let made = skill::reply(text);
+    let asks = made.is_none() && text.contains("skill");
+    let mut reply = made.unwrap_or_else(|| format!("reply to {text}"));
+    if asks {
         let Some(decision) = shared.ask(&turn, number) else {
             shared.interrupted.store(false, Ordering::Relaxed);
             shared.completed(&turn, "interrupted", None);
