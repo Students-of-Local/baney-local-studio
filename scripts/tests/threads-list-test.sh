@@ -25,6 +25,6 @@ expect "$(run --json)" '[{"id":"new","title":"New thread","project":"/p/app/wt",
 expect "$(run | wc -l | tr -d ' ')" 2 "without --json, one line for each"
 expect "$(cksum < "$scratch/d/state.json") $(ls -A "$scratch/d")" "$before state.json" "listing changes no file"
 echo '{"version": 1, "thr' > "$scratch/d/state.json"
-if run --json > "$scratch/out" 2> "$scratch/err"; then echo "FAIL a broken state file was listed"; exit 1; fi
-expect "$(cat "$scratch/out")" "" "a broken state file prints no list and fails"
+if run --json > "$scratch/out"; then echo "FAIL a broken state file was listed"; exit 1; fi
+expect "$(cut -c1-34 "$scratch/out")" "error: read the Local Studio state" "a broken state file is an error, not an empty list"
 echo "PASS threads list"
