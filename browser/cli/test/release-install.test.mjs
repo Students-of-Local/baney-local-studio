@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,7 +13,10 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadTs } from "./helpers/bundle-ts.mjs";
 
-const { installHands } = await loadTs(`export { installHands } from "@src/release.ts";`);
+const { installHands, pruneVersions, setServiceSeamForTests } = await loadTs(`
+export { installHands, pruneVersions } from "@src/release.ts";
+export { setServiceSeamForTests } from "@src/service.ts";
+`);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "..", "dist", "index.js");
@@ -485,6 +488,59 @@ test("an upgrade while the installed copy runs keeps that copy's files, switches
 	} finally {
 		sleeper.kill("SIGKILL");
 	}
+});
+
+test("an upgrade in a linked home keeps the folder a running copy was started from", { skip: process.platform !== "linux" }, async () => {
+	const home = `${freshHome()}-link`;
+	symlinkSync(home.slice(0, -"-link".length), home);
+	assert.equal(run(home, ["install", "--release", withSleeper(makeRelease("9.9.8")).dir]).status, 0);
+	const sleeper = spawn(join(releaseRoot(home), "sleeper"), ["600"], { stdio: "ignore" });
+	try {
+		const exe = () => readlinkSync(`/proc/${sleeper.pid}/exe`);
+		for (let i = 0; i < 100 && !exe().endsWith("sleeper"); i++) await new Promise((r) => setTimeout(r, 20));
+		const r = run(home, ["install", "--release", withSleeper(makeRelease("9.9.9")).dir]);
+		assert.equal(r.status, 0, r.out);
+		assert.doesNotMatch(exe(), /\(deleted\)$/, "the running copy's program was deleted");
+	} finally {
+		sleeper.kill("SIGKILL");
+	}
+});
+
+// A Mac's ps names a program by the path it was started with, so one started through the `release` pointer, or through the
+// `tychicus` link to it, shows no version folder; lsof names the program file itself.
+test("on a Mac, an old version whose program was started through the pointer or a link is kept until it stops", { skip: process.platform === "win32" }, (t) => {
+	t.after(() => setServiceSeamForTests({}));
+	const base = join(realpathSync(scratch), `mac-base-${++n}`);
+	const folder = (v) => join(base, "versions", v);
+	const [oldest, old, current] = ["1.0.0-aaaaaaaaaaaa", "2.0.0-bbbbbbbbbbbb", "3.0.0-cccccccccccc"].map(folder);
+	const fill = () => {
+		for (const f of [oldest, old, current]) {
+			mkdirSync(f, { recursive: true });
+			writeFileSync(join(f, "tychicus"), "");
+		}
+	};
+	fill();
+	symlinkSync(join("versions", "3.0.0-cccccccccccc"), join(base, "release"));
+	const pointer = join(base, "release", "tychicus");
+	const link = join(base, "path-tychicus");
+	symlinkSync(pointer, link);
+	const prune = (ps, lsof) => {
+		fill();
+		const exec = (cmd) => {
+			if (cmd === "/bin/ps") return { code: 0, out: `    1 /sbin/launchd\n 4242 ${ps}\n` };
+			return lsof ? { code: 0, out: `p4242\nftxt\nn${lsof}\n` } : { code: 1, out: "" };
+		};
+		setServiceSeamForTests({ platform: "darwin", exec });
+		return pruneVersions(current, base);
+	};
+	for (const path of [pointer, link, "tychicus"]) {
+		assert.deepEqual(prune(path, join(old, "tychicus")), [oldest], `${path} runs the version before`);
+		assert.deepEqual(prune(path, join(oldest, "tychicus")), [old], `${path} runs the version before that`);
+		assert.deepEqual(prune(path, join(current, "tychicus")), [oldest, old], `${path} runs the new version`);
+	}
+	assert.deepEqual(prune(pointer, undefined), [], "lsof can't tell: nothing is removed");
+	assert.deepEqual(prune(join(old, "tychicus"), undefined), [oldest], "a path in a version folder needs no lsof");
+	assert.deepEqual(prune("/usr/local/bin/tychicus", undefined), [oldest, old], "someone else's program holds nothing back");
 });
 
 /**

@@ -6,6 +6,7 @@ import extensionId from "../../src/bridge/extension-id.json" with { type: "json"
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -178,4 +179,37 @@ test("a 3 MB answer from Local Studio reaches the extension in pieces, not refus
 	const old = await run([]);
 	assert.ok(Math.max(...old.sizes) <= CHROME_CAP);
 	assert.equal(old.frames.filter((f) => f.type === "chunk").length, 0);
+});
+
+test("an agent's request over one native message reaches the extension in pieces, or is refused by its id", { skip: !posix && "sockets", timeout: 30_000 }, async (t) => {
+	const { sockets, env } = sandbox(t);
+	const run = async (features) => {
+		const host = spawn(process.execPath, [cli, "host", ORIGIN], { env, stdio: ["pipe", "pipe", "pipe"] });
+		t.after(() => host.kill("SIGKILL"));
+		const out = reader(host.stdout);
+		host.stdin.write(encode({ type: "hello", version: "0", protocol: 1, methods: [], features }));
+		const path = join(sockets, `${host.pid}.sock`);
+		await until(() => existsSync(path) && out.frames.length > 0, 10_000, "the host's socket");
+		const agent = connect(path);
+		t.after(() => agent.destroy());
+		agent.on("error", () => undefined);
+		const answers = reader(agent).frames;
+		agent.write(encode({ type: "hello", protocol: 1, client: { name: "test" } }));
+		const params = { code: "x".repeat(1500 * 1024) };
+		agent.write(encode({ type: "request", id: 7, method: "page.evaluate", params }));
+		agent.write(encode({ type: "request", id: 8, method: "tabs.list", params: {} }));
+		await until(() => out.frames.some((f) => f.type === "request" && f.id === 8), 10_000, "the request after the large one");
+		return { out, answers, params };
+	};
+
+	const chunked = await run(["chunks"]);
+	const assembler = new ChunkAssembler();
+	const whole = chunked.out.frames.filter((f) => f.type === "chunk").map((f) => assembler.push(f).message);
+	assert.deepEqual(whole.find((m) => m?.id === 7)?.params, chunked.params);
+	assert.ok(Math.max(...chunked.out.sizes) <= CHROME_CAP);
+
+	const old = await run([]);
+	const refused = await until(() => old.answers.find((m) => m.type === "response" && m.id === 7), 10_000, "the refusal");
+	assert.equal(refused.error.code, "bad_params");
+	assert.ok(Math.max(...old.out.sizes) <= CHROME_CAP);
 });

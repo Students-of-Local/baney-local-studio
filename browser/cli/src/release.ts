@@ -27,6 +27,7 @@ import { eukheSettingsPath, localStudioPluginsDir, PLUGINS } from "./local-studi
 import { linkOnPath } from "./path-link.ts";
 import { NATIVE_HOST_NAMES } from "../../src/bridge/protocol.ts";
 import { COMMAND_NAME } from "./self.ts";
+import { processProgram, servicePlatform, serviceRunner } from "./service.ts";
 import { restartCommand, serviceName, staleLines, staleServices, versionName } from "./service-version.ts";
 import { c, sym } from "./ui.ts";
 
@@ -364,12 +365,16 @@ export function reportHands(versionDir: string): void {
  * The version folders some running program was started from, or undefined where that can't be told (then nothing is
  * pruned). Linux reads /proc/<pid>/exe, macOS asks ps; Windows is answered by the rename in pruneVersions.
  */
-function foldersInUse(folders: string[]): Set<string> | undefined {
+function foldersInUse(folders: string[], base: string): Set<string> | undefined {
 	const inUse = new Set<string>();
-	const mark = (exe: string) => {
-		for (const f of folders) if (exe.startsWith(f + sep)) inUse.add(f);
+	// A program's path may have its links resolved where the folder's has not (a linked home or data folder).
+	const paths = folders.map((f) => [f, (real(f) ?? f) + sep] as const);
+	const mark = (exe: string): boolean => {
+		const hit = paths.find(([f, resolved]) => exe.startsWith(f + sep) || exe.startsWith(resolved));
+		if (hit) inUse.add(hit[0]);
+		return hit !== undefined;
 	};
-	if (process.platform === "linux") {
+	if (servicePlatform() === "linux") {
 		let pids: string[];
 		try {
 			pids = readdirSync("/proc").filter((p) => /^\d+$/.test(p));
@@ -385,10 +390,22 @@ function foldersInUse(folders: string[]): Set<string> | undefined {
 		}
 		return inUse;
 	}
-	if (process.platform === "darwin") {
-		const r = spawnSync("ps", ["-axo", "comm="], { encoding: "utf8" });
-		if (r.status !== 0) return undefined;
-		for (const line of r.stdout.split("\n")) mark(line.trim());
+	if (servicePlatform() === "darwin") {
+		const r = serviceRunner()("/bin/ps", ["-axo", "pid=,comm="]);
+		if (r.code !== 0) return undefined;
+		const root = join(base, "release") + sep;
+		const versions = versionsDir(base);
+		const unpacked = (real(versions) ?? versions) + sep;
+		for (const line of r.out.split("\n")) {
+			const [, pid, path] = /^\s*(\d+)\s+(.*\S)\s*$/.exec(line) ?? [];
+			if (!pid || mark(path)) continue;
+			// ps names a program as it was started: through the pointer, or a link to it, that says nothing about the version.
+			const linked = path.startsWith(root) || real(path)?.startsWith(unpacked) === true;
+			if (!linked && basename(path) !== "tychicus") continue;
+			const program = processProgram(Number(pid));
+			if (program && real(program) === program) mark(program);
+			else if (linked) return undefined;
+		}
 		return inUse;
 	}
 	return undefined;
@@ -423,7 +440,7 @@ export function pruneVersions(keep: string, base: string = releaseBase()): strin
 		}
 		return removed;
 	}
-	const inUse = foldersInUse(folders);
+	const inUse = foldersInUse(folders, base);
 	if (!inUse) return removed;
 	for (const f of folders) {
 		if (inUse.has(f)) continue;

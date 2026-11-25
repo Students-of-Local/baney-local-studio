@@ -357,8 +357,8 @@ function frame(message) {
 	return out;
 }
 
-function startHost(cli) {
-	const host = spawn(process.execPath, [cli, "host", `chrome-extension://${EXTENSION_ID}/`], { env: env(), stdio: ["pipe", "pipe", "pipe"] });
+function startHost(cli, extra = {}) {
+	const host = spawn(process.execPath, [cli, "host", `chrome-extension://${EXTENSION_ID}/`], { env: { ...env(), ...extra }, stdio: ["pipe", "pipe", "pipe"] });
 	const messages = [];
 	let buf = Buffer.alloc(0);
 	host.stdout.on("data", (chunk) => {
@@ -601,6 +601,27 @@ test("a skills record that can't be written doesn't stop the install", async () 
 	assert.equal(a.last.phase, "done", a.last.message);
 	assert.equal(a.last.reload, true);
 	assert.equal(extBuild(c).commit, git(c.checkout, "rev-parse", "HEAD"));
+});
+
+test("a setting or a record that can't be saved doesn't stop the host", async (t) => {
+	const c = makeCheckout();
+	const disk = extBuild(c);
+	const dir = join(tmp, "unwritable-config");
+	// Folders where the files written first go: the write fails for every user, root included.
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "update-progress.json"), JSON.stringify({ pid: 999999, action: "update", phase: "building", message: "Building", at: Date.now() }));
+	const h = startHost(c.cli, { TABKYRA_CONFIG_DIR: dir });
+	t.after(() => h.host.kill());
+	for (const name of ["update.json", "update-progress.json"]) mkdirSync(join(dir, `${name}.${h.host.pid}.tmp`));
+	h.send({ type: "hello", version: "1.2.0", protocol: 1, methods: [], build: disk, diskBuild: disk });
+	await h.waitFor((m) => m.type === "update_progress" && m.action === "update" && m.phase === "failed", "the dead updater reported");
+	h.send({ type: "update_action", action: "policy-off" });
+	const failed = await h.waitFor((m) => m.type === "update_progress" && m.action === "policy-off", "the failed setting");
+	assert.equal(failed.phase, "failed");
+	assert.match(failed.message, /wasn't saved/);
+	h.send({ type: "update_action", action: "update --rollback" });
+	await h.waitFor((m) => m.type === "update_progress" && /Refused/.test(m.message), "the host still answering");
+	assert.equal(h.host.exitCode, null);
 });
 
 test("the mismatch fix rebuilds HEAD on any branch, but not with local changes", async () => {

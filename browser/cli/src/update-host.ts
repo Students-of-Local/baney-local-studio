@@ -166,7 +166,11 @@ function failed(send: Send, action: HostRunAction, message: string): HostUpdateP
  * (reload included), so a host that replays it later asks for the reload too.
  */
 function recordFailure(record: ProgressRecord, frame: HostUpdateProgress): void {
-	writeProgressRecord({ ...record, phase: "failed", message: frame.message, reload: frame.reload, extensionBuild: frame.extensionBuild, at: Date.now() });
+	try {
+		writeProgressRecord({ ...record, phase: "failed", message: frame.message, reload: frame.reload, extensionBuild: frame.extensionBuild, at: Date.now() });
+	} catch (err) {
+		process.stderr.write(`[tychicus-host] update record not saved: ${String(err)}\n`);
+	}
 }
 
 let helloSeen = false;
@@ -441,7 +445,11 @@ export function handleUpdateAction(raw: unknown, send: Send): void {
 	}
 	startUp(send);
 	if (action === "policy-off" || action === "policy-notify" || action === "policy-auto") {
-		setPolicy(action === "policy-off" ? "off" : action === "policy-notify" ? "notify" : "auto");
+		try {
+			setPolicy(action === "policy-off" ? "off" : action === "policy-notify" ? "notify" : "auto");
+		} catch (err) {
+			progress(send, action, "failed", `The update setting wasn't saved: ${err instanceof Error ? err.message : String(err)}`);
+		}
 		void sendStatus(send);
 		return;
 	}

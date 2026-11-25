@@ -86,7 +86,8 @@ export class CopilotTurns {
 	}
 
 	private async drop(conv: Conversation): Promise<void> {
-		this.conversations.delete(conv.key);
+		// Another session may have taken the chat's place since.
+		if (this.conversations.get(conv.key) === conv) this.conversations.delete(conv.key);
 		// A turn still streaming ends now, with a reason, instead of waiting on events that won't come.
 		conv.sink?.emit({ type: "error", message: "The Copilot session was reset (sign-out, a new token or an idle timeout). Send the message again." });
 		conv.sink?.end();
@@ -146,14 +147,19 @@ export class CopilotTurns {
 		// The side panel stopped the run: the session can't be continued consistently, so drop it.
 		signal.addEventListener("abort", () => {
 			if (finished) return;
-			const c = this.conversations.get(req.conversation);
-			if (c) void this.drop(c);
+			if (conv) void this.drop(conv);
 			sink.end();
 		});
+		// Stopped while the old session was dropped: nothing to start.
+		if (signal.aborted) return;
 
 		try {
 			if (!conv) {
-				conv = await this.open(req, toolsKey);
+				const opened = await this.open(req, toolsKey);
+				// Stopped while the session opened: no prompt goes out, and the chat doesn't keep the session.
+				if (signal.aborted) return await this.drop(opened);
+				conv = opened;
+				this.conversations.set(conv.key, conv);
 				conv.sink = sink;
 				const last = messages[messages.length - 1];
 				const earlier = last.role === "user" ? messages.slice(0, -1) : messages;
@@ -240,7 +246,6 @@ export class CopilotTurns {
 			onPermissionRequest: () => ({ kind: "denied-no-approval-rule-and-could-not-request-from-user" }),
 		});
 		conv.unsubscribe = conv.session.on((event) => this.onEvent(conv, event));
-		this.conversations.set(conv.key, conv);
 		return conv;
 	}
 

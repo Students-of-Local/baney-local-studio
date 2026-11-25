@@ -297,7 +297,8 @@ export function runNativeHost(args: readonly string[] = []): void {
 		const id = `c${++seq}-${process.pid}`;
 		const client: Client = { id, socket, outstanding: new Set(), lastDataAt: Date.now() };
 		clients.set(id, client);
-		const parser = new FrameParser(MAX_FRAME_TO_EXTENSION);
+		// Over one native message: toExtension sends it in pieces, or refuses that request by its id.
+		const parser = new FrameParser(MAX_CHUNKED_FRAME_BYTES);
 		socket.on("data", (chunk) => {
 			client.lastDataAt = Date.now();
 			const { messages, error } = parser.push(chunk);
