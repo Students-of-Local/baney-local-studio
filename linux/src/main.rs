@@ -1,5 +1,6 @@
 mod actions;
 mod app;
+mod app_links;
 mod banners;
 mod bindings;
 mod branches;
