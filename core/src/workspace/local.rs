@@ -33,6 +33,9 @@ const FORGET_MS: i64 = 10 * 60_000;
 const ACTION_TIMEOUT: Duration = Duration::from_secs(180);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_GRACE: Duration = Duration::from_secs(3);
+const NO_BUN: &str =
+    "The Local controller needs bun, which isn't installed. Install it from bun.sh, then reopen Local Studio. \
+     Models on this computer work without it: Settings > Providers.";
 
 #[derive(Default)]
 struct Cached {
@@ -829,7 +832,7 @@ impl Local {
     }
 
     fn spawn_controller(&self, base: &Url) -> Result<(), String> {
-        let bun = find_bun().ok_or("bun is not installed, so Local Studio cannot start a Local controller.")?;
+        let bun = find_bun().ok_or(NO_BUN)?;
         let script =
             controller_script(self.controller_main.as_deref()).ok_or("The Local controller sources were not found.")?;
         let port = base.port_or_known_default().unwrap_or(18091);
