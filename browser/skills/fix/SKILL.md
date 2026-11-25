@@ -41,8 +41,10 @@ For a small lesson from your own work, use `rsi` instead.
    opus` or `codex exec`. If no stronger model is available, stop and tell the user.
 6. **Draft the fix** in a new empty folder, as one reply file. Start from the exact SKILL.md at the
    path `local-studio skills list` gives, whole, in a block opened by four backticks (one more than
-   the longest run inside) and the word `skill`. Its `asks.txt` and `where.txt` go in `asks` and
-   `where` blocks the same way. Write for the failing tier:
+   the longest run inside) and the word `skill`. Its `asks.txt` and `where.txt` go unchanged in `asks`
+   and `where` blocks the same way, and each other file in a block labeled `file <path>`; if one isn't
+   text, show the user the edit to make by hand instead. Never edit `rsi`, and never remove a section,
+   a safety rule, a "Done when" check or an ask-first step. Write for the failing tier:
    - small: one action per step, exact calls with real parameters, a table instead of a
      judgment, nothing optional, and one worked example rebuilt from the reference run's tool
      calls in your own words, with placeholders for names, addresses and IDs;
@@ -54,8 +56,8 @@ For a small lesson from your own work, use `rsi` instead.
 7. **Keep it short.** The skill must stay under 150 lines. Cut words before adding
    sections.
 8. **Check and preview:** `local-studio skills create <file>` (no `--save`). It must print the
-   skill, say "not saved" and call no line you wrote "may be private". Then diff the draft's
-   text against the SKILL.md of step 6.
+   skill, say "not saved" and call no line you wrote "may be private". Then diff every block against
+   its file: the fix is the only difference, no file is missing and nothing step 6 keeps is gone.
 9. **Prove it on the failing model.** Run the task again with the model that failed,
    loading the draft, but only in a way that changes nothing: a test page, a draft that
    isn't sent, a form that isn't submitted. Never repeat a send, post, purchase, booking or
@@ -70,7 +72,7 @@ For a small lesson from your own work, use `rsi` instead.
     - a skill holding personal data is never shared, whatever the setting;
     - `"never"`: keep it local;
     - anything else: ask whether to propose it to the skill library.
-    A proposal is a pull request to `baney75/local-studio` that changes `skills/<name>/SKILL.md`.
+    A proposal is a pull request to `baney75/local-studio` that changes `browser/skills/<name>/SKILL.md`.
     Its description names the failing tier and the cause, and describes the before and
     after results as patterns ("cited a paper that doesn't exist"), never as the user's
     content. Before opening it, scrub everything in it the way the `bug` skill's step 4

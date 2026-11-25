@@ -55,17 +55,20 @@ Only the user edits this file; never change it yourself.
    already said it and it recurred, move the rule into the skill or check the agent has
    open when it acts.
 3. **Pick the target skill.** `skill_search` the lesson's task and choose the skill the lesson
-   belongs in. If none fits and the task recurs, write a new one: the three blocks of step 4
-   with a new name. A lesson about a project's code: a failing test there.
+   belongs in. A skill `local-studio skills list` doesn't show: change it in its own repo by pull
+   request. If none fits and the task recurs, write a new one: a `skill` block (frontmatter with
+   `name` and a `description` that ends "Use when ..."; then "When to use", "Steps", "When something
+   goes wrong", "Done when", one example), five or more ways to ask for it in `asks`, and its sites'
+   bare hostnames in `where`. A lesson about a project's code: a failing test there.
 4. **Write the smallest edit.** Start from the exact SKILL.md at the path
    `local-studio skills list` gives. In a new empty folder write a reply file with that text whole
    in a block opened by four backticks (one more than the longest run inside) and the word `skill`.
-   Its `asks.txt` and `where.txt` go in `asks` and `where` blocks the same way.
+   Its `asks.txt` and `where.txt`, if it has them, go unchanged in `asks` and `where` blocks the same way.
    Change only what the lesson needs: a numbered step, a row in the failure table, or a
    worked example.
 5. **Check the draft:** `local-studio skills create <file>`. Without `--save` it changes
-   nothing: it prints the skill and must call no line you wrote "may be private". Diff the
-   draft's text against the SKILL.md; only the lesson's lines may differ.
+   nothing: it prints the skill and must call no line you wrote "may be private". Diff every
+   block against its file; only the lesson's lines may differ. A new skill has nothing to diff.
 6. **Replay check.** Re-read the draft as if you were a small model starting the original
    task cold. Would the edit have prevented the problem? Would it break any other case the
    skill covers? If either answer is wrong, revise once, then drop it if still wrong.
@@ -91,7 +94,7 @@ Only the user edits this file; never change it yourself.
 11. **Offer upstream,** when `submit` is `"ask"`: ask whether to propose the change to the
     skill library. A skill holding personal data is never
     proposed. Scrub it all as the `bug` skill's step 4 does; give the evidence as patterns, never
-    quoted errors or page text. Show the exact text, and only on an explicit yes open a pull request to `baney75/local-studio` that changes `skills/<name>/SKILL.md`.
+    quoted errors or page text. Show the exact text, and only on an explicit yes open a pull request to `baney75/local-studio` that changes `browser/skills/<name>/SKILL.md`.
 
 ## Done when
 

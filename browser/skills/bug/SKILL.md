@@ -24,7 +24,8 @@ Not for problems with a website itself, or with the user's own code.
    steps as a numbered list someone else can follow on a test page.
    Don't repeat anything that sends, posts, buys or deletes.
 3. **Collect facts.** Run `tychicus status --json` and `tychicus doctor --json` and keep:
-   extension version, CLI version, browser, OS, and each doctor line that failed. Copy the
+   extension version, CLI version, browser, OS, and each doctor line that failed. For the app, also
+   the version `local-studio --version` prints. Copy the
    exact error message from the tool result or terminal.
 4. **Scrub.** Remove from everything you will file: emails, names, phone numbers,
    addresses, account and student IDs, page addresses (a signed-in site becomes a kind,
@@ -49,7 +50,7 @@ Not for problems with a website itself, or with the user's own code.
    What I expected
    ...
    Versions
-   Extension x.y.z, CLI x.y.z, [browser] [version], [OS]
+   App x.y.z (if it is about the app), extension x.y.z, CLI x.y.z, [browser] [version], [OS]
    Doctor
    [failed lines, or "all passed"]
    fingerprint: ...

@@ -39,10 +39,11 @@ If a skill exists for the site (`youtube`, `rumble`, `instagram`, `news-research
    `get_page_html {"selector":"meta[property=\"article:published_time\"]"}` or a `time` element give an exact date?
 8. **Do the user's task** with what you found. Cap scrolling and paging at 5 rounds. Tell the user what you could not read.
 9. **Offer the playbook.** When the task worked, use `ask_user` to ask whether to save a playbook for the site.
-   If no, stop. If yes, write it as in "The playbook" below and show the user the whole text.
-10. **Save it after their yes to that text.** With a shell: put it in a file, run `local-studio skills create <file>` (it says
-    what would be saved and what may be private) and, when that is right, the same with `--save`. Without one, tell the user
-    to send `@create` in this thread. Next time `skill_search` finds it. Close your tab with `tabs_close`.
+   If no, stop. If yes, write it as in "The playbook" below. With a shell, put it in a file and run
+   `local-studio skills create <file>`: it changes nothing, says what would be saved and calls out lines that may be private.
+   Fix those, then show the user the whole text.
+10. **Save it after their yes to that text.** A change after the yes needs a new yes. With a shell, the same command with
+    `--save`. Without one, tell the user to send `@create` in this thread. Next time `skill_search` finds it. Close your tab with `tabs_close`.
 
 ## The playbook
 
@@ -76,7 +77,7 @@ that forbids automation are also facts for the playbook.
 | Page text is empty or has no results | `wait {"text":"<a word from the results>"}`, then read again. |
 | Links hide in the page text | Use `read_page {"filter":"interactive"}` or `find`. |
 | Items repeat between pages | Dedupe on the item ID, and say so in the playbook. |
-| `create` refuses the text or says a line may be private | Fix the line it names. |
+| `create` refuses the text or says a line may be private | Fix the line it names, never loosen the text to get past it, and show the new text. |
 | User said no | Keep nothing. Don't save, and don't ask again this session. |
 
 ## Done when
