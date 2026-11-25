@@ -129,6 +129,7 @@ impl Composer {
         let models = gtk::StringList::new(&[]);
         let model = picker(&models, "Model");
         model.set_enable_search(true);
+        model.set_search_match_mode(gtk::StringFilterMatchMode::Substring);
         model.set_expression(Some(gtk::PropertyExpression::new(
             gtk::StringObject::static_type(),
             None::<&gtk::Expression>,
@@ -538,13 +539,14 @@ impl Composer {
             .models
             .iter()
             .filter(|model| !state.hidden.iter().any(|key| key.provider == model.provider && key.model == model.id))
+            .filter(|model| model.configured)
             .filter(|model| {
                 state.selected.is_none() || info.is_none_or(|info| format::harness_of(&model.provider) == info.harness)
             })
             .collect();
         models.sort_by_key(|model| {
             let favorite = state.favorites.iter().any(|key| key.provider == model.provider && key.model == model.id);
-            (!favorite, !model.configured, model.provider.clone(), model.name.clone())
+            (!favorite, model.provider.clone(), model.name.clone())
         });
         for model in models {
             keys.push(Some(ModelKey { provider: model.provider.clone(), model: model.id.clone() }));
