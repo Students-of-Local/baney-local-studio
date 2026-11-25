@@ -573,9 +573,9 @@ impl Workspace {
         query: String,
         limit: u32,
     ) {
-        let (reply, data) = (request.clone(), self.inner.data_dir.clone());
+        let (reply, data, asked) = (request.clone(), self.inner.data_dir.clone(), mentions::turn());
         self.answer(request, async move {
-            let items = mentions::list(data, plugins, project, query, limit).await?;
+            let items = mentions::list(asked, data, plugins, project, query, limit).await?;
             Ok(vec![Update::Mentions { request: reply, items }])
         });
     }

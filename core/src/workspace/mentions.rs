@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{oneshot, Semaphore};
 
 use super::files;
 use super::model::SearchHit;
@@ -15,8 +16,16 @@ const FOUND: usize = 5;
 const WAIT: Duration = Duration::from_millis(300);
 
 static LOOKUP: Semaphore = Semaphore::const_new(1);
+static LATEST: AtomicU64 = AtomicU64::new(0);
+
+type Found = (Vec<Listed>, Vec<Hit>);
+
+pub(super) fn turn() -> u64 {
+    LATEST.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 pub(super) async fn list(
+    asked: u64,
     data: PathBuf,
     plugins: Option<PathBuf>,
     project: Option<String>,
@@ -30,21 +39,16 @@ pub(super) async fn list(
     });
     let path = query.contains(['/', '.']);
     let wanted = query.trim().to_lowercase();
-    let named = async {
-        let turn = LOOKUP.acquire().await;
-        let named = tokio::task::spawn_blocking(move || {
-            let _turn = turn;
-            named(&data, plugins.as_deref(), project.as_deref().map(Path::new), &wanted)
-        });
-        named.await.unwrap_or_default()
-    };
-    let named = async {
-        if path {
-            return Vec::new();
+    let installed = plugins.clone();
+    let installed = tokio::task::spawn_blocking(move || installed.as_deref().map(plugins::scan).unwrap_or_default());
+    let stored = async {
+        if path || wanted.is_empty() {
+            return Found::default();
         }
-        tokio::time::timeout(WAIT, named).await.unwrap_or_default()
+        tokio::time::timeout(WAIT, lookup(asked, data, plugins, project, wanted.clone())).await.unwrap_or_default()
     };
-    let (files, named) = tokio::join!(files, named);
+    let (files, installed, stored) = tokio::join!(files, installed, stored);
+    let named = if path { Vec::new() } else { named(&installed.unwrap_or_default().plugins, &stored, &wanted) };
     let files = files.map_err(|error| error.to_string())??;
     let limit = limit as usize;
     Ok(if query.trim().is_empty() { files_first(&files, named, limit) } else { named_first(&files, named, limit) })
@@ -64,25 +68,32 @@ fn named_first(files: &[SearchHit], named: Vec<Mention>, limit: usize) -> Vec<Me
     named.into_iter().take(most).chain(files.iter().map(file)).take(limit).collect()
 }
 
-fn stored(
-    data: &Path,
-    plugins: Option<&Path>,
-    project: Option<&Path>,
-    query: &str,
-) -> Result<(Vec<Listed>, Vec<Hit>), String> {
+async fn lookup(asked: u64, data: PathBuf, plugins: Option<PathBuf>, project: Option<String>, query: String) -> Found {
+    let turn = LOOKUP.acquire().await;
+    if LATEST.load(Ordering::Relaxed) != asked {
+        return Found::default();
+    }
+    let (tell, told) = oneshot::channel();
+    std::thread::spawn(move || {
+        let found = stored(&data, plugins.as_deref(), project.as_deref().map(Path::new), &query);
+        drop(turn);
+        tell.send(found).ok();
+    });
+    told.await.ok().and_then(Result::ok).unwrap_or_default()
+}
+
+fn stored(data: &Path, plugins: Option<&Path>, project: Option<&Path>, query: &str) -> Result<Found, String> {
     let mut store = Store::open(data, skills::roots(data, plugins, project)?)?;
     let listed: Vec<Listed> = store.list()?.into_iter().filter(|skill| skill.problem.is_none()).collect();
     let named = listed.iter().filter(|skill| skill.name.to_lowercase().contains(query)).count();
-    let hits = store.search(&Query { text: query, limit: named + 2 * FOUND, ..Query::default() })?;
+    let hits = store.search(&Query { text: query, limit: named + 2 * FOUND, ..Query::default() }).unwrap_or_default();
     Ok((listed, hits))
 }
 
-fn named(data: &Path, plugins: Option<&Path>, project: Option<&Path>, query: &str) -> Vec<Mention> {
-    let installed = plugins.map(plugins::scan).unwrap_or_default().plugins;
+fn named(installed: &[Plugin], (listed, hits): &Found, query: &str) -> Vec<Mention> {
     if query.is_empty() {
         return installed.iter().map(plugin).collect();
     }
-    let (listed, hits) = stored(data, plugins, project, query).unwrap_or_default();
     let mut ranked: Vec<(usize, String, Mention)> = Vec::new();
     let mut add = |names: &[&str], row: &dyn Fn() -> Mention| {
         let holding = names.iter().map(|name| name.to_lowercase()).filter_map(|name| {
@@ -93,13 +104,13 @@ fn named(data: &Path, plugins: Option<&Path>, project: Option<&Path>, query: &st
             ranked.push((rank, name, row()));
         }
     };
-    for found in &listed {
+    for found in listed {
         add(&[&found.name], &|| skill(&found.name, &found.description, &found.source));
     }
-    for found in &installed {
+    for found in installed {
         add(&[&found.id, &found.name], &|| plugin(found));
     }
-    let offered = Catalog::bundled().map(|catalog| hub::catalog_rows(&catalog, &installed)).unwrap_or_default();
+    let offered = Catalog::bundled().map(|catalog| hub::catalog_rows(&catalog, installed)).unwrap_or_default();
     for offer in offered.into_iter().filter(|offer| offer.installed.is_none()) {
         add(&[&offer.id, &offer.name], &|| Mention {
             badge: "Install".to_string(),
@@ -108,15 +119,11 @@ fn named(data: &Path, plugins: Option<&Path>, project: Option<&Path>, query: &st
         });
     }
     ranked.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    let mut rows: Vec<Mention> = ranked.into_iter().map(|(_, _, row)| row).collect();
-    let hits = hits.iter().filter(|hit| listed.iter().any(|skill| skill.path == hit.path));
-    let meant: Vec<Mention> = hits
-        .map(|hit| skill(&hit.name, &hit.description, &hit.source))
-        .filter(|row| !rows.contains(row))
-        .take(FOUND)
-        .collect();
-    rows.extend(meant);
-    rows
+    let unnamed =
+        |hit: &Hit| listed.iter().find(|skill| skill.path == hit.path && !skill.name.to_lowercase().contains(query));
+    let meant = hits.iter().filter_map(unnamed).take(FOUND);
+    let meant = meant.map(|found| skill(&found.name, &found.description, &found.source));
+    ranked.into_iter().map(|(_, _, row)| row).chain(meant).collect()
 }
 
 fn mention(kind: MentionKind, name: &str, detail: &str) -> Mention {

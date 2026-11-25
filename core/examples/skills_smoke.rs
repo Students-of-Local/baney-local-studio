@@ -775,10 +775,15 @@ struct At {
 }
 
 impl At {
-    fn once(&mut self, project: Option<String>, query: &str, limit: u32) -> Result<Vec<Mention>, String> {
+    fn ask(&mut self, project: Option<String>, query: &str, limit: u32) -> String {
         self.asked += 1;
         let asked = format!("at-{}", self.asked);
         self.studio.mentions(asked.clone(), project, query.to_string(), limit);
+        asked
+    }
+
+    fn once(&mut self, project: Option<String>, query: &str, limit: u32) -> Result<Vec<Mention>, String> {
+        let asked = self.ask(project, query, limit);
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
             for update in self.studio.tick() {
@@ -795,13 +800,13 @@ impl At {
 
     fn list(&mut self, query: &str, holds: &str) -> Result<Vec<Mention>, String> {
         let project = self.project.to_string_lossy().into_owned();
-        self.list_in(Some(&project), query, holds)
+        self.list_in(Some(&project), query, 0, holds)
     }
 
-    fn list_in(&mut self, project: Option<&str>, query: &str, holds: &str) -> Result<Vec<Mention>, String> {
+    fn list_in(&mut self, project: Option<&str>, query: &str, limit: u32, holds: &str) -> Result<Vec<Mention>, String> {
         let mut items = Vec::new();
         for _ in 0..20 {
-            items = self.once(project.map(String::from), query, 0)?;
+            items = self.once(project.map(String::from), query, limit)?;
             if titles(&items).contains(&holds) {
                 break;
             }
@@ -882,7 +887,7 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     let items = at.list("mar", "@marmot")?;
     let trusted = row(MentionKind::Skill, "marmot", "Dig", "project", "");
     smoke.check("and a trusted project's is", items.contains(&trusted));
-    let nowhere = at.list_in(None, "mar", "@marmalade")?;
+    let nowhere = at.list_in(None, "mar", 0, "@marmalade")?;
     let own = titles(&nowhere).contains(&"@marmalade") && !titles(&nowhere).contains(&"@marmot");
     smoke.check("with no project, skills are still listed, and no files", own && files(&nowhere) == 0);
     smoke.check("@kite finds a skill by its text", titles(&at.list("kite", "@outdoors")?) == ["@outdoors"]);
@@ -895,7 +900,8 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     let install = |item: &Mention| item.badge == "Install" && item.install == "gantrel" && item.insert == "@gantrel ";
     smoke.check("@gan offers the catalog's gantrel", offer.is_some_and(install));
     let empty = at.list("", "@marble.txt")?;
-    smoke.check("an empty @ lists files, and no plugin that isn't installed", files(&empty) == empty.len());
+    let shown = titles(&empty).contains(&"@marble.txt");
+    smoke.check("an empty @ lists files, and no plugin that isn't installed", shown && files(&empty) == empty.len());
     let manifest =
         "id = \"gantrel\"\nname = \"Crane\"\nversion = \"0.1.0\"\ndescription = \"Lift\"\ncapabilities = []\n";
     put(&data.join("plugins/gantrel/plugin.toml"), manifest)?;
@@ -920,16 +926,9 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     smoke.check("six skills above files", items.len() == 30 && files(&items[6..]) == 24 && files(&items[..6]) == 0);
     let items = at.list("okapi", "@okapi-0")?;
     smoke.check("more when no file matches", items.len() == 9 && files(&items) == 0);
-    let lock = std::fs::File::open(data.join("skills.lock")).map_err(|error| error.to_string())?;
-    lock.lock().map_err(|error| error.to_string())?;
-    let held = Instant::now();
-    let items = at.once(Some(at.project.to_string_lossy().into_owned()), "zebra", 0)?;
-    let (took, only) = (held.elapsed(), items.len() == 30 && files(&items) == 30);
-    lock.unlock().map_err(|error| error.to_string())?;
-    smoke.check("a store that takes too long leaves files alone", only && took < Duration::from_secs(3));
-    let again = at.list("zebra", "@zebra-0")?;
-    smoke.check("and the next list has skills again", titles(&again).contains(&"@zebra-0"));
-    let few = at.once(Some(at.project.to_string_lossy().into_owned()), "zebra", 4)?;
+    at_slow(smoke, at, data, &plugin)?;
+    let here = at.project.to_string_lossy().into_owned();
+    let few = at.list_in(Some(&here), "zebra", 4, "@zebra-0")?;
     smoke.check("a short list still has files", few.len() == 4 && files(&few) == 2);
     let found = at.list("stripes", "@okapi-0")?;
     smoke.check("five skills found by their text", found.len() == 5 && files(&found) == 0);
@@ -949,6 +948,26 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     create_dir_all(index.join("in-the-way")).map_err(|error| error.to_string())?;
     let items = at.list("gantrel", "@gantrel")?;
     smoke.check("with no index, plugins and files are still listed", items.len() == 2 && items[0] == plugin);
+    Ok(())
+}
+
+fn at_slow(smoke: &mut Smoke, at: &mut At, data: &Path, plugin: &Mention) -> Result<(), String> {
+    let lock = std::fs::File::open(data.join("skills.lock")).map_err(|error| error.to_string())?;
+    lock.lock().map_err(|error| error.to_string())?;
+    let held = Instant::now();
+    let here = at.project.to_string_lossy().into_owned();
+    let items = at.once(Some(here.clone()), "zebra", 0)?;
+    let (took, only) = (held.elapsed(), items.len() == 30 && files(&items) == 30);
+    let slow = at.once(Some(here.clone()), "gan", 0)?;
+    let empty = at.once(Some(here.clone()), "", 0)?;
+    for n in 0..60 {
+        at.ask(Some(here.clone()), &format!("zebra-{n}"), 0);
+    }
+    lock.unlock().map_err(|error| error.to_string())?;
+    smoke.check("a store that takes too long leaves files alone", only && took < Duration::from_secs(3));
+    smoke.check("and a plugin keeps its row", slow == [plugin.clone()] && empty.last() == Some(plugin));
+    let last = at.once(Some(here.clone()), "zebra", 0)?;
+    smoke.check("the last of many has its skills", titles(&last).contains(&"@zebra-0"));
     Ok(())
 }
 
