@@ -60,6 +60,12 @@ const NOT_LINKS: &[&str] = &[
     "localstudio://app/a%EF%BB%BFb",
     "localstudio://app/a%F3%A0%81%81b",
     "localstudio://app/a%E2%80%A8b",
+    "localstudio://app/a\u{3164}b",
+    "localstudio://app/a%E3%85%A4b",
+    "localstudio://app/a%E1%A0%8Eb",
+    "localstudio://app/a%E2%81%AAb",
+    "localstudio://app/a%EF%B8%8Fb",
+    "localstudio://app/a%CD%8Fb",
     "localstudio://app/a%0Ab",
     "localstudio://app/a%00b",
     "localstudio://app/a%2Fb",
@@ -104,6 +110,7 @@ const NOT_LINKS: &[&str] = &[
     "localstudio://thread/@mac/a",
     "localstudio://thread/@mac%2Fa",
     "localstudio://thread/a.b",
+    "localstudio://thread/-a",
     "localstudio://thread/a%20b",
     "localstudio://pair?url=x",
 ];
@@ -160,6 +167,9 @@ fn grammar() -> anyhow::Result<()> {
 fn words() -> anyhow::Result<()> {
     let manager = if cfg!(target_os = "macos") { "Finder" } else { "Files" };
     let shown = format!("Show b.pdf in {manager}");
+    let padded = format!("/tmp/report.pdf{}.command", " ".repeat(300));
+    let long = format!("/tmp/report.pdf{}.command", "_".repeat(300));
+    let short = format!("Open report.pdf{}\u{2026}{}.command", "_".repeat(20), "_".repeat(21));
     for (kind, value, title) in [
         ("settings", "providers", "Open Providers settings"),
         ("settings", "sites", "Open Sites settings"),
@@ -169,6 +179,9 @@ fn words() -> anyhow::Result<()> {
         ("app", "Calculator", "Open Calculator"),
         ("reveal", "/tmp/secret/b.pdf/", &shown),
         ("file", "~/secret/b.pdf", "Open b.pdf"),
+        ("file", &padded, "Open report.pdf .command"),
+        ("file", &long, &short),
+        ("file", "/tmp/ ", "Open a folder or file with a blank name"),
         ("shortcut", "Focus", "Run the shortcut \u{201C}Focus\u{201D}"),
     ] {
         let want = LinkWords { title: title.to_string(), detail: value.to_string(), confirm: kind == "shortcut" };
