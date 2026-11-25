@@ -165,8 +165,10 @@ impl Harness {
             Update::Notification { thread, kind, title, body } => {
                 println!("     notification {kind:?} {title}: {body}");
                 self.view.notifications.push(format!("{kind:?}"));
-                if kind == NotificationKind::TurnDone {
-                    *self.view.done_by_thread.entry(thread).or_default() += 1;
+                match kind {
+                    NotificationKind::TurnDone => *self.view.done_by_thread.entry(thread).or_default() += 1,
+                    NotificationKind::Failed => bail!("a run failed: {body}"),
+                    _ => {}
                 }
             }
             Update::Notice { level, text } => {
