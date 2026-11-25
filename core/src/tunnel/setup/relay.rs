@@ -16,7 +16,7 @@ use super::{
 };
 use crate::link::devices::random;
 use crate::platform::Mode;
-use crate::tunnel::record::{Record, AGAIN, FOLDER, RECORD};
+use crate::tunnel::record::{Record, AGAIN, FOLDER, RECORD, STATE};
 use crate::tunnel::relay::{stop_signal, WORKER_CONFIG, WORKER_JS};
 use crate::tunnel::{check_ports, fail, serve_allow, Failure, Ports, Tunnel, UpLock};
 use crate::workspace::process::signal_pid_group;
@@ -284,9 +284,10 @@ impl Tunnel {
         let account_id = wrangler.account.clone().unwrap_or_default();
         let relay = json!({ "name": name, "accountId": account_id });
         let route = new_route("cloudflare", &host, &[], ports);
+        let live = old.is_some_and(|old| old.name == name && old.account_id == account_id && old.host() == host);
         let key = match wrangler.put_key(&name).await {
-            Err(failure) if old.as_ref().is_some_and(|old| old.name == name && old.account_id == account_id) => {
-                let message = format!("{} This machine's relay and route are as they were. If tunnel status says its key is refused, run setup again.", failure.message);
+            Err(failure) if live => {
+                let message = format!("{} This machine's service and files are as they were, but the relay may already have the new key. If tunnel status says its key is refused, run setup again.", failure.message);
                 return Err(fail(failure.code, message).into());
             }
             key => key,
@@ -310,6 +311,10 @@ impl Tunnel {
         }
         let checks = match started {
             Ok(checks) => checks,
+            Err(failure) if live && failure.code == "stopped" => {
+                let message = format!("{} Its service runs with the new key and keeps trying; tunnel status says whether it is connected.", failure.message);
+                return Err(fail(failure.code, message).into());
+            }
             Err(failure) => return Err(self.relay_undo(&manager, &name, &host, failure).await.into()),
         };
         let mut value = ready(&route, &checks, "Live on your own relay, a Worker on your own Cloudflare account.");
@@ -395,8 +400,14 @@ impl Tunnel {
             }
             None => Vec::new(),
         };
-        let install = || manager.install(OWN, &program, &args, &env, &log);
-        install().await.map_err(|error| fail("service_failed", error))?;
+        let start = || async {
+            let installed = match fs::remove_file(self.dir.join(STATE)) {
+                Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
+                _ => manager.install(OWN, &program, &args, &env, &log).await,
+            };
+            installed.map_err(|error| fail("service_failed", error))
+        };
+        start().await?;
         if !manager.wait_running(OWN).await {
             let text = format!("Local Studio's tunnel service didn't stay running. See {}.", log.display());
             return Err(fail("service_failed", text));
@@ -405,14 +416,22 @@ impl Tunnel {
         let (total, live) = (live_wait(), |error: String| fail("going_live", error));
         let every = LIVE_EVERY.min(total / 5);
         let deadline = Instant::now() + total;
+        let mut retaken = false;
         let dns = loop {
-            match self.check_once(host, Want { relay: true, ..Want::default() }).await {
-                Ok(dns) => break dns,
-                Err(error) if Instant::now() + every > deadline => return Err(live(error)),
-                Err(_) => tokio::time::sleep(every).await,
+            let checked = self.check_once(host, Want { relay: true, ..Want::default() }).await;
+            let mine = self.relay_seen().map_or_else(|| "connecting".to_string(), |seen| seen.state);
+            let error = match checked {
+                Ok(dns) if mine == "connected" => break dns,
+                Ok(_) => format!("The relay answers, but this machine's own connection to it is {mine}."),
+                Err(error) => error,
+            };
+            if Instant::now() + every > deadline {
+                return Err(live(error));
             }
-            if self.relay_seen().is_some_and(|seen| matches!(seen.state.as_str(), "unauthorized" | "replaced")) {
-                install().await.map_err(|error| fail("service_failed", error))?;
+            tokio::time::sleep(every).await;
+            if mine == "unauthorized" || (mine == "replaced" && !retaken) {
+                retaken |= mine == "replaced";
+                start().await?;
             }
         };
         let hosts = [host.to_string()];

@@ -49,13 +49,15 @@ up() {
   rm -f "$SHIM_STATE/connected"
   [ -f "$SHIM_STATE/interrupt" ] && kill -INT "$PPID"
   [ -f "$SHIM_STATE/hangup" ] && kill -HUP "$PPID"
-  turned=$(cd "$SHIM_STATE" && ls -d unauthorized replaced 2>/dev/null)
+  turned=$(cd "$SHIM_STATE" && ls -d taken unauthorized replaced 2>/dev/null | head -n 1)
   if [ -n "$turned" ]; then
-    rm "$SHIM_STATE/$turned"
-    echo "{\"state\":\"$turned\",\"at\":1,\"pid\":1}" > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
+    [ "$turned" = unauthorized ] || touch "$SHIM_STATE/connected"
+    [ "$turned" = taken ] && turned=replaced || rm "$SHIM_STATE/$turned"
   elif [ ! -f "$SHIM_STATE/never" ] && grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
     touch "$SHIM_STATE/connected"
+    turned=connected
   fi
+  [ -z "$turned" ] || echo "{\"state\":\"$turned\",\"at\":1,\"pid\":1}" > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
 }
 case "$1" in
   restart|bootstrap) up ;;
@@ -564,8 +566,25 @@ pub fn broken(c: &mut Cases) -> Result<(), String> {
     ensure(value["code"] == "relay_key" && message.contains("as they were"), format!("S18 relay_key: {value}"))?;
     ensure(c.kept()? == before && c.state.join("up").exists(), "S18 a refused key leaves the live relay alone")?;
     c.set("secret-fails", false)?;
+    for flag in ["interrupt", "hangup"] {
+        c.set(flag, true)?;
+        let value = c.setup(&["smoke"])?;
+        c.set(flag, false)?;
+        let kept = ["relay.json", "route.json"].iter().all(|name| c.s.tunnel(name).exists());
+        let kept = kept && c.hosts()? == json!([HOST]) && c.state.join("up").exists();
+        ensure(value["code"] == "stopped" && kept, format!("S20 {flag} keeps the live relay: {value}"))?;
+    }
     off(c)?;
     println!("ok: S18 the secret fails on a live relay");
+
+    c.set("taken", true)?;
+    let starts = c.started();
+    let value = c.setup(&["smoke", "--yes"])?;
+    let says = value["message"].as_str().is_some_and(|said| said.contains("own connection to it is replaced"));
+    let once = value["code"] == "going_live" && c.started() == starts + 2;
+    ensure(says && once, format!("S9 a relay another machine keeps is taken back once and not live: {value}"))?;
+    c.gone("S9 taken")?;
+    c.set("taken", false)?;
 
     for flag in ["never", "stuck"] {
         c.set(flag, true)?;
