@@ -1,0 +1,170 @@
+academic-research	I need a handful of solid journal articles on whether intermittent fasting actually helps with weight loss, and I want to be sure they're all legit
+academic-research	can you check if this reference I got from a classmate is a real paper or if it was made up
+academic-research	Put together a reading list for my thesis chapter with proper APA formatting that I can drop into Zotero
+academic-research	What do the studies say about screen time and teen sleep? Give me sources I can trust, nothing that got pulled.
+adversarial-review	I just rewrote one of my agent's instruction files and I don't trust my own judgment on it. Can you get a different AI to try to tear it apart before I keep it?
+adversarial-review	Before I ship this script that logs into my accounts on my behalf, I want another model to hunt for problems and refuse it if it finds something real.
+adversarial-review	Can you get a second opinion from a stronger or different LLM on my plan? I want it to poke holes, not just say it looks good.
+adversarial-review	How do I set up a fresh-context critic that gets only the diff and the test output, with no tools, and returns approve or reject?
+annotation	Can you circle the confusing parts of this app screenshot and number them, then give me a list of what's wrong with each one?
+annotation	I need to draw red boxes around a few spots on our staging site's signup page and write a comment for each so the designer knows what to fix.
+annotation	Take this contract PDF and highlight the clauses I care about, with a short note next to each one saying why.
+annotation	Put little numbered arrows and labels on this PNG so I can paste it into a tutorial showing which buttons to click.
+artifacts	Can you put together a nice shareable web page summarizing my research on laptop vendors, with sources listed?
+artifacts	I've got a spreadsheet of quarterly sales numbers and want a single offline file I can email people that shows them clearly.
+artifacts	Make me a printable one-pager comparing three phone plans side by side, with links to where the prices came from.
+artifacts	Turn these findings into a good-looking standalone page and make sure it actually looks right on a phone screen before you give it to me.
+autoresearch	I need a really thorough investigation into how countries have handled data privacy law over the last 20 years, with sources for everything. Keep digging until it's all covered.
+autoresearch	Can you go through lots of papers and websites and put together a sourced summary of what's known about microplastics in drinking water?
+autoresearch	My website's load time is 4.2 seconds and I want you to try changes one at a time, keeping only the ones that actually make it faster, and not touch the tests.
+autoresearch	Do a big survey of the competitors in the meal-kit delivery space and tell me what you find, with links, and don't stop until you've checked everything or run out of time.
+biology	How big is the human insulin receptor protein and what is its job in the cell?
+biology	I have a mystery DNA sequence from a bacterial isolate, can you figure out which species it matches?
+biology	What's the proper Latin name and family tree lineage for the zebrafish?
+biology	Pull up the 3D shape of hemoglobin, ideally both the lab-determined one and the computer-predicted one.
+branding	I'm starting a candle company and need help coming up with a name that nobody else is already using
+branding	Can you make me a full look and feel for my new app, including colors, fonts, and a short slogan?
+branding	Is the name 'Brightwell' already taken by someone in the US? Also see if the website and Instagram are free
+branding	We're overhauling how our consulting firm looks and sounds. Can you put together guidelines I can give to a designer?
+bug	The browser assistant just froze on me halfway through a task and I want to tell the developers about it properly
+bug	Can you help me write up a problem with the side panel extension so the maintainers can fix it, without leaking my personal info?
+bug	my agent's CLI tool threw an error and I'd like it posted as an issue on GitHub
+bug	Something misbehaved in the extension after I hit the Report button, please put together a ticket
+bulk-actions	I've got something like 300 old bookmarks on this site and I want them all gone without clicking each one
+bulk-actions	can you go through my inbox and flag every message as seen, there are hundreds
+bulk-actions	Need to put the same label on a couple hundred of my uploaded photos, what's the fastest way to do that?
+bulk-actions	Stop following all these accounts for me, my list is huge and I don't want to do them one by one
+chemistry	How many grams of sodium chloride do I need to make 500 mL of a 0.2 M solution?
+chemistry	Is it dangerous to store bleach next to ammonia cleaner under the sink?
+chemistry	I need the boiling point and density of ethanol from a reliable source, not from memory
+chemistry	I have 5 g of magnesium reacting with oxygen, how much product can I theoretically get?
+connector	I want to chat with my home computer's assistant from my phone through the Claude website, how do I set that up?
+connector	Help me put a Cloudflare tunnel in front of my local agent app so ChatGPT can reach it
+connector	The link I added to grok a while back suddenly doesn't work anymore, can you figure out why?
+connector	Set up a public address on my tailnet so a web AI can use this machine, and let me decide whether it can control my desktop
+design-library	I just picked out a set of colors for my bakery's website and want to keep them somewhere so I can grab them again next time
+design-library	Pull up the fonts combo I stored last month for my portfolio and use it on this new landing page
+design-library	What have I got stored away from my past design work? Give me a list
+design-library	Make this new slide deck look like my usual style, using the colors and typefaces I normally go with
+dorks	My searches keep returning spammy blog posts. How do I get straight to the official PDF report from a state agency?
+dorks	Can you help me find lecture syllabi from universities for an organic chemistry course, only on .edu sites?
+dorks	I need to track down where a famous quote first appeared, limited to things published before 2015. What's the best way to search for that?
+dorks	Look up what the FAA officially says about flying drones over crowds, and give me the exact search you used so I can rerun it.
+email-organization	My inbox is out of control, can you help me get it sorted out without deleting anything important?
+email-organization	Which of my emails are still waiting on a response from me? Go through my recent mail and tell me what's urgent.
+email-organization	I keep getting store receipts and weekly digests cluttering my Outlook. Can you set up something so they go into their own folder automatically?
+email-organization	Get me off all these promo mailing lists, but check with me before you do it
+fix	The cheap model I run locally botched a task using one of my instructions files. Can you make that file work better for it?
+fix	I walked through the right result by hand in the browser with the recorder on. Update the instructions so they reproduce what I did.
+fix	After a lot of back and forth I finally got the answer I wanted. Can you turn what worked into an improved version of that guide?
+fix	Haiku keeps getting this workflow wrong and made up a citation. Rewrite the guide so a weaker model can follow it, and check it actually works before saving.
+genetics	I got my raw ancestry file from 23andMe and there's a line for rs429358, can you tell me what that spot in my DNA is and how often people carry it?
+genetics	Is the BRCA2 gene on chromosome 13, and where exactly does it sit in the genome?
+genetics	Look up whether labs have flagged this particular mutation as harmful, and how much evidence stands behind that label.
+genetics	How common is this SNP across the world population, and which build are the position numbers from?
+instagram	Can you check what a certain business's account has been putting up lately and tell me the captions and how many likes they got?
+instagram	I want to see what people are saying in the replies under one particular video someone shared. Here's the link.
+instagram	Find me accounts or shops related to 'vintage ceramics' and see if you're even logged in over there first.
+instagram	Pull up everything posted under a topic keyword on that photo-sharing app, without showing me the same post twice.
+map-data	I have a spreadsheet of about 60 street addresses and need the lat/long for each one
+map-data	Pull every hospital in Denver from OpenStreetMap and save it as a file I can open in a mapping tool
+map-data	My GeoJSON points are showing up in the middle of the ocean, can you fix it?
+map-data	I have GPS coordinates from a hike and want to know the street address for each one
+maps	How long will it take me to get from downtown Denver to the airport if I head out around 8 am tomorrow?
+maps	find me the closest open pharmacy and tell me its hours
+maps	I'm planning to bike across town to my friend's place, what's the best way and how far is it?
+maps	Can you give me a link to the route from Seattle to Portland that stops in Olympia on the way?
+mathematics	Can you help me figure out the area under x times e to the x between 0 and 1 and make sure the number is right?
+mathematics	I have a 3x3 matrix and need its eigenvalues, with some way to confirm you didn't mess up
+mathematics	Two cars leave a city an hour apart going different speeds, when does the second catch up? Show your work and double check it
+mathematics	Go through my calculus homework answers and tell me which ones are wrong, also plot the parabola y = x^2 - 5x + 6 for me
+mechanism-design	I've got a motor spinning at constant speed and I want a little arm to swing back and forth about 60 degrees. What linkage should I build and how long should the bars be?
+mechanism-design	How do I turn a spinning shaft into a push-pull straight line motion for something I'm going to 3D print on my FDM printer?
+mechanism-design	Need a part that advances a wheel by a fixed angle each turn and then holds still, plus the math to size it
+mechanism-design	An AI image generator gave me a picture of some linkage with rods and pivots. Can I trust it will actually move the way it looks, or do I need to verify it?
+news-research	Is it true that a senator actually said that line going around online? Help me find where it first came from
+news-research	Give me a rundown of everything that's happened with the port strike over the past week, with dates
+news-research	I keep seeing a video of a flooded subway that people say is from yesterday. Can you tell if it's real or old footage?
+news-research	What's the latest on the Fed meeting today, and did they move interest rates?
+notes	Jot down what I learned in today's lecture in my markdown vault and connect it to the related stuff I already have
+notes	I want to change the title of one of my notes without all the other notes pointing to it going dead
+notes	Make a new page in Notion for my project checklist with some to-do items
+notes	Go through the unsorted pile of new notes in my vault, tag them and file them where they belong
+office-docs	Can you start a blank online spreadsheet for my monthly budget and put a total at the bottom?
+office-docs	I need a slide presentation made in the browser for Friday's team meeting, then give me a copy I can email as a file.
+office-docs	Take this report template in Word online and fill in the sections with my numbers, then download it as a PDF.
+office-docs	Make a new online document with a title, a few section headings and a bulleted list of trip dates, and double-check what got saved.
+osint	I'm thinking of hiring a local plumbing company, can you dig into whether they're a real, registered business and if anyone has sued them?
+osint	Who actually owns this website? I want to find out who's behind shopdealsnow.example before I give them my card.
+osint	Can you look up the landlord of my prospective apartment and see if there's any history of complaints or court cases?
+osint	Check whether this investment firm is legit and properly registered before I send them money
+pcb-design	I need a small power chip to drop 5V from USB down to 3.3V for my board, around half an amp, and I want something I can solder by hand. Can you find one that's actually available to buy?
+pcb-design	Can you check my board layout file for problems before I send it off to be manufactured? I keep getting a bunch of spacing complaints and I'm not sure why.
+pcb-design	How do I generate the files the board house needs from my project, including the parts list and the drill and pick-and-place data, for JLCPCB?
+pcb-design	The part I picked is sold out everywhere. Help me find a drop-in replacement and make sure the pin layout and land pattern on the new one actually match.
+pdf	Can you go through this link to a report and tell me what it says about profits? It's a file on a website, around 50 pages.
+pdf	I tried to get the words out of a document and got nothing back at all. Why is it blank, and can you still read it?
+pdf	Pull the table of quarterly figures out of this online paper and tell me which page each number sits on.
+pdf	Find where the authors describe how they ran the study in this document and give me a short rundown with the page numbers.
+polycarp-browser	Can you log into my email in Chrome and tell me if there's anything from my landlord? I'm already signed in there.
+polycarp-browser	I just built a little app running on localhost:3000, can you click around it and make sure the signup page works and grab a screenshot?
+polycarp-browser	Go to the company's contact page and put my name and email in the form, then submit it for me.
+polycarp-browser	Open my analytics dashboard in the browser, scroll down and read me the numbers from this week's table.
+proton	Can you dig through my encrypted email and find the message from my landlord about the lease renewal?
+proton	I need a link to my Taxes folder in my private cloud storage that anyone can open but only to view, and it should stop working after a week
+proton	What do I have on my schedule next week? Also put a dentist appointment on Thursday at 3.
+proton	Which entry in my password manager is the one for my Netflix login? Just tell me which one, don't show me the password.
+proton-pass	I need to run my deploy script but it needs an API key that's stored in my password vault. How do I get it to the program without you seeing it?
+proton-pass	My GitHub token lives in Proton Pass under Work. Can you kick off the release script using it?
+proton-pass	Instead of me pasting my secret key into this chat, how can you run the tests that need a credential from my 1Password?
+proton-pass	Run the build with my Bitwarden secrets injected as environment variables, but don't print or read any of the values.
+reference	I'm building a landing page for my dog grooming business and want to see some good-looking sites in a similar vibe to learn from. Can you pull together a few examples?
+reference	Is it okay to use a photo I found on Google Images on my company's brochure, or do I need permission first?
+reference	Can you put together a board of looks I could aim for with my portfolio site, with links and who made each one, without just cloning anyone's work?
+reference	I downloaded a nice typeface for a client's packaging but the page says it's only free for personal projects. Am I allowed to use it, and what else could I choose?
+rsi	That last job took me three tries and I had to correct you twice. Can you make sure you don't repeat those mistakes next time?
+rsi	Go back through this conversation and find where things went wrong, then fix whatever instructions you were following so it works properly going forward.
+rsi	The steps in one of your how-to guides were outdated and sent you down the wrong path. Update it with the correct approach and let me look at the change first.
+rsi	I keep having you do the same chore by hand and nothing documents it. Save how to do it so a smaller model gets it right next time.
+rumble	Can you look up videos about woodworking on that red video site with the green logo and show me only the ones uploaded in the last week?
+rumble	What has this creator posted lately on their page? I have the link to their channel and want the newest uploads listed.
+rumble	I've got a link to a clip and I want to know how many people watched it and what folks said underneath it.
+rumble	Find me the longest, most watched videos about backyard chickens from the past month on Rumble
+site-learning	I need to pull the latest listings from some small niche forum and nothing in my toolkit covers it. Can you figure out how its search works first?
+site-learning	Keep messing up the page numbers and filters on this online shop's search. Can you work out how it actually behaves and jot down notes so we don't redo it every time?
+site-learning	Go explore this unfamiliar blog site, work out how to look things up on it and how results are ordered, and keep a reusable cheat sheet for next time.
+site-learning	Show me how you'd approach a website you've never seen before so that future requests on it go quicker, without posting or buying anything.
+summarize	can you boil this blog post down for me in a few bullets? here's the link
+summarize	I've got five links open about the same topic, give me one combined rundown of what they say
+summarize	this reddit discussion is huge, what are people mostly arguing about?
+summarize	what's the main takeaway of this youtube talk, I don't have time to watch it
+video-editing	I have a recording of a meeting and need to chop out the first two minutes and the last bit, then save it as a new file
+video-editing	Can you take my wide landscape footage and make it into a tall 9:16 version I can post on Reels?
+video-editing	The sound in my lecture recording is really low and goes up and down, can you even it out?
+video-editing	Turn a few seconds of this clip into a looping animated image and keep the file small
+visual-explainer	Can you make me a picture-style web page that explains how this repo's request handling works, with boxes and arrows?
+visual-explainer	I want to see what changed in pull request 87 laid out visually, with before and after and anything risky.
+visual-explainer	Draw up a one-page visual of our rollout plan, including the choices I still need to make.
+visual-explainer	Make a quick summary page showing what we just shipped, with diagrams, that I can open in a browser without anything external loading.
+world-data	How many people die before age five in Nigeria compared to Kenya, and has it improved over the last 30 years?
+world-data	Someone told me that 99% of adults in Cuba can read. Can you check if that's actually right?
+world-data	I need a graph of unemployment rates for Spain, Germany and Greece since 2000 with where the numbers came from.
+world-data	What's the projected world population in 2100 according to the UN?
+writing	I have a messy transcript from our team call and need it turned into a clean report my director can skim
+writing	Can you make this 12-page proposal tighter? It's way too wordy and I need it about half as long
+writing	Help me put together a step-by-step guide for new hires on how to set up their accounts
+writing	I need to announce the office move to the whole staff, can you draft it so people know what to do and by when
+writing-voice	Can you draft this reply so it sounds like me? I want it to read the way I normally email people.
+writing-voice	Go through my sent emails and figure out how I usually write, then keep some notes on it for later drafts.
+writing-voice	My old notes on how I write are out of date, can you redo them from my recent emails and docs?
+writing-voice	Write a message to my client in the same tone I use with them, not that stiff robotic stuff.
+x-search	Can you look up what people are saying on Twitter about the new Framework laptop and give me links to the best ones?
+x-search	find me everything @jane_doe tweeted last month that got over 200 likes
+x-search	I need all the responses people left under this tweet: https://x.com/someone/status/1851234567890
+x-search	pull up the whole chain of connected posts that this person wrote starting from this link and put them in order
+youtube	Look up videos online about how to repot a monstera, only ones posted in the last month and longer than 20 minutes
+youtube	I have a link to a video and want a written summary of what the speaker says, with links that jump to the exact moments
+youtube	Show me everything a particular creator has uploaded, newest first
+youtube	What are people saying in the comments under this video? Give me the top ones and how old they are
+youtube	Pull the list of videos in this playlist in order
+youtube	Find me a clip from just one channel about brake pad replacement without searching the whole site

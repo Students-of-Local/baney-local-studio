@@ -45,9 +45,12 @@ def main [--profile (-p): string = "debug"] {
     let icons = ($bundle | path join "share" "icons" "hicolor" "scalable" "apps")
     mkdir $icons
     cp ($linux | path join "assets" "mark.svg") ($icons | path join "dev.localstudio.LocalStudio.svg")
+    let shared = ($bundle | path join "share" "local-studio")
+    mkdir $shared
+    cp -r ($repo | path join "browser" "skills") ($shared | path join "app-skills")
     let controller = ($repo | path join "controller")
     if ($controller | path join "src" "main.ts" | path exists) {
-        let target = ($bundle | path join "share" "local-studio" "controller")
+        let target = ($shared | path join "controller")
         mkdir $target
         cp -r ($controller | path join "src") $target
         for file in ["package.json" "bun.lock" "tsconfig.json"] {
