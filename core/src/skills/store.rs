@@ -18,6 +18,8 @@ const VERSION: i64 = 3;
 const MAX_FILE: u64 = 256 * 1024;
 const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
+const SHIPPED: &str = "shipped";
+const SHIPPED_DIR: &str = "LOCAL_STUDIO_SKILLS_DIR";
 const FRESH: Duration = Duration::from_secs(2);
 const FOLDERS: [&str; 3] = [".agents", ".claude", ".eukhe"];
 pub(super) const BESIDE: [&str; 3] = ["asks.txt", "names.txt", "where.txt"];
@@ -35,6 +37,7 @@ pub struct Roots {
     trusted: BTreeSet<String>,
     here: Option<PathBuf>,
     plugins: Vec<Plugin>,
+    shipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,7 +138,29 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
         files: Some(plugin.skills.iter().map(|skill| skill.path.clone()).collect()),
         dir: plugin.dir.clone(),
     }));
-    Ok(Roots { list, trusted, here, plugins })
+    list.extend(shipped().map(|dir| Root { links: false, ..Root::yours(&dir, SHIPPED) }));
+    Ok(Roots { list, trusted, here, plugins, shipped: false })
+}
+
+fn shipped() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(SHIPPED_DIR).filter(|dir| !dir.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let app = std::env::current_exe().and_then(std::fs::canonicalize).ok()?;
+    let places = app.ancestors().skip(1).take(2);
+    places
+        .flat_map(|dir| ["share/local-studio/skills", "Resources/skills"].map(|place| dir.join(place)))
+        .find(|dir| dir.is_dir())
+}
+
+impl Roots {
+    #[must_use]
+    pub fn only_shipped(mut self) -> Self {
+        self.list.sort_by_key(|root| root.source != SHIPPED);
+        self.plugins.clear();
+        self.shipped = true;
+        self
+    }
 }
 
 impl Store {
@@ -211,6 +236,9 @@ impl Store {
         let mut names: HashMap<String, PathBuf> = HashMap::new();
         for Found { path, real, source, .. } in found {
             let Some(Row { id, name, description, problem, .. }) = stored.remove(&path) else { continue };
+            if self.roots.shipped && source != SHIPPED {
+                continue;
+            }
             let mut listed = Listed { name, description, source, path, problem, real };
             if listed.problem.is_none() {
                 let name = listed.name.to_lowercase();
@@ -225,6 +253,7 @@ impl Store {
         }
         let shadowed = |skill: &Listed| skill.problem.is_some() && names.contains_key(&skill.name.to_lowercase());
         hidden.extend(self.seen.extract_if(|_, skill| shadowed(skill)).map(|(_, skill)| skill));
+        hidden.retain(|skill| !self.roots.shipped || skill.source == SHIPPED);
         self.hidden = hidden;
         self.checked = Some(Instant::now());
         Ok(())

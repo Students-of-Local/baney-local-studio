@@ -16,11 +16,11 @@ const USAGE: &str = "usage: local-studio --version
        local-studio plugin revoke <id> [capability...]
        local-studio plugin capabilities
        local-studio plugin hash <dir> [excluded path...]
-       local-studio skills search [--for <site or app>] [--in <skill>] [--limit <n>] [--project <dir>] [--json] <words...>
-       local-studio skills read <name> [--part <heading>] [--from <n>] [--project <dir>] [--json]
-       local-studio skills list [--project <dir>] [--json]
+       local-studio skills search [--for <site or app>] [--in <skill>] [--limit <n>] [--project <dir> | --shipped] [--json] <words...>
+       local-studio skills read <name> [--part <heading>] [--from <n>] [--project <dir> | --shipped] [--json]
+       local-studio skills list [--project <dir> | --shipped] [--json]
        local-studio skills create [--save] [--json] [<reply file or ->]
-       local-studio skills mcp [--project <dir> | --no-project] [--data <dir>] [--plugins <dir>]
+       local-studio skills mcp [--project <dir> | --no-project | --shipped] [--data <dir>] [--plugins <dir>]
        local-studio tunnel status [--json]
        local-studio tunnel setup --relay [<name>] [--account <id>] [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
@@ -137,6 +137,7 @@ struct SkillArgs<'a> {
     from: usize,
     project: Option<&'a str>,
     no_project: bool,
+    shipped: bool,
     data: Option<&'a str>,
     plugins: Option<&'a str>,
     limit: Option<usize>,
@@ -160,6 +161,7 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
             ("mcp", "--plugins") => asked.plugins = Some(args.next()?),
             ("mcp", "--no-project") => asked.no_project = true,
             ("create", "--save") => asked.save = true,
+            ("search" | "read" | "list" | "mcp", "--shipped") => asked.shipped = true,
             (_, "--project") => asked.project = Some(args.next()?),
             (_, "--") => asked.words.extend(args.by_ref()),
             (_, flag) if flag.starts_with("--") => return None,
@@ -176,7 +178,7 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
 }
 
 fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
-    use local_studio_core::skills::{lines, plain, roots, serve, Query, Store, CREATE};
+    use local_studio_core::skills::{lines, plain, roots, serve, Query, Server, Store, CREATE};
     let data = asked.data.map_or_else(|| local_studio_core::data_dir(None), |dir| Ok(PathBuf::from(dir)))?;
     let plugins = asked.plugins.map(PathBuf::from).or_else(|| plugins::plugins_dir(asked.data));
     let project = match asked.project {
@@ -184,13 +186,15 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
         None => std::env::current_dir().map_err(|error| error.to_string())?,
     };
     if verb == "mcp" {
-        return serve(data, plugins, (!asked.no_project).then_some(project));
+        let project = (!asked.no_project && !asked.shipped).then_some(project);
+        return serve(Server { data, plugins, project, shipped: asked.shipped });
     }
     if verb == "create" && asked.words.is_empty() {
         println!("{}", if json { serde_json::json!({ "ask": CREATE }).to_string() } else { CREATE.to_string() });
         return Ok(());
     }
-    let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(&project))?)?;
+    let roots = roots(&data, plugins.as_deref(), (!asked.shipped).then_some(&project))?;
+    let mut store = Store::open(&data, if asked.shipped { roots.only_shipped() } else { roots })?;
     let words = asked.words.join(" ");
     let (value, text) = match verb {
         "search" => {
@@ -199,7 +203,9 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
             let text = match hits.as_slice() {
                 [] => "nothing found".to_string(),
                 hits => {
-                    let from = asked.project.map(|dir| format!(" --project {}", plain(dir))).unwrap_or_default();
+                    let shipped = asked.shipped.then(|| " --shipped".to_string());
+                    let from = asked.project.map(|dir| format!(" --project {}", plain(dir))).or(shipped);
+                    let from = from.unwrap_or_default();
                     format!("{}\nUse one only if it fits: local-studio skills read{from} <name>", lines(hits))
                 }
             };
