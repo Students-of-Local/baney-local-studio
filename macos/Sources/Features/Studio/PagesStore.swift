@@ -243,7 +243,10 @@ final class PagesStore {
     }
 
     func loadProviders() {
-        core.run { $0.loadProviders() }
+        core.run {
+            $0.loadProviders()
+            $0.findLocalServers(presets: endpointPresets())
+        }
     }
 
     func setFavorite(provider: String, model: String, favorite: Bool) {

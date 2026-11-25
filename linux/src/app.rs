@@ -1053,6 +1053,7 @@ impl App {
         self.settings.replace(Some(dialog));
         self.core.run(|studio| {
             studio.load_providers();
+            studio.find_local_servers(local_studio_core::endpoint_presets());
             studio.load_plugins();
             studio.list_paired_devices();
         });

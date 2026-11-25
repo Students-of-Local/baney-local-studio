@@ -1,6 +1,7 @@
 use super::model::{
-    ChannelInstall, CustomProvider, DiffScope, LocalAction, MergeMethod, ProjectScript, ProjectSettings, ProviderApi,
-    Settings, TerminalFrame, TerminalKey, TerminalMouse, TerminalScroll, TerminalSelect, TerminalSize, UsagePeriod,
+    ChannelInstall, CustomProvider, DiffScope, EndpointPreset, LocalAction, MergeMethod, ProjectScript,
+    ProjectSettings, ProviderApi, Settings, TerminalFrame, TerminalKey, TerminalMouse, TerminalScroll, TerminalSelect,
+    TerminalSize, UsagePeriod,
 };
 use super::terminal::{self, Message};
 use crate::studio::Studio;
@@ -230,6 +231,10 @@ impl Studio {
     pub fn load_providers(&self) {
         self.workspace.load_providers();
         self.load_models();
+    }
+
+    pub fn find_local_servers(&self, presets: Vec<EndpointPreset>) {
+        self.workspace.find_local_servers(presets);
     }
 
     pub fn discover_provider_models(

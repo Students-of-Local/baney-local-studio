@@ -348,11 +348,15 @@ pub fn remove(app: &Rc<App>, id: &str) {
 
 fn engines_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
-        .title("Local Fleet")
-        .description("Engines the Local controller found running. Using one adds it as an endpoint routed through the controller.")
+        .title("Local Engines")
+        .description("Engines found on this computer and by the Local controller. Using one adds it as an endpoint; the controller's go through the controller.")
         .build();
     if state.engines.is_empty() {
-        group.add(&adw::ActionRow::builder().title("No engines are running on the Local fleet.").build());
+        group.add(
+            &adw::ActionRow::builder()
+                .title("No model server with models answered on the usual ports. Add others under Custom Endpoints.")
+                .build(),
+        );
     }
     for engine in &state.engines {
         group.add(&engine_row(app, state, engine));

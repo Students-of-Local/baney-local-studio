@@ -4,6 +4,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -11,12 +12,12 @@ use anyhow::{bail, ensure, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
-    AccessMode, Block, Connection, CustomProvider, DaemonLaunch, Delivery, Item, ItemKind, LocalEngine, ModelOption,
-    PromptDraft, ProviderApi, ProviderCredential, ProviderKey, ProviderKind, ProviderModel, ProviderStatus, Studio,
-    StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod, UsageReport, Waker,
-    WorktreeChoice,
+    AccessMode, Block, Connection, CustomProvider, DaemonLaunch, Delivery, EndpointPreset, Item, ItemKind, LocalEngine,
+    ModelOption, PromptDraft, ProviderApi, ProviderCredential, ProviderKey, ProviderKind, ProviderModel,
+    ProviderStatus, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod,
+    UsageReport, Waker, WorktreeChoice,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 #[path = "support/real_model.rs"]
 mod real_model;
@@ -406,6 +407,17 @@ fn run(daemon: &Path, root: &Path, stub: Option<u16>) -> anyhow::Result<()> {
         providers: if models.exists() { read_json(&models)?["providers"].clone() } else { Value::Null },
         keys: auth_keys(&agent)?,
     };
+    if let Some(port) = stub {
+        let controller = root.join("data/controller");
+        std::fs::create_dir_all(&controller)?;
+        let named = json!({
+            "fleetKey": format!("providers-smoke-{}", std::process::id()),
+            "enginePorts": [port],
+            "registry": { "url": "", "dir": root.join("registry"), "ref": "none" },
+            "modelsDir": root.join("models"),
+        });
+        std::fs::write(controller.join("config.json"), named.to_string())?;
+    }
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
     std::env::set_var("LOCAL_STUDIO_CONTROLLER_URL", format!("http://127.0.0.1:{}", free_port()?));
@@ -448,6 +460,7 @@ fn drive(
         return real_model::check_usage(harness.view.usage.as_ref().context("usage")?);
     };
     discovery(harness, port)?;
+    local_servers(harness, agent, port)?;
     add_and_chat(harness, agent, port, &project)?;
     edit_and_keys(harness, agent, port)?;
     local_fleet(harness, port, &project)?;
@@ -538,6 +551,129 @@ fn discovery(harness: &mut Harness, port: u16) -> anyhow::Result<()> {
     ensure!(models.iter().all(|model| model.context_window == 32768), "context windows {models:?}");
     println!("     discovered {base_url} {:?}", models.iter().map(|model| &model.id).collect::<Vec<_>>());
     Ok(())
+}
+
+fn canned(answer: Option<String>) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&hits);
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for mut stream in listener.incoming().flatten() {
+            count.fetch_add(1, Ordering::SeqCst);
+            if let Some(answer) = &answer {
+                let lines = BufReader::new(&stream).lines().map_while(Result::ok);
+                lines.take_while(|line| !line.is_empty()).for_each(drop);
+                let _ = stream.write_all(answer.as_bytes());
+            } else {
+                held.push(stream);
+            }
+        }
+    });
+    Ok((port, hits))
+}
+
+fn found_here(base_url: String) -> EndpointPreset {
+    let api = ProviderApi::OpenAiCompatible;
+    EndpointPreset { name: "Found Here".to_string(), base_url, api, needs_key: false }
+}
+
+fn gone_server(harness: &mut Harness) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let base = format!("http://{}/v1", listener.local_addr()?);
+    let once = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        BufReader::new(&stream).lines().map_while(Result::ok).take_while(|line| !line.is_empty()).for_each(drop);
+        let body = r#"{"data":[{"id":"brief"}]}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    });
+    harness.studio.find_local_servers(vec![found_here(base.clone())]);
+    let listed = base.clone();
+    harness.pump_until("a server that answers once is listed", move |view| {
+        view.engines.iter().any(|engine| engine.id == listed)
+    })?;
+    once.join().map_err(|_| anyhow::anyhow!("the brief server panicked"))??;
+    let request = harness.request();
+    harness.studio.use_local_engine(request.clone(), base.clone());
+    let expected = format!("Found Here no longer answers at {base}.");
+    harness.failure("Use on a server that stopped saves nothing", &request, &expected)
+}
+
+fn local_servers(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Result<()> {
+    let studio = Arc::clone(&harness.studio);
+    let reply = |head: &str, body: &str| {
+        Some(format!("HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
+    };
+    let list = r#"{"data":[{"id":"other"}]}"#;
+    let big = format!(r#"{{"data":[{{"id":"{}"}}]}}"#, "x".repeat(2 << 20));
+    let (elsewhere, elsewhere_hits) = canned(reply("200 OK", list))?;
+    let (proxy, proxy_hits) = canned(reply("200 OK", list))?;
+    let bad = [
+        None,
+        reply("401 Unauthorized", list),
+        reply("500 Internal Server Error", list),
+        reply("200 OK", "<html></html>"),
+        reply("200 OK", r#"{"data":[]}"#),
+        reply("200 OK", r#"{"data":[{"id":"text-embedding-nomic-embed-text-v1.5"}]}"#),
+        reply("200 OK", &big),
+        reply(&format!("302 Found\r\nLocation: http://127.0.0.1:{elsewhere}/v1/models"), ""),
+    ];
+    let mut urls =
+        vec![format!("http://[::ffff:127.0.0.1]:{elsewhere}/v1"), format!("http://127.0.0.1:{}/v1", free_port()?)];
+    for answer in bad {
+        urls.push(format!("http://127.0.0.1:{}/v1", canned(answer)?.0));
+    }
+    let base = format!("http://127.0.0.1:{port}/v1");
+    urls.push(format!("{base}/"));
+    let presets = urls.into_iter().map(found_here);
+    std::env::set_var("HTTP_PROXY", format!("http://127.0.0.1:{proxy}"));
+    let started = Instant::now();
+    studio.find_local_servers(presets.collect());
+    harness.pump_until("a model server on this computer is found", |view| !view.engines.is_empty())?;
+    std::env::remove_var("HTTP_PROXY");
+    let took = started.elapsed();
+    ensure!(took < Duration::from_millis(2500), "a silent port held the search for {took:?}");
+    let [engine] = harness.view.engines.as_slice() else { bail!("engines {:?}", harness.view.engines) };
+    let engine = engine.clone();
+    let named = engine.controller == "Found Here" && engine.port == port && engine.base_url == base;
+    ensure!(named && engine.models == ["stub-1", "stub-2"] && !engine.added, "engine {engine:?}");
+    ensure!(elsewhere_hits.load(Ordering::SeqCst) == 0, "a redirect or an address that is not loopback was asked");
+    ensure!(proxy_hits.load(Ordering::SeqCst) == 0, "the search went through HTTP_PROXY");
+    println!("ok   silent, refused, broken, oversized, redirecting and proxied answers are left out ({took:?})");
+    for step in ["used", "used again"] {
+        let request = harness.request();
+        studio.use_local_engine(request.clone(), engine.id.clone());
+        harness.answer(&format!("the found server is {step}"), &request)?;
+        harness.pump_until("its models reach the picker and its row says added", |view| {
+            view.has_model("found-here", "stub-2") && view.engines.iter().all(|engine| engine.added)
+        })?;
+    }
+    let file = agent.join("models.json");
+    let mut models = read_json(&file)?;
+    let providers = models["providers"].clone();
+    ensure!(providers.as_object().is_some_and(|providers| providers.len() == 1), "providers {providers}");
+    let entry = &providers["found-here"];
+    ensure!(entry["apiKey"] == "none" && entry["models"][0]["contextWindow"] == 32768, "entry {entry}");
+    let written = models["providers"]["found-here"]["models"].clone();
+    models["providers"]["found-here"]["models"] = Value::Array(Vec::new());
+    std::fs::write(&file, models.to_string())?;
+    studio.load_providers();
+    harness
+        .pump_until("an entry with no models does not count", |view| view.engines.iter().all(|engine| !engine.added))?;
+    models["providers"]["found-here"]["models"] = written;
+    models["providers"]["found-here"]["baseUrl"] = format!("http://localhost:{port}/v1/").into();
+    std::fs::write(&file, models.to_string())?;
+    studio.load_providers();
+    harness.pump_until("localhost and a trailing slash are the same server", |view| {
+        view.engines.iter().all(|engine| engine.added)
+    })?;
+    let request = harness.request();
+    studio.remove_custom_provider(request.clone(), "found-here".to_string());
+    harness.answer("the found server is removed", &request)?;
+    gone_server(harness)?;
+    studio.find_local_servers(Vec::new());
+    harness.pump_until("a server that is gone leaves the list", |view| view.engines.is_empty())
 }
 
 fn add_and_chat(harness: &mut Harness, agent: &Path, port: u16, project: &str) -> anyhow::Result<()> {
@@ -738,6 +874,15 @@ fn local_fleet(harness: &mut Harness, port: u16, project: &str) -> anyhow::Resul
     let engine = harness.view.engines.iter().find(|engine| engine.port == port).cloned().context("engine")?;
     println!("     engine {} via {} models {:?}", engine.id, engine.base_url, engine.models);
     ensure!(!engine.added, "engine already added");
+    studio.find_local_servers(vec![found_here(format!("http://127.0.0.1:{port}/v1"))]);
+    harness.pump_until("the controller's row stands for the found server and its endpoint", move |view| {
+        let mut rows = view.engines.iter().filter(|engine| engine.port == port);
+        rows.next().is_some_and(|row| !row.provider.is_empty() && row.added) && rows.next().is_none()
+    })?;
+    studio.find_local_servers(Vec::new());
+    harness.pump_until("the controller's own provider is not added yet", move |view| {
+        view.engines.iter().all(|engine| engine.port != port || !engine.added)
+    })?;
     let request = harness.request();
     studio.use_local_engine(request.clone(), engine.id.clone());
     harness.answer("Use this engine", &request)?;
