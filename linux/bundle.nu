@@ -2,6 +2,16 @@
 
 use ../eukhe.nu
 
+def unstore [binary: path] {
+    let folder = if $nu.os-info.arch == "aarch64" { "/lib" } else { "/lib64" }
+    let loader = ($folder | path join (^patchelf --print-interpreter $binary | str trim | path basename))
+    ^patchelf --set-interpreter $loader --remove-rpath $binary
+    let left = ([--print-interpreter --print-rpath] | each {|part| ^patchelf $part $binary | str trim })
+    if $left != [$loader ""] {
+        error make { msg: $"($binary) still loads from the build machine: ($left | str join ' ')" }
+    }
+}
+
 def main [--profile (-p): string = "debug"] {
     let linux = $env.FILE_PWD
     let repo = ($linux | path dirname)
@@ -26,6 +36,9 @@ def main [--profile (-p): string = "debug"] {
         cp $binary $bundle
     }
     cp $tool ($bundle | path join "local-studio-cli")
+    if $profile == "release" and ($env.IN_NIX_SHELL? | is-not-empty) {
+        for binary in ["local-studio" "local-studio-cli"] { unstore ($bundle | path join $binary) }
+    }
     for sidecar in $sidecars {
         eukhe copy-sidecar $sidecar $bundle
     }
