@@ -406,7 +406,7 @@ enum SettingKey: CaseIterable {
         case .wordWrap: "wrap lines"
         case .apiKeys: "auth api key secret token openai anthropic google gemini openrouter groq mistral xai deepseek together fireworks"
         case .customEndpoints: "openai compatible responses anthropic base url endpoint server ollama lm studio llama.cpp vllm add provider"
-        case .localEngines: "engine controller fleet gpu use"
+        case .localEngines: "engine controller fleet gpu use ollama lm studio llama.cpp vllm"
         case .providers: "auth configured catalog"
         case .favorites: "models star"
         case .signIn: "login auth eukhe claude subscription"

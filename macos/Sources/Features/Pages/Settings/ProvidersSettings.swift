@@ -76,7 +76,7 @@ struct ProvidersSettings: View {
             SettingsSection(.localEngines, footer: "Engines found on this computer and by the Local controller. Using one adds it as an endpoint; the controller's go through the controller.") {
                 SettingRow(.localEngines) {
                     if pages.engines.isEmpty {
-                        Text("No engines are running on this computer or the Local fleet.")
+                        Text("No model server with models answered on the usual ports. Add others under Custom Endpoints.")
                             .foregroundStyle(Theme.secondaryText)
                     }
                     ForEach(pages.engines, id: \.id) { engine in

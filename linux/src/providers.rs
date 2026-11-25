@@ -353,7 +353,9 @@ fn engines_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
         .build();
     if state.engines.is_empty() {
         group.add(
-            &adw::ActionRow::builder().title("No engines are running on this computer or the Local fleet.").build(),
+            &adw::ActionRow::builder()
+                .title("No model server with models answered on the usual ports. Add others under Custom Endpoints.")
+                .build(),
         );
     }
     for engine in &state.engines {

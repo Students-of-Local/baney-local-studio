@@ -149,11 +149,23 @@ struct Server {
 
 impl Server {
     fn added(&self, providers: &Map<String, Value>) -> bool {
-        providers
-            .values()
-            .filter_map(|entry| text(entry, "baseUrl"))
-            .any(|url| url.trim_end_matches('/') == self.base_url)
+        let custom = providers.iter().filter(|(id, entry)| is_custom(id, entry));
+        let mut places = custom.filter_map(|(_, entry)| place(text(entry, "baseUrl")?));
+        place(&self.base_url).is_some_and(|here| places.any(|there| there == here))
     }
+}
+
+fn loopback(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']);
+    host.parse::<std::net::IpAddr>().is_ok_and(|host| host.is_loopback())
+}
+
+fn place(url: &str) -> Option<Url> {
+    let mut url = Url::parse(url.trim_end_matches('/')).ok()?;
+    if loopback(&url) {
+        url.set_host(Some("localhost")).ok()?;
+    }
+    Some(url)
 }
 
 #[derive(Default)]
@@ -386,22 +398,31 @@ fn engine_provider(controller: &LocalController, port: u16) -> String {
 }
 
 fn engines(state: &ProviderState, providers: &Map<String, Value>) -> Vec<LocalEngine> {
-    let fleet = fleet_engines(&state.fleet, providers);
-    let here = |port: u16| {
-        let own = state.fleet.iter().filter(|controller| controller.local);
-        own.flat_map(|controller| &controller.endpoints)
-            .any(|endpoint| endpoint.port == port && fleet.iter().any(|engine| engine.id == endpoint.id))
-    };
-    let found = state.servers.iter().filter(|server| !here(server.port)).map(|server| LocalEngine {
-        id: server.base_url.clone(),
-        controller: server.name.clone(),
-        port: server.port,
-        base_url: server.base_url.clone(),
-        models: server.models.iter().map(|model| model.id.clone()).collect(),
-        provider: String::new(),
-        added: server.added(providers),
-    });
-    found.chain(fleet.iter().cloned()).collect()
+    let mut fleet = fleet_engines(&state.fleet, providers);
+    let own: BTreeSet<&str> = state
+        .fleet
+        .iter()
+        .filter(|controller| controller.local)
+        .flat_map(|controller| controller.endpoints.iter().map(|endpoint| endpoint.id.as_str()))
+        .collect();
+    let mut found = Vec::new();
+    for server in &state.servers {
+        let added = server.added(providers);
+        match fleet.iter_mut().find(|engine| engine.port == server.port && own.contains(engine.id.as_str())) {
+            Some(engine) => engine.added |= added,
+            None => found.push(LocalEngine {
+                id: server.base_url.clone(),
+                controller: server.name.clone(),
+                port: server.port,
+                base_url: server.base_url.clone(),
+                models: server.models.iter().map(|model| model.id.clone()).collect(),
+                provider: String::new(),
+                added,
+            }),
+        }
+    }
+    found.append(&mut fleet);
+    found
 }
 
 fn fleet_engines(fleet: &[LocalController], providers: &Map<String, Value>) -> Vec<LocalEngine> {
@@ -743,8 +764,7 @@ async fn discover(base_url: &str, api: ProviderApi, key: Option<&str>) -> Result
 
 fn server_at(preset: EndpointPreset) -> Option<Server> {
     let url = Url::parse(&preset.base_url).ok()?;
-    let host = url.host_str()?.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()?;
-    if url.scheme() != "http" || !host.is_loopback() {
+    if url.scheme() != "http" || !loopback(&url) {
         return None;
     }
     let base_url = preset.base_url.trim_end_matches('/').to_string();
@@ -762,16 +782,21 @@ async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Serve
         body.extend_from_slice(&chunk);
     }
     server.models = parse_models(&serde_json::from_slice(&body).ok()?);
+    server.models.retain(|model| !model.id.to_lowercase().contains("embed"));
     (!server.models.is_empty()).then_some(server)
 }
 
-async fn find_servers(presets: Vec<EndpointPreset>) -> Result<Vec<Server>, String> {
-    let client = reqwest::Client::builder()
+fn server_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(SERVER_TIMEOUT)
         .build()
-        .map_err(|error| format!("Could not look for model servers on this computer: {error}"))?;
+        .map_err(|error| format!("Could not look for model servers on this computer: {error}"))
+}
+
+async fn find_servers(presets: Vec<EndpointPreset>) -> Result<Vec<Server>, String> {
+    let client = server_client()?;
     let asked =
         presets.into_iter().filter_map(server_at).map(|server| tokio::spawn(ask_server(client.clone(), server)));
     let mut servers = Vec::new();
@@ -901,6 +926,8 @@ impl Workspace {
     }
 
     async fn add_server(&self, request: String, agent: PathBuf, server: Server) -> Result<Vec<Update>, String> {
+        let gone = format!("{} no longer answers at {}.", server.name, server.base_url);
+        let server = ask_server(server_client()?, server).await.ok_or(gone)?;
         let _guard = self.inner.providers_lock.lock().await;
         let taken = self.taken_ids();
         let message = format!("Added {}.", server.name);
