@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-FLOORS = {0: (0.764, 0.911, 0.947), 1000: (0.552, 0.711, 0.811)}
+FLOORS = {0: (130, 155, 161), 1000: (94, 123, 138)}
 CUTS = (1, 3, 5)
 
 
@@ -51,21 +51,23 @@ def recall(binary, shipped, asks, scratch, count):
             sys.exit(f"FAIL search {words!r}: {out.stdout}{out.stderr}")
         names = [hit["name"] for hit in json.loads(out.stdout)]
         found.append(names.index(name) if name in names else 99)
-    return [sum(rank < cut for rank in found) / len(found) for cut in CUTS]
+    return [sum(rank < cut for rank in found) for cut in CUTS]
 
 
 def main():
     binary, shipped, tsv, scratch = sys.argv[1], *map(pathlib.Path, sys.argv[2:5])
     asks = [line.split("\t") for line in tsv.read_text().splitlines()]
-    missing = {name for name, _ in asks} - {path.parent.name for path in shipped.glob("*/SKILL.md")}
-    failed = bool(missing)
-    if missing:
-        print(f"FAIL no such skill: {', '.join(sorted(missing))}")
+    asked, there = {name for name, _ in asks}, {path.parent.name for path in shipped.glob("*/SKILL.md")}
+    failed = asked != there
+    for label, names in (("no such skill", asked - there), ("no asks for", there - asked)):
+        if names:
+            print(f"FAIL {label}: {', '.join(sorted(names))}")
     for count, floors in FLOORS.items():
         got = recall(binary, shipped, asks, scratch / f"crowd-{count}", count)
-        for cut, rate, floor in zip(CUTS, got, floors):
-            failed |= rate < floor
-            print(f"{'FAIL' if rate < floor else 'PASS'} top {cut} with {count} other skills: {rate:.3f}, floor {floor:.3f}")
+        for cut, hits, floor in zip(CUTS, got, floors):
+            failed |= hits != floor
+            word = "PASS" if hits == floor else "FAIL" if hits < floor else "FAIL raise the floor:"
+            print(f"{word} top {cut} with {count} other skills: {hits} of {len(asks)}, floor {floor}")
     sys.exit(failed)
 
 
