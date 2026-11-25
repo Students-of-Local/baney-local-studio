@@ -16,7 +16,7 @@ use eukhe_types::session::AgentMessage;
 use eukhe_types::shell::ShellVerdict;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::daemon::{self, DaemonQuery};
@@ -297,6 +297,8 @@ fn merge_frame(pending: &mut TerminalFrame, mut next: TerminalFrame) {
     pending.bell = bell;
 }
 
+type Resuming = oneshot::Receiver<Result<(saved_sessions::CreatedSession, String), String>>;
+
 enum Command {
     AddProject {
         path: String,
@@ -496,6 +498,9 @@ enum Command {
         thread: String,
         draft: String,
         text: String,
+    },
+    Resumed {
+        thread: String,
     },
     SkillSaved {
         request: String,
@@ -754,6 +759,7 @@ impl Studio {
             focused: None,
             watchers: HashMap::new(),
             left: VecDeque::new(),
+            resuming: HashMap::new(),
             reopen_at: None,
             heads: HashMap::new(),
             models: Vec::new(),
@@ -1331,6 +1337,7 @@ struct Actor {
     focused: Option<String>,
     watchers: HashMap<String, u32>,
     left: VecDeque<String>,
+    resuming: HashMap<String, Resuming>,
     reopen_at: Option<Instant>,
     heads: HashMap<String, GitHead>,
     models: Vec<ModelOption>,
@@ -1591,6 +1598,7 @@ impl Actor {
 
     fn disconnected(&mut self) {
         self.client = None;
+        self.resuming.clear();
         self.client_slot.send_replace(None);
         self.by_active.clear();
         self.utility = None;
@@ -1788,6 +1796,17 @@ impl Actor {
 
     #[allow(clippy::too_many_lines)]
     async fn handle(&mut self, command: Command) {
+        let waits = !matches!(
+            command,
+            Command::SelectThread { .. }
+                | Command::WatchThread { .. }
+                | Command::UnwatchThread { .. }
+                | Command::MarkUnread { .. }
+                | Command::Resumed { .. }
+        );
+        if waits {
+            self.all_resumed().await;
+        }
         match command {
             Command::AddProject { path } => self.add_project(&path),
             Command::RemoveProject { project } => {
@@ -1821,6 +1840,7 @@ impl Actor {
                 self.projects_changed();
             }
             Command::SelectThread { thread } => self.select(thread).await,
+            Command::Resumed { thread } => self.resumed(&thread).await,
             Command::WatchThread { thread } => self.watch(&thread).await,
             Command::UnwatchThread { thread } => self.unwatch(&thread).await,
             Command::StartThread { draft, project, prompt, settings, caller } => {
@@ -2249,6 +2269,16 @@ impl Actor {
     }
 
     async fn open_watched(&mut self, id: &str) {
+        if self.resuming.contains_key(id) {
+            return;
+        }
+        if self.harness(id).is_none() && self.live_active(id).is_none() {
+            match self.start_resuming(id) {
+                Ok(resuming) => drop(self.resuming.insert(id.to_string(), resuming)),
+                Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
+            }
+            return;
+        }
         match self.ensure_open(id).await {
             Ok(_) => self.refresh_subagents(id).await,
             Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
@@ -2388,9 +2418,22 @@ impl Actor {
         if self.harness(id).is_some() {
             return Ok(self.cli_view(id));
         }
+        let resuming = self.resuming.remove(id);
         if let Some(active) = self.live_active(id) {
             return Ok(active);
         }
+        let resuming = resuming.map_or_else(|| self.start_resuming(id), Ok)?;
+        let (created, cwd) =
+            resuming.await.unwrap_or_else(|_| Err("The thread's opening was cut short.".to_string()))?;
+        let entry = self.threads.entry(id.to_string()).or_default();
+        entry.path = Some(created.session_file);
+        entry.cwd = Some(cwd);
+        self.attach(id, &created.active_session_id).await?;
+        self.sync_plugin_servers(id, &created.active_session_id).await;
+        Ok(created.active_session_id)
+    }
+
+    fn start_resuming(&self, id: &str) -> Result<Resuming, String> {
         let client = self.client.clone().ok_or_else(|| "Not connected to the Eukhe daemon yet.".to_string())?;
         let thread = self.threads.get(id);
         let roster = self.roster_for(id);
@@ -2405,15 +2448,33 @@ impl Actor {
             .or_else(|| self.saved.get(id).map(|row| row.cwd.clone()))
             .filter(|cwd| !cwd.is_empty())
             .unwrap_or_else(|| self.home.clone());
-        let created = saved_sessions::create_resident(&client, Some(path.clone()), self.create_config(&cwd))
-            .await
-            .map_err(|error| format!("{error:#}"))?;
-        let entry = self.threads.entry(id.to_string()).or_default();
-        entry.path = Some(created.session_file);
-        entry.cwd = Some(cwd);
-        self.attach(id, &created.active_session_id).await?;
-        self.sync_plugin_servers(id, &created.active_session_id).await;
-        Ok(created.active_session_id)
+        let config = self.create_config(&cwd);
+        let (done, resuming) = oneshot::channel();
+        let (itself, thread) = (self.itself.clone(), id.to_string());
+        tokio::spawn(async move {
+            let created = saved_sessions::create_resident(&client, Some(path), config).await;
+            done.send(created.map(|created| (created, cwd)).map_err(|error| format!("{error:#}"))).ok();
+            itself.send(Command::Resumed { thread });
+        });
+        Ok(resuming)
+    }
+
+    async fn resumed(&mut self, id: &str) {
+        if !self.resuming.contains_key(id) {
+            return;
+        }
+        match self.ensure_open(id).await {
+            Ok(_) if self.watched(id) => self.refresh_subagents(id).await,
+            Ok(_) => self.release(id).await,
+            Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
+        }
+    }
+
+    async fn all_resumed(&mut self) {
+        let resuming: Vec<String> = self.resuming.keys().cloned().collect();
+        for id in resuming {
+            self.resumed(&id).await;
+        }
     }
 
     async fn attach(&mut self, id: &str, active: &str) -> Result<(), String> {
