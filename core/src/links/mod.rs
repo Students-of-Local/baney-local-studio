@@ -1,7 +1,11 @@
+pub(crate) mod studio;
+
 const SCHEMES: &[&str] = &["http", "https", "mailto"];
 
 fn hidden(char: char) -> bool {
-    char.is_control() || matches!(char, '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    char.is_control()
+        || matches!(char, '\u{AD}' | '\u{61C}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}')
+        || matches!(char, '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}')
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
