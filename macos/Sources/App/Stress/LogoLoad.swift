@@ -79,13 +79,13 @@ final class LogoLoad {
         let conversation = store.conversation
         conversation.loadModels()
         try await until("models", 20) { conversation.modelsLoaded }
-        guard conversation.models.contains(where: { $0.provider == "anthropic" && $0.id == "claude-haiku-5-5" && $0.configured }) else {
-            throw StressFailure("anthropic/claude-haiku-5-5 is not configured")
+        guard SmokeModel.configured(conversation) else {
+            throw StressFailure("\(SmokeModel.label) is not configured")
         }
         for index in 1...Self.threads {
             store.newThread(in: project)
-            conversation.newThread.model = ModelKey(provider: "anthropic", model: "claude-haiku-5-5")
-            conversation.newThread.thinkingLevel = "low"
+            conversation.newThread.model = SmokeModel.key
+            conversation.newThread.thinkingLevel = nil
             conversation.newThread.access = .fullAccess
             let text = "Run exactly this one shell command and nothing else, then reply with the single word done: sleep 75 (\(index))"
             let known = Set(store.inbox.threads.map(\.id))

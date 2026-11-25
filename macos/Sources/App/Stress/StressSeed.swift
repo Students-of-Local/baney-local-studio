@@ -74,11 +74,9 @@ struct StressSeed {
         }
         store.conversation.loadModels()
         try await until("models", 20) { store.conversation.modelsLoaded }
-        guard store.conversation.models.contains(where: { $0.provider == "anthropic" && $0.id == "claude-haiku-5-5" && $0.configured }) else {
-            throw StressFailure("anthropic/claude-haiku-5-5 is not configured")
+        guard SmokeModel.select(store.conversation) else {
+            throw StressFailure("\(SmokeModel.label) is not configured")
         }
-        store.conversation.newThread.model = ModelKey(provider: "anthropic", model: "claude-haiku-5-5")
-        store.conversation.newThread.thinkingLevel = "low"
         var sent = 0
         for (index, plan) in Self.plans.enumerated() {
             guard let project = projects[plan.project] else { throw StressFailure("project \(plan.project) missing") }

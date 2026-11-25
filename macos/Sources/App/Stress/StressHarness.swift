@@ -773,7 +773,7 @@ final class StressHarness: NSObject {
         let ms = { (value: TimeInterval) in String(format: "%.1f ms", value * 1000) }
         let p99 = monitor.percentile(0.99)
         print("stress \(Int(duration)) s, \(monitor.frames.count) frames at \(ms(interval)) refresh")
-        print("model: anthropic/claude-haiku-5-5 thinking low, \(StressSeed.seedSends + created + followUps) real prompts")
+        print("model: \(SmokeModel.label), \(StressSeed.seedSends + created + followUps) real prompts")
         print("frame time p50 \(ms(monitor.percentile(0.5))) p95 \(ms(monitor.percentile(0.95))) p99 \(ms(p99)) max \(ms(monitor.frames.max() ?? 0))")
         let worst = monitor.hitches.max { $0.duration < $1.duration }
         print("hitches (>1.5× refresh): \(monitor.hitches.count)" + (worst.map { ", worst \(ms($0.duration)) at \(String(format: "%.2f", $0.at)) s after \($0.context)" } ?? ""))
