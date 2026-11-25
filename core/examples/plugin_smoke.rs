@@ -1568,6 +1568,24 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         studio.answer_consent("sheet".to_string(), ConsentAnswer::Cancel);
         let text = sent(harness, "after-cancel", &work, "@gantrel")?;
         ensure!(text == "@gantrel", "after a declined install the message became {text:?}");
+        let folder = root.join("gantrel").to_string_lossy().into_owned();
+        for (request, done) in [("kept", true), ("again", false)] {
+            let seen = harness.view.other.len();
+            studio.install_plugin(request.to_string(), folder.clone());
+            harness.pump_until(&format!("{request}: its sheet is open"), STEP, |view| {
+                view.other[seen..].iter().any(|update| update.starts_with("Consents") && update.contains("\"gantrel\""))
+            })?;
+            if done {
+                studio.answer_consent(request.to_string(), ConsentAnswer::Install { sensitive: Vec::new() });
+                harness.pump_until("it is installed", STEP, |view| {
+                    view.other.iter().any(|update| update.contains("RequestDone { request: \"kept\""))
+                })?;
+                let asks = "capabilities = [\"mcp-server\", \"screen-capture\"]\n[mcp]\ncommand = \"bin/run.sh\"\n";
+                manifest(&root.join("gantrel"), "Gantrel", asks)?;
+            }
+        }
+        let text = sent(harness, root, "while-it-updates", &work, "@gantrel")?;
+        ensure!(text.ends_with("@gantrel"), "an installed plugin's update makes the message {text:?}");
         Ok(())
     }
 }
