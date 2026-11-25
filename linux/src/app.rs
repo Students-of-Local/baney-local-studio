@@ -745,7 +745,7 @@ impl App {
                 crate::skill_draft::set(self, thread, draft);
                 dirty.composer = true;
             }
-            Update::SkillTry { .. } => {}
+            Update::SkillTry { thread, model, text } => crate::skill_draft::offer(self, &thread, model, text),
             Update::Notice { level, text } => match level {
                 local_studio_core::NoticeLevel::Error | local_studio_core::NoticeLevel::Warning => {
                     self.show_notice(&text);
@@ -1167,6 +1167,15 @@ impl App {
     pub fn toast(&self, text: &str) {
         let toast = adw::Toast::new(&format::escape(text));
         toast.set_timeout(4);
+        self.toasts.add_toast(toast);
+    }
+
+    pub fn toast_action(&self, text: &str, button: &str, run: impl Fn() + 'static) {
+        let toast = adw::Toast::new(&format::escape(text));
+        toast.set_button_label(Some(button));
+        toast.set_priority(adw::ToastPriority::High);
+        toast.set_timeout(10);
+        toast.connect_button_clicked(move |_| run());
         self.toasts.add_toast(toast);
     }
 

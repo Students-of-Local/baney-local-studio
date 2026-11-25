@@ -374,6 +374,14 @@ struct ToastView: View {
                 .textSelection(.enabled)
                 .lineLimit(4)
             Spacer(minLength: 8)
+            if let action = notice.action {
+                Button(action.title) {
+                    dismiss()
+                    action.run()
+                }
+                .buttonStyle(.bordered)
+                .tint(Theme.primary)
+            }
             CloseIconButton(title: "Dismiss", action: dismiss)
         }
         .padding(.horizontal, 14)
@@ -385,7 +393,7 @@ struct ToastView: View {
         .shadow(color: Theme.shadow, radius: 14, y: 6)
         .task(id: notice.id) {
             guard notice.level != .error else { return }
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(notice.action == nil ? 5 : 10))
             if !Task.isCancelled { dismiss() }
         }
     }

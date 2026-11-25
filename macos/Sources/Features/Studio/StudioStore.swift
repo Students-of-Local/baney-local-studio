@@ -176,6 +176,18 @@ final class StudioStore {
         core.run { $0.saveSkill(request: request, thread: thread, draft: draft, text: text) }
     }
 
+    private func offerTrial(thread: String, model: ModelKey, text: String) {
+        let project = inbox.thread(thread)?.project
+        let action = NoticeAction(title: "Try It") { [weak self] in
+            guard let self else { return }
+            newThread(in: project)
+            conversation.newThread.model = model
+            let draft = conversation.composer(project: project)
+            draft.text = [text, draft.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        notice = StudioNotice(level: .info, text: "Saved. Try it on \(model.model)?", action: action)
+    }
+
     func discardSkill(thread: String, draft: String) {
         core.run { $0.discardSkill(thread: thread, draft: draft) }
     }
@@ -366,8 +378,8 @@ final class StudioStore {
             shell.confirmation = .localOnly(thread: thread, plugin: plugin, message: message, local: local)
         case .skillDraft(let thread, let draft):
             conversation.setSkillDraft(thread: thread, draft: draft)
-        case .skillTry:
-            break
+        case .skillTry(let thread, let model, let text):
+            offerTrial(thread: thread, model: model, text: text)
         }
     }
 }

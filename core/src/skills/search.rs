@@ -110,13 +110,14 @@ impl Store {
             *scores.entry(*id).or_default() += ranked.first().map_or(0.0, |(score, _)| *score) + 0.3 * more;
         }
         let (mut listing, mut linking) = (HashSet::new(), HashSet::new());
-        if let Some(wanted) = query.place.and_then(text::place) {
+        let wanted = query.place.and_then(text::place);
+        if let Some(wanted) = &wanted {
             let seen = scores.iter().filter(|(id, _)| self.seen.contains_key(id));
             let top = seen.map(|(_, score)| *score).fold(1.0, f64::max);
             let mut rows = self.db.prepare_cached("SELECT skill, place, listed FROM places")?;
             let mut rows = rows.query([])?;
             while let Some(row) = rows.next()? {
-                if text::at(&row.get::<_, String>(1)?, &wanted) {
+                if text::at(&row.get::<_, String>(1)?, wanted) {
                     let (id, own) = (row.get(0)?, row.get(2)?);
                     if own {
                         listing.insert(id);
@@ -141,7 +142,13 @@ impl Store {
         });
         let heads = if within.is_some() { query.limit } else { 2 };
         let hits = ranked.into_iter().take(query.limit).map(|(.., id)| self.hit(id, parts.remove(&id), heads));
-        hits.collect::<rusqlite::Result<_>>().map(Some)
+        let mut hits = hits.collect::<rusqlite::Result<Vec<_>>>()?;
+        if let Some(wanted) = &wanted {
+            for hit in &mut hits {
+                hit.places.sort_by_key(|place| !text::at(place, wanted));
+            }
+        }
+        Ok(Some(hits))
     }
 
     fn hit(&self, id: i64, ranked: Option<Vec<(f64, String)>>, heads: usize) -> rusqlite::Result<Hit> {

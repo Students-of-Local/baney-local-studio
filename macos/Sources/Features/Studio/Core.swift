@@ -92,6 +92,17 @@ struct StudioNotice: Identifiable, Equatable {
     let id = UUID()
     let level: NoticeLevel
     let text: String
+    var action: NoticeAction?
+}
+
+struct NoticeAction: Equatable {
+    let id = UUID()
+    let title: String
+    let run: @MainActor () -> Void
+
+    static func == (one: Self, other: Self) -> Bool {
+        one.id == other.id
+    }
 }
 
 extension Item: Identifiable {}

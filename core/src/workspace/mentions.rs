@@ -148,7 +148,12 @@ fn mention(kind: MentionKind, name: &str, detail: &str) -> Mention {
 }
 
 fn skill(name: &str, description: &str, source: &str) -> Mention {
-    let row = Mention { badge: source.to_string(), ..mention(MentionKind::Skill, name, description) };
+    let badge = match (source, source.split_at_checked(1)) {
+        ("shipped", _) => "Local Studio".to_string(),
+        (_, Some((first, rest))) => first.to_uppercase() + rest,
+        _ => String::new(),
+    };
+    let row = Mention { badge, ..mention(MentionKind::Skill, name, description) };
     if name == CREATE {
         return Mention { title: format!("${name}"), insert: format!("${name} "), ..row };
     }

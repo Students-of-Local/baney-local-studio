@@ -3,7 +3,7 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use local_studio_core::skills::skill_marks;
-use local_studio_core::{ColorScheme, Settings, SkillDraft, SkillFile, Update};
+use local_studio_core::{ColorScheme, ModelKey, Settings, SkillDraft, SkillFile, Update};
 
 use crate::app::{App, Dirty, Target};
 use crate::icons;
@@ -216,6 +216,18 @@ pub fn done(app: &App, request: &str, message: &str) {
         close(thread);
     }
     app.toast(message);
+}
+
+pub fn offer(app: &Rc<App>, thread: &str, model: ModelKey, text: String) {
+    let project = app.state.borrow().row(thread).and_then(|row| row.project.clone());
+    let weak = Rc::downgrade(app);
+    app.toast_action(&format!("Saved. Try it on {}?", model.model), "Try It", move || {
+        let Some(app) = weak.upgrade() else { return };
+        app.state.borrow_mut().draft_settings.model = Some(model.clone());
+        app.new_thread(project.clone());
+        let unsent = app.composer.text();
+        app.composer.set_text(format!("{text}\n\n{unsent}").trim_end());
+    });
 }
 
 pub fn failed(app: &App, request: &str, message: &str) {
