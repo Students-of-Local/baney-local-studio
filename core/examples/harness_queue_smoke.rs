@@ -820,18 +820,31 @@ fn looks_up(run: &mut Run) -> anyhow::Result<()> {
     for (label, pick) in [("skills-claude", CLAUDE), ("skills-codex", CODEX)] {
         with_cli(run, pick, label, &first, WorktreeChoice::Local)?;
         run.setup(&format!("{label}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
-        run.send("look up zorb steps");
-        run.check(&format!("{label}: the thread's own tools find a skill"), |watch| {
-            let reply = watch.replied("reply to look up zorb steps");
-            reply.is_some_and(|reply| reply.contains(", found zorbing (personal)"))
-        });
+        finds(run, label, "zorb", "zorbing (personal)");
+        finds(run, label, "harness", "abseil (plugin ropes)");
     }
     Ok(())
+}
+
+fn finds(run: &mut Run, label: &str, word: &str, found: &str) {
+    let text = format!("look up {word} for {label}");
+    run.send(&text);
+    run.check(&format!("{label}: looking up {word} finds {found}"), |watch| {
+        let reply = watch.replied(&format!("reply to {text}"));
+        reply.is_some_and(|reply| reply.contains(&format!(", found {found}")))
+    });
+}
+
+fn skill(dir: &Path, name: &str, text: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir.join(name))?;
+    let text = format!("---\nname: {name}\ndescription: A sport\n---\n{text}\n");
+    Ok(std::fs::write(dir.join(name).join("SKILL.md"), text)?)
 }
 
 fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     let (repo, forged, tree) = (root.join("trust"), root.join("forged"), root.join("trust-tree"));
     configured_repo(&repo)?;
+    skill(&repo.join(".agents/skills"), "bungee", "jump cord")?;
     git(&repo, &["worktree", "add", "-q", &tree.to_string_lossy(), "-b", "tree"])?;
     std::fs::create_dir_all(forged.join(".claude"))?;
     std::fs::write(forged.join(".git"), format!("gitdir: {}\n", repo.join(".git/worktrees/trust-tree").display()))?;
@@ -854,10 +867,12 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     }
     run.focus(&second);
     ran_with(run, "trust-second", "hello", "all");
+    finds(run, "trust-second", "cord", "bungee (project)");
     run.focus(&denied);
     run.studio.restart_thread(denied);
     run.send("again");
     ran_with(run, "trust-denied", "again", "user");
+    finds(run, "trust-denied", "cord", "nothing found");
     let linked = WorktreeChoice::Existing { path: tree.to_string_lossy().into_owned() };
     in_folder(run, "trust-tree", &repo, linked)?;
     ran_with(run, "trust-tree", "hello", "all");
@@ -1198,18 +1213,22 @@ fn main() -> anyhow::Result<()> {
         ensure!(binary.is_file(), "build the {name} example first ({} is missing)", binary.display());
         std::env::set_var(variable, binary);
     }
-    let cli = examples.parent().and_then(Path::parent).context("target folder")?.join("local-studio");
-    ensure!(cli.is_file(), "build the local-studio binary first ({} is missing)", cli.display());
-    std::env::set_var("LOCAL_STUDIO_CLI_BIN", cli);
+    let built = examples.ancestors().skip(1).take(2).map(|dir| dir.join("local-studio")).find(|file| file.is_file());
+    let cli = examples.with_file_name("local-studio-cli");
+    std::fs::remove_file(&cli).ok();
+    std::fs::hard_link(built.context("build the local-studio binary first")?, cli)?;
+    std::env::remove_var("LOCAL_STUDIO_CLI_BIN");
     let home = root.join("home");
     let agent_dir = root.join("agent");
     let work = root.join("work");
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&agent_dir)?;
     scratch_repo(&work)?;
-    let skill = home.join(".agents/skills/zorbing");
-    std::fs::create_dir_all(&skill)?;
-    std::fs::write(skill.join("SKILL.md"), "---\nname: zorbing\ndescription: Roll down a hill\n---\nzorb steps\n")?;
+    skill(&home.join(".agents/skills"), "zorbing", "zorb steps")?;
+    let plugin = root.join("data/plugins/ropes");
+    skill(&plugin.join("skills"), "abseil", "harness steps")?;
+    let manifest = "id = \"ropes\"\nversion = \"0.1.0\"\ndescription = \"Ropes\"\ncapabilities = []\n";
+    std::fs::write(plugin.join("plugin.toml"), manifest)?;
     std::env::set_var("HOME", &home);
     std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
     std::env::set_var("CODEX_HOME", home.join(".codex"));

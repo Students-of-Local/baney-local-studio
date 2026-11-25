@@ -24,7 +24,7 @@ const CLOSEST: &str =
 struct Server {
     data: PathBuf,
     plugins: Option<PathBuf>,
-    project: PathBuf,
+    project: Option<PathBuf>,
 }
 
 fn tool(name: &'static str, about: &'static str, wanted: &str, asks: &[(&str, &str)]) -> Tool {
@@ -69,7 +69,7 @@ fn tools() -> Vec<Tool> {
 impl Server {
     fn call(&self, tool: &str, given: &Map<String, Value>) -> Result<String, String> {
         let text = |key: &str| given.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty());
-        let open = || Store::open(&self.data, roots(&self.data, self.plugins.as_deref(), Some(&self.project))?);
+        let open = || Store::open(&self.data, roots(&self.data, self.plugins.as_deref(), self.project.as_deref())?);
         match tool {
             "skill_search" => {
                 let (words, place, within) = (text("words"), text("for"), text("in"));
@@ -131,7 +131,7 @@ impl ServerHandler for Server {
     }
 }
 
-pub(crate) fn entry(data: &Path, project: &str) -> Option<Value> {
+pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) -> Option<Value> {
     let binary = match std::env::var_os("LOCAL_STUDIO_CLI_BIN").filter(|value| !value.is_empty()) {
         Some(binary) => PathBuf::from(binary),
         None => std::env::current_exe().and_then(std::fs::canonicalize).ok()?.with_file_name(CLI),
@@ -139,15 +139,22 @@ pub(crate) fn entry(data: &Path, project: &str) -> Option<Value> {
     if !binary.is_file() {
         return None;
     }
-    let mut env = Map::new();
-    env.insert("LOCAL_STUDIO_DATA_DIR".to_string(), json!(data));
-    if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
-        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(agent.to_string_lossy()));
+    let mut args = vec!["skills", "mcp", "--data", data.to_str()?];
+    if let Some(plugins) = plugins {
+        args.extend(["--plugins", plugins.to_str()?]);
     }
-    Some(json!({ "command": binary, "args": ["skills", "mcp", "--project", project], "env": env }))
+    match project {
+        Some(project) => args.extend(["--project", project]),
+        None => args.push("--no-project"),
+    }
+    let mut env = Map::new();
+    if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
+        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(agent.to_str()?));
+    }
+    Some(json!({ "command": binary.to_str()?, "args": args, "env": env }))
 }
 
-pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: PathBuf) -> Result<(), String> {
+pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: Option<PathBuf>) -> Result<(), String> {
     let server = Server { data, plugins, project };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| error.to_string())?.block_on(async {
