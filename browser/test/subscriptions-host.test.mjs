@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { CopilotAuth, loadSdk } from "../cli/src/subscriptions/copilot.ts";
 import { CopilotTurns, transcript } from "../cli/src/subscriptions/copilot-turns.ts";
+import { npmCommand } from "../cli/src/subscriptions/install-sdk.ts";
 import { SubscriptionService } from "../cli/src/subscriptions/service.ts";
 import { FETCH_TIMEOUT_MS, Siwc } from "../cli/src/subscriptions/siwc.ts";
 import { streamSimple } from "@mariozechner/pi-ai";
@@ -836,6 +837,25 @@ test("Copilot: an SDK that is installed but broken says so, not 'not installed'"
 	} finally {
 		delete process.env.TABKYRA_COPILOT_SDK_DIR;
 	}
+});
+
+test("Copilot: on Windows the SDK install runs npm's script with node, never npm.cmd", () => {
+	const node = "C:\\Program Files\\nodejs";
+	const roaming = "C:\\Users\\Ann\\AppData\\Roaming\\npm";
+	const script = (dir) => `${dir}\\node_modules\\npm\\bin\\npm-cli.js`;
+	const win = (execPath, path, ...files) => npmCommand("win32", execPath, path, (f) => files.includes(f));
+	const run = (dir) => ({ program: `${node}\\node.exe`, args: [script(dir)] });
+	// Beside this node, before any npm on PATH.
+	assert.deepEqual(win(`${node}\\node.exe`, roaming, `${node}\\node.exe`, script(node), script(roaming)), run(node));
+	// A node without npm beside it: the npm on PATH.
+	assert.deepEqual(win(`${node}\\node.exe`, `C:\\Windows;${roaming}`, `${node}\\node.exe`, script(roaming)), run(roaming));
+	// A release's own program is not node: both come from PATH, and quotes around an entry go.
+	assert.deepEqual(win("C:\\Local\\app.exe", `"${node}"`, `${node}\\node.exe`, script(node)), run(node));
+	// Nothing runs from a relative entry, and a missing npm or node is said.
+	assert.equal(win("C:\\Local\\app.exe", ".", "node.exe", script(".").slice(2)), undefined);
+	assert.equal(win(`${node}\\node.exe`, node, `${node}\\node.exe`), undefined);
+	assert.equal(win("C:\\Local\\app.exe", roaming, script(roaming)), undefined);
+	assert.deepEqual(npmCommand("linux", "/usr/bin/node", "/usr/bin"), { program: "npm", args: [] });
 });
 
 // ---- requests that get no answer ---------------------------------------------------------------

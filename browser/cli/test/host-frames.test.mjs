@@ -105,6 +105,24 @@ test("the host refuses an extension that is not Tychicus before it reads a frame
 	assert.equal(await exited, 0);
 });
 
+test("a host whose socket can't be opened still answers the extension", { timeout: 20_000 }, async (t) => {
+	const { env } = sandbox(t);
+	const taken = "import net from 'node:net'; net.Server.prototype.listen = function () { setImmediate(() => this.emit('error', new Error('EADDRINUSE'))); return this; };";
+	const host = spawn(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(taken)}`, cli, "host", ORIGIN], { env, stdio: ["pipe", "pipe", "pipe"] });
+	t.after(() => host.kill("SIGKILL"));
+	let stderr = "";
+	host.stderr.on("data", (d) => {
+		stderr += d;
+	});
+	const out = reader(host.stdout);
+	await until(() => stderr.includes("agents can't connect"), 10_000, "the listen failure");
+	host.stdin.write(encode({ type: "hello", version: "0", protocol: 1, methods: [], features: ["chunks"] }));
+	await until(() => out.frames.length > 0, 10_000, "a frame from the host");
+	const exited = new Promise((r) => host.once("exit", r));
+	host.stdin.end();
+	assert.equal(await exited, 0);
+});
+
 test("pieces of a 3 MB frame join back exactly, each under Chrome's cap", async () => {
 	const image = Buffer.alloc(3 * 1024 * 1024, 7).toString("base64");
 	const frame = { type: "eukhe", conversation: "c", event: { type: "session_event", event: { type: "tool_execution_end", result: { content: [{ type: "image", data: image, mimeType: "image/png" }] } } } };

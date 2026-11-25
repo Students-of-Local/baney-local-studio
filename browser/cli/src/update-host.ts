@@ -27,6 +27,7 @@ import {
 	readStaged,
 	recoverCheckoutQuietly,
 	toolEnv,
+	unmanagedReason,
 } from "./checkout.ts";
 import { type HostRunAction, type ProgressEvent, type ProgressRecord, readProgressRecord, writeProgressRecord } from "./update-progress.ts";
 import { COMMAND_NAME, selfExec, selfPrefix } from "./self.ts";
@@ -291,7 +292,7 @@ export async function computeStatus(force = false): Promise<HostUpdateStatus> {
 			// "Update now" and the automatic install would only fail on a release with no signed archive.
 			if (check.available && check.unsigned) blocked = check.unsigned;
 		} else {
-			blocked = `This helper runs from ${root}, which is neither a release install nor a git checkout. Run ${COMMAND_NAME} update in a terminal.`;
+			blocked = unmanagedReason(root);
 		}
 	}
 	if (extension.location === "elsewhere") {

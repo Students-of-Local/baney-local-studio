@@ -3,7 +3,7 @@
 // updater itself is the real CLI bundle, copied into the checkout so it detects checkout mode
 // from where it runs, as the native host does.
 //
-// Covers: mode detection, a fast-forward update, refusals (local changes, another branch, a
+// Covers: mode detection (also a folder of a larger repository), a fast-forward update, refusals (local changes, another branch, a
 // diverged main), a failed build leaving the old build, rollback, the no-parameters rule of the
 // host's update action, the settings actions and the version-mismatch report.
 import extensionId from "../../src/bridge/extension-id.json" with { type: "json" };
@@ -318,6 +318,53 @@ test("mode detection: a copy that is neither a release nor a checkout refuses", 
 	assert.equal(r.code, 1);
 	assert.match(r.last.message, /neither a release install nor a git checkout/);
 	assert.match(r.last.message, /tychicus update in a terminal/);
+});
+
+test("mode detection: the project in a folder of a larger repository is left to git, and nothing there moves", async (t) => {
+	const c = makeCheckout();
+	// The project's files in browser/ beside another folder, as in Local Studio's repository.
+	git(c.pusher, "rm", "-q", "-r", "--cached", ".");
+	mkdirSync(join(c.pusher, "browser"));
+	for (const name of ["package.json", "build.mjs", "cli", "static", "scripts", ".gitignore"]) renameSync(join(c.pusher, name), join(c.pusher, "browser", name));
+	git(c.pusher, "add", "browser");
+	pushCommit(c, "Move into browser/", { "core.rs": "one\n" });
+	const clone = join(c.dir, "clone");
+	git(c.dir, "clone", "-q", c.origin, clone);
+	const root = join(clone, "browser");
+	for (const cwd of [root, join(root, "cli")]) {
+		const r = spawnSync(process.execPath, ["build.mjs"], { cwd, env: env({ TABKYRA_NO_BUMP: "1" }), encoding: "utf8" });
+		assert.equal(r.status, 0, r.stderr);
+	}
+	const cli = join(root, "cli", "dist", "index.js");
+	const head = git(clone, "rev-parse", "HEAD");
+	const build = buildId(join(root, "dist-chrome"));
+	pushCommit(c, "Another folder only", { "core.rs": "two\n" });
+
+	for (const args of [[], ["--activate"], ["--rollback"], ["--reinstall"]]) {
+		const r = await runHost(cli, ...args);
+		assert.equal(r.code, 1);
+		assert.equal(r.last.phase, "failed");
+		assert.match(r.last.message, /a folder inside a larger git repository/);
+		assert.match(r.last.message, /git pull, then rebuild in .*browser/);
+		assert.doesNotMatch(r.last.message, /neither a release/);
+	}
+	const h = startHost(cli);
+	t.after(() => h.host.kill());
+	h.send({ type: "hello", version: "1.2.0", protocol: 1, methods: [], build, diskBuild: build });
+	const status = await h.waitFor((m) => m.type === "update_status", "update_status");
+	assert.equal(status.mode, "unmanaged");
+	assert.match(status.blocked, /a folder inside a larger git repository/);
+	assert.equal(git(clone, "rev-parse", "HEAD"), head, "no pull");
+	assert.equal(git(clone, "rev-parse", "origin/main"), head, "no fetch");
+	assert.equal(git(clone, "status", "--porcelain"), "");
+	assert.equal(buildId(join(root, "dist-chrome")).id, build.id);
+	assert.ok(!existsSync(join(root, ".tabkyra-update")) && !existsSync(join(root, ".setup-ran")));
+
+	// Source files no repository tracks are not a clone: git pull wouldn't help there.
+	const copied = join(tmp, "copied");
+	cpSync(root, copied, { recursive: true });
+	const loose = await runHost(join(copied, "cli", "dist", "index.js"));
+	assert.match(loose.last.message, /neither a release install nor a git checkout/);
 });
 
 test("skill refresh replaces unedited copies and reports edited ones", () => {

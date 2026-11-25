@@ -20,6 +20,7 @@ import type { InstallMode } from "../../src/bridge/protocol.ts";
 import { asBuildInfo, type BuildInfo, describeBuild } from "../../src/update/build.ts";
 import { EXTENSION_FILES, repoRoot } from "./paths.ts";
 import { appDir, isManagedCopy, takeLock, UpdateError } from "./update.ts";
+import { COMMAND_NAME } from "./self.ts";
 import { envVar } from "./env.ts";
 
 /** Commit subjects shown in "What's new". */
@@ -41,14 +42,33 @@ export function readBuildInfo(dir: string): BuildInfo | undefined {
 	}
 }
 
-/** True for a Polycarp source checkout (not a release folder, not an npm install). */
-export function isCheckout(root: string): boolean {
-	if (!existsSync(join(root, ".git")) || !existsSync(join(root, "scripts", "setup-siblings.sh"))) return false;
+/** The project's source folder, wherever it sits (not a release folder, not an npm install). */
+function isSource(root: string): boolean {
+	if (!existsSync(join(root, "scripts", "setup-siblings.sh"))) return false;
 	try {
 		return (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name?: string }).name === "tabkyra";
 	} catch {
 		return false;
 	}
+}
+
+/** True for a source folder that is the top of its own git repository. */
+export function isCheckout(root: string): boolean {
+	return existsSync(join(root, ".git")) && isSource(root);
+}
+
+/**
+ * Why a helper in neither mode doesn't update itself, and what to do instead. A source folder tracked inside a larger
+ * repository (browser/ in Local Studio's) is not updated from here: a pull moves every folder of that clone, which
+ * other work may be using, and every commit to one of them would count as an update.
+ */
+export function unmanagedReason(root: string): string {
+	const refused = "so it can't update itself from the side panel.";
+	const tracked = () => spawnSync("git", ["-C", root, "ls-files", "--error-unmatch", "package.json"], { env: toolEnv(), stdio: "ignore", timeout: GIT_TIMEOUT_MS }).status === 0;
+	if (isSource(root) && tracked()) {
+		return `This helper runs from ${root}, a folder inside a larger git repository, ${refused} Update the clone with git pull, then rebuild in ${root}: ./scripts/setup-siblings.sh, npm run build, and npm run build in cli.`;
+	}
+	return `This helper runs from ${root}, which is neither a release install nor a git checkout, ${refused} Run ${COMMAND_NAME} update in a terminal.`;
 }
 
 /** How the CLI that runs is installed: a release in ~/.local/share/polycarp/browser/app, a checkout, or neither. */

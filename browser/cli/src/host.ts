@@ -316,6 +316,9 @@ export function runNativeHost(args: readonly string[] = []): void {
 		socket.on("error", drop);
 	};
 	const server = createServer(onConnection);
+	server.on("error", (err) => {
+		process.stderr.write(`[tychicus-host] agents can't connect: ${err.message}\n`);
+	});
 	server.listen(path, () => {
 		if (process.platform !== "win32") chmodSync(path, 0o600);
 	});

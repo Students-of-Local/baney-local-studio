@@ -13,7 +13,7 @@
  * What "update" means depends on how Polycarp runs (detectMode):
  *   release:   the signed GitHub release flow of update.ts, with its checks unchanged.
  *   checkout:  fetch, git pull --ff-only on main, setup-siblings, build (checkout.ts).
- *   unmanaged: an npm install or copied folder; refused, with what to run instead.
+ *   unmanaged: an npm install, a copied folder or a folder of a larger repository; refused, with what to run instead.
  */
 
 import { execFileSync } from "node:child_process";
@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { join } from "node:path";
 import type { LastUpdate, UpdatePhase } from "../../src/bridge/protocol.ts";
 import { describeBuild } from "../../src/update/build.ts";
-import { activateCheckout, detectMode, readBuildInfo, recoverCheckoutQuietly, rollbackCheckout, updateCheckout } from "./checkout.ts";
+import { activateCheckout, detectMode, readBuildInfo, recoverCheckoutQuietly, rollbackCheckout, unmanagedReason, updateCheckout } from "./checkout.ts";
 import { writeJsonPrivate } from "./files.ts";
 import { noteUneditedSkills } from "./skill.ts";
 import { type HostRunAction, type ProgressEvent, type ProgressRecord, progressFile } from "./update-progress.ts";
@@ -49,7 +49,6 @@ import {
 	writeLastUpdate,
 	writeStatus,
 } from "./update.ts";
-import { COMMAND_NAME } from "./self.ts";
 
 export type { HostRunAction, ProgressEvent, ProgressRecord } from "./update-progress.ts";
 
@@ -278,11 +277,7 @@ export async function runHostAction(action: HostRunAction): Promise<number> {
 	process.stdout.on("error", () => {});
 	const { mode, root } = detectMode();
 	try {
-		if (mode === "unmanaged") {
-			throw new UpdateError(
-				`This helper runs from ${root}, which is neither a release install nor a git checkout, so it can't update itself from the side panel. Run ${COMMAND_NAME} update in a terminal.`,
-			);
-		}
+		if (mode === "unmanaged") throw new UpdateError(unmanagedReason(root));
 		if (mode === "release") {
 			if (action === "update") await releaseUpdate();
 			else if (action === "activate") releaseActivate();
