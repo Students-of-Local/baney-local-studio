@@ -208,9 +208,8 @@ fn keeps_unsent(app: &Rc<App>, thread: Option<String>) -> bool {
 fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
     let Some(id) = thread.clone() else { return false };
     let holds = |text: &str| app.composer.text() == text;
-    let draft = |file: &str| {
-        PromptDraft { text: format!("returned {file}"), images: vec![], files: vec![file.to_string()] }
-    };
+    let draft =
+        |file: &str| PromptDraft { text: format!("returned {file}"), images: vec![], files: vec![file.to_string()] };
     let returned = |file: &str| {
         app.apply(vec![Update::ComposerDraft { thread: id.clone(), draft: draft(file) }]);
     };
