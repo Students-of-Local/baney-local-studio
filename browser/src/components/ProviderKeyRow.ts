@@ -6,7 +6,7 @@ import { applyProxyIfNeeded, getAppStorage } from "@mariozechner/pi-web-ui";
 import { html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { property, state } from "lit/decorators.js";
 import { Check } from "lucide";
-import { type KeyFailure, keyFailure } from "../models/key-reason.js";
+import { type KeyFailure, keyFailure, refusedKey } from "../models/key-reason.js";
 import { Toast } from "./Toast.js";
 
 /** A cheap model per provider, sent one short message to check a key before it's saved. */
@@ -167,7 +167,7 @@ export class ProviderKeyRow extends LitElement {
 		this.problem = undefined;
 		let problem: KeyFailure | undefined;
 		try {
-			problem = force ? undefined : await checkKey(provider, key, abort.signal);
+			problem = refusedKey(provider, key) ?? (force ? undefined : await checkKey(provider, key, abort.signal));
 			// Cancel closed the editor while the check ran: nothing to save or show.
 			if (abort.signal.aborted) return;
 			// A key the provider knows but whose account is out of credit or over a limit is still

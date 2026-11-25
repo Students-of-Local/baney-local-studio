@@ -1,3 +1,5 @@
+import { RemovedSignInError, resolveApiKey } from "../auth/policy.js";
+
 /**
  * What a key check's failure means for the key:
  * - "rejected": the provider turned the key down: a 401, or a 400 or 403 that names the key (Google
@@ -61,3 +63,14 @@ export function keyFailure(raw: string | undefined): KeyFailure {
  */
 const BAD_KEY =
 	/\b(invalid|incorrect|wrong|bad|expired|revoked)[ _-]?(x-)?(api[ _-]?)?key\b|\bapi[ _-]?key\b[^.]{0,40}?\b(not valid|invalid|expired|revoked|incorrect)\b|\bapi_key_invalid\b|\bauthenticat|\bunauthori[sz]ed\b/i;
+
+/** A sign-in token or leftover the policy refuses as a key (auth/policy.ts): never checked or saved. */
+export function refusedKey(provider: string, key: string): KeyFailure | undefined {
+	try {
+		resolveApiKey(key, provider);
+		return undefined;
+	} catch (error) {
+		if (error instanceof RemovedSignInError) return { kind: "rejected", reason: error.message };
+		throw error;
+	}
+}

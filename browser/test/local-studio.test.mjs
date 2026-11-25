@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { EukheTurn, eukheTarget, LOCAL_STUDIO_API, LOCAL_STUDIO_PROVIDER, panelModels, turnPrompt } from "../src/eukhe/models.ts";
+import { privateModel } from "../src/privacy/private-mode.ts";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -31,6 +32,17 @@ test("local models come first, then the sign-ins, each labeled, under the Local 
 	assert.equal(models[0].baseUrl, "http://127.0.0.1:8080/v1");
 	assert.deepEqual(eukheTarget(models[0].id), { provider: "llamacpp", model: "lfm2.5-8b" });
 	assert.deepEqual(eukheTarget("openai-codex/gpt-5.5"), { provider: "openai-codex", model: "gpt-5.5" });
+});
+
+test("review-r1 first-F1: a remote model listed with no base URL is refused in private mode, a local one keeps loopback", () => {
+	const [local, remote] = panelModels([
+		{ id: "lfm2.5-8b", provider: "llamacpp" },
+		{ id: "gpt-5.5", provider: "openai-codex" },
+	]);
+	assert.equal(local.baseUrl, "http://127.0.0.1");
+	assert.equal(privateModel(local), local);
+	assert.doesNotMatch(remote.baseUrl, /127\.0\.0\.1|localhost/);
+	assert.throws(() => privateModel(remote), "a provider's model with no base URL never passes as local");
 });
 
 test("a turn sends what is new; a fresh session for an old chat gets the earlier turns first", () => {
@@ -265,6 +277,21 @@ test("first-F1: after Local Studio restarts, the next turn in the same chat runs
 	const prompts = sent.filter((r) => r.command?.type === "prompt");
 	assert.notEqual(prompts.at(-1).command.activeSessionId, prompts[0].command.activeSessionId, "the dead session is not reused");
 	assert.match(prompts.at(-1).command.message, /^Earlier in this chat:[\s\S]*User: what is on this page[\s\S]*Now:\n\nand now\?$/);
+});
+
+test("review-r1 second-S1: a saved chat reopened with no session in memory sends its earlier turns in the first prompt", async () => {
+	const { sent } = fakeRuntime({ words: 2 });
+	const { streamLocalStudio } = await import("../src/eukhe/stream.ts");
+	const first = { role: "user", content: "a chat saved before the reload", timestamp: 11 };
+	const reply = { role: "assistant", content: [{ type: "text", text: "An answer from before." }] };
+	const turn = await runTurn(streamLocalStudio, MODEL, {
+		systemPrompt: "sys",
+		messages: [first, reply, { role: "user", content: "follow up", timestamp: 12 }],
+	});
+	assert.equal(turn.final.type, "done", turn.final.error?.errorMessage);
+	const prompts = sent.filter((r) => r.command?.type === "prompt");
+	assert.equal(prompts.length, 1, "one prompt, no retry");
+	assert.match(prompts[0].command.message, /^Earlier in this chat:[\s\S]*User: a chat saved before the reload[\s\S]*Assistant: An answer from before\.[\s\S]*Now:\n\nfollow up$/);
 });
 
 test("first-F2: a stopped run's last events, arriving as the next prompt goes out, do not end the new turn", async () => {

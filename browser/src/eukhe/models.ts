@@ -110,7 +110,7 @@ export function panelModels(models: readonly EukheModel[]): Model<Api>[] {
 			name: `${m.name || m.id} (${eukheModelLabel(m)})`,
 			api: LOCAL_STUDIO_API as Api,
 			provider: LOCAL_STUDIO_PROVIDER,
-			baseUrl: m.baseUrl || "http://127.0.0.1",
+			baseUrl: m.baseUrl || (isLocalEukheModel(m) ? "http://127.0.0.1" : `https://${m.provider}.invalid`),
 			reasoning: Boolean(m.reasoning),
 			// Text only: a turn sends Eukhe text (turnPrompt), so the composer must not take an image it would drop.
 			input: ["text"],

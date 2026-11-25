@@ -8,6 +8,7 @@
  */
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessageEventStream, Context, Message, Model } from "@mariozechner/pi-ai";
+import { LOCAL_STUDIO_PROVIDER } from "../eukhe/models.js";
 import {
 	applyCompaction,
 	type CompactionMessage,
@@ -121,7 +122,7 @@ export function createCompactor(deps: CompactorDeps): Compactor {
 	return {
 		async transform(messages, signal) {
 			const model = deps.model();
-			if (!model) return messages;
+			if (!model || model.provider === LOCAL_STUDIO_PROVIDER) return messages;
 			const record = current(messages);
 			const request = deps.request();
 			const fixed = estimateFixedTokens(request);

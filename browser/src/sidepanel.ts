@@ -84,6 +84,7 @@ import {
 	registerWelcomeRenderer,
 	setWelcomeSetup,
 } from "./messages/WelcomeMessage.js";
+import { isPerson } from "./models/compaction.js";
 import { createCompactor, streamSummarizer } from "./models/compactor.js";
 import { guardContext, toolBudgetChars, withoutReplyCap } from "./models/context-guard.js";
 import { modelLabelParts, providerDisplayName } from "./models/display.js";
@@ -729,8 +730,8 @@ export function getShownSkills(): Map<string, string> {
 // HELPERS
 // ============================================================================
 const generateTitle = (messages: AgentMessage[]): string => {
-	const firstUserMsg = messages.find((m) => m.role === "user");
-	if (!firstUserMsg || firstUserMsg.role !== "user") return "";
+	const firstUserMsg = messages.find(isPerson);
+	if (!firstUserMsg || (firstUserMsg.role !== "user" && firstUserMsg.role !== "user-with-attachments")) return "";
 
 	let text = "";
 	const content = firstUserMsg.content;
@@ -754,7 +755,7 @@ const generateTitle = (messages: AgentMessage[]): string => {
 };
 
 const shouldSaveSession = (messages: AgentMessage[]): boolean => {
-	const hasUserMsg = messages.some((m: AgentMessage) => m.role === "user");
+	const hasUserMsg = messages.some(isPerson);
 	const hasAssistantMsg = messages.some((m: AgentMessage) => m.role === "assistant");
 	return hasUserMsg && hasAssistantMsg;
 };
@@ -797,7 +798,7 @@ const saveSession = async () => {
 		let preview = "";
 		for (const msg of state.messages) {
 			if (preview.length >= 2048) break;
-			if (msg.role === "user") {
+			if (msg.role === "user" || msg.role === "user-with-attachments") {
 				const text =
 					typeof msg.content === "string"
 						? msg.content
@@ -1282,7 +1283,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		chatPanel.agentInterface.historyProvider = () => {
 			for (let i = agent.state.messages.length - 1; i >= 0; i--) {
 				const m = agent.state.messages[i];
-				if (m.role !== "user") continue;
+				if (m.role !== "user" && m.role !== "user-with-attachments") continue;
 				const text =
 					typeof m.content === "string"
 						? m.content
@@ -1298,14 +1299,14 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 
 		// Only disable auto-scroll for new sessions with welcome message
 		// Check if this is a fresh session (only has welcome message, no user messages)
-		const hasUserMessage = agent.state.messages.some((m) => m.role === "user");
+		const hasUserMessage = agent.state.messages.some(isPerson);
 		if (!hasUserMessage) {
 			chatPanel.agentInterface.setAutoScroll(false);
 
 			// Re-enable auto-scroll on first user message
 			let unsubscribe: (() => void) | undefined;
 			unsubscribe = agent.subscribe(() => {
-				const hasUserMsg = agent.state.messages.some((m) => m.role === "user");
+				const hasUserMsg = agent.state.messages.some(isPerson);
 				if (hasUserMsg && unsubscribe) {
 					chatPanel.agentInterface?.setAutoScroll(true);
 					unsubscribe();
@@ -1541,7 +1542,11 @@ window.addEventListener(
 		// Use capturing phase to intercept before MessageEditor handles it
 		// Escape in an external agent's question card is not a Stop for this panel's agent.
 		const inBridgeQuestion = e.target instanceof Element && e.target.closest('[data-testid="bridge-questions"]');
-		if (e.key === "Escape" && agent?.state.isStreaming && !inBridgeQuestion) {
+		// Escape in an open page, dialog, menu or the title editor closes that, not the run.
+		const inLayer =
+			(e.target instanceof Element && e.target.closest("[role=dialog], [role=menu], [data-title-input]")) ||
+			document.querySelector('[aria-modal="true"], .fixed.inset-0');
+		if (e.key === "Escape" && agent?.state.isStreaming && !inBridgeQuestion && !inLayer) {
 			e.preventDefault();
 			e.stopPropagation();
 			agent.abort();
@@ -1794,12 +1799,7 @@ async function initApp() {
 			});
 
 			renderApp();
-			void watchModeNotice(renderApp).catch(() => {});
-			void watchAgentAsks(renderApp).catch(() => {});
-			void watchBridgeQuestions(renderApp).catch(() => {});
-			void watchHandbacks(renderApp).catch(() => {});
-			void watchSiteChanges(renderApp).catch(() => {});
-			void watchRuns(renderApp).catch(() => {});
+			startWatchers();
 			return;
 		} else {
 			// Session doesn't exist, redirect to new session
@@ -1823,6 +1823,11 @@ async function initApp() {
 
 	renderApp();
 	performance.mark("panel:rendered");
+	startWatchers();
+}
+
+/** What the panel shows beside the chat, for a restored chat and a new one alike. */
+function startWatchers() {
 	void watchUpdateStatus(renderApp).catch(() => {});
 	void watchModeNotice(renderApp).catch(() => {});
 	void watchAgentAsks(renderApp).catch(() => {});

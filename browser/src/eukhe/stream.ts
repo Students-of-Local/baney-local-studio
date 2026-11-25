@@ -239,8 +239,7 @@ export function streamLocalStudio(
 			options?.signal?.addEventListener("abort", abort, { once: true });
 			stream.push({ type: "start", partial: turn.output });
 			/** False when the run was stopped before a prompt went out. */
-			const prompt = async (retry: boolean): Promise<boolean> => {
-				const made = await chatSession(conversation, model.id);
+			const prompt = async (made: { session: ChatSession; fresh: boolean }, retry: boolean): Promise<boolean> => {
 				const { session: current, fresh } = made;
 				session = current;
 				if (stoppedBeforePrompt(made)) return false;
@@ -257,11 +256,11 @@ export function streamLocalStudio(
 					if (fresh || !retry || turn.ended) throw err;
 					sessions.delete(conversation);
 					prompted = false;
-					return prompt(false);
+					return prompt(await chatSession(conversation, model.id), false);
 				}
 				return true;
 			};
-			if (!(await prompt(true))) {
+			if (!(await prompt(first, true))) {
 				options?.signal?.removeEventListener("abort", abort);
 				return;
 			}

@@ -103,6 +103,16 @@ test("a chat the guard keeps whole is sent unchanged, with no model call", async
 	assert.equal(calls.length, 0);
 });
 
+test("review-r1 second-S2: a Local Studio chat is never summarized, so no summary turn opens a session with tools", async () => {
+	const chat = browsingChat(LONG);
+	assert.ok((await guard(chat)).dropped > 0);
+	const { c, calls, records } = compactor({ model: { ...MODEL, provider: "local-studio" } });
+	const sent = await c.transform(chat);
+	assert.equal(calls.length, 0, "no summarizer call");
+	assert.equal(records.length, 0);
+	assert.equal(sent, chat);
+});
+
 test("the notes hold across a reload: a new panel sends the stored record's notes without a new summary", async () => {
 	const chat = browsingChat(LONG);
 	const first = compactor();
