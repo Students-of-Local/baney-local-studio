@@ -48,7 +48,7 @@ For driving the browser from an agent on this computer, use the `polycarp-browse
 | `cloudflared_missing` | The person installs `cloudflared`. |
 | `cloudflare_login` | The person runs `next.command` in their terminal and signs in. |
 | `cloudflare_account`, `workers_subdomain` | The person picks the account (`--account <id>`) or opens `next.url` to pick a subdomain. |
-| `relay_connector`, `relay_health` | `remote status --json` shows `relay.state`; `unauthorized`, `replaced` or `outdated` means setup again. |
+| `relay_connector`, `relay_health` | `remote status --json` shows `relay.state` and `next.command`. `unauthorized` or `replaced`: with their yes, `tychicus remote setup --no-passcode --relay <name>`, since plain setup leaves a relay another computer took alone. `outdated` or a stopped connector: with their yes, `tychicus remote fix`. `disconnected` comes back by itself. |
 | `cloudflare_dns` | That name is in use or not valid. Ask for another. Never overwrite a record. |
 | `cloudflare_zone` | The sign-in is for another domain. The message says how to sign in again. |
 | `cloudflare_tunnel` | The message names the command. Show it, and run it only with their yes: it deletes a tunnel. |

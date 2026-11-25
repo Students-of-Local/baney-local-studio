@@ -23,21 +23,21 @@ For Google Docs, Word or Sheets, use `office-docs`. For paper citations, use
 - A vault is a folder holding `.obsidian` (don't edit it). Find one with
   `find ~ -maxdepth 4 -type d -name .obsidian -not -path '*/Library/*'`, or ask the user.
 - The file name is the title. Links: `[[Note title]]`, `[[Note title|shown text]]`.
-  Properties sit between two `---` lines at the top: `tags`, `aliases`, `created`.
+  Properties, between `---` lines at the top: `tags`, `aliases`, `created`.
 
 ## Steps for Obsidian
 
 1. **Find the vault.** `ls` its top folders; read two recent notes for the user's
    conventions (folders, property names, date format).
 2. **Search before you create.** `grep -ril "[topic]" "[vault]" --include=*.md | head`.
-   If a note on the topic exists, append to it rather than duplicate it.
+   If one exists, add to it.
 3. **Write the note.** Title as the file name, properties, then content; one idea per
    note, where the vault's conventions say or the inbox.
 4. **Link it.** Link two to five related notes from step 2, and link back from the
    closest one.
 5. **Rename: prefer Obsidian.** If the user has Obsidian open, ask them to rename the note
    there; with "Automatically update internal links" on, it fixes every link. Otherwise go
-   on with steps 6 to 8. Rename in place; moving folders is the user's job.
+   on with steps 6 to 8. Moving folders is the user's job.
 6. **Rename: write the helper** to `note_rename.py` outside the vault. It ignores case as
    Obsidian does, takes titles literally, and relinks wikilinks and local Markdown links
    (inline or reference) to the note, never external URLs or code. Exit 0 means clean.
@@ -52,6 +52,7 @@ notes = [p for p in vault.rglob("*.md") if not {".obsidian", ".trash"} & set(p.p
 def local(note, p):
     if re.match(r"[a-z][a-z0-9+.-]*:|//|#", p, re.I): return False
     p = U.unquote(p)
+    if "/" not in p: return re.sub(r"\.md$", "", p.lower()) == old.lower()
     bases = [vault / p.lstrip("/")] + ([] if p.startswith("/") else [note.parent / p])
     return key(home / (old + ".md")) in [key(os.path.relpath(b, vault)) for b in bases]
 def wiki(note, m):
