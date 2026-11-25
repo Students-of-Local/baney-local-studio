@@ -14,6 +14,7 @@ use super::{
     Event, Image, Launch, Sink, Spend, Stop, CLAUDE_PROVIDER,
 };
 use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption};
+use crate::skills::{SERVER, TOOLS};
 
 const MODELS: [(&str, &str, &str); 9] = [
     ("opus", "Opus (Claude Code)", "claude-opus-5-5"),
@@ -64,6 +65,20 @@ fn mode(access: AccessMode) -> &'static str {
     }
 }
 
+const MANAGED: &str = if cfg!(target_os = "macos") {
+    "/Library/Application Support/ClaudeCode/managed-mcp.json"
+} else if cfg!(windows) {
+    "C:\\Program Files\\ClaudeCode\\managed-mcp.json"
+} else {
+    "/etc/claude-code/managed-mcp.json"
+};
+
+fn offered(skills: &Value) -> [String; 4] {
+    let tools = TOOLS.map(|tool| format!("mcp__{SERVER}__{tool}")).join(",");
+    let servers = json!({ "mcpServers": { SERVER: skills } }).to_string();
+    ["--mcp-config".to_string(), servers, "--allowedTools".to_string(), tools]
+}
+
 impl Claude {
     pub(crate) fn spawn(launch: &Launch, sink: Sink) -> Result<Self, String> {
         let binary = program("LOCAL_STUDIO_CLAUDE_BIN", "claude");
@@ -93,6 +108,7 @@ impl Claude {
         if !launch.project {
             command.args(["--setting-sources", "user"]);
         }
+        command.args(launch.skills.iter().filter(|_| !Path::new(MANAGED).exists()).flat_map(offered));
         command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
         if let Some(account) = &launch.account {
             command.env("CLAUDE_CONFIG_DIR", account);

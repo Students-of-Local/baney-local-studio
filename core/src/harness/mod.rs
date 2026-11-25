@@ -132,6 +132,7 @@ pub(crate) struct Launch {
     pub(crate) access: AccessMode,
     pub(crate) account: Option<PathBuf>,
     pub(crate) project: bool,
+    pub(crate) skills: Option<Value>,
 }
 
 #[derive(Clone)]

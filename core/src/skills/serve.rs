@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
@@ -12,6 +12,8 @@ use serde_json::{json, Map, Value};
 use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
+pub(crate) const TOOLS: [&str; 2] = ["skill_search", "skill_read"];
+const CLI: &str = if cfg!(windows) { "local-studio-cli.exe" } else { "local-studio-cli" };
 const INSTRUCTIONS: &str = "Skills are how-to notes for websites, APIs, apps and jobs. Before a task, call skill_search with it. \
      If one of the skills it lists is about the task, call skill_read for that one and follow it; if none is, work without one. \
      Search again when a step does not work.";
@@ -22,7 +24,7 @@ const CLOSEST: &str =
 struct Server {
     data: PathBuf,
     plugins: Option<PathBuf>,
-    project: PathBuf,
+    project: Option<PathBuf>,
 }
 
 fn tool(name: &'static str, about: &'static str, wanted: &str, asks: &[(&str, &str)]) -> Tool {
@@ -67,7 +69,7 @@ fn tools() -> Vec<Tool> {
 impl Server {
     fn call(&self, tool: &str, given: &Map<String, Value>) -> Result<String, String> {
         let text = |key: &str| given.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty());
-        let open = || Store::open(&self.data, roots(&self.data, self.plugins.as_deref(), Some(&self.project))?);
+        let open = || Store::open(&self.data, roots(&self.data, self.plugins.as_deref(), self.project.as_deref())?);
         match tool {
             "skill_search" => {
                 let (words, place, within) = (text("words"), text("for"), text("in"));
@@ -129,7 +131,33 @@ impl ServerHandler for Server {
     }
 }
 
-pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: PathBuf) -> Result<(), String> {
+pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) -> Option<Value> {
+    let binary = match std::env::var_os("LOCAL_STUDIO_CLI_BIN").filter(|value| !value.is_empty()) {
+        Some(binary) => PathBuf::from(binary),
+        None => std::env::current_exe().and_then(std::fs::canonicalize).ok()?.with_file_name(CLI),
+    };
+    let whole = |path: &Path| std::path::absolute(path).ok()?.to_str().map(String::from);
+    let (binary, data) = (binary.is_file().then(|| whole(&binary))??, whole(data)?);
+    let plugins = match plugins {
+        Some(plugins) => Some(whole(plugins)?),
+        None => None,
+    };
+    let mut args = vec!["skills", "mcp", "--data", &data];
+    if let Some(plugins) = &plugins {
+        args.extend(["--plugins", plugins]);
+    }
+    match project {
+        Some(project) => args.extend(["--project", project]),
+        None => args.push("--no-project"),
+    }
+    let mut env = Map::new();
+    if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
+        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(whole(Path::new(&agent))?));
+    }
+    Some(json!({ "command": binary, "args": args, "env": env }))
+}
+
+pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: Option<PathBuf>) -> Result<(), String> {
     let server = Server { data, plugins, project };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| error.to_string())?.block_on(async {

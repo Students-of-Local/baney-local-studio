@@ -318,6 +318,7 @@ impl Actor {
             access: flags.access.unwrap_or(AccessMode::FullAccess),
             account,
             project: !flags.project_refused && (self.cli_trusted(&cwd) || (harness == Harness::Codex && !configured)),
+            skills: None,
         };
         let ask = !launch.project && !flags.project_refused && configured;
         self.generation += 2;
@@ -396,6 +397,8 @@ impl Actor {
         if opening.launch.harness == Harness::Codex {
             self.load_codex_models();
         }
+        let project = (!self.store.flags(id).project_refused).then_some(opening.launch.cwd.as_str());
+        opening.launch.skills = crate::skills::entry(&self.data_dir, self.plugins_dir.as_deref(), project);
         let generation = opening.generation;
         let (sender, thread, first) = (self.cli.clone(), id.to_string(), opening.launch.clone());
         let task = tokio::spawn(async move {

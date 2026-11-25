@@ -7,6 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+#[path = "support/mcp.rs"]
+mod mcp;
+
 const SLOW: Duration = Duration::from_millis(1500);
 const LAG: Duration = Duration::from_millis(1500);
 const STALL: Duration = Duration::from_secs(5);
@@ -30,6 +33,7 @@ struct Shared {
     answers: Mutex<Vec<(Value, Sender<String>)>>,
     thread: Mutex<String>,
     trust: Mutex<String>,
+    skills: Mutex<Value>,
 }
 
 impl Shared {
@@ -210,6 +214,11 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         };
         reply = format!("{reply} after {decision}");
     }
+    if text.contains("look up") {
+        let server = shared.skills.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let found = (server["default_tools_approval_mode"] == "approve").then(|| mcp::skills(&server, text)).flatten();
+        reply = format!("{reply}, found {}", found.as_deref().unwrap_or("no server"));
+    }
     reply.push_str(&shared.trust.lock().unwrap_or_else(PoisonError::into_inner));
     let agent = format!("agent-{number}");
     shared.notify("item/started", &json!({ "item": { "id": agent, "type": "agentMessage" } }));
@@ -231,6 +240,8 @@ fn at_home() -> bool {
 
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
     if matches!(method, "thread/start" | "thread/resume") {
+        *shared.skills.lock().unwrap_or_else(PoisonError::into_inner) =
+            params["config"]["mcp_servers"]["local-studio-skills"].clone();
         let projects = params["config"]["projects"].as_object().cloned().unwrap_or_default();
         let levels = projects
             .iter()

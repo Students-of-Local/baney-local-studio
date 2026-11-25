@@ -6,6 +6,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+#[path = "support/mcp.rs"]
+mod mcp;
+
+const ALLOWED: &str = "mcp__local-studio-skills__skill_search,mcp__local-studio-skills__skill_read";
 const SLOW: Duration = Duration::from_millis(1500);
 const LIMITED: &str = "limited";
 const RESET_SECONDS: u64 = 2 * 60 * 60;
@@ -60,7 +64,7 @@ fn remember(file: Option<&PathBuf>, lines: &[Value]) {
 fn run(
     turn: u32,
     frame: &Value,
-    (effort, sources): (&str, &str),
+    (effort, sources, servers): (&str, &str, Option<&Value>),
     (inbox, file): (&Receiver<Value>, Option<&PathBuf>),
     waiting: &mut VecDeque<Value>,
 ) {
@@ -116,7 +120,11 @@ fn run(
         );
         return;
     }
-    let reply = format!("reply to {text} at effort {effort} with {sources} settings");
+    let mut reply = format!("reply to {text} at effort {effort} with {sources} settings");
+    if text.contains("look up") {
+        let found = servers.and_then(|servers| mcp::skills(&servers["mcpServers"]["local-studio-skills"], &text));
+        reply = format!("{reply}, found {}", found.as_deref().unwrap_or("no server"));
+    }
     let assistant = json!({
         "type": "assistant",
         "message": {
@@ -139,6 +147,10 @@ fn main() {
         .windows(2)
         .find(|pair| pair[0] == "--setting-sources")
         .map_or_else(|| "all".to_string(), |pair| pair[1].clone());
+    let servers = args.windows(2).find(|pair| pair[0] == "--mcp-config").and_then(|pair| {
+        let allowed = args.iter().any(|arg| arg == ALLOWED);
+        allowed.then(|| serde_json::from_str::<Value>(&pair[1]).ok()).flatten()
+    });
     let file = session_file(&args);
     let (frames, inbox) = mpsc::channel::<Value>();
     std::thread::spawn(move || {
@@ -163,7 +175,7 @@ fn main() {
         match frame["type"].as_str() {
             Some("user") => {
                 turn += 1;
-                run(turn, &frame, (&effort, &sources), (&inbox, file.as_ref()), &mut waiting);
+                run(turn, &frame, (&effort, &sources, servers.as_ref()), (&inbox, file.as_ref()), &mut waiting);
             }
             Some("control_request") => answer_control(&frame),
             _ => {}

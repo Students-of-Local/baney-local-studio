@@ -731,6 +731,7 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
     codex_unexpected_approval(run)?;
+    looks_up(run)?;
     claude_trust(run, root)?;
     codex_trust(run, root)?;
     account_scenarios(run, root)
@@ -814,9 +815,36 @@ fn ran_with(run: &mut Run, label: &str, text: &str, sources: &str) {
     }
 }
 
+fn looks_up(run: &mut Run) -> anyhow::Result<()> {
+    let first = run.watch.projects.first().cloned().context("first project")?;
+    for (label, pick) in [("lookup-claude", CLAUDE), ("lookup-codex", CODEX)] {
+        with_cli(run, pick, label, &first, WorktreeChoice::Local)?;
+        run.setup(&format!("{label}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
+        finds(run, label, "zorb", "zorbing (personal)");
+        finds(run, label, "harness", "abseil (plugin ropes)");
+    }
+    Ok(())
+}
+
+fn finds(run: &mut Run, label: &str, word: &str, found: &str) {
+    let text = format!("look up {word} for {label}");
+    run.send(&text);
+    run.check(&format!("{label}: looking up {word} finds {found}"), |watch| {
+        let reply = watch.replied(&format!("reply to {text}"));
+        reply.is_some_and(|reply| reply.contains(&format!(", found {found}")))
+    });
+}
+
+fn skill(dir: &Path, name: &str, text: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir.join(name))?;
+    let text = format!("---\nname: {name}\ndescription: A sport\n---\n{text}\n");
+    Ok(std::fs::write(dir.join(name).join("SKILL.md"), text)?)
+}
+
 fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     let (repo, forged, tree) = (root.join("trust"), root.join("forged"), root.join("trust-tree"));
     configured_repo(&repo)?;
+    skill(&repo.join(".agents/skills"), "bungee", "jump cord")?;
     git(&repo, &["worktree", "add", "-q", &tree.to_string_lossy(), "-b", "tree"])?;
     std::fs::create_dir_all(forged.join(".claude"))?;
     std::fs::write(forged.join(".git"), format!("gitdir: {}\n", repo.join(".git/worktrees/trust-tree").display()))?;
@@ -839,10 +867,12 @@ fn claude_trust(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     }
     run.focus(&second);
     ran_with(run, "trust-second", "hello", "all");
+    finds(run, "trust-second", "cord", "bungee (project)");
     run.focus(&denied);
     run.studio.restart_thread(denied);
     run.send("again");
     ran_with(run, "trust-denied", "again", "user");
+    finds(run, "trust-denied", "cord", "nothing found");
     let linked = WorktreeChoice::Existing { path: tree.to_string_lossy().into_owned() };
     in_folder(run, "trust-tree", &repo, linked)?;
     ran_with(run, "trust-tree", "hello", "all");
@@ -1183,12 +1213,22 @@ fn main() -> anyhow::Result<()> {
         ensure!(binary.is_file(), "build the {name} example first ({} is missing)", binary.display());
         std::env::set_var(variable, binary);
     }
+    let built = examples.ancestors().skip(1).take(2).map(|dir| dir.join("local-studio")).find(|file| file.is_file());
+    let cli = examples.with_file_name("local-studio-cli");
+    std::fs::remove_file(&cli).ok();
+    std::fs::hard_link(built.context("build the local-studio binary first")?, &cli)?;
+    std::env::remove_var("LOCAL_STUDIO_CLI_BIN");
     let home = root.join("home");
     let agent_dir = root.join("agent");
     let work = root.join("work");
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&agent_dir)?;
     scratch_repo(&work)?;
+    skill(&home.join(".agents/skills"), "zorbing", "zorb steps")?;
+    let plugin = root.join("data/plugins/ropes");
+    skill(&plugin.join("skills"), "abseil", "harness steps")?;
+    let manifest = "id = \"ropes\"\nversion = \"0.1.0\"\ndescription = \"Ropes\"\ncapabilities = []\n";
+    std::fs::write(plugin.join("plugin.toml"), manifest)?;
     std::env::set_var("HOME", &home);
     std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
     std::env::set_var("CODEX_HOME", home.join(".codex"));
@@ -1248,6 +1288,7 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     });
     let stopped = stop_daemon(&socket);
+    std::fs::remove_file(&cli).ok();
     outcome?;
     stopped?;
     if !misses.is_empty() {

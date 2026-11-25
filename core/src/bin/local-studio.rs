@@ -19,7 +19,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio skills search [--for <site or app>] [--in <skill>] [--limit <n>] [--project <dir>] [--json] <words...>
        local-studio skills read <name> [--part <heading>] [--from <n>] [--project <dir>] [--json]
        local-studio skills list [--project <dir>] [--json]
-       local-studio skills mcp [--project <dir>]
+       local-studio skills mcp [--project <dir> | --no-project] [--data <dir>] [--plugins <dir>]
        local-studio tunnel status [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --tailnet [--serve <port>] [--mcp <port>] [--yes] [--json]
@@ -134,6 +134,9 @@ struct SkillArgs<'a> {
     part: Option<&'a str>,
     from: usize,
     project: Option<&'a str>,
+    no_project: bool,
+    data: Option<&'a str>,
+    plugins: Option<&'a str>,
     limit: Option<usize>,
     words: Vec<&'a str>,
 }
@@ -150,6 +153,9 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
             }
             ("read", "--from") => asked.from = args.next()?.parse().ok()?,
             ("read", "--part") => asked.part = Some(args.next()?),
+            ("mcp", "--data") => asked.data = Some(args.next()?),
+            ("mcp", "--plugins") => asked.plugins = Some(args.next()?),
+            ("mcp", "--no-project") => asked.no_project = true,
             (_, "--project") => asked.project = Some(args.next()?),
             (_, "--") => asked.words.extend(args.by_ref()),
             (_, flag) if flag.starts_with("--") => return None,
@@ -166,14 +172,14 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
 
 fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
     use local_studio_core::skills::{lines, plain, roots, serve, Query, Store};
-    let data = local_studio_core::data_dir(None)?;
-    let plugins = plugins::plugins_dir(None);
+    let data = asked.data.map_or_else(|| local_studio_core::data_dir(None), |dir| Ok(PathBuf::from(dir)))?;
+    let plugins = asked.plugins.map(PathBuf::from).or_else(|| plugins::plugins_dir(asked.data));
     let project = match asked.project {
         Some(dir) => PathBuf::from(dir),
         None => std::env::current_dir().map_err(|error| error.to_string())?,
     };
     if verb == "mcp" {
-        return serve(data, plugins, project);
+        return serve(data, plugins, (!asked.no_project).then_some(project));
     }
     let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(&project))?)?;
     let words = asked.words.join(" ");
