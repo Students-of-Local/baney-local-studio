@@ -6,8 +6,9 @@ use anyhow::{bail, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
-    AccessMode, Block, Connection, DaemonLaunch, Item, ItemKind, PromptDraft, Studio, StudioConfig, ThreadRow,
-    ThreadStatus, ToolState, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    AccessMode, Block, Connection, DaemonLaunch, Delivery, Item, ItemKind, NotificationKind, PromptDraft, Studio,
+    StudioConfig, ThreadRow, ThreadStatus, ToolState, TranscriptOp, Update, UsagePeriod, UsageReport, Waker,
+    WorktreeChoice,
 };
 use serde_json::Map;
 
@@ -17,6 +18,8 @@ mod real_model;
 const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const MARK: &str = "step-done";
 const PROMPT: &str = "Say one short sentence about what you will do, then use the bash tool to run exactly this command once: `sleep 3 && echo step-done`. After it finishes, reply with only the word done.";
+const QUICK: &str = "Reply with only the word done.";
+const QUICK_TURNS: u32 = 8;
 
 #[derive(Default)]
 struct Signal {
@@ -64,6 +67,7 @@ struct Watch {
     finished: bool,
     progress: Progress,
     usage: Option<UsageReport>,
+    done: u32,
 }
 
 impl Watch {
@@ -96,6 +100,12 @@ fn observe(watch: &mut Watch, item: &Item) {
         | ItemKind::TurnSummary { .. }
         | ItemKind::Notice { .. }
         | ItemKind::Compaction { .. } => {}
+    }
+}
+
+fn count_done(watch: &mut Watch, update: &Update) {
+    if let Update::Notification { thread, kind: NotificationKind::TurnDone, .. } = update {
+        watch.done += u32::from(watch.thread.as_ref() == Some(thread));
     }
 }
 
@@ -211,6 +221,7 @@ fn pump(
     let deadline = Instant::now() + STEP_TIMEOUT;
     loop {
         for update in studio.tick() {
+            count_done(watch, &update);
             apply(watch, update);
         }
         if done(watch) {
@@ -277,6 +288,39 @@ fn drive(config: StudioConfig, work: &Path) -> anyhow::Result<()> {
     outcome
 }
 
+fn finishes(config: StudioConfig) -> anyhow::Result<()> {
+    std::env::set_var("LOCAL_STUDIO_TEST_TIMER_MS", "100");
+    let signal = Arc::new(Signal::default());
+    let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+    let mut watch = Watch::default();
+    let outcome = (|| {
+        pump(&studio, &signal, &mut watch, "daemon connected again", |watch| {
+            matches!(watch.connection, Some(Connection::Ready)) && watch.projects.len() == 1
+        })?;
+        let quick = || PromptDraft { text: QUICK.to_string(), images: Vec::new(), files: Vec::new() };
+        studio.start_thread(
+            "draft-quick".to_string(),
+            Some(watch.projects[0].clone()),
+            quick(),
+            real_model::thread_settings(AccessMode::FullAccess, WorktreeChoice::Local),
+        );
+        for turn in 1..=QUICK_TURNS {
+            let step = format!("with the run check every 100 ms, background turn {turn} was reported done once");
+            pump(&studio, &signal, &mut watch, &step, |watch| watch.done >= turn && !watch.working())?;
+            if watch.done > turn {
+                bail!("turn {turn} was reported done {} times", watch.done + 1 - turn);
+            }
+            if turn < QUICK_TURNS {
+                let thread = watch.thread.clone().context("thread id")?;
+                studio.send(format!("send-{turn}"), thread, quick(), Delivery::Queue);
+            }
+        }
+        Ok(())
+    })();
+    studio.shutdown();
+    outcome
+}
+
 fn main() -> anyhow::Result<()> {
     let usage = "usage: working_smoke <eukhe> <scratch dir>";
     let mut args = std::env::args_os().skip(1);
@@ -289,7 +333,7 @@ fn main() -> anyhow::Result<()> {
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     let socket = root.join("d.sock");
-    let config = StudioConfig {
+    let config = || StudioConfig {
         socket_path: Some(socket.to_string_lossy().into_owned()),
         session_dir: Some(agent_dir.join("sessions").to_string_lossy().into_owned()),
         data_dir: None,
@@ -297,7 +341,7 @@ fn main() -> anyhow::Result<()> {
         take_over_serve: false,
         launch: Some(DaemonLaunch { program: daemon.to_string_lossy().into_owned() }),
     };
-    let outcome = drive(config, &work);
+    let outcome = drive(config(), &work).and_then(|()| finishes(config()));
     let stopped = stop_daemon(&socket);
     outcome?;
     stopped?;

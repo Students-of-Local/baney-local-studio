@@ -1433,6 +1433,11 @@ async fn reader_died(dead: &mut Option<watch::Receiver<bool>>) {
     }
 }
 
+fn timer_period() -> Duration {
+    let set = std::env::var("LOCAL_STUDIO_TEST_TIMER_MS").ok().and_then(|ms| ms.parse().ok());
+    set.filter(|ms| *ms > 0).map_or(TIMER_PERIOD, Duration::from_millis)
+}
+
 async fn wait_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -1458,7 +1463,7 @@ impl Actor {
         let mut retry_at = Some(Instant::now());
         let mut settings_open = true;
         let mut pulls_open = true;
-        let mut timer = tokio::time::interval(TIMER_PERIOD);
+        let mut timer = tokio::time::interval(timer_period());
         loop {
             if self.client.is_none() && retry_at.is_some_and(|at| at <= Instant::now()) {
                 self.mailbox.push(Update::Connection { state: Connection::Connecting });
@@ -3927,11 +3932,14 @@ impl Actor {
         Ok(())
     }
 
-    fn running(&self, id: &str) -> bool {
+    fn run_open(&self, id: &str) -> bool {
         self.threads
             .get(id)
             .is_some_and(|thread| thread.pending_run || thread.live.as_ref().is_some_and(|live| live.state.busy))
-            || self.roster_for(id).is_some_and(|row| row.running)
+    }
+
+    fn running(&self, id: &str) -> bool {
+        self.run_open(id) || self.roster_for(id).is_some_and(|row| row.running)
     }
 
     fn daemon_active(&self, id: &str) -> Option<String> {
@@ -4019,18 +4027,24 @@ impl Actor {
     }
 
     async fn resync(&mut self, id: &str, active: &str) {
-        let was = self.running(id);
+        let (was, open) = (self.running(id), self.run_open(id));
         if let Err(error) = self.attach(id, active).await {
             self.run_lost(id, &error).await;
             return;
         }
         self.emit_info(id);
-        if !self.running(id) {
-            if was {
-                let failed = self.threads.get(id).is_some_and(|thread| thread.failed_at.is_some());
-                self.run_finished(id, failed);
-                self.refresh_saved().await;
+        let ended = open && !self.run_open(id);
+        let idle = !self.running(id);
+        if ended || (was && idle) {
+            let failed = self.threads.get(id).is_some_and(|thread| thread.failed_at.is_some());
+            if let Some(thread) = self.threads.get_mut(id) {
+                thread.ended_by_events = !idle;
             }
+            self.run_finished(id, failed);
+            self.refresh_saved().await;
+        }
+        if ended || idle {
+            self.send_held(id).await;
             self.release(id).await;
         }
     }
