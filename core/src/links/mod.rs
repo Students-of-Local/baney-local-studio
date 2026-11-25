@@ -9,6 +9,14 @@ fn hidden(char: char) -> bool {
         || matches!(char, '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}')
 }
 
+#[must_use]
+pub fn scheme(channel: &str) -> String {
+    match channel {
+        "stable" | "" => "localstudio".to_string(),
+        other => format!("localstudio-{other}"),
+    }
+}
+
 #[cfg_attr(feature = "ffi", uniffi::export)]
 #[must_use]
 pub fn refused_link(url: &str) -> Option<String> {

@@ -205,22 +205,45 @@ extension StudioStore {
     func openStudioLink(_ url: String) {
         guard let link = studioLink(url: url) else { return }
         switch link {
-        case .settings(let section) where outsideLink(url: url) != nil:
-            if let pane = SettingsPane.allCases.first(where: { $0.linkName == section }) {
-                openSettings(pane)
-            }
-        case .thread(let id):
-            if inbox.thread(id) != nil {
-                open(id)
-            } else {
-                post(.info, "That thread is not in Local Studio on this computer.")
-            }
+        case .settings(let section) where outsideLink(url: url) != nil: openSettings(linked: section)
+        case .thread(let id): openThread(linked: id)
         default:
             if linkWords(link: link).confirm {
                 shell.confirmation = .studioLink(link)
             } else {
                 core.run { $0.openStudioLink(link: link) }
             }
+        }
+    }
+
+    func openSystemLink(_ url: String) {
+        switch systemLink(url: url) {
+        case .settings(let section)?: openSettings(linked: section)
+        case .thread(let id)?:
+            Task { @MainActor [weak self] in
+                var ready = 0
+                for _ in 0..<240 {
+                    guard let self, self.inbox.thread(id) == nil, ready < 20 else { break }
+                    ready += self.connection == .ready ? 1 : 0
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                self?.openThread(linked: id)
+            }
+        default: post(.info, "Only settings and thread links open Local Studio from outside it.")
+        }
+    }
+
+    private func openSettings(linked section: String) {
+        if let pane = SettingsPane.allCases.first(where: { $0.linkName == section }) {
+            openSettings(pane)
+        }
+    }
+
+    private func openThread(linked id: String) {
+        if inbox.thread(id) != nil {
+            open(id)
+        } else {
+            post(.info, "That thread is not in Local Studio on this computer.")
         }
     }
 

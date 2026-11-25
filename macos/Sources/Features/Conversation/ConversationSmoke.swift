@@ -381,6 +381,10 @@ final class ConversationSmoke {
         store.openStudioLink(own[1])
         guard store.shell.confirmation == .studioLink(.shortcut(name: "Focus")) else { return "a shortcut link did not ask first" }
         store.shell.confirmation = nil
+        for other in ["localstudio", "localstudio-nightly", "localstudio-dev"] {
+            store.openSystemLink("\(other)://shortcut/Focus")
+        }
+        guard store.shell.confirmation == nil else { return "a shortcut link from the system asked to run" }
         print("ok   localstudio:// links in a reply are buttons with the app's own words, stay links elsewhere, and a shortcut asks first")
         return nil
     }

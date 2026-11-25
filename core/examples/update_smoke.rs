@@ -601,12 +601,17 @@ impl Smoke {
                 return Err(format!("install.sh with {verifier} installed a build that reports {reports}"));
             }
             if !cfg!(target_os = "macos") {
-                for path in [
-                    prefix.join("bin").join("local-studio-nightly"),
-                    prefix.join("share").join("applications").join("dev.localstudio.LocalStudio.Nightly.desktop"),
-                ] {
-                    if !path.exists() {
-                        return Err(format!("install.sh did not create {}", path.display()));
+                let command = prefix.join("bin").join("local-studio-nightly");
+                if !command.exists() {
+                    return Err(format!("install.sh did not create {}", command.display()));
+                }
+                let entry =
+                    prefix.join("share").join("applications").join("dev.localstudio.LocalStudio.Nightly.desktop");
+                let text = std::fs::read_to_string(&entry).map_err(|error| format!("{}: {error}", entry.display()))?;
+                let exec = format!("Exec=\"{}\" %u", target.join("local-studio").display());
+                for line in [exec.as_str(), "MimeType=x-scheme-handler/localstudio-nightly;"] {
+                    if !text.lines().any(|found| found == line) {
+                        return Err(format!("{} has no line {line}", entry.display()));
                     }
                 }
             }

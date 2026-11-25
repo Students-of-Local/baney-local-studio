@@ -34,7 +34,7 @@ pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
 #[doc(hidden)]
 pub use links::open::{link_command, LinkEnv, Platform};
 pub use links::refused_link;
-pub use links::studio::{link_words, outside_link, studio_link, LinkWords, StudioLink};
+pub use links::studio::{link_words, outside_link, studio_link, system_link, LinkWords, StudioLink};
 pub use model::{
     AccessMode, Approval, ApprovalAnswer, Block, CatalogPlugin, CommandKind, Connection, ConsentAnswer, ConsentNeed,
     ConsentRequest, ConsentRow, ContextUsage, DaemonMismatch, Delivery, FileChange, Goal, Harness, ImageAttachment,

@@ -144,6 +144,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = NSApp.delegate?.applicationOpenUntitledFile?(NSApp)
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.presentMainWindowIfMissing()
+            self?.store.openSystemLink(url.absoluteString)
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }

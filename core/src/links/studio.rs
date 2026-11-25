@@ -136,6 +136,13 @@ pub fn outside_link(url: &str) -> Option<StudioLink> {
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 #[must_use]
+pub fn system_link(url: &str) -> Option<StudioLink> {
+    let rest = url.strip_prefix(&super::scheme(crate::CHANNEL))?.strip_prefix("://")?;
+    outside_link(&format!("localstudio://{rest}"))
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+#[must_use]
 pub fn link_words(link: StudioLink) -> LinkWords {
     let confirm = matches!(link, StudioLink::Shortcut { .. });
     let manager = if cfg!(target_os = "macos") { "Finder" } else { "Files" };
