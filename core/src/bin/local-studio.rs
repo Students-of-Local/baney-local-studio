@@ -177,7 +177,10 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
             let hits = store.search(&Query { text: &words, place: asked.place, within: asked.within, limit })?;
             let text = match hits.as_slice() {
                 [] => "nothing found".to_string(),
-                hits => format!("{}\nUse one only if it fits: local-studio skills read <name>", lines(hits)),
+                hits => {
+                    let from = asked.project.map(|dir| format!(" --project {}", plain(dir))).unwrap_or_default();
+                    format!("{}\nUse one only if it fits: local-studio skills read{from} <name>", lines(hits))
+                }
             };
             (serde_json::to_value(&hits), text)
         }
@@ -191,7 +194,7 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
             }
             (
                 serde_json::to_value(&reading),
-                format!("{text}\nFolder: {}", plain(&reading.path.with_file_name("").to_string_lossy())),
+                format!("{text}\n\nFolder: {}", plain(&reading.path.with_file_name("").to_string_lossy())),
             )
         }
         _ => {

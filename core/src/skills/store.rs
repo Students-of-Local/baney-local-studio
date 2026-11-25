@@ -66,7 +66,7 @@ pub struct Store {
     pub(super) db: Connection,
     roots: Roots,
     pub(super) seen: HashMap<i64, Listed>,
-    hidden: Vec<Listed>,
+    pub(super) hidden: Vec<Listed>,
     pub(super) checked: Option<Instant>,
 }
 
