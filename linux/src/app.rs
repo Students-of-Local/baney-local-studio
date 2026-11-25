@@ -538,12 +538,15 @@ impl App {
                 }
             }
             Update::SearchResults { request, results } => match self.take_request(&request) {
-                Some(Target::Mentions) => self.composer.extras.mentions_loaded(&request, &results),
                 Some(Target::ProjectSearch) => self.search.loaded(&request, &results),
                 Some(Target::GotoFile) => self.goto.loaded(&request, &results),
                 _ => {}
             },
-            Update::Mentions { .. } => {}
+            Update::Mentions { request, items } => {
+                if self.take_request(&request) == Some(Target::Mentions) {
+                    self.composer.extras.mentions_loaded(&request, &items);
+                }
+            }
             Update::PullRequests { request, pulls } => match self.take_request(&request) {
                 Some(Target::PanelPulls) => self.panel.pulls.loaded(&pulls),
                 Some(Target::PagePulls) => self.pulls.loaded(&pulls),

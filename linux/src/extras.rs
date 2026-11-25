@@ -4,13 +4,14 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use local_studio_core::{ImageAttachment, ItemKind, PullRequest, SearchHit, SlashCommand};
+use local_studio_core::{ImageAttachment, ItemKind, Mention, MentionKind, PullRequest, SlashCommand};
 
 use crate::app::{App, Target};
 use crate::format;
 use crate::icons;
 
 const MENU_LIMIT: usize = 8;
+const MENTION_LIMIT: u32 = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -27,7 +28,7 @@ struct Trigger {
     query: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Suggestion {
     title: String,
     detail: String,
@@ -35,6 +36,7 @@ struct Suggestion {
     insert: String,
     file: Option<String>,
     context: Option<(String, String)>,
+    install: String,
 }
 
 pub struct Extras {
@@ -207,10 +209,6 @@ impl Extras {
                 self.show_pulls(&trigger.query);
             }
             Kind::Mention => {
-                let Some(root) = root else {
-                    self.show(vec![], "Add a project to mention its files.");
-                    return;
-                };
                 let request = app.ask(Target::Mentions);
                 self.pending.replace(request.clone());
                 let query = trigger.query.clone();
@@ -218,9 +216,9 @@ impl Extras {
                     return;
                 }
                 if self.items.borrow().is_empty() {
-                    self.show(vec![], "Searching workspace files…");
+                    self.show(vec![], "Searching skills, plugins and files…");
                 }
-                app.core.run(|studio| studio.search_files(request, root, query, 20));
+                app.core.run(|studio| studio.mentions(request, root, query, MENTION_LIMIT));
             }
         }
     }
@@ -247,11 +245,11 @@ impl Extras {
                 detail: format!("{} → {} · {}", pull.head, pull.base, pull.url),
                 badge: format::capitalize(&pull.state.to_lowercase()),
                 insert: format!("#{} ", pull.number),
-                file: None,
                 context: Some((
                     format!("PR #{}", pull.number),
                     format!("{}\n{}\n{} → {} ({})", pull.title, pull.url, pull.head, pull.base, pull.state),
                 )),
+                ..Suggestion::default()
             })
             .collect();
         self.show(items, "No matching pull requests.");
@@ -270,8 +268,7 @@ impl Extras {
                 detail: skill.description.clone(),
                 badge: skill_source(skill.source).to_string(),
                 insert: format!("${} ", skill.name),
-                file: None,
-                context: None,
+                ..Suggestion::default()
             })
             .collect();
         self.show(items, "No matching skill.");
@@ -295,7 +292,7 @@ impl Extras {
         }
     }
 
-    pub fn mentions_loaded(&self, request: &str, hits: &[SearchHit]) {
+    pub fn mentions_loaded(&self, request: &str, mentions: &[Mention]) {
         if *self.pending.borrow() != request {
             return;
         }
@@ -303,19 +300,19 @@ impl Extras {
         if !open {
             return;
         }
-        let items = hits
+        let items = mentions
             .iter()
-            .take(MENU_LIMIT)
-            .map(|hit| Suggestion {
-                title: format!("@{}", hit.relative),
-                detail: hit.preview.clone(),
-                badge: String::new(),
-                insert: format!("@{} ", hit.relative),
-                file: Some(hit.relative.clone()),
-                context: None,
+            .map(|mention| Suggestion {
+                title: mention.title.clone(),
+                detail: mention.detail.clone(),
+                badge: mention.badge.clone(),
+                insert: mention.insert.clone(),
+                file: (mention.kind == MentionKind::File).then(|| mention.title[1..].to_string()),
+                install: mention.install.clone(),
+                ..Suggestion::default()
             })
             .collect();
-        self.show(items, "No matching files or folders.");
+        self.show(items, "No matching skill, plugin or file.");
     }
 
     fn show_commands(&self, query: &str) {
@@ -325,8 +322,7 @@ impl Extras {
             detail: "Switch response model for this thread".to_string(),
             badge: "App".to_string(),
             insert: "/model ".to_string(),
-            file: None,
-            context: None,
+            ..Suggestion::default()
         }];
         items.extend(self.commands.borrow().iter().map(|command| Suggestion {
             title: format!("/{}", command.name),
@@ -343,8 +339,7 @@ impl Extras {
                 }
             },
             insert: format!("/{} ", command.name),
-            file: None,
-            context: None,
+            ..Suggestion::default()
         }));
         items.retain(|item| item.title[1..].to_lowercase().contains(&query));
         items.truncate(MENU_LIMIT);
@@ -394,6 +389,10 @@ impl Extras {
                     let next = if key == gdk::Key::Down { current + 1 } else { (current - 1).max(0) };
                     if let Some(row) = self.list.row_at_index(next) {
                         self.list.select_row(Some(&row));
+                        if let Some(shown) = row.compute_bounds(&self.list) {
+                            let (top, height) = (f64::from(shown.y()), f64::from(shown.height()));
+                            self.menu.vadjustment().clamp_page(top, top + height);
+                        }
                     }
                     return glib::Propagation::Stop;
                 }
@@ -469,6 +468,9 @@ impl Extras {
             if !files.contains(&file) {
                 files.push(file);
             }
+        }
+        if !item.install.is_empty() {
+            crate::plugins::install(&self.app, &item.install, &item.install);
         }
         self.close();
         self.render_chips();
@@ -581,10 +583,10 @@ impl Extras {
         self.render_chips();
     }
 
-    pub fn show_fixture_mentions(&self, hits: &[SearchHit]) {
+    pub fn show_fixture_mentions(&self, mentions: &[Mention]) {
         self.pending.replace("fixture".to_string());
         self.trigger.replace(Some(Trigger { kind: Kind::Mention, start: 0, query: String::new() }));
-        self.mentions_loaded("fixture", hits);
+        self.mentions_loaded("fixture", mentions);
     }
 
     pub fn show_fixture_commands(&self, commands: Vec<SlashCommand>, query: &str) {

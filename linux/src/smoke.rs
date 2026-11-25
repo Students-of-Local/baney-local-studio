@@ -327,11 +327,12 @@ fn advance(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, proj
         }
         Phase::FollowUp | Phase::Rejected => follow_up(app, phase, failed, project),
         Phase::Workspace => {
-            let mention = app.composer.extras.suggestions().iter().any(|item| item == "@notes.md");
+            let listed = app.composer.extras.suggestions();
+            let mention = ["@notes-tidy", "@notes.md"].iter().all(|name| listed.iter().any(|item| item == name));
             let file = app.panel.files.names().iter().any(|name| name == "notes.md");
             let hits = app.sidebar.hit_count() > 0;
             if mention && file && hits {
-                println!("ok   @ mention, Files surface and thread search answered through the core");
+                println!("ok   @ skill and file, Files surface and thread search answered through the core");
                 phase.set(Phase::Terminal);
                 app.drawer.add(app, crate::drawer::Layout::SideBySide);
             }
@@ -340,6 +341,15 @@ fn advance(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, proj
         Phase::Keys => keys(app, phase, failed),
         Phase::Endpoint | Phase::Discovering | Phase::Adding | Phase::Removing | Phase::Kernel | Phase::Finished => {}
     }
+}
+
+fn write_mentioned(project: &std::path::Path) -> Result<(), String> {
+    let skill = local_studio_core::data_dir(None)?.join("skills/notes-tidy");
+    let text = "---\nname: notes-tidy\ndescription: Tidy a notes file\n---\nSort the lines.\n";
+    std::fs::create_dir_all(&skill)
+        .and_then(|()| std::fs::write(skill.join("SKILL.md"), text))
+        .and_then(|()| std::fs::write(project.join("notes.md"), "smoke notes\n"))
+        .map_err(|error| error.to_string())
 }
 
 fn start_draft(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>) {
@@ -447,8 +457,8 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
             app.composer.set_text("");
             let thread = app.state.borrow().threads.first().map(|row| row.id.clone());
             app.select_thread(thread);
-            if let Err(error) = std::fs::write(std::path::Path::new(project).join("notes.md"), "smoke notes\n") {
-                finish(app, phase, failed, false, &format!("write notes.md: {error}"));
+            if let Err(error) = write_mentioned(std::path::Path::new(project)) {
+                finish(app, phase, failed, false, &format!("write what @ lists: {error}"));
                 return;
             }
             phase.set(Phase::Workspace);
