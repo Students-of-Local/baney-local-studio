@@ -10,6 +10,8 @@ allowed() {
 controller/src/share.ts|local-ai-registry.dev|JSON schema id, never fetched
 core/src/tunnel/setup.rs|dash.cloudflare.com|printed for the user to open
 core/src/tunnel/setup.rs|developers.cloudflare.com|printed for the user to open
+core/src/tunnel/setup/relay.rs|dash.cloudflare.com|printed for the user to open
+core/src/tunnel/setup/relay.rs|nodejs.org|printed for the user to open
 core/src/tunnel/setup.rs|www.apple.com|property list DTD name
 remote/src/service.rs|www.apple.com|property list DTD name
 ios/LocalStudio/Info.plist|www.apple.com|property list DTD name

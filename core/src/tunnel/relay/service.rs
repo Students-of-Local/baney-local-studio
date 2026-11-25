@@ -104,7 +104,7 @@ fn ending(ended: Ended) -> (&'static str, String) {
 }
 
 #[cfg(unix)]
-fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
+pub(in crate::tunnel) fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     use tokio::signal::unix::{signal, SignalKind};
     let (mut term, mut int) = (signal(SignalKind::terminate())?, signal(SignalKind::interrupt())?);
     Ok(async move {
@@ -116,7 +116,7 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
 }
 
 #[cfg(not(unix))]
-fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
+pub(in crate::tunnel) fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     let mut stop = tokio::signal::windows::ctrl_c()?;
     Ok(async move {
         stop.recv().await;

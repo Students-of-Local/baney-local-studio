@@ -22,6 +22,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio skills create [--save] [--json] [<reply file or ->]
        local-studio skills mcp [--project <dir> | --no-project] [--data <dir>] [--plugins <dir>]
        local-studio tunnel status [--json]
+       local-studio tunnel setup --relay [<name>] [--account <id>] [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --tailnet [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel adopt [--hostname <name>] [--yes] [--json]
@@ -580,6 +581,9 @@ fn show(value: &Value, as_json: bool) {
     for step in value.get("plan").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
         println!("  - {step}");
     }
+    for account in value.get("accounts").and_then(Value::as_array).into_iter().flatten() {
+        println!("  - {} ({})", account["id"].as_str().unwrap_or(""), account["name"].as_str().unwrap_or(""));
+    }
     for (key, label) in [
         ("command", "run"),
         ("nextCommand", "run"),
@@ -608,13 +612,15 @@ fn port_value(value: Option<&&str>, usage: &str) -> Result<u16, String> {
 }
 
 fn setup(flags: &[&str], json: bool) -> Result<(), String> {
-    let usage = "usage: local-studio tunnel setup (--cloudflare <hostname> [--alias <name>]... | --tailnet) [--serve <port>] [--mcp <port>] [--yes] [--json]";
-    let (mut cloudflare, mut tailnet, mut yes) = (None, false, false);
+    let usage = "usage: local-studio tunnel setup (--relay [<name>] [--account <id>] | --cloudflare <hostname> [--alias <name>]... | --tailnet) [--serve <port>] [--mcp <port>] [--yes] [--json]";
+    let (mut cloudflare, mut tailnet, mut relay, mut account, mut yes) = (None, false, None, None, false);
     let (mut aliases, mut serve, mut mcp) = (Vec::new(), None, None);
-    let mut rest = flags.iter();
+    let mut rest = flags.iter().peekable();
     while let Some(flag) = rest.next() {
         match *flag {
             "--cloudflare" => cloudflare = Some(rest.next().ok_or(usage)?.to_string()),
+            "--relay" => relay = Some(rest.next_if(|name| !name.starts_with("--")).map(ToString::to_string)),
+            "--account" => account = Some(rest.next().ok_or(usage)?.to_string()),
             "--alias" => aliases.push(rest.next().ok_or(usage)?.to_string()),
             "--tailnet" => tailnet = true,
             "--yes" => yes = true,
@@ -623,13 +629,47 @@ fn setup(flags: &[&str], json: bool) -> Result<(), String> {
             _ => return Err(usage.to_string()),
         }
     }
-    match (cloudflare, tailnet) {
-        (Some(host), false) => {
+    match (cloudflare, tailnet, relay) {
+        (None, false, Some(name)) if aliases.is_empty() => setup_relay(name, account, (serve, mcp), yes, json),
+        _ if account.is_some() => Err(usage.to_string()),
+        (Some(host), false, None) => {
             run_state(move |t| Box::pin(t.setup_cloudflare(host, aliases, serve, mcp, consent(yes, json))), json)
         }
-        (None, true) if aliases.is_empty() => run_state(move |t| Box::pin(t.setup_tailnet(serve, mcp)), json),
+        (None, true, None) if aliases.is_empty() => run_state(move |t| Box::pin(t.setup_tailnet(serve, mcp)), json),
         _ => Err(usage.to_string()),
     }
+}
+
+#[cfg(feature = "link")]
+fn setup_relay(
+    name: Option<String>,
+    account: Option<String>,
+    ports: (Option<u16>, Option<u16>),
+    yes: bool,
+    as_json: bool,
+) -> Result<(), String> {
+    let go = move |state: &Value| {
+        if yes || as_json || !std::io::stdin().is_terminal() {
+            return yes;
+        }
+        println!("{}", state["message"].as_str().unwrap_or_default());
+        print!("Replace it? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    };
+    run_state(move |t| Box::pin(t.setup_relay(name, account, ports.0, ports.1, go)), as_json)
+}
+
+#[cfg(not(feature = "link"))]
+fn setup_relay(
+    _name: Option<String>,
+    _account: Option<String>,
+    _ports: (Option<u16>, Option<u16>),
+    _yes: bool,
+    _as_json: bool,
+) -> Result<(), String> {
+    Err(NO_RELAY.into())
 }
 
 fn adopt(flags: &[&str], json: bool) -> Result<(), String> {
