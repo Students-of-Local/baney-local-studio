@@ -204,7 +204,7 @@ extension SnapshotCatalog {
                 updates: [],
                 view: { _ in
                     let draft = fixtures.skill(marked: true)
-                    return AnyView(SkillDraftSheet(draft: draft, saving: false) { _, _, _ in } cancel: {}.ignoresSafeArea())
+                    return AnyView(SkillDraftSheet(draft: draft, saving: false) { _, _ in } close: { _ in }.ignoresSafeArea())
                 }
             ),
             SnapshotEntry(

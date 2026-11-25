@@ -17,7 +17,7 @@ private struct SkillDraftCardBody: View {
     let store: StudioStore
     let thread: String
     let draft: SkillDraft
-    @State private var reviewing = false
+    @State private var reviewing: SkillDraft?
 
     var body: some View {
         let saving = store.conversation.savingSkills.contains(thread)
@@ -70,11 +70,12 @@ private struct SkillDraftCardBody: View {
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.primary.opacity(0.3)))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Skill from this thread: \(draft.name)")
-        .sheet(isPresented: $reviewing) {
-            SkillDraftSheet(draft: draft, saving: saving) { made, text, failed in
-                store.saveSkill(thread: thread, draft: made, text: text, failed: failed)
-            } cancel: {
-                reviewing = false
+        .sheet(item: $reviewing) { draft in
+            SkillDraftSheet(draft: draft, saving: saving) { text, failed in
+                store.saveSkill(thread: thread, draft: draft.id, text: text, failed: failed)
+            } close: { text in
+                store.conversation.keepSkillText(thread: thread, draft: draft.id, text: text)
+                reviewing = nil
             }
         }
     }
@@ -85,7 +86,7 @@ private struct SkillDraftCardBody: View {
     }
 
     private var reviewButton: some View {
-        Button("Review") { reviewing = true }
+        Button("Review") { reviewing = draft }
             .help("Read and edit it before you save")
     }
 }
@@ -93,23 +94,21 @@ private struct SkillDraftCardBody: View {
 struct SkillDraftSheet: View {
     let draft: SkillDraft
     let saving: Bool
-    let save: (String, String, @escaping (String) -> Void) -> Void
-    let cancel: () -> Void
-    @State private var made: String
+    let save: (String, @escaping (String) -> Void) -> Void
+    let close: (String) -> Void
     @State private var text: String
     @State private var error: String?
 
     init(
         draft: SkillDraft,
         saving: Bool,
-        save: @escaping (String, String, @escaping (String) -> Void) -> Void,
-        cancel: @escaping () -> Void
+        save: @escaping (String, @escaping (String) -> Void) -> Void,
+        close: @escaping (String) -> Void
     ) {
         self.draft = draft
         self.saving = saving
         self.save = save
-        self.cancel = cancel
-        _made = State(initialValue: draft.id)
+        self.close = close
         _text = State(initialValue: draft.text)
     }
 
@@ -163,11 +162,12 @@ struct SkillDraftSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                Button("Cancel", role: .cancel, action: cancel)
+                Button("Close", role: .cancel) { close(text) }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(saving)
                 Button(draft.verb) {
                     error = nil
-                    save(made, text) { error = $0 }
+                    save(text) { error = $0 }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.primary)
@@ -179,6 +179,8 @@ struct SkillDraftSheet: View {
         }
         .frame(width: 640, height: 600)
         .background(Theme.card)
+        .interactiveDismissDisabled(saving)
+        .onDisappear { close(text) }
     }
 }
 
@@ -218,6 +220,7 @@ private struct PlainEditor: NSViewRepresentable {
         view.isAutomaticDashSubstitutionEnabled = false
         view.isAutomaticTextReplacementEnabled = false
         view.isAutomaticSpellingCorrectionEnabled = false
+        view.smartInsertDeleteEnabled = false
         view.string = text
         scroll.drawsBackground = false
         return scroll
@@ -242,6 +245,8 @@ private struct PlainEditor: NSViewRepresentable {
         }
     }
 }
+
+extension SkillDraft: Identifiable {}
 
 extension SkillDraft {
     private static let asks = "asks.txt"
