@@ -62,8 +62,9 @@ the pull request how you checked it by hand, or that you didn't.
 - Stage files by explicit path (`git add path/to/file`), never `git add -A` or `git add .`.
 - Plain, direct English in code, comments and docs. No emojis. The voice is in
   [media/brand/BRAND.md](media/brand/BRAND.md).
-- Side panel sign-in is API keys only. A pull request that adds a subscription sign-in or
-  borrows another app's identity won't be merged ([docs/auth-policy.md](docs/auth-policy.md)).
+- Side panel sign-in is API keys, plus the sign-ins a provider documents for other apps, under
+  this app's own registration. A pull request that borrows another app's identity won't be merged
+  ([docs/auth-policy.md](docs/auth-policy.md)).
 
 ## Contributing a skill
 

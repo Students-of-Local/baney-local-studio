@@ -555,15 +555,25 @@ become usable again if you set up later with the same URL. `tychicus token clien
 On a custom route (`--public-url`), `remote off` can't close your front door: your own tunnel
 keeps forwarding to this computer. Stop it there, for example by stopping `cloudflared`.
 
-### After a tunnel token leaked
+### After a relay key or tunnel token leaked
 
-Someone who runs a second connector with your tunnel token receives some of the requests meant for
-you, including approval page submissions, which carry your passcode. Before the tunnel comes back:
+Someone who runs a second connector with your relay key or tunnel token receives some of the requests
+meant for you, including approval page submissions, which carry your passcode.
 
-```bash
-umask 077; printf '%s\n' '<new passcode>' > ~/new-passcode   # owner-only, at least 20 characters
-tychicus remote reset --new-passcode-file ~/new-passcode [--yes] [--json]
-```
+1. Turn the route off: `tychicus remote off`.
+2. End the old credential, which `remote reset` doesn't do. Relay: `npx wrangler@4.163.0 delete
+   tychicus-relay`, so the old key opens nothing. Cloudflare: delete the tunnel in the dashboard, or
+   rotate its token there. Leave the route off until step 4.
+3. Set a new passcode and end every grant (bash or zsh; the passcode isn't echoed or kept in history):
+
+   ```bash
+   (umask 077; IFS= read -rs p; printf '%s\n' "$p" > ~/new-passcode)   # at least 20 characters
+   tychicus remote reset --new-passcode-file ~/new-passcode [--yes] [--json]
+   rm ~/new-passcode
+   ```
+
+4. Turn the route on again with `tychicus remote setup` and your route's option. The relay gets a new
+   key, and so does every setup run after it.
 
 `remote reset` reads the new passcode from that file (never the command line or the environment)
 and refuses a file group or others can read or write, a link, an empty file, or a passcode shorter

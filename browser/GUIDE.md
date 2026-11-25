@@ -28,8 +28,8 @@
 ---
 
 Local Studio's browser use is a Chromium extension and a small CLI. Your coding agent gets a browser that is
-already signed in where you are signed in. It works in background tabs it owns, and it
-asks before it opens a site you haven't allowed. Local Studio also ships agent skills that pass
+already signed in where you are signed in. It works in background tabs it owns, and you
+pick when it asks before it opens a site. Local Studio also ships agent skills that pass
 a security lint, a verified source library, and a side panel agent of its own for when you
 want to chat with a page directly.
 
@@ -479,8 +479,11 @@ Tailscale and a real Cloudflare tunnel hasn't been recorded yet.
 
 Your browser is signed in as you, so the defaults are conservative.
 
-- **The agent asks before it opens a new site.** Claude Code and Codex show the prompt
-  inline; otherwise answer it in the side panel under Settings > Agents. Run
+- **You pick when the agent asks before it opens a site**, in Settings > Agents. Auto, the
+  default, asks before an agent goes straight to mail, a bank or another sensitive site, and
+  before every new site for a small or unknown model; an agent on a frontier model opens
+  ordinary sites without asking. Manual asks before every new site, and Yolo doesn't ask.
+  Claude Code and Codex show the prompt inline; otherwise answer it in the side panel. Run
   `tychicus allow <host>` to pre-approve a site, `tychicus allow-all` to skip prompts and
   `tychicus ask` to turn them back on.
 - **Page text is data, not instructions.** The MCP server tells every agent that page
@@ -504,11 +507,12 @@ Your browser is signed in as you, so the defaults are conservative.
 - **Only this extension can make the browser start the host.** The host manifest's
   `allowed_origins` names one fixed extension id, `igjafcggmahiboobmnhfkndodphjdnhg`,
   derived from the manifest `key` (the e2e test checks it).
-- **API keys only, no subscription sign-in.** The ChatGPT, GitHub Copilot and Gemini
-  sign-ins this fork inherited worked by posing as Codex CLI, VS Code and Gemini CLI.
-  Their terms forbid that, and accounts get suspended for it, so they're gone, along with
-  Claude Pro/Max login. The side panel takes API keys, which each provider bills. The CLI
-  and the MCP server never call a model. Sources and dates are in
+- **API keys, and only the sign-ins a provider documents for other apps.** The ChatGPT,
+  GitHub Copilot and Gemini sign-ins this fork inherited worked by posing as Codex CLI,
+  VS Code and Gemini CLI. Their terms forbid that, and accounts get suspended for it, so
+  they're gone, along with Claude Pro/Max login. Today's ChatGPT and GitHub Copilot
+  sign-ins use this app's own registration. The CLI's commands and the MCP server never
+  call a model. Sources and dates are in
   [docs/auth-policy.md](docs/auth-policy.md).
 - **Skills ship only through review and the lint** ([Skill lint and CI](#skill-lint-and-ci)).
 

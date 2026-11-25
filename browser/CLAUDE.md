@@ -1,4 +1,4 @@
-# Tabkyra
+# Local Studio browser use
 
 @AGENTS.md
 
@@ -15,6 +15,7 @@ Never break these:
   not the lint.
 - Never weaken the skill lint, its red-team tests, CI or CODEOWNERS without the
   maintainer's review.
-- Sign-in policy: API keys only. Never add a sign-in that borrows another app's identity
+- Sign-in policy: API keys, plus the sign-ins a provider documents for other apps, under this
+  app's own registration. Never add a sign-in that borrows another app's identity
   (docs/auth-policy.md).
 - Commit only when the user asks.

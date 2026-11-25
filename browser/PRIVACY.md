@@ -104,8 +104,14 @@ pastes it into a GitHub issue they open and post themselves. Turning the switch 
 
 ## What the agent can see
 
-The agent reads and acts only in tabs it opened or the user gave it, kept in their own tab group. It can't open a new
-site until the user allows it, and it hands the tab back for sign-ins and captchas.
+The agent reads and acts only in tabs it opened or the user gave it, kept in their own tab group. The user picks when it
+asks before a site, in Settings > Agents. Manual asks before every new site. Auto, the default, asks before an agent goes
+straight to mail, a bank or another sensitive site, and before every new site for a small or unknown model; an agent on a
+frontier model opens ordinary sites without asking. Yolo, off until the user turns it on, doesn't ask.
+
+The agent hands the tab back for captchas, and for sign-ins it either hands the tab back or opens a small window that
+names the site and takes the user's username and password. Those go into that page's fields and nowhere else, and the
+agent isn't given them, though a script it runs in the page (`run_js`) could read the fields.
 
 ## Data sale and use
 

@@ -1,6 +1,7 @@
 # Proxy Architecture
 
-> Local Studio no longer accepts Anthropic OAuth tokens (`sk-ant-oat-*`); see `auth-policy.md`. The OAuth notes below describe the upstream design.
+> This is the upstream design, kept for reference. Local Studio turns the proxy off each time the side panel starts, so
+> keys and chats go straight to the provider. It also refuses Anthropic OAuth tokens (`sk-ant-oat-*`); see `auth-policy.md`.
 
 ## Overview
 
