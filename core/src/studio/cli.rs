@@ -738,6 +738,22 @@ impl Actor {
         self.settle_approval(id, request);
     }
 
+    pub(super) fn cli_answer_questions(&mut self, id: &str, request: &str, answers: &[String]) {
+        let result = match self.drivers.get_mut(id) {
+            Some(cli) => cli.driver.answer_questions(request, answers),
+            None => Err("That question is no longer pending.".to_string()),
+        };
+        if let Err(error) = result {
+            self.mailbox.notice(NoticeLevel::Warning, error);
+        }
+    }
+
+    pub(super) fn cli_dismiss(&mut self, id: &str, request: &str) {
+        if let Some(cli) = self.drivers.get_mut(id) {
+            cli.driver.answer(request, ApprovalAnswer::Deny).ok();
+        }
+    }
+
     pub(super) fn cli_rename(&mut self, id: &str, title: &str) {
         self.store.update(id, |flags| flags.title = Some(title.to_string()));
         self.save();
@@ -869,6 +885,7 @@ impl Actor {
                 live.approvals.clear();
             }
         }
+        self.cancel_questions(id, false);
         self.cli_begin_open(id, Vec::new(), None)?;
         Ok(self.live_active(id).unwrap_or_default())
     }
@@ -982,7 +999,11 @@ impl Actor {
                 }
             }
             Event::Approval(approval) => self.add_approval(id, approval),
-            Event::ApprovalSettled(request) => self.settle_approval(&id, &request),
+            Event::Questions(asked) => self.harness_questions(&id, name(harness), asked),
+            Event::ApprovalSettled(request) => {
+                self.settle_approval(&id, &request);
+                self.harness_questions_gone(&id, &request);
+            }
             Event::Context(context) => {
                 if let Some(live) = self.threads.get_mut(&id).and_then(|thread| thread.live.as_mut()) {
                     live.state.context = Some(context);
@@ -1134,6 +1155,7 @@ impl Actor {
     }
 
     async fn cli_halt(&mut self, id: &str) {
+        self.cancel_questions(id, false);
         let busy = self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy);
         if busy {
             if let Some(thread) = self.threads.get_mut(id) {

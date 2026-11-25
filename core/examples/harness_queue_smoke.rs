@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,8 +11,8 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
     AccessMode, ApprovalAnswer, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel,
-    NotificationKind, PromptDraft, Settings, SkillDraft, SkillFile, Studio, StudioConfig, ThreadSettings, TranscriptOp,
-    Update, Waker, WorktreeChoice,
+    NotificationKind, PromptDraft, Question, Settings, SkillDraft, SkillFile, Studio, StudioConfig, ThreadSettings,
+    TranscriptOp, Update, Waker, WorktreeChoice,
 };
 use serde_json::{json, Map, Value};
 
@@ -53,6 +53,7 @@ struct Watch {
     misses: Vec<String>,
     settings: Option<Settings>,
     asked: BTreeMap<String, Vec<String>>,
+    cards: Vec<(String, String, Question)>,
     codex: bool,
     done: Vec<String>,
     drafts: BTreeMap<String, Option<SkillDraft>>,
@@ -128,6 +129,13 @@ fn apply(watch: &mut Watch, update: Update) {
         Update::Approvals { thread, approvals } => {
             let asked = approvals.into_iter().map(|approval| format!("{}: {}", approval.request_id, approval.command));
             watch.asked.insert(thread, asked.collect());
+        }
+        Update::Questions { thread, request, questions, .. } => {
+            watch.cards.retain(|(known, asked, _)| *known != thread || *asked != request);
+            watch.cards.extend(questions.into_iter().map(|question| (thread.clone(), request.clone(), question)));
+        }
+        Update::QuestionsSettled { thread, request } => {
+            watch.cards.retain(|(known, asked, _)| *known != thread || *asked != request);
         }
         Update::Settings { settings } => watch.settings = Some(settings),
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
@@ -425,6 +433,67 @@ fn codex_drop(run: &mut Run, label: &str, first: &str, held: &str) -> anyhow::Re
     run.slow(first)?;
     run.send(held);
     run.check(&format!("{label}: the dropped held message is shown in the transcript"), |watch| watch.noticed(held));
+    Ok(())
+}
+
+fn cards(watch: &Watch, thread: &str) -> Vec<(String, Question)> {
+    watch
+        .cards
+        .iter()
+        .filter(|(known, ..)| known == thread)
+        .map(|(_, request, question)| (request.clone(), question.clone()))
+        .collect()
+}
+
+fn harness_questions(run: &mut Run, pick: (&str, &str), source: &str) -> anyhow::Result<()> {
+    run.start(&format!("{source}-questions"), pick, None)?;
+    let thread = run.thread();
+    run.send("questions alpha");
+    let shown = |watch: &Watch| {
+        let cards = cards(watch, &watch.thread.clone().unwrap_or_default());
+        cards.len() == 2
+            && cards[0].1.header == source
+            && cards[0].1.question == "Which color?"
+            && cards[0].1.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() == ["Red", "Blue"]
+            && cards[0].1.options[0].description == "warm"
+            && cards[1].1.question == "Which size?"
+    };
+    if !run.within(&format!("{source}: both questions show as cards with their options"), CHECK_TIMEOUT, shown) {
+        println!("     cards {:?}", cards(&run.watch, &thread));
+        return Ok(());
+    }
+    let asked = cards(&run.watch, &thread);
+    let answers = HashMap::from([("Which color?".to_string(), "Blue".to_string())]);
+    run.studio.answer_questions(thread.clone(), asked[0].0.clone(), answers);
+    run.check(&format!("{source}: the answered card goes, the other stays"), |watch| {
+        let left = cards(watch, watch.thread.as_deref().unwrap_or_default());
+        left.len() == 1 && left[0].1.question == "Which size?"
+    });
+    run.until(PROMPT, |_| false);
+    if run.watch.replied("picked").is_some() || !run.watch.busy {
+        run.watch.miss(format!("{source}: the turn went on before every question was answered"));
+    }
+    let answers = HashMap::from([("Which size?".to_string(), "Small, Large".to_string())]);
+    run.studio.answer_questions(thread.clone(), asked[1].0.clone(), answers);
+    run.check(&format!("{source}: the CLI gets both answers by its own keys"), |watch| {
+        watch.replied("picked Blue and Small, Large").is_some()
+            && !watch.busy
+            && cards(watch, watch.thread.as_deref().unwrap_or_default()).is_empty()
+    });
+    run.send("questions bravo");
+    run.within(&format!("{source}: a second ask shows its cards"), CHECK_TIMEOUT, |watch| {
+        cards(watch, watch.thread.as_deref().unwrap_or_default()).len() == 2
+    });
+    run.studio.abort(thread);
+    run.within(
+        &format!("{source}: Stop clears the cards and ends the turn unanswered"),
+        Duration::from_secs(20),
+        |watch| {
+            cards(watch, watch.thread.as_deref().unwrap_or_default()).is_empty()
+                && !watch.busy
+                && watch.answers("picked") == 1
+        },
+    );
     Ok(())
 }
 
@@ -801,6 +870,8 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-start-exit", "slow romeo", "crash sierra")?;
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
+    harness_questions(run, CLAUDE, "Claude Code")?;
+    harness_questions(run, CODEX, "Codex")?;
     codex_unexpected_approval(run)?;
     codex_tool_approval(run)?;
     looks_up(run)?;

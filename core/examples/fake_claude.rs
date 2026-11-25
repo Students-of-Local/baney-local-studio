@@ -68,6 +68,38 @@ fn remember(session: Option<&(PathBuf, Option<PathBuf>)>, lines: &[Value]) {
     }
 }
 
+fn ask(inbox: &Receiver<Value>, waiting: &mut VecDeque<Value>, turn: u32) -> Option<String> {
+    let id = format!("fake-ask-{turn}");
+    let color = json!({ "question": "Which color?", "header": "Color", "multiSelect": false,
+        "options": [{ "label": "Red", "description": "warm" }, { "label": "Blue", "description": "cool" }] });
+    let size = json!({ "question": "Which size?", "header": "Size", "multiSelect": true,
+        "options": [{ "label": "Small", "description": "" }, { "label": "Large", "description": "" }] });
+    let input = json!({ "questions": [color, size] });
+    emit(&json!({ "type": "control_request", "request_id": id,
+        "request": { "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": input } }));
+    loop {
+        let next = inbox.recv().unwrap_or_else(|_| std::process::exit(0));
+        if interrupt(&next) {
+            answer_control(&next);
+            return None;
+        }
+        if next["type"] == "control_response" && next["response"]["request_id"] == id {
+            let response = &next["response"]["response"];
+            if response["behavior"] != "allow" {
+                return Some("question denied".to_string());
+            }
+            let answers = &response["updatedInput"]["answers"];
+            let picked = |key: &str| answers[key].as_str().unwrap_or("nothing").to_string();
+            return Some(format!("picked {} and {}", picked("Which color?"), picked("Which size?")));
+        }
+        if next["type"] == "control_request" {
+            answer_control(&next);
+        } else {
+            waiting.push_back(next);
+        }
+    }
+}
+
 fn run(
     turn: u32,
     frame: &Value,
@@ -79,6 +111,11 @@ fn run(
     emit(&json!({ "type": "system", "subtype": "init", "model": "fake-claude" }));
     emit(&json!({ "type": "user", "message": { "role": "user", "content": text }, "isReplay": true }));
     let mut aborted = false;
+    let mut asked = None;
+    if text.contains("questions") {
+        asked = ask(inbox, waiting, turn);
+        aborted = asked.is_none();
+    }
     if text.contains("slow") {
         let deadline = Instant::now() + SLOW;
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -129,6 +166,9 @@ fn run(
     }
     let mut reply =
         skill::reply(&text).unwrap_or_else(|| format!("reply to {text} at effort {effort} with {sources} settings"));
+    if let Some(asked) = asked {
+        reply = format!("{reply}: {asked}");
+    }
     if text.contains("look up") {
         let found = servers.and_then(|servers| mcp::skills(&servers["mcpServers"]["local-studio-skills"], &text));
         reply = format!("{reply}, found {}", found.as_deref().unwrap_or("no server"));

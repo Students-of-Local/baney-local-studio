@@ -23,7 +23,7 @@ private struct QuestionCardBody: View {
         let question = pending.question
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Image(systemName: "puzzlepiece.extension.fill")
+                Image(systemName: pending.source.hasPrefix("plugin:") ? "puzzlepiece.extension.fill" : "questionmark.bubble.fill")
                     .icon(.inline)
                     .accessibilityHidden(true)
                 Text(question.header)
@@ -42,7 +42,7 @@ private struct QuestionCardBody: View {
             }
             .foregroundStyle(Theme.primary)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Plugin \(question.header) asks")
+            .accessibilityLabel("\(question.header) asks")
             Text(question.question)
                 .font(.system(size: 13))
                 .lineSpacing(2)

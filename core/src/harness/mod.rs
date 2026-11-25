@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption};
+use crate::model::{
+    AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption, Question, QuestionOption,
+};
 
 pub(crate) use claude::session_exists as claude_session_exists;
 
@@ -46,6 +48,7 @@ const STOP_WORDS: [&str; 16] = [
 pub(crate) enum Event {
     Session(Box<SessionEvent>),
     Approval(Approval),
+    Questions(Asked),
     ApprovalSettled(String),
     Context(ContextUsage),
     Model(String),
@@ -56,6 +59,36 @@ pub(crate) enum Event {
     Failed(Failure, String),
     Opened(Box<OpenReport>),
     Loaded(Result<Vec<AgentMessage>, String>),
+}
+
+pub(crate) struct Asked {
+    pub(crate) request_id: String,
+    pub(crate) questions: Vec<Question>,
+}
+
+fn asked_question(value: &Value) -> Option<Question> {
+    let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
+    let question = text("question");
+    if question.is_empty() {
+        return None;
+    }
+    let options = value
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| {
+            let label = option.get("label").and_then(Value::as_str)?.trim().to_string();
+            let description = option.get("description").and_then(Value::as_str).unwrap_or_default().to_string();
+            (!label.is_empty()).then_some(QuestionOption { label, description })
+        })
+        .collect();
+    Some(Question {
+        header: text("header"),
+        question,
+        options,
+        multi_select: value.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+    })
 }
 
 pub(crate) struct Stop {
@@ -205,6 +238,13 @@ impl Driver {
         match self {
             Self::Claude(driver) => driver.answer(request, answer),
             Self::Codex(driver) => driver.answer(request, answer),
+        }
+    }
+
+    pub(crate) fn answer_questions(&mut self, request: &str, answers: &[String]) -> Result<(), String> {
+        match self {
+            Self::Claude(driver) => driver.answer_questions(request, answers),
+            Self::Codex(driver) => driver.answer_questions(request, answers),
         }
     }
 
