@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -232,6 +234,10 @@ impl Store {
     }
 
     pub(crate) fn save(&self) -> anyhow::Result<()> {
+        write(&self.path, &self.bytes()?)
+    }
+
+    fn bytes(&self) -> anyhow::Result<Vec<u8>> {
         let file = StateFile {
             version: VERSION,
             projects: self.projects.clone(),
@@ -240,15 +246,65 @@ impl Store {
             hidden: self.hidden.clone(),
             trusted: self.trusted.clone(),
         };
-        let bytes = serde_json::to_vec_pretty(&file)?;
-        let directory = self.path.parent().context("the state file has no directory")?;
-        std::fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
-        let temporary = directory.join(format!(".{FILE}.{}.tmp", std::process::id()));
-        let mut handle = std::fs::File::create(&temporary).with_context(|| format!("write {}", temporary.display()))?;
-        handle.write_all(&bytes)?;
-        handle.sync_all()?;
-        drop(handle);
-        std::fs::rename(&temporary, &self.path).with_context(|| format!("replace {}", self.path.display()))
+        Ok(serde_json::to_vec_pretty(&file)?)
+    }
+}
+
+fn write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let directory = path.parent().context("the state file has no directory")?;
+    std::fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
+    let temporary = directory.join(format!(".{FILE}.{}.tmp", std::process::id()));
+    let mut handle = std::fs::File::create(&temporary).with_context(|| format!("write {}", temporary.display()))?;
+    handle.write_all(bytes)?;
+    handle.sync_all()?;
+    drop(handle);
+    std::fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))
+}
+
+pub(crate) struct Saver {
+    next: Option<Sender<Vec<u8>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Saver {
+    pub(crate) fn new(store: &Store, failed: impl Fn(anyhow::Error) + Send + 'static) -> Self {
+        let path = store.path.clone();
+        let (next, saves) = std::sync::mpsc::channel::<Vec<u8>>();
+        let thread = std::thread::spawn(move || {
+            let mut written = Vec::new();
+            while let Ok(first) = saves.recv() {
+                let bytes = saves.try_iter().last().unwrap_or(first);
+                if bytes == written {
+                    continue;
+                }
+                match write(&path, &bytes) {
+                    Ok(()) => written = bytes,
+                    Err(error) => failed(error),
+                }
+            }
+        });
+        Self { next: Some(next), thread: Some(thread) }
+    }
+
+    pub(crate) fn save(&self, store: &Store) -> anyhow::Result<()> {
+        let bytes = store.bytes()?;
+        match &self.next {
+            Some(next) => Ok(next.send(bytes)?),
+            None => write(&store.path, &bytes),
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.next = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Saver {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
