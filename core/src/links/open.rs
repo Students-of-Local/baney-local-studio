@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -28,7 +28,11 @@ const RUNS: &[&[u8]] = &[
     b"\xcf\xfa\xed\xfe",
     b"\xca\xfe\xba\xbe",
     b"book\0\0\0\0mark",
+    b"L\0\0\0\x01\x14\x02",
 ];
+const OLD_OFFICE: &str = "doc xls ppt";
+const OLE: &[u8] = b"\xd0\xcf\x11\xe0";
+const INSTALLER: &[u8] = b"\x10\x0c\0\0\0\0\0\xc0\0\0\0\0\0\0\x46";
 
 const PANE_IDS: &[(&str, &str, &str, &str, &str)] = &[
     ("general", "systempreferences.GeneralSettings", "system", "", ""),
@@ -171,16 +175,28 @@ fn document(path: &Path, on: Platform) -> bool {
     }
     let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
     let listed = |list: &str| list.split(' ').any(|known| known.eq_ignore_ascii_case(extension));
-    metadata.is_file() && listed(DOCUMENTS) && starts_as_document(path, listed(ZIPPED))
+    metadata.is_file() && listed(DOCUMENTS) && starts_as_document(path, listed(ZIPPED), listed(OLD_OFFICE))
 }
 
-fn starts_as_document(path: &Path, zipped: bool) -> bool {
+fn starts_as_document(path: &Path, zipped: bool, old_office: bool) -> bool {
     let mut start = Vec::new();
-    let Ok(file) = fs::File::open(path) else { return false };
-    if file.take(16).read_to_end(&mut start).is_err() {
+    let Ok(mut file) = fs::File::open(path) else { return false };
+    if file.by_ref().take(64).read_to_end(&mut start).is_err() || RUNS.iter().any(|runs| start.starts_with(runs)) {
         return false;
     }
-    !RUNS.iter().any(|runs| start.starts_with(runs)) && (zipped || !start.starts_with(b"PK\x03\x04"))
+    if start.starts_with(b"PK\x03\x04") {
+        return zipped && !start.get(30..).unwrap_or_default().starts_with(b"META-INF");
+    }
+    !start.starts_with(OLE) || (old_office && !installer(&mut file, &start).unwrap_or(true))
+}
+
+fn installer(file: &mut fs::File, start: &[u8]) -> Option<bool> {
+    let shift = start.get(30).copied().filter(|shift| [9, 12].contains(shift))?;
+    let root = u64::from(u32::from_le_bytes(start.get(48..52)?.try_into().ok()?));
+    let mut kind = [0; 16];
+    file.seek(SeekFrom::Start(((root + 1) << shift) + 80)).ok()?;
+    file.read_exact(&mut kind).ok()?;
+    Some(&kind[1..] == INSTALLER)
 }
 
 fn reveal(given: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, String> {
