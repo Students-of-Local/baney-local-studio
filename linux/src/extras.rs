@@ -54,6 +54,7 @@ pub struct Extras {
     pulls: RefCell<Vec<PullRequest>>,
     pulls_key: RefCell<Option<String>>,
     pending: RefCell<String>,
+    shown: RefCell<String>,
     images: RefCell<Vec<ImageAttachment>>,
     files: RefCell<Vec<String>>,
     contexts: RefCell<Vec<(String, String)>>,
@@ -110,6 +111,7 @@ impl Extras {
             pulls: RefCell::new(Vec::new()),
             pulls_key: RefCell::new(None),
             pending: RefCell::new(String::new()),
+            shown: RefCell::new(String::new()),
             images: RefCell::new(Vec::new()),
             files: RefCell::new(Vec::new()),
             contexts: RefCell::new(Vec::new()),
@@ -300,6 +302,7 @@ impl Extras {
         if !open {
             return;
         }
+        self.shown.replace(request.to_string());
         let items = mentions
             .iter()
             .map(|mention| Suggestion {
@@ -370,6 +373,7 @@ impl Extras {
         }
         if let Some(first) = self.list.row_at_index(0) {
             self.list.select_row(Some(&first));
+            self.menu.vadjustment().set_value(0.0);
         }
         self.items.replace(items);
         self.menu.set_visible(true);
@@ -454,6 +458,9 @@ impl Extras {
         else {
             return;
         };
+        if trigger.kind == Kind::Mention && *self.shown.borrow() != *self.pending.borrow() {
+            return;
+        }
         let view = app.composer.view();
         let buffer = view.buffer();
         let mut start = buffer.iter_at_offset(trigger.start);
@@ -469,7 +476,8 @@ impl Extras {
                 files.push(file);
             }
         }
-        if !item.install.is_empty() {
+        let asked = app.state.borrow().plugin_pending.contains(&item.install);
+        if !item.install.is_empty() && !asked {
             crate::plugins::install(&self.app, &item.install, &item.install);
         }
         self.close();
