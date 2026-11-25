@@ -103,7 +103,7 @@ pub struct App {
     pub editors: Editors,
     pub saved_accels: RefCell<Option<SavedAccels>>,
     pub history: RefCell<(Vec<String>, usize)>,
-    pub unsent: RefCell<HashMap<String, Unsent>>,
+    pub unsent: RefCell<HashMap<Option<String>, Unsent>>,
     pub navigating: Cell<bool>,
     pub interactive: Cell<bool>,
     pub force_steer: Cell<bool>,
@@ -410,18 +410,19 @@ impl App {
                 dirty.settings = true;
             }
             Update::ThreadStarted { draft, thread } => {
+                let fork = draft.starts_with("fork:");
                 let ours = {
                     let mut state = self.state.borrow_mut();
-                    let ours = state.draft.as_deref() == Some(draft.as_str()) || draft.starts_with("fork:");
+                    let ours = state.draft.as_deref() == Some(draft.as_str()) || fork;
                     if ours {
                         state.draft = None;
                     }
                     ours
                 };
                 if ours {
-                    let here = self.state.borrow().selected.is_none();
-                    if let Some(unsent) = here.then(|| self.composer.leave()).flatten() {
-                        self.unsent.borrow_mut().insert(thread.clone(), unsent);
+                    let follows = !fork && self.state.borrow().selected.is_none();
+                    if let Some(unsent) = follows.then(|| self.composer.leave()).flatten() {
+                        self.park(Some(thread.clone()), unsent);
                     }
                     self.select_thread(Some(thread));
                 }
@@ -502,15 +503,12 @@ impl App {
                 if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
                     self.composer.set_text(&text);
                 } else {
-                    self.park(thread, PromptDraft { text, images: Vec::new(), files: Vec::new() });
+                    self.unsent.borrow_mut().remove(&Some(thread.clone()));
+                    self.park(Some(thread), PromptDraft { text, images: Vec::new(), files: Vec::new() }.into());
                 }
             }
             Update::ComposerDraft { thread, draft } => {
-                if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
-                    self.composer.set_draft(draft);
-                } else {
-                    self.park(thread, draft);
-                }
+                self.hand_back(thread, draft);
             }
             Update::Models { models, favorites, hidden } => {
                 let mut state = self.state.borrow_mut();
@@ -907,24 +905,37 @@ impl App {
         }
     }
 
-    fn park(&self, thread: String, draft: PromptDraft) {
-        let taken = self.unsent.borrow().contains_key(&thread);
-        if taken {
-            self.composer.tools.keep(&draft.text);
-        } else {
-            self.unsent.borrow_mut().insert(thread, draft.into());
+    pub fn park(&self, thread: Option<String>, unsent: Unsent) {
+        let mut parked = self.unsent.borrow_mut();
+        let unsent = match parked.remove(&thread) {
+            Some(later) => unsent.then(later),
+            None => unsent,
+        };
+        if !unsent.is_empty() {
+            parked.insert(thread, unsent);
+        }
+    }
+
+    fn hand_back(&self, thread: String, draft: PromptDraft) {
+        let here = self.state.borrow().selected.as_deref() == Some(thread.as_str());
+        if here {
+            self.keep_unsent();
+        }
+        self.park(Some(thread), draft.into());
+        if here {
+            self.bring_unsent();
         }
     }
 
     fn keep_unsent(&self) {
-        let key = self.state.borrow().composer_key();
+        let key = self.state.borrow().selected.clone();
         if let Some(unsent) = self.composer.leave() {
-            self.unsent.borrow_mut().insert(key, unsent);
+            self.park(key, unsent);
         }
     }
 
     fn bring_unsent(&self) {
-        let key = self.state.borrow().composer_key();
+        let key = self.state.borrow().selected.clone();
         let unsent = self.unsent.borrow_mut().remove(&key);
         if let Some(unsent) = unsent {
             self.composer.bring(unsent);
@@ -937,6 +948,7 @@ impl App {
             let mut state = self.state.borrow_mut();
             let project = project.or_else(|| state.current_project());
             state.selected = None;
+            state.draft = None;
             state.info = None;
             state.approvals.clear();
             state.queue.clear();
@@ -1066,10 +1078,17 @@ impl App {
         self.render_pending();
         let here = self.state.borrow().selected.as_deref() == Some(pending.thread.as_str());
         let back = here && self.composer.restore(&pending.draft);
-        if !back {
-            self.composer.tools.keep(&pending.draft.text);
-        }
-        let kept = if back { "" } else { " Its text is in the stash menu." };
+        let kept = match (here, back) {
+            (true, true) => "",
+            (true, false) => {
+                self.composer.tools.keep(&pending.draft.text);
+                " Its text is in the stash menu."
+            }
+            (false, _) => {
+                self.park(Some(pending.thread), pending.draft.into());
+                " It is back in its thread's composer."
+            }
+        };
         self.toast(&format!("Could not send the message: {message}{kept}"));
         self.render(Dirty { composer: true, ..Dirty::default() });
         true

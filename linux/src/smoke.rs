@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
-use local_studio_core::{ApprovalAnswer, Block, Connection, ItemKind, KernelState, ModelKey, ToolState};
+use local_studio_core::{
+    ApprovalAnswer, Block, Connection, ItemKind, KernelState, ModelKey, PromptDraft, ToolState, Update,
+};
 
 use crate::app::App;
 
@@ -199,8 +201,48 @@ fn keeps_unsent(app: &Rc<App>, thread: Option<String>) -> bool {
     app.new_thread(None);
     let new = holds(REJECTED);
     app.composer.set_text("");
+    page && empty && back && new && hands_back(app, thread)
+}
+
+fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
+    let Some(id) = thread.clone() else { return false };
+    let holds = |text: &str| app.composer.text() == text;
+    let returned = |file: &str| {
+        let (thread, text) = (id.clone(), format!("returned {file}"));
+        let draft = PromptDraft { text, images: vec![], files: vec![file.to_string()] };
+        app.apply(vec![Update::ComposerDraft { thread, draft }]);
+    };
+    let started = |draft: &str| {
+        app.apply(vec![Update::ThreadStarted { draft: draft.to_string(), thread: id.clone() }]);
+    };
+    returned("a.txt");
+    returned("b.txt");
+    let away = holds("");
     app.select_thread(thread);
-    page && empty && back && new && holds("")
+    let both = holds("returned b.txt\n\nreturned a.txt");
+    app.composer.set_text(KEPT);
+    returned("c.txt");
+    let before = holds(&format!("returned c.txt\n\n{KEPT}"));
+    let (_, mut files, _) = app.composer.extras.take();
+    files.sort();
+    app.composer.set_text("");
+    app.new_thread(None);
+    app.state.borrow_mut().draft = Some("gtk-draft-smoke".to_string());
+    app.new_thread(None);
+    app.composer.set_text(REJECTED);
+    started("gtk-draft-smoke");
+    let stayed = app.state.borrow().selected.is_none() && holds(REJECTED);
+    started("fork:smoke");
+    let forked = app.state.borrow().selected.as_deref() == Some(id.as_str()) && holds("");
+    app.new_thread(None);
+    let still = holds(REJECTED);
+    app.state.borrow_mut().draft = Some("gtk-draft-smoke".to_string());
+    started("gtk-draft-smoke");
+    let followed = holds(REJECTED);
+    app.composer.set_text("");
+    let merged = away && both && before && files == ["a.txt", "b.txt", "c.txt"];
+    println!("     handed back {merged}, left a start {stayed}, forked {forked} {still}, followed {followed}");
+    merged && stayed && forked && still && followed
 }
 
 fn turn_done(app: &Rc<App>) -> Option<Vec<local_studio_core::Item>> {
