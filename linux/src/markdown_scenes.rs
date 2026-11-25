@@ -1,6 +1,15 @@
+use std::rc::Rc;
+use std::time::Duration;
+
+use adw::prelude::*;
+use gtk::glib;
+use local_studio_core::{Block, ItemKind, TranscriptOp, Update};
+
+use crate::app::App;
+use crate::fixtures::{conversation, item, FOCUSED};
 use crate::format::{markdown, Markdown, Span};
 
-pub const SCENES: [&str; 3] = ["58-markdown-1", "58-markdown-2", "58-markdown-3"];
+pub const SCENES: [&str; 4] = ["58-markdown-1", "58-markdown-2", "58-markdown-3", "58-answer"];
 const CASES: [(&str, &str, &str); 30] = [
     ("M5", "- one\n  still one\n- two", "0• one still one|0• two"),
     ("M6", "1. a\n\n   ```sh\n   ls\n   ```\n2. b", "01. a|in 0,1|code sh:ls|in 0,0|02. b"),
@@ -40,6 +49,46 @@ const CASES: [(&str, &str, &str); 30] = [
 
 pub fn cases(scene: &str) -> &'static [(&'static str, &'static str, &'static str)] {
     SCENES.iter().position(|name| *name == scene).and_then(|page| CASES.chunks(10).nth(page)).unwrap_or_default()
+}
+
+pub fn stage(app: &Rc<App>, scene: &str) -> bool {
+    if scene != "58-answer" {
+        return false;
+    }
+    conversation(app, false);
+    let index = u64::try_from(app.timeline.items().len()).unwrap_or(0);
+    let answer = |text: &str, streaming| {
+        let thinking = Block::Thinking { text: "They say hi.".to_string() };
+        let blocks = vec![thinking, Block::Text { text: text.to_string() }];
+        item(90, 3, 1, ItemKind::Assistant { blocks, streaming, error: None, changed_files: Vec::new() })
+    };
+    let update = |op| Update::Transcript { thread: FOCUSED.to_string(), op };
+    app.apply(vec![update(TranscriptOp::Insert { index, item: answer("", true) })]);
+    let app = Rc::clone(app);
+    glib::timeout_add_local_once(Duration::from_millis(250), move || {
+        for streaming in [true, false] {
+            app.apply(vec![update(TranscriptOp::Update { index, item: answer("Hi there.", streaming) })]);
+        }
+    });
+    true
+}
+
+pub fn drawn(widget: &gtk::Widget) -> Result<(), String> {
+    if !widget.is_mapped() {
+        return Ok(());
+    }
+    if let Some(view) = widget.downcast_ref::<gtk::TextView>().filter(|view| view.has_css_class("ls-markdown")) {
+        let (start, end) = view.buffer().bounds();
+        if view.height() == 0 && start != end {
+            return Err(format!("{:?} is not drawn", view.buffer().text(&start, &end, false)));
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        drawn(&current)?;
+        child = current.next_sibling();
+    }
+    Ok(())
 }
 
 pub fn check(scene: &str) -> Result<(), String> {

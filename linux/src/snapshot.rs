@@ -45,7 +45,10 @@ pub fn start(app: &Rc<App>, dir: PathBuf, filter: Option<String>, failed: Rc<Cel
             if usage_scenes::finish(&app, scene) || link_scenes::finish(scene) {
                 settle(700).await;
             }
-            if let Err(error) = link_scenes::check(&app, scene).and_then(|()| crate::markdown_scenes::check(scene)) {
+            let checked = link_scenes::check(&app, scene)
+                .and_then(|()| crate::markdown_scenes::check(scene))
+                .and_then(|()| crate::markdown_scenes::drawn(app.window.upcast_ref()));
+            if let Err(error) = checked {
                 eprintln!("FAIL {scene}: {error}");
                 failed.set(true);
             }
