@@ -17,7 +17,7 @@ use local_studio_core::{
     TerminalRow, TerminalScroll, TerminalSelect, TerminalSize, ThreadRow, ThreadSettings, ThreadStatus, Update,
     UsagePeriod, UsageReport, Waker, WorktreeChoice, WritingStyle,
 };
-use serde_json::Map;
+use serde_json::{json, Map};
 
 #[path = "support/real_model.rs"]
 mod real_model;
@@ -465,6 +465,18 @@ fn start_stub_engine(bin: &Path) -> anyhow::Result<u16> {
     Ok(port)
 }
 
+fn name_stub_engine(controller: &Path, port: u16) -> anyhow::Result<()> {
+    std::fs::create_dir_all(controller)?;
+    let named = json!({
+        "fleetKey": format!("workspace-smoke-{}", std::process::id()),
+        "enginePorts": [port],
+        "registry": { "url": "", "dir": controller.join("registry"), "ref": "none" },
+        "modelsDir": controller.join("models"),
+    });
+    std::fs::write(controller.join("config.json"), named.to_string())?;
+    Ok(())
+}
+
 fn install_fake_gh(root: &Path) -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let bin = root.join("bin");
@@ -501,6 +513,7 @@ fn main() -> anyhow::Result<()> {
     install_fake_gh(&root)?;
     let engine = start_stub_engine(&root.join("bin"))?;
     println!("     stub engine on port {engine}");
+    name_stub_engine(&data.join("controller"), engine)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     std::env::set_var("LOCAL_STUDIO_CONTROLLER_URL", format!("http://127.0.0.1:{port}"));
