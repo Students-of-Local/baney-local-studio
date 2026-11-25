@@ -58,6 +58,7 @@ mod search;
 mod settings;
 mod setup;
 mod sidebar;
+mod skill_draft;
 mod smoke;
 mod snapshot;
 mod sound;
