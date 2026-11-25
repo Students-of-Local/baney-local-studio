@@ -48,6 +48,7 @@ const PROBED_POLL: Duration = Duration::from_millis(20);
 const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
 const LEFT_KEPT: usize = 8;
+const REOPEN_AFTER: Duration = Duration::from_millis(250);
 const NEW_THREAD_TITLE: &str = "New thread";
 const BODY_LIMIT: usize = 140;
 const GRANTABLE_EFFECTS: [&str; 6] = ["read", "write", "exec", "net", "outside", "protected"];
@@ -728,6 +729,7 @@ impl Studio {
             focused: None,
             watchers: HashMap::new(),
             left: VecDeque::new(),
+            reopen_at: None,
             heads: HashMap::new(),
             models: Vec::new(),
             models_waiting: Vec::new(),
@@ -1292,6 +1294,7 @@ struct Actor {
     focused: Option<String>,
     watchers: HashMap<String, u32>,
     left: VecDeque<String>,
+    reopen_at: Option<Instant>,
     heads: HashMap<String, GitHead>,
     models: Vec<ModelOption>,
     models_waiting: Vec<Option<(String, String)>>,
@@ -1476,6 +1479,12 @@ impl Actor {
                     self.cli_event(envelope).await;
                 },
                 () = wait_until(retry_at) => {}
+                () = wait_until(self.reopen_at) => {
+                    self.reopen_at = None;
+                    if let Some(id) = self.focused.clone() {
+                        self.open_focused(&id).await;
+                    }
+                }
                 _ = timer.tick() => self.on_timer(),
                 changed = self.settings.changed(), if settings_open => {
                     if changed.is_err() {
@@ -2149,12 +2158,16 @@ impl Actor {
         });
         self.save();
         self.dirty = true;
-        if self.client.is_none() && self.harness(&id).is_none() {
-            return;
+        let kept = self.threads.get(&id).is_some_and(|thread| thread.left.is_some() && thread.live.is_none());
+        self.reopen_at = kept.then(|| Instant::now() + REOPEN_AFTER);
+        if !kept {
+            self.open_focused(&id).await;
         }
-        match self.ensure_open(&id).await {
-            Ok(_) => self.refresh_subagents(&id).await,
-            Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
+    }
+
+    async fn open_focused(&mut self, id: &str) {
+        if self.client.is_some() || self.harness(id).is_some() {
+            self.open_watched(id).await;
         }
     }
 
