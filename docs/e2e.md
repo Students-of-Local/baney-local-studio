@@ -45,7 +45,7 @@ It ends with each example's time and the total. The status description names the
 
 ```sh
 ssh abbey1
-git clone https://github.com/baney75/local-studio ~/Projects/_work/local-studio-e2e
+git clone https://github.com/Students-of-Local/baney-local-studio ~/Projects/_work/local-studio-e2e
 cd ~/Projects/_work/local-studio-e2e/scripts/e2e-abbey1
 install -m 0644 local-studio-e2e.service local-studio-e2e.timer ~/.config/systemd/user/
 install -m 0600 local-studio-e2e.env ~/.config/local-studio-e2e.env
