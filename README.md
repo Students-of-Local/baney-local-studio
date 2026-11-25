@@ -104,7 +104,7 @@ The plugin family, in progress:
 
 | Plugin | What it is | State |
 | --- | --- | --- |
-| [Tychicus](https://github.com/baney75/tychicus) | Browser use and computer use for your agents | Both plugins in the bundled catalog; becoming the default plugin |
+| [Browser and computer use](browser) | The Local Studio extension works in browser tabs; computer use works in desktop apps | Both in the bundled catalog |
 | [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | In the bundled catalog |
 | [Gantrel](https://github.com/baney75/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
 | [UntoCaesar](https://github.com/baney75/UntoCaesar) | Local-AI tax filing that never leaves your machine | Engine and manifest on a branch |
@@ -132,6 +132,7 @@ Write your own: start from [examples/plugins/smoothstone](examples/plugins/smoot
 - `core/`: the shared Rust core both apps link: inbox, transcripts, git, files, terminals, usage, plugins, settings.
 - `kit/`: the core as a static library with Swift bindings (UniFFI).
 - `macos/`: the macOS app. `linux/`: the Linux app. `ios/`: the iPhone app, in progress.
+- `browser/`: the Local Studio extension for Chromium browsers, computer use and their command line tool. The app talks to them as separate programs.
 - `controller/`: the local-LLM controller. Discovers inference engines, links machines into a fleet, launches registry recipes. See [docs/controller.md](docs/controller.md).
 - Eukhe is the agent engine, the way libghostty is Ghostty's terminal: sessions, storage, tools and inference live there, out of process.
 
@@ -154,7 +155,8 @@ Local Studio stands on the work of others, and gladly says so.
 - [Eukhe](https://github.com/gildrb/eukhe), the agent core, and the native rework this repository grew from: Gil Rodrigues ([gildrb.com](https://gildrb.com)).
 - The original Local Studio: Sherif Cherfa ([0xSero](https://github.com/0xSero)) and [contributors](https://github.com/sybil-solutions/local-studio/graphs/contributors).
 - [T3 Code](https://github.com/pingdotgg/t3code) by T3 Tools: the original app and layout Local Studio began from.
+- `browser/` grew from [Sitegeist](https://github.com/badlogic/sitegeist) by [Mario Zechner](https://github.com/badlogic) and the agent bridge by [0xSero](https://github.com/0xSero/sitegeist). Their commits are in this history.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Report security issues as described in [SECURITY.md](SECURITY.md).
+MIT ([LICENSE](LICENSE)), except `browser/`, which is AGPL-3.0 ([browser/LICENSE](browser/LICENSE)): a separate set of programs the app runs and talks to, with no code shared between the two. Report security issues as described in [SECURITY.md](SECURITY.md).

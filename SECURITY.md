@@ -8,7 +8,7 @@ Include the version and channel from Settings or `local-studio --version`, the p
 
 ## Scope
 
-In scope: the macOS, Linux and iPhone apps, the Rust core, the local-LLM controller, `local-studio serve` and the remote protocol, and the plugin installer and grants.
+In scope: the macOS, Linux and iPhone apps, the Rust core, the local-LLM controller, `local-studio serve` and the remote protocol, the plugin installer and grants, and the browser extension, computer use and their command line tool ([browser/SECURITY.md](browser/SECURITY.md) lists those parts).
 
 Problems in Eukhe, the agent engine, belong to [gildrb/eukhe](https://github.com/gildrb/eukhe). Problems in a plugin belong to that plugin's repository.
 

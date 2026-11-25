@@ -1,11 +1,7 @@
 name: Feature request
-description: Suggest a change to Tabkyra's extension, CLI or MCP tools.
+description: Suggest a change to the app, the browser extension, computer use or the command line tools.
 labels: ["enhancement"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        For a new or changed skill, use the skill proposal form instead. Check [docs/verification/STATUS.md](https://github.com/baney75/tabkyra/blob/main/docs/verification/STATUS.md) first: it lists what is planned and what is already built.
   - type: textarea
     id: problem
     attributes:

@@ -1,13 +1,13 @@
 name: Bug report
-description: Something in Tabkyra (side panel, CLI, MCP tools, skills) failed or behaved wrong.
-labels: ["bug-report"]
+description: Something in the app, the browser extension, computer use or the command line tools failed or behaved wrong.
+labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
         This form has the same sections as the report the `/bug` skill writes and the side panel's **Review report** (Settings > Privacy). If you have one of those, paste each section into its box.
 
-        Not for problems with a website itself, or with your own code. Security problems go to [SECURITY.md](https://github.com/baney75/tabkyra/blob/main/SECURITY.md), not here.
+        Not for problems with a website itself, or with your own code. Security problems go to [SECURITY.md](https://github.com/baney75/local-studio/blob/main/SECURITY.md), not here.
 
         **Scrub before you submit.** Replace emails, names, phone numbers, addresses, account and student IDs, page URLs past the domain, paths under your home folder, and anything that looks like a key or token with a label in square brackets, such as `[email]`. Never paste page text from your signed-in sites.
   - type: textarea
@@ -16,8 +16,8 @@ body:
       label: What I did
       description: Numbered steps someone else can follow, on a public test page if you can.
       placeholder: |
-        1. Ran `tabkyra setup --yes`
-        2. Asked Claude Code to open example.com
+        1. Opened a thread in a new project
+        2. Asked it to open example.com
     validations:
       required: true
   - type: textarea
@@ -38,18 +38,18 @@ body:
     id: versions
     attributes:
       label: Versions
-      description: "`tabkyra status --json` and the side panel's About screen show these."
-      placeholder: Extension 1.1.8, CLI 0.1.0, Chrome 141, macOS 15
+      description: "`local-studio --version`, and the side panel's About screen for the extension."
+      placeholder: Local Studio 0.1.0 (dev), extension 1.4.1, Chrome 141, macOS 26
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
       label: Doctor
-      description: The lines `tabkyra doctor` reported as failed, or "all passed".
+      description: "For the browser or computer use, the lines `tychicus doctor` reported as failed."
       render: text
     validations:
-      required: true
+      required: false
   - type: input
     id: fingerprint
     attributes:
