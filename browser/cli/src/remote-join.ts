@@ -19,11 +19,12 @@ import { mintApprovalCode, passcodeSet, setPasscode } from "./oauth.ts";
 import { RELAY_SERVICE, relayStateFile, workerStays } from "./relay.ts";
 import { loadRemoteConfig, type RemoteConfig, remoteFile, saveRemoteConfig } from "./remote-config.ts";
 import { funnelOff, openFunnel, proofLines, type SetupOptions, serveWaitMs, tailnetOff, waitForServe } from "./remote-setup.ts";
+import { waitMs } from "./remote-guide.ts";
 import { agentStep, printReport, type SetupReport, setupExitCode } from "./remote-state.ts";
-import { type ProofCheck, preloadedHooks, publicChecks } from "./remote-test.ts";
+import { type ProofCheck, preloadedHooks, publicChecks, realFault } from "./remote-test.ts";
 import { type RouteRecord, readRouteRecord, routeRecordFile } from "./route-record.ts";
 import { COMMAND_NAME } from "./self.ts";
-import { installService, removeService, SERVE_SERVICE, serviceFile, serviceLogHint, serviceOfOtherConfig, writeAtomic } from "./service.ts";
+import { installService, removeService, SERVE_SERVICE, serviceFile, serviceLogHint, serviceOfOtherConfig, sleep, writeAtomic } from "./service.ts";
 import { applyMounts, planMounts, readServeState, wantedMounts } from "./tailnet.ts";
 import { tailscaleBinary } from "./tailscale.ts";
 import { c, sym } from "./ui.ts";
@@ -58,6 +59,8 @@ export interface JoinOptions {
 	connectCode?: boolean;
 	/** From setup: a person at a terminal, who gets a connect code unasked outside JSON mode. */
 	terminal?: boolean;
+	/** From setup (SetupOptions.wait): a person waits, so a check that is only pending is asked again until PUBLIC_WAIT_MS. */
+	wait?: boolean;
 }
 
 function reporter(options: { json?: boolean; report?: (report: SetupReport) => void }) {
@@ -219,15 +222,25 @@ export async function remoteJoin(options: JoinOptions = {}): Promise<number> {
 		say(`${sym.ok} ${r.message}`);
 	}
 
-	// The proof, through Local Studio's route alone, for the hostname and each alias.
+	// The proof, through Local Studio's route alone, for the hostname and each alias. A new name or a tunnel still connecting
+	// fails as pending for a few minutes (setup's rule): only a real fault rolls back, and a person waiting sees it asked again.
 	say(tailnet ? `\nFrom inside your tailnet, through Local Studio's route:` : `\nFrom the internet, through Local Studio's route:`);
 	const all: ProofCheck[] = [];
+	const publicDeadline = Date.now() + waitMs("PUBLIC_WAIT_MS", 5 * 60_000);
+	const every = waitMs("PUBLIC_POLL_MS", 5000);
 	for (const url of [publicUrl, ...aliases.map((a) => `https://${a}`)]) {
-		const checks = await prove(url, tailnet);
+		let checks = await prove(url, tailnet);
+		while (options.wait && !json && !realFault(checks) && checks.some((check) => check.status === "fail") && Date.now() + every < publicDeadline) {
+			await sleep(every);
+			checks = await prove(url, tailnet);
+		}
 		all.push(...checks.map((check) => (url === publicUrl ? check : { ...check, detail: `${new URL(url).hostname}: ${check.detail}` })));
-		const failed = checks.find((check) => check.status === "fail");
+		const failed = realFault(checks);
 		if (failed) return rollback(`${url}/mcp doesn't work through Local Studio's ${record.route} route: ${failed.name} failed (${failed.detail}).`, failed.name, all);
 	}
+	const pending = all.find((check) => check.status === "fail");
+	const notYet = pending ? ` It doesn't answer ${tailnet ? "on your tailnet" : "from the internet"} yet (${pending.name}: ${pending.detail}); a new name or tunnel takes a few minutes, then run ${COMMAND_NAME} remote test.` : "";
+	if (pending) say(`${sym.warn}${notYet}`);
 	// The way in, by setup's rules (runSetup): a passcode unless --no-passcode, and a connect code when asked or for a person at a terminal.
 	const connectorUrl = `${publicUrl}/mcp`;
 	const worker = previous?.relay ? ` ${workerStays(previous.relay)}` : "";
@@ -251,7 +264,7 @@ export async function remoteJoin(options: JoinOptions = {}): Promise<number> {
 	return finish({
 		ok: true,
 		state: "on",
-		message: `Joined Local Studio's ${record.route} route: ${connectorUrl} reaches serve on 127.0.0.1:${port}${aliases.length ? `, and so ${aliases.length === 1 ? "does" : "do"} ${aliases.map((a) => `https://${a}/mcp`).join(", ")} while connectors move` : ""}. No tunnel of the helper's own runs now.${worker}`,
+		message: `Joined Local Studio's ${record.route} route: ${connectorUrl} reaches serve on 127.0.0.1:${port}${aliases.length ? `, and so ${aliases.length === 1 ? "does" : "do"} ${aliases.map((a) => `https://${a}/mcp`).join(", ")} while connectors move` : ""}. No tunnel of the helper's own runs now.${notYet}${worker}`,
 		...way,
 		...(connect ? { connectCode: connect.code, connectCodeExpiresAt: connect.expiresAt } : {}),
 		next: { kind: "add_connector", url: connectorUrl },
@@ -350,5 +363,5 @@ export async function setupThroughLocalStudio(options: SetupOptions): Promise<nu
 		}
 		if (!record) return fail(`local-studio ${args.join(" ")} finished but wrote no route record (${routeRecordFile()}), so there is nothing to join. Update Local Studio. ${COMMAND_NAME} changed nothing.`, "local_studio");
 	}
-	return remoteJoin({ json: options.json, report: options.report, service: options.service, port: options.port, passcode: options.passcode, connectCode: options.connectCode, terminal: options.terminal });
+	return remoteJoin({ json: options.json, report: options.report, service: options.service, port: options.port, passcode: options.passcode, connectCode: options.connectCode, terminal: options.terminal, wait: options.wait });
 }

@@ -13,7 +13,7 @@ import { passcodeSet } from "./oauth.ts";
 import { RELAY_SERVICE, readRelayStatus, relaySetupCommand } from "./relay.ts";
 import { reachedOnTailnet } from "./remote-config.ts";
 import { askYes, closeInput, interactiveTerminal } from "./remote-guide.ts";
-import { FUNNEL_PORT, lingerWarning, loadRemoteConfig, openFunnel, operatorWarning, probeLocal, proofLines, type RemoteConfig, saveRemoteConfig, serveWaitMs, tailscaleReady, waitForServe } from "./remote-setup.ts";
+import { FUNNEL_PORT, lingerWarning, loadRemoteConfig, openFunnel, operatorWarning, planFunnel, probeLocal, proofLines, type RemoteConfig, saveRemoteConfig, serveWaitMs, tailscaleReady, waitForServe } from "./remote-setup.ts";
 import { CLOUDFLARED_DOWNLOAD_URL, EXIT_FAILED, EXIT_NEEDS_PERSON, EXIT_ON, printReport, type RemoteState, TAILSCALE_OPERATOR_FIX } from "./remote-state.ts";
 import { type ProofCheck, publicChecks } from "./remote-test.ts";
 import { releaseProgram, releaseRoot } from "./paths.ts";
@@ -128,7 +128,11 @@ async function diagnose(config: RemoteConfig): Promise<Diagnosis> {
 			return { actions, advice, blocked: { state: "problem", code: "serve", message: `Nothing answers on 127.0.0.1:${config.port} and no service runs serve. Start it yourself (${command}), or run ${COMMAND_NAME} remote setup to install the service.`, command } };
 		}
 	}
-	if (funnel && !funnel.open) actions.push({ kind: "open_funnel", what: `Open Tailscale Funnel on ${funnel.dns}:${FUNNEL_PORT} to 127.0.0.1:${config.port}` });
+	if (funnel && !funnel.open) {
+		const plan = planFunnel([config.port]);
+		if (!plan.ok) return { actions, advice, blocked: { state: plan.state, ...(plan.code ? { code: plan.code } : {}), message: plan.message } };
+		actions.push({ kind: "open_funnel", what: `Open Tailscale Funnel on ${funnel.dns}:${FUNNEL_PORT} to 127.0.0.1:${config.port}` });
+	}
 
 	const linger = serveFile() && existsSync(serveFile() as string) ? lingerWarning() : undefined;
 	if (linger) advice.push({ name: "linger", detail: linger, command: `loginctl enable-linger ${linger.split(" ").pop()}` });
@@ -241,8 +245,9 @@ async function perform(action: Diagnosis["actions"][number], config: RemoteConfi
 			return { ok: false, detail: `the relay connector was started, but it is ${up.state}, not connected. ${blocked ? `Run ${blocked.command}.` : `Its log: ${serviceLogHint(RELAY_SERVICE)}`}`, ...(blocked ? { blocked } : {}) };
 		}
 		case "open_funnel": {
-			const where = funnelFor();
-			if (!where) return { ok: false, detail: "Tailscale isn't ready" };
+			if (!funnelFor()) return { ok: false, detail: "Tailscale isn't ready" };
+			const where = planFunnel([config.port]);
+			if (!where.ok) return { ok: false, detail: where.message, blocked: { state: where.state, ...(where.code ? { code: where.code } : {}), message: where.message } };
 			const opened = await openFunnel(where.bin, where.dns, config.port);
 			if (opened.kind === "opened") return { ok: true, detail: `Funnel is on for ${where.dns}:${FUNNEL_PORT}` };
 			if (opened.kind === "not_allowed") return { ok: false, detail: `Funnel isn't enabled for this tailnet yet. Open ${opened.url}, enable it, then run ${COMMAND_NAME} remote fix again.`, blocked: { state: "funnel_not_allowed", message: "Funnel isn't enabled for this tailnet yet.", url: opened.url } };

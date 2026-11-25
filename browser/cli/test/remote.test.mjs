@@ -739,6 +739,8 @@ function remoteScenario(name, { lock = "Tailnet lock is NOT enabled.", serveStat
 	const scenarioEnv = { HOME: home, LOCAL_STUDIO_BROWSER_DIR: join(home, "cfg"), PATH: withNode(bin), LOCAL_STUDIO_BROWSER_APPLICATIONS_DIR: apps, LOCAL_STUDIO_BROWSER_DOH_URL: "http://127.0.0.1:9/dns-query" };
 	return {
 		stub,
+		/** Write the tailscale stub again with these options changed, such as `status: "{}"` for a Tailscale that stopped. */
+		tailscale: (more) => writeTailscaleStub(stubFile, { dir, log, dns: DNS, lock, serveStatus, funnel, funnelText: funnelFails, funnelOffFails, ...more }),
 		env: { ...env, ...scenarioEnv },
 		home,
 		config: scenarioEnv.LOCAL_STUDIO_BROWSER_DIR,
@@ -1228,6 +1230,26 @@ serviceTest("remote off leaves the service running and the files in place when F
 	assert.ok(existsSync(s.serviceFile()), "the service file is kept");
 	assert.ok(!s.calls().slice(before).includes(stopCall), "the service is not stopped while Funnel is open");
 	assert.deepEqual(s.remoteJson(), { publicUrl: FUNNEL_URL, port, route: "funnel" });
+});
+
+serviceTest("remote off with Tailscale stopped keeps the service and remote.json: its Funnel config comes back when it reconnects", async () => {
+	const { s, port } = await funnelWithService("off-funnel-disconnected", { funnelOffFails: true });
+	s.tailscale({ status: "{}" });
+	const before = s.calls().length;
+	const r = s.run(["remote", "off"]);
+	assert.equal(r.code, 1, r.out);
+	assert.match(r.out, /Tailscale isn't connected/);
+	assert.doesNotMatch(r.out, /already off/);
+	assert.ok(existsSync(s.serviceFile()), "the service file is kept");
+	assert.ok(!s.calls().slice(before).includes(stopCall), "the service is not stopped");
+	assert.deepEqual(s.remoteJson(), { publicUrl: FUNNEL_URL, port, route: "funnel" });
+	// remote.json damaged: the route can't be read, so it may be Funnel's, and nothing goes either.
+	writeFileSync(join(s.config, "remote.json"), "{ not json");
+	const bad = s.run(["remote", "off"]);
+	assert.equal(bad.code, 1, bad.out);
+	assert.match(bad.out, /Tailscale isn't connected and remote\.json can't be read/);
+	assert.ok(existsSync(s.serviceFile()), "the service file is kept");
+	assert.ok(existsSync(join(s.config, "remote.json")), "remote.json is kept");
 });
 
 serviceTest("remote off exits 1 and keeps the service file and remote.json when the service won't stop", async () => {

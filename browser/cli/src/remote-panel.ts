@@ -11,8 +11,8 @@ import { cloudflaredBinary } from "./cloudflare.ts";
 import { cloudflaredAsset } from "./cloudflared-download.ts";
 import { relaySetupCommand } from "./relay.ts";
 import { DEFAULT_RELAY_NAME } from "./relay-setup.ts";
-import { remoteFile } from "./remote-config.ts";
-import { loadRemoteConfig, openFunnel, planFunnelAsync, preflight, type ProbeSeam, relayView, type RemoteConfig, remoteSetup, routesFrom, tailscaleReadyAsync } from "./remote-setup.ts";
+import { reachedOnTailnet, remoteFile } from "./remote-config.ts";
+import { frontDoorNext, loadRemoteConfig, openFunnel, planFunnelAsync, preflight, type ProbeSeam, relayView, type RemoteConfig, remoteSetup, routesFrom, tailscaleReadyAsync } from "./remote-setup.ts";
 import { CLOUDFLARED_DOWNLOAD_URL, type RemoteNext, type RemoteState, type SetupReport, TAILSCALE_OPERATOR_FIX, tailscaleAccessDenied, tailscaleDownloadUrl } from "./remote-state.ts";
 import { publicChecks, realFault } from "./remote-test.ts";
 import { COMMAND_NAME, selfExec, selfPrefix } from "./self.ts";
@@ -246,12 +246,13 @@ export async function remoteOpenFunnel(seam: FunnelSeam = {}): Promise<RemoteAns
 export async function remoteTest(checks: typeof publicChecks = publicChecks, load: () => RemoteConfig | undefined = loadRemoteConfig): Promise<RemoteAnswer> {
 	const config = load();
 	if (!config) return remoteAnswer({ state: "problem", code: "not_set_up", message: `Nothing is set up yet.`, next: { kind: "run_command", command: `${COMMAND_NAME} remote setup` }, relaySetup: true });
-	const found = await checks(config.publicUrl);
+	const tailnet = reachedOnTailnet(config);
+	const found = frontDoorNext(await checks(config.publicUrl, { tailnet }), config);
 	const failed = found.find((x) => x.status === "fail");
 	return remoteAnswer({
 		state: failed ? "problem" : "on",
 		...(failed ? { code: failed.name } : {}),
-		message: failed ? `${failed.name}: ${failed.detail}` : "An assistant can reach and stream from this connector.",
+		message: failed ? `${failed.name}: ${failed.detail}` : tailnet ? "A device on your tailnet can reach and stream from this connector." : "An assistant can reach and stream from this connector.",
 		route: config.route,
 		connectorUrl: `${config.publicUrl}/mcp`,
 		...(config.route === "relay" ? relayPart(config) : {}),

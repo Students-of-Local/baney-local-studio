@@ -342,7 +342,7 @@ export async function openFunnel(bin: string, dns: string, port: number): Promis
  * Port 8443 as `tailscale serve status` shows it when remote.json can't say what we set up. found.ours:
  * every handler on 8443 proxies to a loopback port that answers like Local Studio, so closing it is safe.
  */
-type StrayFunnel = { kind: "none" } | { kind: "found"; bin: string; paths: string[]; ours: boolean } | { kind: "unknown"; message: string };
+type StrayFunnel = { kind: "none"; disconnected?: true } | { kind: "found"; bin: string; paths: string[]; ours: boolean } | { kind: "unknown"; message: string };
 
 const LOOPBACK_PORT = /^http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/;
 
@@ -351,7 +351,7 @@ async function strayFunnel(): Promise<StrayFunnel> {
 	const bin = tailscaleBinary();
 	if (!bin) return { kind: "none" };
 	const state = readTailscale(bin);
-	if (state.kind === "disconnected") return { kind: "none" };
+	if (state.kind === "disconnected") return { kind: "none", disconnected: true };
 	if (state.kind === "unreadable") return { kind: "unknown", message: "Couldn't read tailscale serve status, so I can't tell whether Funnel is on." };
 	const handlers = Object.entries(state.web[`${state.dns}:${FUNNEL_PORT}`]?.Handlers ?? {});
 	const local = handlers.filter(([, h]) => h.Proxy && LOCAL_PROXY.test(h.Proxy));
@@ -1341,15 +1341,17 @@ export async function remoteStatus(options: { json: boolean }, seam: ProbeSeam =
 					? `${where} answers with resource ${config.publicUrl}/mcp`
 					: `${where} ${local.state === "none" ? "didn't answer: connection refused" : local.detail}. Is ${COMMAND_NAME} serve running? ${COMMAND_NAME} remote setup starts it.`,
 		});
-		if (onTailnet) {
+		// Reached on the tailnet: this install's own tailnet route, or Local Studio's that it joined. Its name is in no public DNS.
+		const reached = reachedOnTailnet(config);
+		if (reached) {
 			const dns = await tailnetDnsCheck(new URL(config.publicUrl).hostname);
 			checks.push({ name: "tailnet DNS", status: dns.check.status, detail: dns.check.detail });
 		} else checks.push(await dnsCheck(new URL(config.publicUrl).hostname));
 		const pub = await metadata(`${config.publicUrl}${METADATA_PATH}`, 10_000, config.publicUrl);
-		checks.push({ name: onTailnet ? "tailnet fetch" : "public fetch", status: pub.ok ? "ok" : "fail", detail: pub.detail });
+		checks.push({ name: reached ? "tailnet fetch" : "public fetch", status: pub.ok ? "ok" : "fail", detail: pub.detail });
 		// This fetch used this computer's resolver. On a tailnet that answers a ts.net name with a tailnet address, so it can pass
 		// while the internet can't reach the connector. `remote test` asks public DNS and connects to that address instead.
-		if (!onTailnet && (await answeredInsideTailnet(new URL(config.publicUrl).hostname))) {
+		if (!reached && (await answeredInsideTailnet(new URL(config.publicUrl).hostname))) {
 			checks.push({ name: "public test", status: "warn", detail: `this computer can reach ${new URL(config.publicUrl).hostname} over your tailnet, so the fetch above can't tell whether the internet can. ${COMMAND_NAME} remote test checks from outside.` });
 		}
 		try {
@@ -1530,14 +1532,18 @@ export async function remoteTest(options: { json: boolean }): Promise<number> {
 export const tailscaleMissing = (platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env) =>
 	`Tailscale wasn't found (not on PATH, and not at ${platform === "win32" ? windowsInstallPaths("tailscale", env).join(" or ") : tailscaleAppPath()})`;
 
-/** Close Funnel on 8443. A failure that leaves the entry in place is a failure; an entry already gone counts as off. */
+/**
+ * Close Funnel on 8443. A failure that leaves the entry in place is a failure; an entry already gone counts as off. A Tailscale
+ * that isn't connected shows no entry but keeps its Funnel config, which is public again once it reconnects, so that is a failure too.
+ */
 export function funnelOff(bin: string | undefined): { ok: boolean; message: string } {
 	// Bounded like opening it: a call that never ends is a failure that leaves Funnel as it was.
 	const r = bin ? run(bin, ["funnel", `--https=${FUNNEL_PORT}`, "off"], 30_000) : { code: 1, out: tailscaleMissing() };
 	if (r.code === 0) return { ok: true, message: `Tailscale Funnel on port ${FUNNEL_PORT} is off.` };
-	if (bin) {
-		const state = readTailscale(bin);
-		if (state.kind === "disconnected" || (state.kind === "ok" && !state.web[`${state.dns}:${FUNNEL_PORT}`])) return { ok: true, message: `Tailscale Funnel on port ${FUNNEL_PORT} was already off.` };
+	const state = bin ? readTailscale(bin) : undefined;
+	if (state?.kind === "ok" && !state.web[`${state.dns}:${FUNNEL_PORT}`]) return { ok: true, message: `Tailscale Funnel on port ${FUNNEL_PORT} was already off.` };
+	if (state?.kind === "disconnected") {
+		return { ok: false, message: `Couldn't turn Funnel off: ${r.out}. Tailscale isn't connected, so I can't tell whether Funnel on port ${FUNNEL_PORT} is still on. The service and remote.json are kept; start Tailscale, then run ${COMMAND_NAME} remote off again.` };
 	}
 	return { ok: false, message: `Couldn't turn Funnel off: ${r.out}. The service and remote.json are kept; run tailscale funnel --https=${FUNNEL_PORT} off, then ${COMMAND_NAME} remote off again.` };
 }
@@ -1647,6 +1653,11 @@ export async function remoteOff(options: { json?: boolean } = {}): Promise<numbe
 		const stray = await strayFunnel();
 		if (stray.kind === "unknown") {
 			problem(`${stray.message} Nothing was changed. Start Tailscale and run ${COMMAND_NAME} remote off again.`);
+			return finish(1);
+		}
+		// remote.json can't say the route, so it may be Funnel's: a Tailscale that isn't connected keeps that Funnel for when it reconnects.
+		if (stray.kind === "none" && stray.disconnected && badFile !== undefined) {
+			problem(`Tailscale isn't connected and remote.json can't be read, so I can't tell whether Funnel on port ${FUNNEL_PORT} is still on. Nothing was changed. Start Tailscale and run ${COMMAND_NAME} remote off again.`);
 			return finish(1);
 		}
 		if (stray.kind === "found" && stray.ours) {

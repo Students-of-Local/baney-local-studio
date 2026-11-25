@@ -119,6 +119,29 @@ test("the outside checks: a failed one names its check; nothing set up says so",
 	assert.equal((await remoteTest(async () => OK_CHECKS, () => undefined)).code, "not_set_up");
 });
 
+test("the outside checks on the tailnet route, own or joined, run from inside the tailnet", async () => {
+	const asked = [];
+	const checks = async (url, opts) => (asked.push(opts?.tailnet === true), OK_CHECKS);
+	const tailnet = await remoteTest(checks, () => ({ publicUrl: "https://m.tail1.ts.net", port: 8787, route: "tailnet" }));
+	assert.equal(tailnet.state, "on");
+	assert.match(tailnet.message, /tailnet/);
+	await inConfig("joined-tailnet", async () => {
+		const studio = join(root, "joined-tailnet-studio");
+		mkdirSync(join(studio, "tunnel"), { recursive: true, mode: 0o700 });
+		writeJson(join(studio, "tunnel", "route.json"), { v: 1, owner: "local-studio", route: "tailnet", hostname: "m.tail1.ts.net", ports: { mcp: 18093 } });
+		const before = process.env.LOCAL_STUDIO_DATA_DIR;
+		process.env.LOCAL_STUDIO_DATA_DIR = studio;
+		try {
+			assert.equal((await remoteTest(checks, () => ({ publicUrl: "https://m.tail1.ts.net", port: 18093, route: "custom" }))).state, "on");
+		} finally {
+			if (before === undefined) delete process.env.LOCAL_STUDIO_DATA_DIR;
+			else process.env.LOCAL_STUDIO_DATA_DIR = before;
+		}
+	});
+	assert.equal((await remoteTest(checks, funnelConfig)).state, "on");
+	assert.deepEqual(asked, [true, true, false]);
+});
+
 test("Repair is feature-detected: a helper without `remote fix` answers available: false, and the host passes fixed arguments only", async () => {
 	const calls = [];
 	const without = await remoteFix(true, async (args) => (calls.push(args), { code: 2, out: "Usage: local-studio-browser remote setup | status | off | test" }));
