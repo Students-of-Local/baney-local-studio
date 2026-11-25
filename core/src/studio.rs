@@ -559,6 +559,7 @@ enum Command {
     },
     StopCheck {
         thread: String,
+        since: Instant,
     },
     RosterCheck {
         thread: String,
@@ -2051,7 +2052,7 @@ impl Actor {
                 self.mailbox.push(update);
             }
             Command::Verify { thread, attempt, relink } => self.verify(&thread, attempt, relink).await,
-            Command::StopCheck { thread } => self.stop_check(&thread).await,
+            Command::StopCheck { thread, since } => self.stop_check(&thread, since).await,
             Command::RosterCheck { thread } => self.roster_check(&thread).await,
             Command::CliSettle { thread, epoch } => self.cli_settle(&thread, epoch),
             Command::RestartDaemon { force } => self.restart_daemon(force).await,
@@ -4136,21 +4137,23 @@ impl Actor {
             return;
         };
         let thread = self.threads.entry(id.to_string()).or_default();
-        thread.stopping = Some(Instant::now());
+        let since = Instant::now();
+        thread.stopping = Some(since);
         thread.skill.asked = false;
         let abort = DaemonCommand::Abort { id: None, active_session_id: active, rest: Map::default() };
         match self.probe(abort, PROBE_TIMEOUT_MS).await {
-            Ok(_) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string() }),
+            Ok(_) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string(), since }),
             Err(error) => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("Eukhe did not take the stop request: {error}"));
-                self.itself.send(Command::StopCheck { thread: id.to_string() });
+                self.itself.send(Command::StopCheck { thread: id.to_string(), since });
             }
         }
     }
 
-    async fn stop_check(&mut self, id: &str) {
-        let Some(thread) = self.threads.get_mut(id) else { return };
-        if thread.stopping.take().is_none() || !self.running(id) {
+    async fn stop_check(&mut self, id: &str, since: Instant) {
+        let Some(thread) = self.threads.get_mut(id).filter(|thread| thread.stopping == Some(since)) else { return };
+        thread.stopping = None;
+        if !self.running(id) {
             return;
         }
         if self.harness(id).is_some() {
@@ -4476,6 +4479,7 @@ impl Actor {
             }
             if stopped && !self.running(&id) {
                 if let Some(thread) = self.threads.get_mut(&id) {
+                    thread.stopping = None;
                     thread.run_started_at = None;
                 }
                 self.itself.send(Command::SendHeld { thread: id.clone() });
@@ -4773,6 +4777,7 @@ impl Actor {
         let failed = self.threads.get(id).is_some_and(|thread| thread.failed_at.is_some());
         if let Some(thread) = self.threads.get_mut(id) {
             thread.pending_run = false;
+            thread.stopping = None;
             thread.ended_by_events = true;
         }
         if !self.running(id) {

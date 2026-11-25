@@ -656,12 +656,13 @@ impl Actor {
             return;
         };
         let result = cli.driver.interrupt();
-        self.threads.entry(id.to_string()).or_default().stopping = Some(Instant::now());
+        let since = Instant::now();
+        self.threads.entry(id.to_string()).or_default().stopping = Some(since);
         match result {
-            Ok(()) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string() }),
+            Ok(()) => self.later(STOP_GRACE, Command::StopCheck { thread: id.to_string(), since }),
             Err(error) => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("The stop request did not go through: {error}"));
-                self.itself.send(Command::StopCheck { thread: id.to_string() });
+                self.itself.send(Command::StopCheck { thread: id.to_string(), since });
             }
         }
     }
@@ -1030,7 +1031,9 @@ impl Actor {
             }
             Failure::Interrupt => {
                 self.mailbox.notice(NoticeLevel::Warning, format!("The stop request did not go through: {error}"));
-                self.itself.send(Command::StopCheck { thread: id.to_string() });
+                if let Some(since) = self.threads.get(id).and_then(|thread| thread.stopping) {
+                    self.itself.send(Command::StopCheck { thread: id.to_string(), since });
+                }
             }
             Failure::Rename => self.mailbox.notice(NoticeLevel::Warning, error),
             Failure::Compact => {
