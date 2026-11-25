@@ -83,6 +83,7 @@ impl Timeline {
         let list = gtk::ListView::new(Some(gtk::NoSelection::new(Some(joined))), Some(factory));
         list.add_css_class("ls-timeline");
         list.set_focusable(true);
+        crate::app_links::install(&keyboard, &list);
         install_keys(&keyboard, &list);
         list.set_margin_top(12);
         list.set_margin_bottom(12);
