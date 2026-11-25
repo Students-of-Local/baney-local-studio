@@ -366,6 +366,8 @@ final class StudioStore {
             shell.confirmation = .localOnly(thread: thread, plugin: plugin, message: message, local: local)
         case .skillDraft(let thread, let draft):
             conversation.setSkillDraft(thread: thread, draft: draft)
+        case .skillTry:
+            break
         }
     }
 }

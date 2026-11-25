@@ -262,6 +262,7 @@ impl Harness {
             | Update::ComposerDraft { .. }
             | Update::LocalOnly { .. }
             | Update::SkillDraft { .. }
+            | Update::SkillTry { .. }
             | Update::Commands { .. }
             | Update::Skills { .. }
             | Update::Subagents { .. }

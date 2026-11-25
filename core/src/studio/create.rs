@@ -169,20 +169,31 @@ impl Actor {
             let roots = skills::roots(&data, plugins.as_deref(), None);
             let store = roots.and_then(|roots| skills::Store::open(&data, roots));
             let outcome = store.and_then(|mut store| store.save(&draft));
-            let outcome = outcome.map(|_| format!("Saved. Use @{} in any thread.", draft.name));
+            let outcome = outcome.map(|_| draft.trial());
             itself.send(Command::SkillSaved { request, thread, draft: saved, outcome });
         });
         Ok(())
     }
 
-    pub(super) fn skill_saved(&mut self, request: String, id: &str, draft: String, outcome: Result<String, String>) {
+    pub(super) fn skill_saved(
+        &mut self,
+        request: String,
+        id: &str,
+        draft: String,
+        outcome: Result<(String, String), String>,
+    ) {
         if let Some(thread) = self.threads.get_mut(id) {
             thread.skill.saving = false;
         }
         match outcome {
-            Ok(message) => {
+            Ok((name, ask)) => {
+                let message = format!("Saved. Use @{name} in any thread.");
                 self.mailbox.push(Update::RequestDone { request, message });
                 self.finish_skill(id, draft);
+                if let Some(model) = self.local_choice() {
+                    let text = format!("@{name} {ask}").trim_end().to_string();
+                    self.mailbox.push(Update::SkillTry { thread: id.to_string(), model, text });
+                }
             }
             Err(message) => self.mailbox.push(Update::RequestFailed { request, message }),
         }

@@ -194,6 +194,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ComposerDraft { .. }
         | Update::LocalOnly { .. }
         | Update::SkillDraft { .. }
+        | Update::SkillTry { .. }
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }
         | Update::Pairing { .. }

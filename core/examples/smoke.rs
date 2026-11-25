@@ -220,6 +220,7 @@ impl Harness {
             | Update::RequestDone { .. }
             | Update::LocalOnly { .. }
             | Update::SkillDraft { .. }
+            | Update::SkillTry { .. }
             | Update::ProjectScripts { .. }
             | Update::ProjectSettings { .. }
             | Update::WorktreeSetup { .. }

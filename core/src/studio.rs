@@ -502,7 +502,7 @@ enum Command {
         request: String,
         thread: String,
         draft: String,
-        outcome: Result<String, String>,
+        outcome: Result<(String, String), String>,
     },
     DiscardSkill {
         thread: String,

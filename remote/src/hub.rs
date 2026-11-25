@@ -763,7 +763,8 @@ impl Hub {
             Update::Machines { .. }
             | Update::Pairing { .. }
             | Update::PairedDevices { .. }
-            | Update::SkillDraft { .. } => return,
+            | Update::SkillDraft { .. }
+            | Update::SkillTry { .. } => return,
             update => update,
         };
         let value = match serde_json::to_value(&update) {
