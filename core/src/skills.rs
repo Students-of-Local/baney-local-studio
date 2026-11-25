@@ -163,14 +163,9 @@ impl Resources {
     }
 
     fn local_only<'a>(&'a self, text: &'a str, at: &'a At) -> impl Iterator<Item = String> + 'a {
-        self.plugins.iter().filter(|plugin| plugin.local_only).filter_map(move |plugin| {
-            let is = |rest: &str, name: &String| {
-                let Some((head, after)) = rest.split_at_checked(name.len()) else { return false };
-                !name.is_empty() && head.eq_ignore_ascii_case(name) && ends_word(after) && !at.path(rest, head)
-            };
-            let named = mentions(text).any(|(_, rest)| is(rest, &plugin.id) || is(rest, &plugin.name));
-            named.then(|| plugin.id.clone())
-        })
+        let named =
+            move |plugin: &&Plugin| plugin.local_only && (at.names(text, &plugin.id) || at.names(text, &plugin.name));
+        self.plugins.iter().filter(named).map(|plugin| plugin.id.clone())
     }
 
     pub(crate) fn expand(&self, text: &str, at: &At) -> Expansion {
@@ -275,6 +270,14 @@ impl At {
         self.here.as_ref().is_some_and(|here| {
             here.join(name).exists() || std::fs::read_dir(here).is_ok_and(|all| all.flatten().any(longer))
         })
+    }
+
+    pub(crate) fn names(&self, text: &str, name: &str) -> bool {
+        let is = |rest: &str| {
+            let Some((head, after)) = rest.split_at_checked(name.len()) else { return false };
+            head.eq_ignore_ascii_case(name) && ends_word(after) && !self.path(rest, head)
+        };
+        !name.is_empty() && mentions(text).any(|(_, rest)| is(rest))
     }
 }
 

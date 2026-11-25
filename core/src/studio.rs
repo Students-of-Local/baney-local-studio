@@ -1938,6 +1938,7 @@ impl Actor {
             Command::GrantPlugin { request, id, capabilities } => self.grant_plugin(request, &id, &capabilities),
             Command::RevokePlugin { request, id, capability } => self.revoke_plugin(request, &id, &capability),
             Command::PluginsDone { request, outcome } => {
+                self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner).end(&request);
                 self.plugins();
                 self.mailbox.push(match outcome {
                     Ok(message) => Update::RequestDone { request, message },
@@ -2836,6 +2837,12 @@ impl Actor {
             return Err("Write a message first.".to_string());
         }
         let at = self.at(id, &message).await;
+        if let Err(error) = self.settled(&at, &message) {
+            if request.is_none() && !again {
+                self.mailbox.push(Update::ComposerDraft { thread: id.to_string(), draft: prompt });
+            }
+            return Err(error);
+        }
         let cli = self.harness(id).is_some();
         let active = if cli {
             self.threads.entry(id.to_string()).or_default();
@@ -2974,6 +2981,21 @@ impl Actor {
         At { skills, here: cwd.map(PathBuf::from) }
     }
 
+    fn settled(&self, at: &At, message: &str) -> Result<(), String> {
+        let installing = self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner).installing();
+        if installing.is_empty() || !message.contains('@') {
+            return Ok(());
+        }
+        let catalog = plugins::Catalog::bundled()?;
+        for entry in installing.iter().filter_map(|id| catalog.entry(id)) {
+            let name = entry.name.as_ref().unwrap_or(&entry.id);
+            if at.names(message, &entry.id) || at.names(message, name) {
+                return Err(format!("{name} is still installing. Answer its sheet, then send again."));
+            }
+        }
+        Ok(())
+    }
+
     fn thread_project(&self, id: &str) -> Option<String> {
         let cwd = self.threads.get(id).and_then(|thread| thread.cwd.clone()).unwrap_or_default();
         threads::project_for(&cwd, &self.store.flags(id), &self.store.projects)
@@ -3093,6 +3115,7 @@ impl Actor {
             }
             Ok(plugins::Offer::Ask(pending)) => {
                 let mut pendings = consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                pendings.end(&request);
                 if pendings.push(*pending) {
                     mailbox.push(Update::Consents { consents: pendings.requests() });
                 } else {
@@ -3100,12 +3123,16 @@ impl Actor {
                     mailbox.push(Update::RequestFailed { request, message });
                 }
             }
-            Err(message) => mailbox.push(Update::RequestFailed { request, message }),
+            Err(message) => {
+                consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner).end(&request);
+                mailbox.push(Update::RequestFailed { request, message });
+            }
         }
     }
 
     fn install_plugin(&mut self, request: String, source: String) {
         let Some(root) = self.plugins_root(&request) else { return };
+        self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner).begin(&request, &source);
         let offering = self.offering();
         tokio::task::spawn_blocking(move || {
             let offer = plugins::offer_install(&root, &source, request.clone());
@@ -3194,6 +3221,10 @@ impl Actor {
                 self.mailbox.push(Update::RequestDone { request, message });
             }
             ConsentAnswer::Install { sensitive } => {
+                if pending.installs() {
+                    let mut pendings = self.consents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    pendings.begin(&request, &pending.request().plugin);
+                }
                 let itself = self.itself.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = plugins::answer(&root, pending, &sensitive);
