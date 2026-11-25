@@ -17,7 +17,7 @@ use local_studio_core::{
     ProviderStatus, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp, Update, UsagePeriod,
     UsageReport, Waker, WorktreeChoice,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 #[path = "support/real_model.rs"]
 mod real_model;
@@ -407,6 +407,17 @@ fn run(daemon: &Path, root: &Path, stub: Option<u16>) -> anyhow::Result<()> {
         providers: if models.exists() { read_json(&models)?["providers"].clone() } else { Value::Null },
         keys: auth_keys(&agent)?,
     };
+    if let Some(port) = stub {
+        let controller = root.join("data/controller");
+        std::fs::create_dir_all(&controller)?;
+        let named = json!({
+            "fleetKey": format!("providers-smoke-{}", std::process::id()),
+            "enginePorts": [port],
+            "registry": { "url": "", "dir": root.join("registry"), "ref": "none" },
+            "modelsDir": root.join("models"),
+        });
+        std::fs::write(controller.join("config.json"), named.to_string())?;
+    }
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
     std::env::set_var("LOCAL_STUDIO_CONTROLLER_URL", format!("http://127.0.0.1:{}", free_port()?));
