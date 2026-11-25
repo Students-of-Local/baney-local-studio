@@ -503,7 +503,7 @@ mod local_only {
         ensure, json, plugin_store, prompt, stop_daemon, user_text, write_private, Arc, AtomicUsize, Capability,
         Command, Connection, Context, DaemonClient, DaemonCommand, DaemonLaunch, Delivery, Duration, Grants, Harness,
         Instant, Map, OpenOptionsExt, Ordering, Path, PathBuf, Read, Signal, Studio, StudioConfig, TcpListener,
-        ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MAX_TOKENS, MID, STEP,
+        ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MID, STEP,
     };
     use local_studio_core::{ConsentAnswer, ImageAttachment, PromptDraft};
     use std::sync::OnceLock;
@@ -638,7 +638,7 @@ for line in sys.stdin:
                 "baseUrl": base(),
                 "api": "openai-completions",
                 "apiKey": "ollama",
-                "models": [{ "id": mid(), "name": mid(), "contextWindow": 32768, "maxTokens": MAX_TOKENS }],
+                "models": [{ "id": mid(), "name": mid(), "contextWindow": 32768, "maxTokens": 1024 }],
             }),
         );
         providers.insert(
