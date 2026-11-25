@@ -76,6 +76,11 @@ enum T3Fixtures {
                 item("project:/Users/demo/Projects/api", "api", "~/Projects/api", state),
                 item("project:p-old", "old-prototype", "Its folder is gone: ~/Projects/old-prototype", .unsupported),
             ]),
+            T3Group(kind: .threads, title: "Threads", chosen: true, items: [
+                item("thread:demo-1", "Fix the sidebar order", "Claude Code, ~/Projects/local-studio", state),
+                item("thread:demo-2", "Draft the release notes", "Codex, ~/Projects/site", state),
+                item("thread:demo-3", "Port the importer", "Running in T3 Code. It comes over when it stops.", .unsupported),
+            ]),
             T3Group(kind: .models, title: "Models", chosen: true, items: [
                 item("model.default", "Default model", "Claude Opus 5.5, thinking high", state),
                 item("model.textGeneration", "Text generation model", "Claude Sonnet 5.5", state),
@@ -106,7 +111,7 @@ enum T3Fixtures {
     static var firstRun: T3Report {
         T3Report(
             found: true, source: source, enabled: false, offered: false, applied: false, lastSyncedAt: nil,
-            choices: T3Choices(accounts: true, projects: true, models: true, keybindings: true, appearance: true, preferences: true),
+            choices: T3Choices(accounts: true, projects: true, threads: true, models: true, keybindings: true, appearance: true, preferences: true),
             groups: groups(.import), problems: []
         )
     }
@@ -115,7 +120,7 @@ enum T3Fixtures {
         T3Report(
             found: true, source: source, enabled: true, offered: true, applied: true,
             lastSyncedAt: PagesFixtures.now - 4 * 60_000,
-            choices: T3Choices(accounts: true, projects: true, models: true, keybindings: true, appearance: true, preferences: true),
+            choices: T3Choices(accounts: true, projects: true, threads: true, models: true, keybindings: true, appearance: true, preferences: true),
             groups: groups(.synced), problems: []
         )
     }

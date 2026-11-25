@@ -765,6 +765,7 @@ pub struct AccountLabel {
 pub struct T3Choices {
     pub accounts: bool,
     pub projects: bool,
+    pub threads: bool,
     pub models: bool,
     pub keybindings: bool,
     pub appearance: bool,
@@ -773,7 +774,15 @@ pub struct T3Choices {
 
 impl Default for T3Choices {
     fn default() -> Self {
-        Self { accounts: true, projects: true, models: true, keybindings: true, appearance: true, preferences: true }
+        Self {
+            accounts: true,
+            projects: true,
+            threads: true,
+            models: true,
+            keybindings: true,
+            appearance: true,
+            preferences: true,
+        }
     }
 }
 
@@ -783,6 +792,7 @@ impl Default for T3Choices {
 pub enum T3Kind {
     Accounts,
     Projects,
+    Threads,
     Models,
     Keybindings,
     Appearance,

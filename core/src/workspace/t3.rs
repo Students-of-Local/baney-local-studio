@@ -1,7 +1,8 @@
 mod plan;
 mod source;
+mod threads;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,9 @@ pub(crate) use source::{fingerprint, locate, read, T3Data};
 use super::model::{ProjectSettings, Settings, T3Report};
 use super::projects::{ProjectEntry, ProjectFile};
 use super::settings;
-use crate::store::Store;
+use crate::harness;
+use crate::model::Harness;
+use crate::store::{Store, ThreadFlags};
 
 const STATE_FILE: &str = "t3-sync.json";
 const PROJECT_FILE: &str = "project-workspace.json";
@@ -87,6 +90,19 @@ pub(crate) fn run(t3: &T3Data, ls: &mut Ls, state: &mut SyncState, apply: bool) 
     }
 }
 
+pub(crate) fn sessions(store: &Store) -> BTreeSet<String> {
+    let flags = store.threads.values();
+    flags.flat_map(|flags| [&flags.fork_of, &flags.native_session]).flatten().cloned().collect()
+}
+
+pub(crate) fn add_threads(store: &mut Store, threads: Vec<ThreadFlags>) {
+    for mut flags in threads {
+        let id = harness::new_session_id();
+        flags.native_session = (flags.harness == Harness::ClaudeCode).then(|| id.clone());
+        store.threads.insert(id, flags);
+    }
+}
+
 fn load_files(data_dir: &Path) -> Result<(Ls, Store, ProjectFile), String> {
     let (loaded, error) = settings::load_json::<Settings>(&data_dir.join("settings.json"));
     if let Some(error) = error {
@@ -111,6 +127,8 @@ fn load_files(data_dir: &Path) -> Result<(Ls, Store, ProjectFile), String> {
         favorites: store.favorites.clone(),
         hidden: store.hidden.clone(),
         project_settings,
+        sessions: sessions(&store),
+        threads: Vec::new(),
     };
     Ok((ls, store, project_file))
 }
@@ -161,10 +179,13 @@ pub fn import_from_t3(data_dir: Option<&str>, dry_run: bool) -> Result<T3Report,
     if ls.keybindings != before.keybindings {
         settings::save_json(&data_dir.join("keybindings.json"), &ls.keybindings)?;
     }
-    if ls.projects != before.projects || ls.favorites != before.favorites || ls.hidden != before.hidden {
+    let threads = std::mem::take(&mut ls.threads);
+    let lists = ls.projects != before.projects || ls.favorites != before.favorites || ls.hidden != before.hidden;
+    if lists || !threads.is_empty() {
         store.projects.clone_from(&ls.projects);
         store.favorites.clone_from(&ls.favorites);
         store.hidden.clone_from(&ls.hidden);
+        add_threads(&mut store, threads);
         store.save().map_err(|error| format!("{error:#}"))?;
     }
     if ls.project_settings != before.project_settings {
