@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import LocalStudioKit
+import SwiftUI
 
 @MainActor
 final class ConversationSmoke {
