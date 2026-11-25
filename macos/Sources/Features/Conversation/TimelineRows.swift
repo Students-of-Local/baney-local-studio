@@ -213,6 +213,7 @@ extension EnvironmentValues {
     @Entry var responseStreaming: ResponseStreaming = .paragraph
     @Entry var timeFormat: TimeFormat = .locale
     @Entry var selectableText = true
+    @Entry var linkStore: StudioStore?
     @Entry var timelineLive = true
 }
 
@@ -263,7 +264,7 @@ private struct AssistantMessage: View {
                     }
                 case .text(let text):
                     if let shown = StreamingText.visible(text, streaming: streaming && index == blocks.count - 1, mode: responseStreaming) {
-                        MarkdownView(text: shown)
+                        MarkdownView(text: shown, studioLinks: true)
                     }
                 }
             }

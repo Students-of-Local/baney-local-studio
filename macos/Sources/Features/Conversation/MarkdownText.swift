@@ -47,6 +47,7 @@ extension NSAttributedString.Key {
     static let markdownRule = NSAttributedString.Key("LocalStudioMarkdownRule")
     static let markdownCell = NSAttributedString.Key("LocalStudioMarkdownCell")
     static let markdownGroup = NSAttributedString.Key("LocalStudioMarkdownGroup")
+    static let studioLink = NSAttributedString.Key("LocalStudioStudioLink")
 }
 
 extension NSResponder {
@@ -86,6 +87,7 @@ struct MarkdownSource: Hashable {
     let text: String
     let size: CGFloat
     let secondary: Bool
+    var studioLinks = false
 }
 
 final class MarkdownRendering {
@@ -129,12 +131,12 @@ enum MarkdownRenderer {
 
     static func rendering(_ source: MarkdownSource) -> MarkdownRendering {
         let revision = ThemeTokens.shared.revision
-        let key = "\(source.size)|\(source.secondary)|\(source.text)" as NSString
+        let key = "\(source.size)|\(source.secondary)|\(source.studioLinks)|\(source.text)" as NSString
         if let cached = storage.object(forKey: key), cached.revision == revision,
            !cached.pending.contains(where: SyntaxHighlighter.shared.contains) {
             return cached
         }
-        var builder = MarkdownStringBuilder(size: source.size, secondary: source.secondary)
+        var builder = MarkdownStringBuilder(size: source.size, secondary: source.secondary, studioLinks: source.studioLinks)
         builder.build(MarkdownCache.document(for: source.text))
         let rendering = MarkdownRendering(
             source: source, string: builder.output, codeBlocks: builder.codeBlocks, pending: builder.pending, revision: revision
@@ -148,6 +150,7 @@ enum MarkdownRenderer {
 private struct MarkdownStringBuilder {
     let size: CGFloat
     let secondary: Bool
+    let studioLinks: Bool
     let output = NSMutableAttributedString()
     var codeBlocks: [MarkdownCodeBlock] = []
     var pending: [HighlightKey] = []
@@ -157,14 +160,17 @@ private struct MarkdownStringBuilder {
     private let secondaryColor: NSColor
     private let inlineCodeBackground: NSColor
     private let linkColor: NSColor
+    private let linkBackground: NSColor
 
-    init(size: CGFloat, secondary: Bool) {
+    init(size: CGFloat, secondary: Bool, studioLinks: Bool) {
         self.size = size
         self.secondary = secondary
+        self.studioLinks = studioLinks
         secondaryColor = NSColor(Theme.secondaryText)
         textColor = secondary ? secondaryColor : .labelColor
         inlineCodeBackground = NSColor(Theme.message)
         linkColor = NSColor(Theme.primary)
+        linkBackground = NSColor(Theme.primary.opacity(0.14))
     }
 
     mutating func build(_ document: MarkdownDocument) {
@@ -335,7 +341,16 @@ private struct MarkdownStringBuilder {
     }
 
     private func append(_ content: AttributedString, attributes: [NSAttributedString.Key: Any], font: NSFont) {
+        var lastLink: URL?
         for run in content.runs {
+            let link = run[AttributeScopes.FoundationAttributes.LinkAttribute.self]
+            defer { lastLink = link }
+            if studioLinks, let link, let target = studioLink(url: link.absoluteString) {
+                if link != lastLink {
+                    appendButton(linkWords(link: target), link: link, attributes: attributes, font: font)
+                }
+                continue
+            }
             var text = String(content[run.range].characters)
             if text.contains("\n") {
                 text = text.replacingOccurrences(of: "\n", with: "\u{2028}")
@@ -357,13 +372,24 @@ private struct MarkdownStringBuilder {
                     runAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
                 }
             }
-            if let link = run[AttributeScopes.FoundationAttributes.LinkAttribute.self] {
+            if let link, !(studioLinks && link.scheme?.lowercased() == "localstudio") {
                 runAttributes[.link] = link
                 runAttributes[.foregroundColor] = linkColor
             }
             runAttributes[.font] = runFont
             output.append(NSAttributedString(string: text, attributes: runAttributes))
         }
+    }
+
+    private func appendButton(_ words: LinkWords, link: URL, attributes: [NSAttributedString.Key: Any], font: NSFont) {
+        var button = attributes
+        button[.font] = NSFont.systemFont(ofSize: font.pointSize, weight: .semibold)
+        button[.foregroundColor] = linkColor
+        button[.backgroundColor] = linkBackground
+        button[.link] = link
+        button[.studioLink] = link.absoluteString
+        button[.toolTip] = words.detail
+        output.append(NSAttributedString(string: "\u{A0}\(words.title)\u{A0}", attributes: button))
     }
 
     private static func italic(_ font: NSFont) -> NSFont {
@@ -495,13 +521,18 @@ struct MarkdownText: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MarkdownNSTextView {
         let view = MarkdownNSTextView()
-        view.openURL = context.environment.openURL
+        update(view, context.environment)
         return view
     }
 
     func updateNSView(_ view: MarkdownNSTextView, context: Context) {
-        view.openURL = context.environment.openURL
+        update(view, context.environment)
         view.show(rendering)
+    }
+
+    private func update(_ view: MarkdownNSTextView, _ environment: EnvironmentValues) {
+        view.openURL = environment.openURL
+        view.openStudioLink = { [weak store = environment.linkStore] in store?.openStudioLink($0) }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView view: MarkdownNSTextView, context: Context) -> CGSize? {
@@ -518,6 +549,7 @@ final class MarkdownNSTextView: NSTextView {
     private var headers: [NSHostingView<CodeBlockHeader>] = []
     private var highlighting = false
     var openURL: OpenURLAction?
+    var openStudioLink: ((String) -> Void)?
 
     init() {
         let storage = NSTextStorage()
@@ -549,6 +581,11 @@ final class MarkdownNSTextView: NSTextView {
     }
 
     override func clicked(onLink link: Any, at charIndex: Int) {
+        if let length = textStorage?.length, charIndex < length,
+           let studio = textStorage?.attribute(.studioLink, at: charIndex, effectiveRange: nil) as? String {
+            openStudioLink?(studio)
+            return
+        }
         guard let openURL, let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) else {
             return
         }
