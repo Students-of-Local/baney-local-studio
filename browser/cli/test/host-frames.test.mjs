@@ -105,6 +105,32 @@ test("the host refuses an extension that is not Local Studio before it reads a f
 	assert.equal(await exited, 0);
 });
 
+test("a client frame that is no message drops that client only", { skip: !posix && "sockets", timeout: 20_000 }, async (t) => {
+	const { sockets, env } = sandbox(t);
+	const host = spawn(process.execPath, [cli, "host", ORIGIN], { env, stdio: ["pipe", "pipe", "pipe"] });
+	t.after(() => host.kill("SIGKILL"));
+	reader(host.stdout);
+	// The extension's side too: what is no message is passed over.
+	for (const m of [null, 7, "x", [], {}]) host.stdin.write(encode(m));
+	host.stdin.write(encode({ type: "hello", version: "0", protocol: 1, methods: [], features: ["chunks"] }));
+	const path = join(sockets, `${host.pid}.sock`);
+	await until(() => existsSync(path), 10_000, "the host's socket");
+	for (const m of [null, 7, "x", [], {}, { type: 1 }, { type: "hello" }, { type: "hello", client: null }, { type: "hello", client: [] }]) {
+		const bad = connect(path);
+		const closed = new Promise((r) => bad.once("close", r));
+		bad.on("error", () => undefined);
+		bad.write(encode(m));
+		await closed;
+	}
+	const good = connect(path);
+	t.after(() => good.destroy());
+	const out = reader(good);
+	good.write(encode({ type: "hello", client: { name: "smoke", session: "s" } }));
+	const welcome = await until(() => out.frames.find((f) => f.type === "welcome"), 10_000, "the welcome");
+	assert.equal(welcome.extensionConnected, true);
+	assert.equal(host.exitCode, null);
+});
+
 test("a host whose socket can't be opened still answers the extension", { timeout: 20_000 }, async (t) => {
 	const { env } = sandbox(t);
 	const taken = "import net from 'node:net'; net.Server.prototype.listen = function () { setImmediate(() => this.emit('error', new Error('EADDRINUSE'))); return this; };";

@@ -104,20 +104,35 @@ class Bridge {
 	private buffer = Buffer.alloc(0);
 	private seq = 0;
 	private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+	private opening?: Promise<void>;
 
 	private async ensure(): Promise<void> {
+		if (this.opening) return this.opening;
 		if (this.socket && !this.socket.destroyed) return;
+		this.opening = this.open().finally(() => {
+			this.opening = undefined;
+		});
+		return this.opening;
+	}
+
+	private async open(): Promise<void> {
 		const path = newestSocket();
 		if (!path) throw new Error("The Local Studio browser bridge is not running (is the Local Studio extension loaded and \`${COMMAND_NAME} install\` done?)");
 		await new Promise<void>((resolve, reject) => {
 			const socket = connect(path);
-			socket.once("error", reject);
-			socket.on("data", (chunk) => this.onData(chunk, resolve));
+			// What a dropped connection left half read is not the start of this one.
+			this.buffer = Buffer.alloc(0);
+			this.socket = socket;
+			socket.on("error", reject);
+			socket.on("data", (chunk) => {
+				if (this.socket === socket) this.onData(chunk, resolve);
+			});
 			socket.on("close", () => {
+				reject(new Error("bridge closed"));
+				if (this.socket !== socket) return;
 				for (const p of this.pending.values()) p.reject(new Error("bridge closed"));
 				this.pending.clear();
 			});
-			this.socket = socket;
 			socket.write(encode({ type: "hello", client: { name: "pi", session: process.env.LOCAL_STUDIO_BROWSER_SESSION || process.env.PI_SESSION_ID || SESSION_FALLBACK } }));
 		});
 	}
