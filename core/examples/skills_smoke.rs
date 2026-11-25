@@ -741,6 +741,7 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn asked(
     smoke: &Smoke,
     server: &[&str],
@@ -805,8 +806,9 @@ fn shipped(smoke: &mut Smoke) -> Result<(), String> {
     });
     let named = skill(&dir, "open", "Open a valve", "Turn the handle.")?;
     let open = asked(smoke, &["mcp"], "skill_read", &json!({ "name": "open" }), || Ok(()))?;
+    let handle = asked(smoke, &["mcp"], "skill_search", &json!({ "words": "valve handle" }), || Ok(()))?;
     smoke.check("a plugin comes before a shipped skill of its name", {
-        open.contains("open-skill") && !open.contains("handle")
+        open.contains("open-skill") && !open.contains("handle") && !handle.contains("open (shipped)")
     });
     remove_dir_all(named).map_err(text)?;
     smoke.check("and yours are all still listed after", smoke.listed("kitchen")?.is_some());
@@ -932,6 +934,8 @@ fn mentions(smoke: &mut Smoke) -> Result<(), String> {
     }
     let project = project.canonicalize().map_err(text)?;
     std::env::set_var("HOME", top.join("home"));
+    skill(&top.join("shipped"), "crane", "Lift", "")?;
+    std::env::set_var("LOCAL_STUDIO_SKILLS_DIR", top.join("shipped"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", top.join("home/agent"));
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
     std::env::set_var("EUKHE_DAEMON_SOCKET", top.join("d.sock"));

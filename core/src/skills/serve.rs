@@ -9,7 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-use super::store::{app, SHIPPED, SHIPPED_DIR};
+use super::store::{app, SHIPPED_DIR};
 use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
@@ -103,15 +103,14 @@ impl Server {
                 let from = from.ok_or("from is a number, such as 6000")?;
                 let mut store = open()?;
                 let part = text("part");
-                let found = store.read(name, part, from);
-                let shipped = found.as_ref().is_ok_and(|reading| reading.source == SHIPPED);
-                let plugin = store.plugin(name).filter(|_| shipped || found.is_err());
-                let Some(plugin) = plugin else { return found.map(|reading| reading.shown()) };
-                match plugin.skills.as_slice() {
-                    [only] if only.name == name => found.map(|reading| reading.shown()),
-                    [only] => store.read(&only.name, part, from).map(|reading| reading.shown()),
-                    _ => Ok(super::plugin_block(&plugin, "Read one with skill_read and its name.")),
-                }
+                store.read(name, part, from).map(|reading| reading.shown()).or_else(|error| {
+                    let plugin = store.plugin(name).ok_or_else(|| error.clone())?;
+                    match plugin.skills.as_slice() {
+                        [only] if only.name == name => Err(error),
+                        [only] => store.read(&only.name, part, from).map(|reading| reading.shown()),
+                        _ => Ok(super::plugin_block(&plugin, "Read one with skill_read and its name.")),
+                    }
+                })
             }
             _ => Err(format!("no tool named {tool}")),
         }

@@ -254,6 +254,11 @@ impl Store {
                 continue;
             }
             let mut listed = Listed { name, description, source, path, problem, real };
+            if listed.behind(&self.roots.plugins) {
+                listed.problem = Some("a plugin has this name".to_string());
+                hidden.push(listed);
+                continue;
+            }
             if listed.problem.is_none() {
                 let name = listed.name.to_lowercase();
                 if let Some(used) = names.get(&name) {
