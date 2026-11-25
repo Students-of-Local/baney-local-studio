@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::setup::{serve_disallow, WRANGLER, YML};
 use super::{process_info, RelayState, Status, Tunnel};
 use crate::platform::mode;
+use crate::workspace::time::now_ms;
 
 pub(super) const RECORD: &str = "relay.json";
 pub(super) const STATE: &str = "relay-state.json";
@@ -14,6 +15,7 @@ pub(super) const FOLDER: &str = "relay";
 pub(super) const AGAIN: &str = "local-studio tunnel setup --relay";
 const OFF: &str = "local-studio tunnel off";
 const CHECK: &str = "local-studio tunnel status --json";
+const NEW_KEY_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,9 +121,12 @@ impl Tunnel {
             "connecting" => ("waiting", "This machine is connecting to its relay."),
             "disconnected" => ("waiting", "This machine lost its relay and keeps trying to reach it again."),
             "replaced" => ("needs_setup", "Another machine took this relay over. To take it back, run setup again:"),
+            "unauthorized" if since.is_some_and(|at| now_ms() - at < NEW_KEY_MS) => {
+                ("waiting", "The relay refuses this machine's key so far, and this machine asks again every minute. A new key can take a few minutes to reach every Cloudflare edge.")
+            }
             "unauthorized" => (
                 "needs_setup",
-                "The relay refuses this machine's key, and this machine asks again every minute. If that doesn't end, run setup again:",
+                "The relay has refused this machine's key for over ten minutes, and this machine asks again every minute. Run setup again:",
             ),
             "outdated" => {
                 ("needs_setup", "The relay speaks a newer protocol. Update Local Studio, then run setup again:")

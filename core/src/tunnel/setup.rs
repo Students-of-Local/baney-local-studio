@@ -1195,10 +1195,8 @@ impl Tunnel {
             }
             Err(error) => {
                 let _ = manager.remove(OWN).await;
-                Err(fail(
-                    "going_live",
-                    format!("{error} The tunnel service was stopped and removed, so nothing is exposed."),
-                ))
+                let text = format!("{error} The tunnel service was stopped and removed, so nothing is exposed.");
+                Err(fail("going_live", with(&text, &refused)))
             }
         }
     }
@@ -1598,22 +1596,23 @@ impl Tunnel {
             .start_service(manager, cloudflared, &old.tunnel, &old.credentials, names, ports)
             .await
             .map_err(|failure| failure.message)?;
+        let told = |error: String| with(&error, &refused);
         let accepted = std::slice::from_ref(&old.hostname);
         let mut checks = json!({ "health": "unchecked", "mcp": "unchecked", "dns": "local" });
         if was_running {
             let both = self
                 .public_checks(accepted, ports, false, true)
                 .await
-                .map_err(|error| format!("While both tunnel connectors ran: {error}"))?;
+                .map_err(|error| told(format!("While both tunnel connectors ran: {error}")))?;
             merge_dns(&mut checks, &both);
             *stopped = true;
-            manager.retire(TYCHICUS).await?;
+            manager.retire(TYCHICUS).await.map_err(told)?;
         }
         let after = |error: String| {
             if was_running {
-                format!("After Tychicus's tunnel stopped: {error}")
+                told(format!("After Tychicus's tunnel stopped: {error}"))
             } else {
-                error
+                told(error)
             }
         };
         let health = self.public_checks(names, ports, true, false).await.map_err(after)?;
@@ -1624,7 +1623,7 @@ impl Tunnel {
         merge_dns(&mut checks, &served);
         checks["serveAllowed"] = json!(refused.is_empty());
         let route = new_route("cloudflare", &names[0], &names[1..], ports);
-        self.write_route(&route)?;
+        self.write_route(&route).map_err(told)?;
         Ok((route, checks, refused))
     }
 

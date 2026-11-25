@@ -434,7 +434,8 @@ impl Tunnel {
             return Err(fail("service_failed", text));
         }
         let allowed = serve_allow(host);
-        let (total, live) = (live_wait(), |error: String| fail("going_live", error));
+        let refused: Vec<String> = allowed.clone().err().into_iter().collect();
+        let (total, live) = (live_wait(), |error: String| fail("going_live", with(&error, &refused)));
         let every = LIVE_EVERY.min(total / 5);
         let deadline = Instant::now() + total;
         let mut retaken = false;

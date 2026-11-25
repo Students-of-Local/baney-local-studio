@@ -489,7 +489,10 @@ impl Tunnel {
         }
         let (hostname, ports) = startable(&status)?;
         let allowed = serve_allow(&hostname);
-        self.going_live(&hostname, ports).await?;
+        self.going_live_checks(&hostname, ports).await.map_err(|message| match &allowed {
+            Err(error) => fail("going_live", format!("{message} {error}")),
+            Ok(()) => fail("going_live", message),
+        })?;
         self.token_allowed()?;
         let cloudflared = self.cloudflared(consent, "local-studio tunnel up --yes").await?;
         let _ = fs::remove_file(self.token_path());

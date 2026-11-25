@@ -59,7 +59,6 @@ impl Tunnel {
         mcp: Option<u16>,
         log: impl Fn(&str) + Send + Sync,
     ) -> Result<(), Failure> {
-        let _lock = UpLock::named(&self.dir, LOCK, Some(BUSY))?;
         let signal = stop_signal().map_err(|error| error.to_string())?;
         if matches!(self.relay_path().try_exists(), Ok(false)) {
             if std::io::stdin().is_terminal() {
@@ -70,6 +69,7 @@ impl Tunnel {
             log("stopped");
             return Ok(());
         }
+        let _lock = UpLock::named(&self.dir, LOCK, Some(BUSY))?;
         let stop = async {
             tokio::select! {
                 () = signal => false,

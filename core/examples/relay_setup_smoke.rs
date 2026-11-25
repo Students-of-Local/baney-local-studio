@@ -299,8 +299,10 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
     })?;
     std::thread::sleep(Duration::from_millis(500));
     ensure(
-        service.child.try_wait().map_err(text)?.is_none() && !s.tunnel("relay-state.json").exists(),
-        "relay run as a service with no relay.json stays up and writes nothing",
+        service.child.try_wait().map_err(text)?.is_none()
+            && !s.tunnel("relay-state.json").exists()
+            && !s.tunnel("relay.lock").exists(),
+        "relay run as a service with no relay.json stays up, takes no lock and writes nothing",
     )?;
     term(&mut service)?;
     ensure(!s.tunnel("relay-state.json").exists(), "nor when it stops")?;

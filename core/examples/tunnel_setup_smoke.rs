@@ -317,6 +317,7 @@ fn answer(mut stream: TcpStream, log: &Path, state: &Path, tychicus_service: &st
     let (code, extra, body) = match path.as_str() {
         _ if old_connector && (host != "old.example.com" || path != "/mcp") => (404, String::new(), "{}"),
         "/v1/health" if state.join("fail-after-stop").exists() && tychicus_down => (503, String::new(), "{}"),
+        "/v1/health" if refuses(state, &host) => (403, String::new(), "{}"),
         "/v1/health" => (200, String::new(), r#"{"ok":true}"#),
         "/mcp" if !tychicus_accepts => (421, String::new(), "{}"),
         "/mcp" => (
@@ -334,6 +335,11 @@ fn answer(mut stream: TcpStream, log: &Path, state: &Path, tychicus_service: &st
         body.len()
     );
     stream.write_all(reply.as_bytes())
+}
+
+fn refuses(state: &Path, host: &str) -> bool {
+    fs::read_to_string(state.join("strict-serve"))
+        .is_ok_and(|serve| !fs::read_to_string(serve).is_ok_and(|text| text.contains(&format!("\"{host}\""))))
 }
 
 impl Smoke {
@@ -361,6 +367,12 @@ impl Smoke {
 
     fn route_path(&self) -> PathBuf {
         self.data.join("tunnel").join("route.json")
+    }
+
+    fn strict(&self, on: bool) -> Result<(), String> {
+        let path = self.state.join("strict-serve");
+        let set = if on { fs::write(path, self.serve_path().display().to_string()) } else { fs::remove_file(path) };
+        set.map_err(|e| e.to_string())
     }
 
     fn serve_path(&self) -> PathBuf {
@@ -809,8 +821,20 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     ensure(!Smoke::has(&lines, "tunnel create"), "setup again must reuse the tunnel")?;
     Smoke::at(&lines, "check studio.example.com /mcp 401")?;
 
-    fs::write(s.serve_path(), "{").map_err(|e| e.to_string())?;
+    bad_serve(s, &again)?;
+
     let (code, value) = s.ls(&again)?;
+    ensure(code == 0 && value["checks"]["serveAllowed"] == true, format!("setup once serve.json is gone: {value}"))?;
+    off(s)?;
+    s.check_serve(&allowed(json!([])))?;
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
+    println!("ok: setup --cloudflare, needs_signin, ready, again, a bad serve.json, off");
+    Ok(())
+}
+
+fn bad_serve(s: &Smoke, again: &[&str]) -> Result<(), String> {
+    fs::write(s.serve_path(), "{").map_err(|e| e.to_string())?;
+    let (code, value) = s.ls(again)?;
     let says = |value: &Value| {
         let said = value["message"].as_str().unwrap_or_default();
         ["studio.example.com", "alt.example.com"].iter().all(|name| said.contains(name))
@@ -822,16 +846,19 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     )?;
     let value = off(s)?;
     ensure(says(&value), format!("off says why serve.json still allows the names: {value}"))?;
+    s.strict(true)?;
+    let (code, value) = s.ls(again)?;
+    ensure(
+        code == 1
+            && value["code"] == "going_live"
+            && says(&value)
+            && value["message"].as_str().is_some_and(|said| said.contains("isn't allowed in serve.json yet"))
+            && !s.route_path().exists(),
+        format!("setup that can't go live says serve.json is why: {value}"),
+    )?;
+    s.strict(false)?;
     ensure(fs::read(s.serve_path()).is_ok_and(|text| text == b"{"), "a serve.json that doesn't parse is left alone")?;
-    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
-
-    let (code, value) = s.ls(&again)?;
-    ensure(code == 0 && value["checks"]["serveAllowed"] == true, format!("setup once serve.json is gone: {value}"))?;
-    off(s)?;
-    s.check_serve(&allowed(json!([])))?;
-    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
-    println!("ok: setup --cloudflare, needs_signin, ready, again, a bad serve.json, off");
-    Ok(())
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())
 }
 
 fn public_dns(s: &Smoke) -> Result<(), String> {
@@ -1165,10 +1192,19 @@ fn adopt_fails_after_stop(s: &Smoke) -> Result<(), String> {
     tychicus_fixture(s)?;
     let fail = s.state.join("fail-after-stop");
     fs::write(&fail, "").map_err(|e| e.to_string())?;
+    fs::write(s.serve_path(), "{").map_err(|e| e.to_string())?;
     let mark = s.mark();
     let (code, value) = s.ls(&["tunnel", "adopt", "--yes", "--json"])?;
     fs::remove_file(&fail).map_err(|e| e.to_string())?;
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
     rolled_back(s, &value, code)?;
+    let why = format!("old.example.com isn't allowed in serve.json yet: parse {}: EOF", s.serve_path().display());
+    ensure(
+        value["message"]
+            .as_str()
+            .is_some_and(|said| said.contains("After Tychicus's tunnel stopped") && said.contains(&why)),
+        format!("adopt that rolls back says why serve.json doesn't allow the names: {value}"),
+    )?;
     let lines = s.since(mark);
     let disabled = Smoke::at(&lines, &Smoke::disable_line())?;
     let stopped = Smoke::at(&lines, &Smoke::stop_line(false))?;
