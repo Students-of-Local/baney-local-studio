@@ -573,9 +573,9 @@ impl Translator {
         let tool = request.get("tool_name").and_then(Value::as_str).unwrap_or_default();
         let input = request.get("input").cloned().unwrap_or(Value::Null);
         if tool == "AskUserQuestion" {
-            let questions: Vec<Question> =
-                input["questions"].as_array().into_iter().flatten().filter_map(super::asked_question).collect();
-            if !questions.is_empty() {
+            let questions: Option<Vec<Question>> =
+                input["questions"].as_array().into_iter().flatten().map(super::asked_question).collect();
+            if let Some(questions) = questions.filter(|questions| !questions.is_empty()) {
                 self.pending
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
