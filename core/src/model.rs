@@ -540,6 +540,29 @@ pub struct PluginEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct SkillDraft {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub folder: String,
+    pub text: String,
+    pub files: Vec<SkillFile>,
+    pub marked: Vec<String>,
+    pub left: Vec<String>,
+    pub replaces: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct SkillFile {
+    pub path: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PluginUpdate {
     pub version: String,
     pub revision: String,
@@ -933,6 +956,10 @@ pub enum Update {
     },
     AppUpdate {
         state: AppUpdateState,
+    },
+    SkillDraft {
+        thread: String,
+        draft: Option<SkillDraft>,
     },
     LocalOnly {
         thread: String,

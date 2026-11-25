@@ -37,9 +37,9 @@ pub use model::{
     ConsentRequest, ConsentRow, ContextUsage, DaemonMismatch, Delivery, FileChange, Goal, Harness, ImageAttachment,
     ImageThumbnail, Item, ItemKind, Machine, MachineState, Mention, MentionKind, ModelKey, ModelOption, ModelRef,
     NoticeLevel, NotificationKind, PairedDevice, PluginEntry, PluginGrant, PluginRow, PluginState, PluginUpdate,
-    Project, PromptDraft, Question, QuestionOption, QueuedMessage, Shelf, SkillEntry, SkillSource, SlashCommand,
-    Subagent, ThreadInfo, ThreadRow, ThreadSearchHit, ThreadSettings, ThreadStatus, ToolKind, ToolState, TranscriptOp,
-    Update, WorktreeChoice,
+    Project, PromptDraft, Question, QuestionOption, QueuedMessage, Shelf, SkillDraft, SkillEntry, SkillFile,
+    SkillSource, SlashCommand, Subagent, ThreadInfo, ThreadRow, ThreadSearchHit, ThreadSettings, ThreadStatus,
+    ToolKind, ToolState, TranscriptOp, Update, WorktreeChoice,
 };
 pub use scratch::{check_scratch_agent, stored_keys_empty};
 pub use store::data_dir;

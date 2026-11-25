@@ -760,7 +760,10 @@ impl Hub {
             Update::ThreadSearch { request, hits } => {
                 Update::ThreadSearch { request, hits: hits.into_iter().filter(|hit| !linked(&hit.thread)).collect() }
             }
-            Update::Machines { .. } | Update::Pairing { .. } | Update::PairedDevices { .. } => return,
+            Update::Machines { .. }
+            | Update::Pairing { .. }
+            | Update::PairedDevices { .. }
+            | Update::SkillDraft { .. } => return,
             update => update,
         };
         let value = match serde_json::to_value(&update) {

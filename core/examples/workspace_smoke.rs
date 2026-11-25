@@ -292,6 +292,7 @@ impl Harness {
             | Update::ComposerText { .. }
             | Update::ComposerDraft { .. }
             | Update::LocalOnly { .. }
+            | Update::SkillDraft { .. }
             | Update::Models { .. }
             | Update::DaemonDefault { .. }
             | Update::Machines { .. }

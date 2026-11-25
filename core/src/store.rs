@@ -63,6 +63,8 @@ pub(crate) struct ThreadFlags {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) local_only: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill_done: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) account: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) project_refused: bool,

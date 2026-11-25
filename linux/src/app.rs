@@ -731,6 +731,7 @@ impl App {
             Update::LocalOnly { thread, message, local, .. } => {
                 crate::actions::local_only(self, thread, &message, local.as_ref());
             }
+            Update::SkillDraft { .. } => {}
             Update::Notice { level, text } => match level {
                 local_studio_core::NoticeLevel::Error | local_studio_core::NoticeLevel::Warning => {
                     self.show_notice(&text);

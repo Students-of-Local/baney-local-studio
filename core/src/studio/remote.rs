@@ -353,6 +353,14 @@ mod route {
                     self.on_machine(&thread, "Opening images from a linked machine's thread", Some(request));
                     None
                 }
+                Command::SaveSkill { request, thread, .. } if remote(&thread) => {
+                    self.on_machine(&thread, "Saving a skill", Some(request));
+                    None
+                }
+                Command::DiscardSkill { thread } if remote(&thread) => {
+                    self.on_machine(&thread, "Discarding a skill", None);
+                    None
+                }
                 Command::DeleteThread { thread } if remote(&thread) => {
                     self.on_machine(&thread, "Deleting a thread", None);
                     None
