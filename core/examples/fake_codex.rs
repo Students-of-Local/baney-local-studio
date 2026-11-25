@@ -208,7 +208,7 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         return;
     }
     let made = skill::reply(text);
-    let asks = made.is_none() && text.contains("skill");
+    let asks = made.is_none() && text.contains("skill") && !text.contains("````skill");
     let mut reply = made.unwrap_or_else(|| format!("reply to {text}"));
     if asks {
         let Some(decision) = shared.ask(&turn, number) else {

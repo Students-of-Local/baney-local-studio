@@ -1327,6 +1327,13 @@ fn makes_skills(run: &mut Run, data: &Path, threads: &mut Vec<[String; 2]>) -> a
         if said(&run.watch) != 1 || run.watch.draft().is_some() {
             run.watch.miss(format!("{name}: a reply with no skill gave a draft or another notice"));
         }
+        for step in ["Press Book", "Press Book twice"] {
+            let text = format!("---\nname: {one}\ndescription: Book a zorb\n---\n{step}\n");
+            run.send(&format!("write it: {step}\n````skill\n{text}````\nok"));
+            run.check(&format!("{name}: a later reply that holds the skill, {step:?}, is the draft"), |watch| {
+                watch.draft().is_some_and(|draft| draft.text == text && draft.files.is_empty())
+            });
+        }
         ask_for(run, name, &one);
         drafted(run, name, &one, false);
         run.send("@create");
