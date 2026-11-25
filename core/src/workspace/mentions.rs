@@ -13,6 +13,7 @@ use crate::skills::{Hit, Listed, Query};
 const ROWS: u32 = 30;
 const ABOVE: usize = 6;
 const FOUND: usize = 5;
+const CREATE: &str = "create";
 const WAIT: Duration = Duration::from_millis(300);
 
 static LOOKUP: Semaphore = Semaphore::const_new(1);
@@ -99,6 +100,10 @@ fn named(installed: &[Plugin], (listed, hits): &Found, query: &str) -> Vec<Menti
     if query.is_empty() {
         return installed.iter().map(plugin).collect();
     }
+    let first = CREATE.starts_with(query).then(|| Mention {
+        badge: "Create".to_string(),
+        ..mention(MentionKind::Skill, CREATE, "Make a skill from this thread")
+    });
     let mut ranked: Vec<(usize, String, Mention)> = Vec::new();
     let mut add = |names: &[&str], row: &dyn Fn() -> Mention| {
         let holding = names.iter().map(|name| name.to_lowercase()).filter_map(|name| {
@@ -128,7 +133,7 @@ fn named(installed: &[Plugin], (listed, hits): &Found, query: &str) -> Vec<Menti
         |hit: &Hit| listed.iter().find(|skill| skill.path == hit.path && !skill.name.to_lowercase().contains(query));
     let meant = hits.iter().filter_map(unnamed).take(FOUND);
     let meant = meant.map(|found| skill(&found.name, &found.description, &found.source));
-    ranked.into_iter().map(|(_, _, row)| row).chain(meant).collect()
+    first.into_iter().chain(ranked.into_iter().map(|(_, _, row)| row)).chain(meant).collect()
 }
 
 fn mention(kind: MentionKind, name: &str, detail: &str) -> Mention {
@@ -143,7 +148,11 @@ fn mention(kind: MentionKind, name: &str, detail: &str) -> Mention {
 }
 
 fn skill(name: &str, description: &str, source: &str) -> Mention {
-    Mention { badge: source.to_string(), ..mention(MentionKind::Skill, name, description) }
+    let row = Mention { badge: source.to_string(), ..mention(MentionKind::Skill, name, description) };
+    if name == CREATE {
+        return Mention { title: format!("${name}"), insert: format!("${name} "), ..row };
+    }
+    row
 }
 
 fn plugin(plugin: &Plugin) -> Mention {

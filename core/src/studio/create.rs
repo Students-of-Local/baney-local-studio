@@ -2,9 +2,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Actor, Command};
 use crate::model::{Block, Item, ItemKind, NoticeLevel, PromptDraft, SkillDraft, SkillFile, Update};
-use crate::skills::{self, Draft, CREATE};
-
-const WORD: &str = "@create";
+use crate::skills::{self, Draft, CREATE, MAKE};
 
 #[derive(Default)]
 pub(super) struct Making {
@@ -14,13 +12,12 @@ pub(super) struct Making {
 }
 
 pub(super) fn asked(prompt: &PromptDraft) -> bool {
-    let rest = prompt.text.trim_start().strip_prefix(WORD);
-    rest.is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    skills::asked(&prompt.text)
 }
 
 pub(super) fn message(message: &str, expanded: &str) -> String {
     let skills = expanded.strip_suffix(message).unwrap_or_default();
-    let rest = message.trim_start().strip_prefix(WORD).unwrap_or_default().trim_start();
+    let rest = message.trim_start().strip_prefix(MAKE).unwrap_or_default().trim_start();
     format!("{CREATE}\n\n{skills}{rest}").trim_end().to_string()
 }
 
