@@ -2,10 +2,16 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
-use super::studio::{file_name, section_title, title_in, StudioLink, EXTENSION_SECTIONS, PANES};
+use tokio::process::{Child, Command};
+
+use super::studio::{file_name, link_words, section_title, title_in, StudioLink, EXTENSION_SECTIONS, PANES};
+use crate::studio::Studio;
 use crate::{platform, store};
 
+const EXIT_WAIT: Duration = Duration::from_secs(10);
 const ENTRY_LIMIT: u64 = 1024 * 1024;
 const OPEN: &str = "/usr/bin/open";
 const EXPLORER: &str = r"C:\Windows\explorer.exe";
@@ -239,4 +245,37 @@ fn program(name: &str, env: &LinkEnv) -> Result<OsString, String> {
         .find(|file| fs::metadata(file).is_ok_and(|found| found.is_file() && platform::is_executable(&found)))
         .map(PathBuf::into_os_string)
         .ok_or_else(|| format!("This computer has no {name}, which Local Studio needs for that."))
+}
+
+fn failed(link: &StudioLink) -> String {
+    let title = link_words(link.clone()).title;
+    let (first, rest) = title.split_at(1);
+    format!("Local Studio could not {}{rest}.", first.to_ascii_lowercase())
+}
+
+fn start(link: &StudioLink) -> Result<Child, String> {
+    let plan = link_command(link, Platform::here(), &LinkEnv::here())?;
+    let (program, args) = plan.split_first().ok_or_else(|| failed(link))?;
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    platform::own_group_async(&mut command);
+    command.spawn().map_err(|_| failed(link))
+}
+
+async fn run(link: StudioLink) -> Result<(), String> {
+    let failed = failed(&link);
+    let started = tokio::task::spawn_blocking(move || start(&link)).await;
+    let mut child = started.unwrap_or_else(|_| Err(failed.clone()))?;
+    match tokio::time::timeout(EXIT_WAIT, child.wait()).await {
+        Ok(Ok(status)) if status.success() || cfg!(windows) => Ok(()),
+        Ok(_) => Err(failed),
+        Err(_) => child.wait().await.map(|_| ()).map_err(|_| failed),
+    }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Studio {
+    pub fn open_studio_link(&self, link: StudioLink) {
+        self.workspace.warn_if(run(link));
+    }
 }
