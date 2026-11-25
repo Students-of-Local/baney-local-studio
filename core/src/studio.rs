@@ -31,7 +31,7 @@ use crate::oneshot::{resolved_provider, TextGen};
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
 use crate::skills::{self, At, Expansion, Resources};
-use crate::store::{self, Store, StoredProject};
+use crate::store::{self, Saver, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
 use crate::workspace::model::{
@@ -726,6 +726,8 @@ impl Studio {
         }
         let ask_tokens = plugins::ask::Tokens::default();
         let (ask_socket, ask_task) = start_ask_server(&runtime, &data_dir, &ask_tokens, &inbox, &mailbox).unzip();
+        let failed = Arc::clone(&mailbox);
+        let saver = Saver::new(&store, move |error| unsaved(&failed, &error));
         let actor = Actor {
             socket,
             session_dir,
@@ -740,6 +742,7 @@ impl Studio {
             client_slot,
             client: None,
             store,
+            saver,
             saved: HashMap::new(),
             roster: HashMap::new(),
             first_seen: HashMap::new(),
@@ -1315,6 +1318,7 @@ struct Actor {
     client_slot: watch::Sender<Option<DaemonClient>>,
     client: Option<DaemonClient>,
     store: Store,
+    saver: Saver,
     saved: HashMap<String, SavedRow>,
     roster: HashMap<String, RosterRow>,
     first_seen: HashMap<String, i64>,
@@ -1637,6 +1641,7 @@ impl Actor {
         if let Some(socket) = self.ask_socket.take() {
             let _ = std::fs::remove_file(socket);
         }
+        self.saver.close();
         if done.send(()).is_err() {
             self.mailbox.notice(NoticeLevel::Warning, "The core stopped after its caller stopped waiting.");
         }
@@ -2157,8 +2162,8 @@ impl Actor {
     }
 
     fn save(&self) {
-        if let Err(error) = self.store.save() {
-            self.mailbox.notice(NoticeLevel::Error, format!("Could not save Local Studio state: {error:#}"));
+        if let Err(error) = self.saver.save(&self.store) {
+            unsaved(&self.mailbox, &error);
         }
     }
 
@@ -5059,6 +5064,10 @@ fn starting(thread: &Thread) -> bool {
 fn pending_left(sent: i64) -> Option<Duration> {
     let elapsed = Duration::from_millis(u64::try_from(now_ms().saturating_sub(sent)).unwrap_or(0));
     START_GRACE.checked_sub(elapsed).filter(|left| !left.is_zero())
+}
+
+fn unsaved(mailbox: &Mailbox, error: &anyhow::Error) {
+    mailbox.notice(NoticeLevel::Error, format!("Could not save Local Studio state: {error:#}"));
 }
 
 fn now_ms() -> i64 {
