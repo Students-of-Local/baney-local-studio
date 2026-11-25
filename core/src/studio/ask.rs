@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use eukhe_types::daemon::DaemonCommand;
 use serde_json::{json, Map, Value};
@@ -197,7 +197,8 @@ impl Actor {
         if before == Some(&servers) {
             return;
         }
-        let busy = self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy);
+        let live = self.threads.get(id).and_then(|thread| thread.live.as_ref());
+        let busy = live.map_or_else(|| self.running(id), |live| live.state.busy);
         if busy {
             let stale = before.is_none_or(|sent| sent.iter().any(|server| !crate::tools::keeps(server, &servers)));
             if !stale {
@@ -205,6 +206,20 @@ impl Actor {
             }
             servers.clear();
         }
+        let left = before.is_some_and(|sent| {
+            sent.iter().any(|server| server["name"] == crate::tools::SERVER && !crate::tools::keeps(server, &servers))
+        });
+        if let Err(error) = self.replace_servers(active, servers).await {
+            let text = if left {
+                format!("Browser or computer use may still be on in this thread: {error}")
+            } else {
+                format!("Plugin tool servers for this thread are off: {error}")
+            };
+            self.mailbox.notice(NoticeLevel::Warning, text);
+        }
+    }
+
+    pub(super) async fn replace_servers(&mut self, active: &str, servers: Vec<Value>) -> Result<(), String> {
         let servers = Value::Array(servers);
         let command = DaemonCommand::ReplaceAcpMcpServers {
             id: None,
@@ -213,29 +228,36 @@ impl Actor {
             servers: servers.clone(),
             rest: Map::default(),
         };
-        match self.call(command).await {
-            Ok(_) => {
-                self.ask_sent.insert(active.to_string(), servers);
-            }
-            Err(error) => {
-                self.mailbox
-                    .notice(NoticeLevel::Warning, format!("Plugin tool servers for this thread are off: {error}"));
-            }
-        }
+        self.call(command).await?;
+        self.ask_sent.insert(active.to_string(), servers);
+        Ok(())
     }
 
+    /// Brings every session that may hold browser or computer use in line with the settings. A session whose
+    /// list is unknown, as after a restart, is cleared when a setting turns off, running or not, opened or
+    /// not: Eukhe ignores an empty list from an owner that holds none, and the next idle prompt sends its list.
     pub(super) async fn sync_tools(&mut self) {
-        let holding: Vec<(String, String)> = self
-            .threads
-            .keys()
-            .filter_map(|id| Some((id.clone(), self.live_active(id)?)))
-            .filter(|(id, active)| match self.ask_sent.get(active).and_then(Value::as_array) {
-                Some(sent) => crate::tools::holds(sent),
-                None => !self.running(id),
-            })
-            .collect();
-        for (id, active) in holding {
-            self.sync_plugin_servers(&id, &active).await;
+        let settings = self.workspace.effective_settings(None);
+        let now = (settings.browser_use, settings.computer_use);
+        let was = std::mem::replace(&mut self.tools_on, now);
+        if was == now {
+            return;
+        }
+        let less = (was.0 && !now.0) || (was.1 && !now.1);
+        let opened = self.threads.keys().cloned();
+        let ids: BTreeSet<String> = opened.chain(self.roster.values().map(|row| row.session_id.clone())).collect();
+        for id in ids {
+            let Some(active) = self.daemon_active(&id) else { continue };
+            match self.ask_sent.get(&active).and_then(Value::as_array) {
+                Some(sent) if crate::tools::holds(sent) => self.sync_plugin_servers(&id, &active).await,
+                None if less => {
+                    if let Err(error) = self.replace_servers(&active, Vec::new()).await {
+                        let text = format!("Browser or computer use may still be on in a thread: {error}");
+                        self.mailbox.notice(NoticeLevel::Warning, text);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

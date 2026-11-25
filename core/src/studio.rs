@@ -706,6 +706,8 @@ impl Studio {
         workspace.start_kernel(daemon::kernel_program(config.launch.as_ref()));
         let codex_models = harness::saved_codex_models(&data_dir);
         let settings = workspace.settings();
+        let on = workspace.effective_settings(None);
+        let tools_on = (on.browser_use, on.computer_use);
         let pull_requests = workspace.pull_requests_changed();
         let (commands, receiver) = mpsc::unbounded_channel();
         let backlog = Arc::new(Backlog::default());
@@ -788,6 +790,7 @@ impl Studio {
             questions: HashMap::new(),
             ask_notes: HashMap::new(),
             ask_sent: HashMap::new(),
+            tools_on,
             consents: Arc::default(),
             t3: t3::Watch::default(),
             roster_checks: HashSet::new(),
@@ -1364,6 +1367,7 @@ struct Actor {
     questions: HashMap<String, Vec<ask::Pending>>,
     ask_notes: HashMap<String, Vec<String>>,
     ask_sent: HashMap<String, Value>,
+    tools_on: (bool, bool),
     consents: Arc<std::sync::Mutex<plugins::Pendings>>,
     t3: t3::Watch,
     roster_checks: HashSet<String>,

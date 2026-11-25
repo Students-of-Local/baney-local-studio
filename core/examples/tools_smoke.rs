@@ -21,6 +21,7 @@ mod real_model;
 
 const STEP: Duration = Duration::from_mins(15);
 const TRIES: usize = 4;
+const WAIT: u32 = 25;
 const DRAFT: &str = "tools";
 const SERVER: &str = r#"#!/usr/bin/env python3
 import json, os, sys
@@ -102,6 +103,7 @@ impl View {
 
 struct Run {
     studio: Arc<Studio>,
+    config: StudioConfig,
     signal: Arc<Signal>,
     view: View,
     ours: PathBuf,
@@ -141,11 +143,8 @@ impl Run {
     }
 
     fn note(&mut self, project: &str, word: &str) -> anyhow::Result<()> {
-        let text = format!(
-            "Call the tool named python (not codemode, not dyn) with exactly this code, then reply with the single word done.\n\nr = await mcp.call_tool(\"local-studio\", \"note\", {{\"word\": \"{word}\"}})\nprint(r)"
-        );
         for attempt in 1..=TRIES {
-            let draft = PromptDraft { text: text.clone(), images: Vec::new(), files: Vec::new() };
+            let draft = prompt("", word);
             self.sent += 1;
             let request = format!("note-{}", self.sent);
             if let Some(thread) = self.view.started.get(DRAFT).cloned() {
@@ -156,6 +155,33 @@ impl Run {
                 self.studio.start_thread(DRAFT.to_string(), Some(project.to_string()), draft, settings);
                 self.until("the thread starts", |view| view.started.contains_key(DRAFT))?;
             }
+            self.until("the turn ends", View::idle)?;
+            if [&self.ours, &self.own].iter().any(|log| noted(log, word)) {
+                return Ok(());
+            }
+            println!("     turn {attempt} of {TRIES}: the model did not call note with {word}");
+        }
+        bail!("the model never called note with {word}")
+    }
+
+    fn off_across_restart(&mut self, word: &str) -> anyhow::Result<()> {
+        let thread = self.view.started.get(DRAFT).cloned().context("no thread")?;
+        for attempt in 1..=TRIES {
+            self.turn_on(false, true)?;
+            let wait = format!("import asyncio\nawait asyncio.sleep({WAIT})\n");
+            self.studio.send(format!("off-{attempt}"), thread.clone(), prompt(&wait, word), Delivery::Queue);
+            self.until("the turn starts", |view| !view.idle())?;
+            self.studio.shutdown();
+            self.studio = Studio::new(self.config.clone(), Arc::clone(&self.signal) as Arc<dyn Waker>)?;
+            let started = std::mem::take(&mut self.view.started);
+            self.view = View { started, ..View::default() };
+            self.until("the core is ready again", |view| {
+                matches!(view.connection, Some(Connection::Ready))
+                    && view.settings.is_some()
+                    && !view.threads.is_empty()
+            })?;
+            ensure!(!self.view.idle(), "the turn ended before the app was back");
+            self.turn_on(false, false)?;
             self.until("the turn ends", View::idle)?;
             if [&self.ours, &self.own].iter().any(|log| noted(log, word)) {
                 return Ok(());
@@ -181,6 +207,13 @@ impl Run {
         println!("ok   {word}: Local Studio's program got the call with --tools {tools}");
         Ok(())
     }
+}
+
+fn prompt(first: &str, word: &str) -> PromptDraft {
+    let text = format!(
+        "Call the tool named python (not codemode, not dyn) with exactly this code, then reply with the single word done.\n\n{first}r = await mcp.call_tool(\"local-studio\", \"note\", {{\"word\": \"{word}\"}})\nprint(r)"
+    );
+    PromptDraft { text, images: Vec::new(), files: Vec::new() }
 }
 
 fn lines(log: &Path) -> Vec<Value> {
@@ -230,6 +263,13 @@ fn drive(run: &mut Run, socket: &Path, work: &Path, bin: &Path) -> anyhow::Resul
     println!("ok   turning both off took the server from the session before another message");
     run.note(&project, "meadow")?;
     run.expect("meadow", None)?;
+    run.turn_on(false, true)?;
+    run.note(&project, "ember")?;
+    run.expect("ember", Some("computer"))?;
+    run.off_across_restart("orchard")?;
+    run.expect("orchard", None)?;
+    ensure!(!held::held(socket, &thread)?, "the session still holds the server after the turn");
+    println!("ok   turning computer use off reached a turn that kept running across a restart");
     std::fs::rename(bin, bin.with_extension("away"))?;
     run.turn_on(true, true)?;
     run.note(&project, "granite")?;
@@ -280,8 +320,8 @@ fn main() -> anyhow::Result<()> {
         controller_main: None,
         take_over_serve: false,
     };
-    let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
-    let mut run = Run { studio, signal, view: View::default(), ours, own, sent: 0 };
+    let studio = Studio::new(config.clone(), Arc::clone(&signal) as Arc<dyn Waker>)?;
+    let mut run = Run { studio, config, signal, view: View::default(), ours, own, sent: 0 };
     let outcome = drive(&mut run, &socket, &work, &bin);
     run.studio.shutdown();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

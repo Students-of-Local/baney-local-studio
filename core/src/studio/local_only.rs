@@ -320,17 +320,10 @@ impl Actor {
 
     async fn drop_tools(&mut self, active: &str) -> Result<(), String> {
         let sent = self.ask_sent.get(active).and_then(Value::as_array).cloned().unwrap_or_default();
-        let servers = Value::Array(sent.into_iter().filter(|one| one["name"] != tools::SERVER).collect());
-        let command = DaemonCommand::ReplaceAcpMcpServers {
-            id: None,
-            active_session_id: active.to_string(),
-            owner_id: plugins::ask::NOTE_TYPE.to_string(),
-            servers: servers.clone(),
-            rest: Map::default(),
-        };
-        self.call(command).await.map_err(|error| format!("Could not take browser and computer use off: {error}"))?;
-        self.ask_sent.insert(active.to_string(), servers);
-        Ok(())
+        let servers = sent.into_iter().filter(|one| one["name"] != tools::SERVER).collect();
+        self.replace_servers(active, servers)
+            .await
+            .map_err(|error| format!("Could not take browser and computer use off: {error}"))
     }
 
     async fn pin_local(
