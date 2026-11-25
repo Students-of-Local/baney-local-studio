@@ -63,7 +63,8 @@ Every host named below sees the computer's IP address, as any site does.
   `github.com` and `release-assets.githubusercontent.com`. For the relay, the usual route, setup runs Cloudflare's own program, wrangler
   (downloaded from `registry.npmjs.org`, its usage reports off), to put a small Worker on the user's own Cloudflare account,
   and the tunnel is a connection to that Worker's workers.dev address; what wrangler contacts is Cloudflare's choice.
-  `tychicus remote off` turns it off.
+  `tychicus remote off` closes a connector, `tychicus link off` unlinks this computer from a hub, and `tychicus hub off`
+  stops a hub; each leaves the other two alone. A relay Worker stays on the user's Cloudflare account until they delete it.
 - **Pages, files and searches.** The agent opens the pages and files the user's request calls for. Reading a PDF uses the
   user's cookies for that site. Search and crawl go only to the user's own SearXNG or Firecrawl.
 - **Papers saved to the library** are looked up by DOI at `doi.org`, `api.crossref.org` and `api.openalex.org`.
@@ -105,9 +106,16 @@ pastes it into a GitHub issue they open and post themselves. Turning the switch 
 ## What the agent can see
 
 The agent reads and acts only in tabs it opened or the user gave it, kept in their own tab group. The user picks when it
-asks before a site, in Settings > Agents. Manual asks before every new site. Auto, the default, asks before an agent goes
+asks before a site, in Settings > Agents. Manual asks before an agent opens a new site. Auto, the default, asks before an agent goes
 straight to mail, a bank or another sensitive site, and before every new site for a small or unknown model; an agent on a
-frontier model opens ordinary sites without asking. Yolo, off until the user turns it on, doesn't ask.
+frontier model opens ordinary sites without asking. Yolo, off until the user turns it on, doesn't ask. The question is
+about sites an agent opens itself: where a clicked link or a redirect leads isn't checked in any mode.
+
+Site edits, feed filters and site scripts are the exception to the agent's own tabs. When an agent makes one for a site, it
+also applies in the user's tabs on that site, then and on every later visit: an edit hides parts of the page, blocks
+requests or turns ad blocking on, and a filter reads the page's posts, on the computer, to hide some. A site script runs
+code there, signed in as the user, and only after the user turns it on. Each is listed in Settings > Sites, with a switch
+and a Remove button.
 
 The agent hands the tab back for captchas, and for sign-ins it either hands the tab back or opens a small window that
 names the site and takes the user's username and password. Those go into that page's fields and nowhere else, and the

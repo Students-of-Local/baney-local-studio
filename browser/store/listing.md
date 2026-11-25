@@ -65,7 +65,7 @@ irm https://github.com/baney75/tychicus/releases/latest/download/install.ps1 | i
 
 You stay in charge:
 
-• You pick when agents ask. By default, agents on frontier models open ordinary sites, small or unknown models ask first, and every agent asks before it goes straight to mail, a bank or another sensitive site. Manual asks before every new site. Allowed sites are listed in Settings, where you can remove them.
+• You pick when agents ask. By default, agents on frontier models open ordinary sites, small or unknown models ask first, and every agent asks before it goes straight to mail, a bank or another sensitive site. Manual asks before an agent opens a new site. Where a clicked link or a redirect leads isn't checked. Allowed sites are listed in Settings, where you can remove them.
 • It stops and hands the tab to you for sign-ins and captchas.
 • Private mode sends prompts only to models that don't keep them, or to your own machines.
 

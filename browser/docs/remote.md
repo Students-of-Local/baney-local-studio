@@ -622,8 +622,9 @@ aren't checked, since NTFS access lists aren't in its mode bits.
   unless you need them.
 - Access tokens last an hour, refresh tokens rotate, and an old refresh token coming back ends
   the grant. Only hashes are stored, in `oauth.json` (0600), next to `remote.json` (0600).
-- Agents work in their own tab group, in your signed-in browser. Sites you haven't allowed still
-  ask first. Revoke a connector you stop using.
+- Agents work in their own tab group, in your signed-in browser. Opening a site asks as your permission mode says
+  (GUIDE.md, Safety model); where a clicked link or a redirect leads isn't checked in any mode. Revoke a connector you
+  stop using.
 - `serve` listens on loopback only and answers only the public host and loopback names.
 
 ## Many devices, one connector

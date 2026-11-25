@@ -431,19 +431,19 @@ desktop browser. Nothing is exposed until you start it.
 ### claude.ai, ChatGPT and grok.com
 
 Each person runs their own connector on their own computer, so it drives their own
-browser and costs them nothing. There's no account with us, no relay and no shared
-server.
+browser and costs them nothing. There's no account with us and no shared server.
 
 ```bash
-tychicus remote setup  # Tailscale Funnel (free plan), an approval passcode, a service that keeps it running
+tychicus remote setup  # a relay on your own free Cloudflare account, and a service that keeps it running
 tychicus remote status  # is it up and reachable from the internet?
 ```
 
-Setup prints the connector URL. Paste it into claude.ai (Settings > Connectors > Add custom
-connector), ChatGPT or grok.com. Each one opens Local Studio's approval page, where you pick the
-permissions and enter your passcode. Without Tailscale, a free Cloudflare named tunnel on
-your own domain works too: `tychicus remote setup --public-url https://tychicus.<your domain>`.
-[docs/remote.md](docs/remote.md) has both routes, revoking and the security notes.
+Setup signs you in to Cloudflare, deploys the relay there, and prints the connector URL and a
+connect code. Paste the URL into claude.ai (Settings > Connectors > Add custom connector), ChatGPT
+or grok.com. Each one opens Local Studio's approval page, where you pick the permissions and enter
+the code; it works once, for 10 minutes, and the passcode alone is refused for a new assistant.
+`--tailscale` (Tailscale Funnel) and `--cloudflare` (a named tunnel on your own domain) are the other
+routes. [docs/remote.md](docs/remote.md) has all three, revoking and the security notes.
 
 Several computers with a browser? Run `tychicus hub setup --public-url https://host` on an always-on box and
 `tychicus link <hub URL> --code <code>` on each computer: one connector URL, and a session goes to a device
@@ -482,7 +482,8 @@ Your browser is signed in as you, so the defaults are conservative.
 - **You pick when the agent asks before it opens a site**, in Settings > Agents. Auto, the
   default, asks before an agent goes straight to mail, a bank or another sensitive site, and
   before every new site for a small or unknown model; an agent on a frontier model opens
-  ordinary sites without asking. Manual asks before every new site, and Yolo doesn't ask.
+  ordinary sites without asking. Manual asks before an agent opens a new site, and Yolo doesn't ask.
+  Where a clicked link or a redirect leads isn't checked in any mode.
   Claude Code and Codex show the prompt inline; otherwise answer it in the side panel. Run
   `tychicus allow <host>` to pre-approve a site, `tychicus allow-all` to skip prompts and
   `tychicus ask` to turn them back on.
@@ -491,13 +492,14 @@ Your browser is signed in as you, so the defaults are conservative.
   sending, posting, buying, deleting or changing settings. It also tells the agent never
   to type passwords or payment details. For a sign-in or a captcha, it brings the tab to
   you. These are instructions to the model, not enforcement: a hostile page can still
-  attempt prompt injection. The site permission limits which sites an agent can open.
-  It doesn't limit what the agent does on a site you've allowed, including running
+  attempt prompt injection. The site permission limits which sites an agent opens itself,
+  not where a link or a redirect takes it. It doesn't limit what the agent does on a site you've allowed, including running
   scripts there with `run_js`. Allow only sites you'd let the agent act on, and for
   high-stakes accounts, run agents in a separate browser profile that isn't signed in.
 - **Agents stay in their own tab group** ("Local Studio · claude", "Local Studio · codex"). Their
   tabs open in the background, they can't see your other tabs, and popups from their
-  tabs don't steal focus. `tabs_show` is the only tool that changes what you see.
+  tabs don't steal focus. `tabs_show` brings a tab in front of you. Site edits and feed filters
+  also change that site in your own tabs, and site scripts do once you turn one on (Settings > Sites).
 - **Nothing listens on the network by default.** The browser starts the native host,
   which relays frames over a Unix socket in `/tmp/tychicus-bridge-<user>/` (0700 directory,
   0600 socket). Other users can't reach it, and the client refuses sockets another user
