@@ -51,7 +51,7 @@ check true push "browser only" 'echo b >browser/a'
 check true "" "browser only, outside GitHub" 'echo b >browser/a'
 git checkout -q main
 git commit -q --allow-empty -m empty
-report true pull_request "a merge that changes nothing"
+report false pull_request "a merge that changes nothing"
 git checkout -q --orphan root
 git commit -qm root
 report true pull_request "a commit git has no parent for"
