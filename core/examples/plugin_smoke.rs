@@ -494,7 +494,11 @@ fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
 
 const LOCAL_USAGE: &str = "usage: plugin_smoke --local-only <eukhe> <scratch dir> (needs a local model: LOCAL_STUDIO_SMOKE_MODEL=<provider>/<model> at LOCAL_STUDIO_SMOKE_BASE_URL, default the LFM2.5 8B model on 127.0.0.1:11434)";
 
+#[path = "support/held.rs"]
+mod held;
+
 mod local_only {
+    use super::held::held;
     use super::{
         ensure, json, plugin_store, prompt, stop_daemon, user_text, write_private, Arc, AtomicUsize, Capability,
         Command, Connection, Context, DaemonClient, DaemonCommand, DaemonLaunch, Delivery, Duration, Grants, Harness,
@@ -1004,21 +1008,20 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(())
     }
 
-    fn lists(socket: &Path, thread: &str, server: &str) -> anyhow::Result<bool> {
-        Ok(connections(socket, thread)?.iter().any(|(name, _)| name == server))
-    }
-
     fn queued_during_run(harness: &mut Harness, socket: &Path, ledger_out: &Path) -> anyhow::Result<()> {
         let studio = Arc::clone(&harness.studio);
         let project = harness.view.projects[0].id.clone();
         let before = server_starts(ledger_out, "plugin-ledger").len();
-        let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
-        studio.start_thread("busy".to_string(), Some(project), prompt(long), settings(LOCAL, mid()));
+        let short = "Reply with the single word ok. Do not call any tools.";
+        studio.start_thread("busy".to_string(), Some(project), prompt(short), settings(LOCAL, mid()));
         harness.pump_until("busy thread started", STEP, |view| view.thread("busy").is_some())?;
         let thread = harness.view.thread("busy").context("busy thread")?;
         studio.select_thread(Some(thread.clone()));
+        harness.pump_until("busy thread answered", STEP, |view| view.idle(&thread) && view.items(&thread).len() > 1)?;
+        ensure!(held(socket, &thread)?, "the busy thread was not offered Local Studio's own tools");
+        let long = "Write a 700-word story about a lighthouse keeper. Do not call any tools.";
+        studio.send("long".to_string(), thread.clone(), prompt(long), Delivery::Queue);
         harness.pump_until("busy thread working", STEP, |view| !view.idle(&thread))?;
-        ensure!(lists(socket, &thread, "local-studio")?, "the busy thread was not offered Local Studio's own tools");
         studio.send("queued".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
         harness
             .pump_until("still working after the queued /ledger", Duration::from_secs(2), |view| !view.idle(&thread))?;
@@ -1031,7 +1034,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 && starts.iter().all(|row| row.get("LOCAL_STUDIO_LOCAL_ONLY").and_then(Value::as_str) == Some("1")),
             "plugin-ledger did not start for the /ledger queued during a local turn: {starts:?}"
         );
-        ensure!(!lists(socket, &thread, "local-studio")?, "local-studio is still in the queued /ledger session");
+        ensure!(!held(socket, &thread)?, "Local Studio's own tools are still in the queued /ledger session");
         Ok(())
     }
 
@@ -1324,10 +1327,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             servers.iter().filter(|(name, up)| *up && name != "plugin-ledger").map(|(name, _)| name.as_str()).collect();
         ensure!(connected.is_empty(), "other MCP servers are connected in the /ledger session: {connected:?}");
         ensure!(!servers.iter().any(|(name, _)| name == "web-search"), "web-search is still in the /ledger session");
-        ensure!(
-            !servers.iter().any(|(name, _)| name == "local-studio"),
-            "local-studio is still in the /ledger session"
-        );
+        ensure!(!held(socket, &cloud)?, "Local Studio's own tools are still in the /ledger session");
         println!(
             "ok   check 4b: the /ledger session lists {} MCP connections, none connected besides the plugin and no web-search; plugin-ledger started {} time(s), each with LOCAL_STUDIO_LOCAL_ONLY=1",
             servers.len(),

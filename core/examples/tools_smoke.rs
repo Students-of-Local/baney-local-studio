@@ -13,6 +13,8 @@ use local_studio_core::{
 };
 use serde_json::{json, Map, Value};
 
+#[path = "support/held.rs"]
+mod held;
 #[path = "support/real_model.rs"]
 #[allow(dead_code)]
 mod real_model;
@@ -195,8 +197,7 @@ fn program(path: &Path, log: &Path) -> anyhow::Result<()> {
     Ok(std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?)
 }
 
-fn drive(run: &mut Run, work: &Path, bin: &Path) -> anyhow::Result<()> {
-    let ours = run.ours.clone();
+fn drive(run: &mut Run, socket: &Path, work: &Path, bin: &Path) -> anyhow::Result<()> {
     run.until("the core is ready", |view| {
         matches!(view.connection, Some(Connection::Ready)) && view.settings.is_some()
     })?;
@@ -218,18 +219,15 @@ fn drive(run: &mut Run, work: &Path, bin: &Path) -> anyhow::Result<()> {
         run.note(&project, word)?;
         run.expect(word, Some(tools))?;
     }
-    let running = || {
-        let pid = lines(&ours).iter().rev().find_map(|entry| entry["pid"].as_i64()).unwrap_or_default().to_string();
-        std::process::Command::new("kill").args(["-0", &pid]).stderr(std::process::Stdio::null()).status()
-    };
-    ensure!(running()?.success(), "the program is not running while computer use is on");
+    let thread = run.view.started.get(DRAFT).cloned().context("no thread")?;
+    ensure!(held::held(socket, &thread)?, "the session holds no server while computer use is on");
     run.turn_on(false, false)?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    while running()?.success() {
-        ensure!(Instant::now() < deadline, "the program still runs 30 s after both were turned off");
+    while held::held(socket, &thread)? {
+        ensure!(Instant::now() < deadline, "the session still holds the server 30 s after both were turned off");
         std::thread::sleep(Duration::from_millis(200));
     }
-    println!("ok   turning both off stopped the program before another message");
+    println!("ok   turning both off took the server from the session before another message");
     run.note(&project, "meadow")?;
     run.expect("meadow", None)?;
     std::fs::rename(bin, bin.with_extension("away"))?;
@@ -284,7 +282,7 @@ fn main() -> anyhow::Result<()> {
     };
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
     let mut run = Run { studio, signal, view: View::default(), ours, own, sent: 0 };
-    let outcome = drive(&mut run, &work, &bin);
+    let outcome = drive(&mut run, &socket, &work, &bin);
     run.studio.shutdown();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let stopped = runtime.block_on(async {
