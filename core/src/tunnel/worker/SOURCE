@@ -1,4 +1,4 @@
 repo https://github.com/baney75/local-studio-tunnels relay/dist
-commit 741ff1611f280b23e7fbad0862f0e71201a8f9c7
-3bb1f173b4100933e40c87efba8632d3236954b85e6693b56cc01d7daae87ade relay.js
+commit 48b2d361dc3be4f16e9071fba9cacc305e6353f1
+636992af0243d19fcd6802e60ebd7ec4e9ceb3c0bb308fa1a09ee123c34ce117 relay.js
 c020a9b02ec0d5a271dfef8de77b631496eab63864cb7958bae29c56394f9b71 wrangler.jsonc
