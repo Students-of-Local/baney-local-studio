@@ -357,13 +357,23 @@ private struct EndpointRow: View {
     }
 }
 
-private struct EngineRow: View {
+struct EngineRow: View {
     let engine: LocalEngine
     let pending: Bool
     let use: () -> Void
 
     var body: some View {
-        LabeledContent {
+        HStack(spacing: 8) {
+            StatusDot(on: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(engine.models.joined(separator: ", "))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text("\(engine.controller) · port \(String(engine.port))")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            Spacer(minLength: 0)
             if engine.added {
                 Text("Added")
                     .foregroundStyle(Theme.secondaryText)
@@ -371,18 +381,6 @@ private struct EngineRow: View {
                 Button("Use", action: use)
                     .disabled(pending)
                     .accessibilityLabel("Use \(engine.models.first ?? "the engine") on port \(engine.port)")
-            }
-        } label: {
-            HStack(spacing: 8) {
-                StatusDot(on: true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(engine.models.joined(separator: ", "))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Text("\(engine.controller) · port \(String(engine.port))")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.secondaryText)
-                }
             }
         }
     }

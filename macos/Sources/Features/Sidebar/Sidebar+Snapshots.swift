@@ -72,6 +72,9 @@ extension SnapshotCatalog {
             SnapshotEntry(name: "shell-onboarding-providers", size: CGSize(width: 560, height: 440), updates: [.connection(state: .ready), .providers(providers: ShellFixtures.providers, engines: [], errors: [])]) { store in
                 AnyView(OnboardingView(store: store, step: .providers))
             },
+            SnapshotEntry(name: "shell-onboarding-providers-found", size: CGSize(width: 560, height: 440), updates: [.connection(state: .ready), .providers(providers: ShellFixtures.unconfiguredProviders, engines: PagesFixtures.engines, errors: [])]) { store in
+                AnyView(OnboardingView(store: store, step: .providers))
+            },
             SnapshotEntry(name: "shell-onboarding-project", size: CGSize(width: 560, height: 440), updates: [.connection(state: .ready), .projects(projects: Array(ShellFixtures.projects.prefix(1)))]) { store in
                 AnyView(OnboardingView(store: store, step: .project))
             },

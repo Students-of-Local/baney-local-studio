@@ -47,7 +47,7 @@ struct OnboardingView: View {
         }
         .frame(width: 560, height: 440)
         .background(Theme.canvas)
-        .task { store.core.run { $0.loadProviders() } }
+        .task { store.pages.loadProviders() }
         .onAppear { if !store.shell.onboardingDismissed { store.shell.onboardingActive = true } }
     }
 
@@ -63,26 +63,11 @@ struct OnboardingView: View {
             }
         case .providers:
             OnboardingPage(symbol: "cpu", title: "Model providers", detail: providerDetail) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(onboardingProviders, id: \.id) { provider in
-                        StatusLine(tint: provider.configured ? Theme.success : Theme.tertiaryText, symbol: provider.configured ? "checkmark" : "minus", text: "\(provider.name) · \(provider.modelCount) model\(provider.modelCount == 1 ? "" : "s")")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        providerRows
                     }
-                    ForEach(store.pages.providerErrors, id: \.self) { error in
-                        IconLabel(error, symbol: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Theme.warning)
-                    }
-                    if configuredProviders == 0 {
-                        Text("Paste an API key or add an OpenAI-compatible endpoint in Settings → Providers, or run `eukhe` in Terminal and use `/login` for a ChatGPT or Copilot subscription, then check again. For Claude, use Claude Code (your `claude` sign-in).")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack {
-                            Button("Add Provider…") { store.openProvidersSettings() }
-                            Button("Open Terminal") { openTerminal() }
-                            Button("Check Again") { store.core.run { $0.loadProviders() } }
-                        }
-                        .padding(.top, 4)
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         case .project:
@@ -113,6 +98,35 @@ struct OnboardingView: View {
             OnboardingPage(symbol: "checkmark", title: "You're ready", detail: "Start a thread with ⌘N, find anything with ⌘K, and hold ⌘ to jump between threads.") {
                 EmptyView()
             }
+        }
+    }
+
+    @ViewBuilder private var providerRows: some View {
+        ForEach(store.pages.engines, id: \.id) { engine in
+            EngineRow(engine: engine, pending: store.pages.isProviderPending(engine.id)) {
+                store.pages.useLocalEngine(engine)
+            }
+        }
+        ForEach(onboardingErrors, id: \.self) { error in
+            IconLabel(error, symbol: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.warning)
+        }
+        ForEach(onboardingProviders, id: \.id) { provider in
+            StatusLine(tint: provider.configured ? Theme.success : Theme.tertiaryText, symbol: provider.configured ? "checkmark" : "minus", text: "\(provider.name) · \(provider.modelCount) model\(provider.modelCount == 1 ? "" : "s")")
+        }
+        if configuredProviders == 0 {
+            if store.pages.engines.isEmpty {
+                Text("Start a local server such as Ollama or LM Studio, paste an API key or add an OpenAI-compatible endpoint in Settings → Providers, or run `eukhe` in Terminal and use `/login` for a ChatGPT or Copilot subscription, then check again. For Claude, use Claude Code (your `claude` sign-in).")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Add Provider…") { store.openProvidersSettings() }
+                Button("Open Terminal") { openTerminal() }
+                Button("Check Again") { store.pages.loadProviders() }
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -151,14 +165,24 @@ struct OnboardingView: View {
     }
 
     private var onboardingProviders: [ProviderStatus] {
-        let configured = store.pages.providers.filter(\.configured)
-        return Array((configured.isEmpty ? store.pages.providers : configured).prefix(5))
+        let engines = store.pages.engines.map(\.baseUrl)
+        let rows = store.pages.providers.filter { provider in
+            provider.configured == (configuredProviders > 0) && !engines.contains { $0 == provider.baseUrl }
+        }
+        return Array(rows.prefix(5))
+    }
+
+    private var onboardingErrors: [String] {
+        [store.pages.providerActionError].compactMap(\.self) + store.pages.providerErrors
     }
 
     private var providerDetail: String {
         let models = store.pages.providers.filter(\.configured).reduce(0) { $0 + Int($1.modelCount) }
         if store.pages.providers.isEmpty {
             return "Checking which providers Eukhe can use…"
+        }
+        if configuredProviders == 0, !store.pages.engines.isEmpty {
+            return "These model servers are running on your machines. Use one, and its models are ready."
         }
         if configuredProviders == 0 {
             return "No provider is signed in yet, so threads can't run."
