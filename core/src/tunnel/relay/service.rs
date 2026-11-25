@@ -107,10 +107,12 @@ fn ending(ended: Ended) -> (&'static str, String) {
 pub(in crate::tunnel) fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     use tokio::signal::unix::{signal, SignalKind};
     let (mut term, mut int) = (signal(SignalKind::terminate())?, signal(SignalKind::interrupt())?);
+    let mut hup = signal(SignalKind::hangup())?;
     Ok(async move {
         tokio::select! {
             _ = term.recv() => {}
             _ = int.recv() => {}
+            _ = hup.recv() => {}
         }
     })
 }

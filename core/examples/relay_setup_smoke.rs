@@ -243,7 +243,8 @@ impl Smoke {
 
     fn stop(&self, service: &mut Service, lines: &[&str]) -> Result<(), String> {
         let pid = service.child.id().to_string();
-        Command::new("kill").args(["-TERM", &pid]).status().map_err(text)?;
+        let sent = Command::new("kill").args(["-TERM", &pid]).status().map_err(text)?;
+        ensure(sent.success(), format!("SIGTERM to {pid}: {sent}"))?;
         let status = until("the exit after SIGTERM", QUICK, || service.child.try_wait().ok().flatten())?;
         ensure(status.code() == Some(0), format!("SIGTERM exits 0, not {status}"))?;
         self.state(service, "stopped")?;
