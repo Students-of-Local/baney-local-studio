@@ -91,6 +91,10 @@ pub struct Ports {
     pub mcp: u16,
 }
 
+const JOIN: &str = "local-studio-browser remote join";
+const UNJOINED: &str =
+    " Browser use is running here but doesn't answer this name yet. Run: local-studio-browser remote join";
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
@@ -427,7 +431,15 @@ impl Tunnel {
         let keys = match (keys, route) {
             (Some(keys), Some(route)) if route.is_hosted() && self.service.is_some() => keys,
             (Some(keys), None) if self.service.is_some() => keys,
-            (_, Some(route)) => return Ok(self.relay_status(route_status(&route))),
+            (_, Some(route)) => {
+                let mut status = self.relay_status(route_status(&route));
+                if status.next == "ready" && self.unjoined(&route).await {
+                    status.next = "needs_join".into();
+                    status.next_command = Some(JOIN.into());
+                    status.message.push_str(UNJOINED);
+                }
+                return Ok(status);
+            }
             (_, None) => return Ok(local_status("none", NO_ROUTE, ports)),
         };
         self.flush_reports(&keys).await;
@@ -435,6 +447,12 @@ impl Tunnel {
         let status = self.status_from(&value, ports);
         self.settle(&status);
         Ok(status)
+    }
+
+    async fn unjoined(&self, route: &Route) -> bool {
+        let mcp = format!("http://127.0.0.1:{}/mcp", route.ports.mcp);
+        let asked = self.http.get(mcp).header("Host", &route.hostname).timeout(Duration::from_secs(2)).send().await;
+        route.owner == "local-studio" && asked.is_ok_and(|answer| answer.status().as_u16() == 421)
     }
 
     fn status_from(&self, value: &Value, fallback: Ports) -> Status {

@@ -780,9 +780,10 @@ fn plan_mounts(state: &ServeState, wanted: &[(String, String)]) -> Result<Vec<(S
 
 fn ready(route: &Route, checks: &Value, message: &str) -> Value {
     let ports = route.ports;
-    json!({
+    let joined = checks["mcp"] != "not_joined";
+    let mut value = json!({
         "state": "ready",
-        "next": "ready",
+        "next": if joined { "ready" } else { "needs_join" },
         "route": route.route,
         "hostname": route.hostname,
         "aliases": route.aliases.clone().unwrap_or_default(),
@@ -791,7 +792,11 @@ fn ready(route: &Route, checks: &Value, message: &str) -> Value {
         "wsUrl": format!("wss://{}/v1/ws", route.hostname),
         "checks": checks,
         "message": format!("{message}{}", notes(checks)),
-    })
+    });
+    if !joined {
+        value["command"] = json!(super::JOIN);
+    }
+    value
 }
 
 fn check_url() -> Option<String> {
@@ -883,9 +888,7 @@ fn notes(checks: &Value) -> String {
         text.push_str(" This computer's DNS still has the old answer for the new name, so the checks looked it up over DNS over HTTPS. That clears on its own, and nothing is needed.");
     }
     if checks["mcp"] == "not_joined" {
-        text.push_str(
-            " Browser use is running here but doesn't answer this name yet. Run: local-studio-browser remote join",
-        );
+        text.push_str(super::UNJOINED);
     }
     text
 }
@@ -1196,7 +1199,7 @@ impl Tunnel {
         };
         let route = new_route("tailnet", &dns, &[], ports);
         self.write_route(&route)?;
-        let mut value = ready(&route, &checks, "Live on your tailnet only. No Funnel.");
+        let mut value = ready(&route, &checks, "Live on your tailnet. This route uses no Funnel.");
         value["mounted"] = json!(added.iter().map(|(path, _)| path).collect::<Vec<_>>());
         if let Err(why) = allowed {
             let command = format!("local-studio-serve allow-host {dns} --json");

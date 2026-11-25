@@ -760,12 +760,26 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     let unjoined = s.state.join("not-joined");
     fs::write(&unjoined, "").map_err(|e| e.to_string())?;
     let (code, value) = s.ls(&again)?;
+    let (status_code, status) = s.ls(&["tunnel", "status", "--json"])?;
     fs::remove_file(&unjoined).map_err(|e| e.to_string())?;
+    let (_, joined) = s.ls(&["tunnel", "status", "--json"])?;
+    let join = "local-studio-browser remote join";
+    ensure(
+        status_code == 0
+            && status["next"] == "needs_join"
+            && status["nextCommand"] == join
+            && status["message"].as_str().is_some_and(|text| text.ends_with(join))
+            && joined["next"] == "ready"
+            && joined["nextCommand"].is_null(),
+        format!("status names the join, and not once it joined: {status} {joined}"),
+    )?;
     let message = value["message"].as_str().unwrap_or_default();
     ensure(
         code == 0
             && value["checks"]["mcp"] == "not_joined"
-            && message.ends_with("local-studio-browser remote join")
+            && value["next"] == "needs_join"
+            && value["command"] == join
+            && message.ends_with(join)
             && s.route_path().exists(),
         format!("a server that hasn't joined the name is ready, naming the join: {value}"),
     )?;
