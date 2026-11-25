@@ -450,9 +450,12 @@ impl Tunnel {
     }
 
     async fn unjoined(&self, route: &Route) -> bool {
+        if route.owner != "local-studio" {
+            return false;
+        }
         let mcp = format!("http://127.0.0.1:{}/mcp", route.ports.mcp);
         let asked = self.http.get(mcp).header("Host", &route.hostname).timeout(Duration::from_secs(2)).send().await;
-        route.owner == "local-studio" && asked.is_ok_and(|answer| answer.status().as_u16() == 421)
+        asked.is_ok_and(|answer| answer.status().as_u16() == 421)
     }
 
     fn status_from(&self, value: &Value, fallback: Ports) -> Status {

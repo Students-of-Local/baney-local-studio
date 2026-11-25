@@ -757,9 +757,22 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     ensure(!Smoke::has(&lines, "tunnel create"), "setup again must reuse the tunnel")?;
     Smoke::at(&lines, "check studio.example.com /mcp 401")?;
 
+    not_joined(s, &again)?;
+    bad_serve(s, &again)?;
+
+    let (code, value) = s.ls(&again)?;
+    ensure(code == 0 && value["checks"]["serveAllowed"] == true, format!("setup once serve.json is gone: {value}"))?;
+    off(s)?;
+    s.check_serve(&allowed(json!([])))?;
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
+    println!("ok: setup --cloudflare, needs_signin, ready, again, a bad serve.json, off");
+    Ok(())
+}
+
+fn not_joined(s: &Smoke, again: &[&str]) -> Result<(), String> {
     let unjoined = s.state.join("not-joined");
     fs::write(&unjoined, "").map_err(|e| e.to_string())?;
-    let (code, value) = s.ls(&again)?;
+    let (code, value) = s.ls(again)?;
     let (status_code, status) = s.ls(&["tunnel", "status", "--json"])?;
     fs::remove_file(&unjoined).map_err(|e| e.to_string())?;
     let (_, joined) = s.ls(&["tunnel", "status", "--json"])?;
@@ -782,17 +795,7 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
             && message.ends_with(join)
             && s.route_path().exists(),
         format!("a server that hasn't joined the name is ready, naming the join: {value}"),
-    )?;
-
-    bad_serve(s, &again)?;
-
-    let (code, value) = s.ls(&again)?;
-    ensure(code == 0 && value["checks"]["serveAllowed"] == true, format!("setup once serve.json is gone: {value}"))?;
-    off(s)?;
-    s.check_serve(&allowed(json!([])))?;
-    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
-    println!("ok: setup --cloudflare, needs_signin, ready, again, a bad serve.json, off");
-    Ok(())
+    )
 }
 
 fn bad_serve(s: &Smoke, again: &[&str]) -> Result<(), String> {
