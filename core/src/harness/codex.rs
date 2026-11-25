@@ -239,6 +239,12 @@ pub(crate) struct Codex {
     kill: Option<oneshot::Sender<()>>,
 }
 
+fn asks_for_tool(params: &Value) -> bool {
+    params["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+        && params["mode"] == "form"
+        && params["requestedSchema"]["properties"].as_object().is_some_and(serde_json::Map::is_empty)
+}
+
 fn tool_answer(accept: bool, session: bool) -> Value {
     json!({
         "action": if accept { "accept" } else { "decline" },
@@ -1056,7 +1062,7 @@ impl Translator {
                 (format!("Run: {command}"), "exec", Ask::Legacy)
             }
             "applyPatchApproval" => ("Change files".to_string(), "write", Ask::Legacy),
-            "mcpServer/elicitation/request" if params["_meta"]["codex_approval_kind"] == "mcp_tool_call" => {
+            "mcpServer/elicitation/request" if asks_for_tool(params) => {
                 let meta = &params["_meta"];
                 let open = self.turns.lock().unwrap_or_else(PoisonError::into_inner).open;
                 if open && meta["codex_requires_user_input"] != true {

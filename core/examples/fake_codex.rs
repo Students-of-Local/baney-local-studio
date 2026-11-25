@@ -58,18 +58,20 @@ impl Shared {
         self.write(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
-    fn ask(&self, turn: &str, number: u64, tool: bool) -> Option<String> {
+    fn ask(&self, turn: &str, number: u64, tool: Option<&str>) -> Option<String> {
         let id = json!(format!("approval-{number}"));
         let (sender, answer) = channel();
         self.answers.lock().unwrap_or_else(PoisonError::into_inner).push((id.clone(), sender));
-        let (method, params) = if tool {
+        let (method, params) = if let Some(text) = tool {
             let meta = json!({
+                "codex_requires_user_input": text.contains("always asks"),
                 "codex_approval_kind": "mcp_tool_call",
                 "persist": ["session", "always"],
                 "tool_name": "open_page",
                 "tool_params": { "url": "https://example.com" },
             });
-            let schema = json!({ "type": "object", "properties": {} });
+            let fields = if text.contains("with a form") { json!({ "name": { "type": "string" } }) } else { json!({}) };
+            let schema = json!({ "type": "object", "properties": fields });
             let message = "Allow the pages MCP server to run tool \"open_page\"?";
             let params = json!({ "threadId": "", "turnId": turn, "serverName": "pages", "mode": "form",
                 "message": message, "requestedSchema": schema, "_meta": meta });
@@ -95,7 +97,7 @@ impl Shared {
             let (_, sender) = answers.remove(index);
             let answer = match result["action"].as_str() {
                 Some(action) => format!("{action} {}", result["_meta"]["persist"].as_str().unwrap_or("once")),
-                None => result["decision"].as_str().unwrap_or_default().to_string(),
+                None => result["decision"].as_str().unwrap_or("refusal").to_string(),
             };
             sender.send(answer).ok();
         }
@@ -223,8 +225,8 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         return;
     }
     let made = skill::reply(text);
-    let tool = text.contains("open a page");
-    let asks = tool || made.is_none() && text.contains("skill") && !text.contains("````skill");
+    let tool = text.contains("open a page").then_some(text);
+    let asks = tool.is_some() || made.is_none() && text.contains("skill") && !text.contains("````skill");
     let mut reply = made.unwrap_or_else(|| format!("reply to {text}"));
     if asks {
         let Some(decision) = shared.ask(&turn, number, tool) else {
