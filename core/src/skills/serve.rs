@@ -136,12 +136,15 @@ pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) 
         Some(binary) => PathBuf::from(binary),
         None => std::env::current_exe().and_then(std::fs::canonicalize).ok()?.with_file_name(CLI),
     };
-    if !binary.is_file() {
-        return None;
-    }
-    let mut args = vec!["skills", "mcp", "--data", data.to_str()?];
-    if let Some(plugins) = plugins {
-        args.extend(["--plugins", plugins.to_str()?]);
+    let whole = |path: &Path| std::path::absolute(path).ok()?.to_str().map(String::from);
+    let (binary, data) = (binary.is_file().then(|| whole(&binary))??, whole(data)?);
+    let plugins = match plugins {
+        Some(plugins) => Some(whole(plugins)?),
+        None => None,
+    };
+    let mut args = vec!["skills", "mcp", "--data", &data];
+    if let Some(plugins) = &plugins {
+        args.extend(["--plugins", plugins]);
     }
     match project {
         Some(project) => args.extend(["--project", project]),
@@ -149,9 +152,9 @@ pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) 
     }
     let mut env = Map::new();
     if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
-        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(agent.to_str()?));
+        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(whole(Path::new(&agent))?));
     }
-    Some(json!({ "command": binary.to_str()?, "args": args, "env": env }))
+    Some(json!({ "command": binary, "args": args, "env": env }))
 }
 
 pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: Option<PathBuf>) -> Result<(), String> {

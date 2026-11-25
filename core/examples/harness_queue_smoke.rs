@@ -1216,7 +1216,7 @@ fn main() -> anyhow::Result<()> {
     let built = examples.ancestors().skip(1).take(2).map(|dir| dir.join("local-studio")).find(|file| file.is_file());
     let cli = examples.with_file_name("local-studio-cli");
     std::fs::remove_file(&cli).ok();
-    std::fs::hard_link(built.context("build the local-studio binary first")?, cli)?;
+    std::fs::hard_link(built.context("build the local-studio binary first")?, &cli)?;
     std::env::remove_var("LOCAL_STUDIO_CLI_BIN");
     let home = root.join("home");
     let agent_dir = root.join("agent");
@@ -1288,6 +1288,7 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     });
     let stopped = stop_daemon(&socket);
+    std::fs::remove_file(&cli).ok();
     outcome?;
     stopped?;
     if !misses.is_empty() {
