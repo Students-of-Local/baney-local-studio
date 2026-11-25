@@ -15,6 +15,7 @@ const FOLDER: usize = 60;
 const LONG: usize = 24;
 const NAMED: [&str; 9] = ["password", "passwd", "secret", "token", "cookie", "api key", "api_key", "api-key", "apikey"];
 const KINDS: [&str; 4] = ["skill", "asks", "where", "file"];
+const QUOTES: [char; 5] = ['"', '\'', '`', '*', ' '];
 const NAMES: &str = "names.txt";
 
 pub const CREATE: &str = "Turn what you did in this thread into one skill that a small local model can follow without this thread.
@@ -73,9 +74,12 @@ impl Draft {
             let (path, text) = match block.info.split_once(' ').unwrap_or((&block.info, "")) {
                 ("skill", "") => continue,
                 ("asks", "") => ("asks.txt".to_string(), listed(&block.text)),
-                ("where", "") => ("where.txt".to_string(), listed(&block.text)),
+                ("where", "") => ("where.txt".to_string(), listed(&block.text).lines().map(place).collect()),
                 ("file", path) if block.long > 3 => (beside(path)?, block.text.clone()),
                 ("file", path) => return Err(format!("The file {} needs four backticks.", text::plain(path))),
+                ("", "") if block.long > 3 => {
+                    return Err("A block in four backticks has no label, so one may have ended early.".to_string());
+                }
                 _ => {
                     left.push(other(&block.info)?);
                     continue;
@@ -84,7 +88,7 @@ impl Draft {
             if files.iter().any(|(used, _)| used.eq_ignore_ascii_case(&path)) {
                 return Err(format!("The reply holds {path} twice."));
             }
-            if !text.is_empty() {
+            if !text.is_empty() || block.info.starts_with("file") {
                 files.push((path, text));
             }
         }
@@ -202,6 +206,11 @@ fn listed(text: &str) -> String {
     text.lines().filter_map(item).collect()
 }
 
+fn place(line: &str) -> String {
+    let ends = ["`", " (", ": ", " - "];
+    format!("{}\n", ends.iter().fold(line, |line, end| line.split(end).next().unwrap_or(line)))
+}
+
 fn folder(name: &str) -> String {
     let name: String = name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
     let words: Vec<&str> = name.split('-').filter(|word| !word.is_empty()).collect();
@@ -221,14 +230,19 @@ fn beside(path: &str) -> Result<String, String> {
 fn private(line: &str) -> bool {
     let lower = line.to_lowercase();
     let filled = |value: &str| {
-        let value = value.trim_start_matches(['"', '\'', '`', ' ']);
+        let value = value.trim_start_matches(QUOTES);
         value.split_whitespace().next().is_some_and(|word| word.len() > 5 && !word.starts_with(['<', '{', '$', '[']))
     };
     let named = NAMED.iter().any(|word| {
         lower.match_indices(word).any(|(at, _)| {
             let after =
                 lower[at + word.len()..].trim_start_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '-');
-            after.trim_start_matches(['"', '\'', '`', ' ']).strip_prefix([':', '=']).is_some_and(filled)
+            let flag = lower[..at].rsplit(char::is_whitespace).next().is_some_and(|word| word.starts_with("--"));
+            after
+                .trim_start_matches(QUOTES)
+                .strip_prefix([':', '='])
+                .or_else(|| after.strip_prefix(' ').filter(|_| flag))
+                .is_some_and(filled)
         })
     });
     let key = |word: &str| {

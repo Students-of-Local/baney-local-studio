@@ -244,7 +244,7 @@ fn create(
     for (path, body) in [("SKILL.md", &draft.text)].into_iter().chain(draft.files.iter().map(|(p, t)| (p.as_str(), t)))
     {
         text.push(format!("with {path}"));
-        text.extend(body.lines().filter(|_| !save).map(|line| format!("  {}", plain(line))));
+        text.extend(body.lines().filter(|_| !save).map(|line| format!("  {}", plain(&line.replace('\t', "    ")))));
     }
     text.extend(draft.left.iter().map(|info| format!("left out: a block labeled \"{info}\"")));
     text.extend(draft.marked.iter().map(|line| format!("may be private: {}", plain(line))));

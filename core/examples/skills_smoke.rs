@@ -443,12 +443,15 @@ fn creating(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     smoke.check("and in JSON", smoke.json(&["create"])?["ask"].as_str().is_some_and(|ask| ask.contains("````skill")));
     let body = "## Water\n```\nmist 2\n```\n~~~~\n```\n~~~~\n## Light\nshade";
     let extras =
-        "```asks\n1. my frond went brown\n```\n````where\n- `ferns.test`\n\n````\n````file scripts/mist.py\nprint(2)\n````\n";
+        "```asks\n1. my frond went brown\n```\n````where\n- `ferns.test`: the shop\n\n````\n````file scripts/mist.py\nprint(2)\n\tmore\n````\n````file scripts/__init__.py\n````\n";
     put(&reply, &format!("{}{extras}", block("Fern Care", body)))?;
     let shown = smoke.json(&["create", &reply.to_string_lossy()])?;
     let plain = smoke.run(&["create", &reply.to_string_lossy()])?.stdout;
     let plain = String::from_utf8_lossy(&plain).into_owned();
-    smoke.check("create alone shows every line", plain.contains("  shade\n") && plain.contains("  print(2)\n"));
+    smoke.check(
+        "create alone shows every line",
+        plain.contains("  shade\n") && plain.contains("  print(2)\n      more\n"),
+    );
     let unsaved = shown["folder"] == "fern-care" && shown["saved"].is_null() && !own.join("fern-care").exists();
     smoke.check("create alone saves nothing", unsaved);
     let (saved, _) = save(smoke, &format!("{}{extras}", block("Fern Care", body)))?;
@@ -456,7 +459,8 @@ fn creating(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
         |name: &str| read(own.join("fern-care").join(name)).map(|text| String::from_utf8_lossy(&text).into_owned());
     let kept = text("SKILL.md").is_ok_and(|text| text.contains("## Light\nshade"))
         && text("asks.txt").is_ok_and(|text| text == "my frond went brown\n")
-        && text("scripts/mist.py").is_ok_and(|text| text == "print(2)\n");
+        && text("scripts/mist.py").is_ok_and(|text| text == "print(2)\n\tmore\n")
+        && text("scripts/__init__.py").is_ok_and(|text| text.is_empty());
     smoke.check("a saved skill holds its text, phrasings and files", saved && kept);
     let found = smoke.first(&["why is the frond brown"])? == "Fern Care"
         && smoke.first(&["--for", "ferns.test"])? == "Fern Care";
@@ -482,6 +486,11 @@ fn refusing(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
         ("three backticks", x.replace("````", "```"), "needs four backticks"),
         ("a file in three backticks", format!("{x}```file a.py\nx\n```\n"), "needs four backticks"),
         ("a reply cut short", format!("{x}````file a.py\nx\n"), "never ends"),
+        (
+            "a skill its own code block ends",
+            x.replace("\n````\n", "\n````sh\nls\n````\nmore\n````\n````asks\ny\n````\n"),
+            "no label",
+        ),
         ("a label near a real one", format!("{x}````Asks:\nx\n````\n"), "labeled"),
     ] {
         let (saved, shown) = save(smoke, &reply)?;
@@ -495,11 +504,14 @@ fn refusing(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     }
     let (odd, _) = save(smoke, &block("../../Over There/é", ""))?;
     smoke.check("a name is a plain folder", odd && own.join("over-there-é/SKILL.md").exists());
-    let (marked, shown) = save(
-        smoke,
-        &block("keys", "password: hunter2xyz\npassword: <yours>\nAsk.\ntoken token_id=abc1234\nx-api-key: q1w2e3r"),
-    )?;
-    smoke.check("secrets are marked", marked && shown.matches("may be private").count() == 3);
+    let made_up = ["plum", "jam9"].concat();
+    let secrets = [
+        format!("password: {made_up}\npassword: <yours>\nAsk for the password."),
+        format!("token token_id={made_up}\nx-api-key: {made_up}"),
+        format!("**Password:** {made_up}\ntool --token {made_up}"),
+    ];
+    let (marked, shown) = save(smoke, &block("keys", &secrets.join("\n")))?;
+    smoke.check("secrets are marked", marked && shown.matches("may be private").count() == 5);
     let marks = save(smoke, &block("mark", "first"))?.0 && save(smoke, &block("mark++", "second"))?.0;
     let both = |one: &str, other: &str| {
         let holds = |folder: &str, text: &str| {
