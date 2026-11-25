@@ -20,6 +20,7 @@ const QUOTES: [char; 5] = ['"', '\'', '`', '*', ' '];
 static MADE: AtomicU64 = AtomicU64::new(0);
 const NAMES: &str = "names.txt";
 
+pub const MAKE: &str = "@create";
 pub const CREATE: &str = "Turn what you did in this thread into one skill that a small local model can follow without this thread.
 Reply with one block opened and closed by four backticks, or one more than the longest run of backticks inside it:
 
@@ -53,6 +54,12 @@ pub struct Saved {
     pub path: PathBuf,
     pub kept: Vec<PathBuf>,
     pub hides: Vec<PathBuf>,
+}
+
+#[must_use]
+pub fn asked(text: &str) -> bool {
+    let rest = text.trim_start().strip_prefix(MAKE);
+    rest.is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
 impl Draft {

@@ -830,6 +830,7 @@ fn mentions(smoke: &mut Smoke) -> Result<(), String> {
     create_dir_all(top.join("home")).map_err(text)?;
     skill(&own, "marmalade", "Cook oranges", "src main rs zebra")?;
     skill(&own, "smart-mart", "Shop", "")?;
+    skill(&own, "create", "Draw", "")?;
     skill(&own, "outdoors", "Go outside", "Take a kite, or a mar.")?;
     put(&own.join("ledger/SKILL.md"), "Broken, with no front matter. mar")?;
     skill(&own, "marzipan", "Hidden twin", "")?;
@@ -891,6 +892,16 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     let own = titles(&nowhere).contains(&"@marmalade") && !titles(&nowhere).contains(&"@marmot");
     smoke.check("with no project, skills are still listed, and no files", own && files(&nowhere) == 0);
     smoke.check("@kite finds a skill by its text", titles(&at.list("kite", "@outdoors")?) == ["@outdoors"]);
+    let make = row(MentionKind::Skill, "create", "Make a skill from this thread", "Create", "");
+    let mut own = row(MentionKind::Skill, "create", "Draw", "yours", "");
+    (own.title, own.insert) = ("$create".to_string(), "$create ".to_string());
+    for query in ["cr", "Create"] {
+        let items = at.list(query, "$create")?;
+        smoke.check(
+            &format!("@{query} lists @create first, then a skill of that name by $"),
+            items[..2] == [make.clone(), own.clone()],
+        );
+    }
     for name in ["src/ma", "main.rs"] {
         let items = at.list(name, "@src/main.rs")?;
         smoke.check(&format!("@{name} lists files only"), !items.is_empty() && files(&items) == items.len());

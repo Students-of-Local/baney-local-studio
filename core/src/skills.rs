@@ -14,7 +14,7 @@ mod serve;
 mod store;
 mod text;
 
-pub use create::{Draft, CREATE};
+pub use create::{asked, Draft, CREATE, MAKE};
 pub use read::Reading;
 pub use search::{lines, Hit, Query};
 pub(crate) use serve::{entry, TOOLS};
@@ -206,7 +206,7 @@ impl Resources {
         let mut used: Vec<PathBuf> = Vec::new();
         let mut blocks: Vec<String> = Vec::new();
         let mut plugins: Vec<String> = Vec::new();
-        for (index, mark) in text.match_indices(['$', '@']) {
+        for (index, mark) in text.match_indices(['$', '@']).skip(usize::from(asked(text))) {
             let rest = &text[index + 1..];
             let found = if mark == "$" {
                 longest(rest, &dollar, |after| !after.starts_with(in_name))

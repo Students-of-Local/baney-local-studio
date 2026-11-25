@@ -1395,6 +1395,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         executable(&root.join("gantrel/bin/run.sh"), "#!/bin/sh\nexec cat\n")?;
         skill(&data.join("skills"), "marmalade", "orange steps")?;
         skill(&data.join("skills"), "marmalade-pot", "pot steps")?;
+        skill(&data.join("skills"), "create", "carpentry steps")?;
         skill(&data.join("skills"), "ledger", "your own ledger")?;
         for id in ["alpha", "beta"] {
             manifest(&plugins.join(id), &id.to_uppercase(), "capabilities = []\n")?;
@@ -1488,6 +1489,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 &["All of kit", "- skill hammer: About hammer (", "- command /build: Build it"],
             ),
             ("absent", &work, "@gantrel", &[]),
+            ("own create", &work, "ask @create", &["carpentry steps"]),
             ("spaced", &work, "@marmalade 2026.csv please", &[]),
             ("cold", &cold, "@otter", &["otter steps"]),
         ] {
@@ -1502,6 +1504,11 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             ensure!(once && tail && shown == usize::from(!blocks.is_empty()), "{key}: {text:?} was sent as {got:?}");
             println!("ok   {key}: {text:?} sent with {blocks:?}");
         }
+        let got = sent(harness, "create", &work, "@create from @marmalade")?;
+        let block = got.starts_with("Turn what you did") && got.ends_with("\n\nfrom @marmalade");
+        let named = got.contains("orange steps") && !got.contains("carpentry steps");
+        ensure!(block && named, "@create was sent as {got:?}");
+        println!("ok   a first word @create is the command, never a skill of that name");
         ensure!(!root.join("data/plugins/gantrel").exists(), "a name in a message installed its plugin");
         let got = sent(harness, "both", &work, "@alpha then @beta")?;
         ensure!(["alpha steps", "beta steps"].iter().all(|steps| got.contains(steps)), "both: sent as {got:?}");
