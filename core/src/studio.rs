@@ -50,7 +50,6 @@ const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
 const LEFT_KEPT: usize = 8;
 const REOPEN_AFTER: Duration = Duration::from_millis(250);
-const NEW_THREAD_TITLE: &str = "New thread";
 const BODY_LIMIT: usize = 140;
 const GRANTABLE_EFFECTS: [&str; 6] = ["read", "write", "exec", "net", "outside", "protected"];
 const GENERATED_TITLE_LIMIT: usize = 80;
@@ -2346,7 +2345,7 @@ impl Actor {
             .or_else(|| thread.and_then(|thread| thread.prompt.clone()))
             .map(|title| threads::clean_title(&title))
             .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| NEW_THREAD_TITLE.to_string())
+            .unwrap_or_else(|| threads::NEW_THREAD_TITLE.to_string())
     }
 
     fn roster_for(&self, id: &str) -> Option<&RosterRow> {

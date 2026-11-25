@@ -87,9 +87,9 @@ use gtk::{gio, glib};
 use crate::app::App;
 
 const USAGE: &str = "usage: local-studio [--version | --smoke | --smoke-kernel [install|installed] | --smoke-providers | --snapshot <dir> [name-filter]]
-       local-studio import | plugin | skills | tunnel | fleet | update ... (runs local-studio-cli beside this binary)";
+       local-studio import | plugin | skills | threads | tunnel | fleet | update ... (runs local-studio-cli beside this binary)";
 
-const CLI_VERBS: [&str; 6] = ["import", "plugin", "skills", "tunnel", "fleet", "update"];
+const CLI_VERBS: [&str; 7] = ["import", "plugin", "skills", "threads", "tunnel", "fleet", "update"];
 const CLI: &str = "local-studio-cli";
 
 fn cli_verb(arg: Option<&str>) -> bool {
