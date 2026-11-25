@@ -277,6 +277,10 @@ impl Entry {
     fn stop(self, why: &str) {
         self.task.abort();
         self.out.fail(why);
+        self.release();
+    }
+
+    fn release(&self) {
         self.share.lock().unwrap_or_else(PoisonError::into_inner).take();
     }
 
@@ -351,6 +355,7 @@ impl Streams {
                 if let Some(entry) = self.open.remove(&id) {
                     entry.out.state.store(STOPPED, Ordering::Release);
                     entry.task.abort();
+                    entry.release();
                 }
             }
             "ws_close" => {

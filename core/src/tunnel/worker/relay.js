@@ -25,7 +25,7 @@ var MAX_QUEUED = 32 * 1024 * 1024;
 var MAX_SENDING = 16 * 1024 * 1024;
 var HEAD_ROOM = 4 * 1024 * 1024;
 var FRAME_COST = 128;
-var STALE_MS = 75e3;
+var STALE_MS = 12e4;
 var SYNC_EVERY = 1024 * 1024;
 var SYNC_PATH = "/_relay/sync";
 var CHUNK = 64 * 1024;
@@ -112,7 +112,8 @@ var Relay = class extends DurableObject {
   streams = /* @__PURE__ */ new Map();
   /** Streams whose response body may still hold bytes the client hasn't read; some have left `streams`. */
   bodies = /* @__PURE__ */ new Set();
-  uplink = { gen: "", sent: 0, received: 0 };
+  uplink = uplink("");
+  heard = { gen: "", at: 0 };
   /** Request bodies waiting for room in the uplink. */
   waiting = [];
   /** Looks for a silent connector while streams are open; nothing else may wake the object then. */
@@ -137,7 +138,8 @@ var Relay = class extends DurableObject {
       const a = ws.deserializeAttachment();
       if (!a || a.replaced || ws.readyState !== OPEN) continue;
       const pinged = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
-      if (Date.now() - Math.max(a.at, pinged) < STALE_MS) return { ws, gen: a.gen };
+      const heard = this.heard.gen === a.gen ? this.heard.at : 0;
+      if (Date.now() - Math.max(a.at, pinged, heard) < STALE_MS) return { ws, gen: a.gen };
       ws.serializeAttachment({ ...a, replaced: true });
       this.drop(a.gen);
       try {
@@ -164,13 +166,14 @@ var Relay = class extends DurableObject {
     this.ctx.acceptWebSocket(server, [CONNECTOR]);
     const gen = crypto.randomUUID();
     server.serializeAttachment({ gen, at: Date.now() });
-    this.uplink = { gen, sent: 0, received: 0 };
+    this.uplink = uplink(gen);
     send(server, { v: 1, t: "hello", maxBody: MAX_BODY, maxInFlight: MAX_IN_FLIGHT, headTimeoutMs: this.headTimeoutMs });
     return new Response(null, { status: 101, webSocket: client });
   }
   async webSocketMessage(ws, message) {
     const a = ws.deserializeAttachment();
     if (!a || a.replaced) return;
+    this.heard = { gen: a.gen, at: Date.now() };
     if (typeof message === "string") return this.control(ws, a.gen, message);
     const f = parseFrame(message);
     const s = f && this.streams.get(f.id);
@@ -219,7 +222,8 @@ var Relay = class extends DurableObject {
     if (m?.v !== 1 || typeof m.id !== "number") return;
     const up = this.uplink;
     if (up.sync && up.gen === gen && m.id === up.sync.id) {
-      up.received = up.sync.mark;
+      up.sending.requests -= up.sync.covers.requests;
+      up.sending.sockets -= up.sync.covers.sockets;
       up.sync = void 0;
       this.sync(ws);
       return this.wake();
@@ -304,8 +308,8 @@ var Relay = class extends DurableObject {
   }
   // Bytes held. Response bytes wait in each stream's queue until its client reads them. Bytes sent
   // to the connector wait in the runtime, which doesn't say how many are left, so they count until
-  // the connector has answered a request sent after them. Each has its own cap: uploads must never
-  // cut a download, and cutting a download would not make room for one.
+  // the connector has answered a request sent after them. Each has its own cap, and so do socket
+  // messages: uploads must never cut a download or a socket, and cutting one would not make room for them.
   queued() {
     let n = 0;
     for (const s of this.bodies) {
@@ -315,38 +319,42 @@ var Relay = class extends DurableObject {
     }
     return n;
   }
-  sending() {
-    return this.uplink.sent - this.uplink.received;
+  sending(lane) {
+    return this.uplink.sending[lane];
   }
-  /** Waits until `bytes` more fit in the uplink; false when the stream ended first. */
-  async room(s, bytes) {
-    while (this.streams.has(s.id) && this.sending() + bytes > MAX_SENDING) await new Promise((r) => this.waiting.push(r));
-    return this.streams.has(s.id);
+  /** Waits until `data` fits in the uplink and sends it in that same step; false when the stream ended first. */
+  async room(s, conn, data) {
+    while (this.streams.has(s.id) && this.sending("requests") + cost(data) > MAX_SENDING) {
+      await new Promise((r) => this.waiting.push(r));
+    }
+    if (!this.streams.has(s.id)) return false;
+    this.toConnector(conn, "requests", data);
+    return true;
   }
   wake() {
     for (const r of this.waiting.splice(0)) r();
   }
-  toConnector(conn, data) {
-    if (this.uplink.gen !== conn.gen) this.uplink = { gen: conn.gen, sent: 0, received: 0 };
+  toConnector(conn, lane, data) {
+    if (this.uplink.gen !== conn.gen) this.uplink = uplink(conn.gen);
     conn.ws.send(data);
-    this.uplink.sent += data.length + FRAME_COST;
+    this.uplink.sending[lane] += cost(data);
     this.sync(conn.ws);
   }
   sync(conn) {
     const up = this.uplink;
-    if (up.sync || this.sending() < SYNC_EVERY) return;
-    up.sync = { id: this.newId(), mark: up.sent };
+    if (up.sync || up.sending.sockets === 0 && up.sending.requests < SYNC_EVERY) return;
+    up.sync = { id: this.newId(), covers: { ...up.sending } };
     send(conn, { v: 1, t: "req", id: up.sync.id, method: "GET", path: SYNC_PATH, headers: [["host", "relay"]], body: false, ws: false });
   }
   tell(conn, m) {
-    this.toConnector(conn, JSON.stringify(m));
+    this.toConnector(conn, "requests", JSON.stringify(m));
   }
   // Public side.
   async forward(request) {
     const conn = this.connector();
     if (!conn) return text(503, "No connector is connected. Start Local Studio on your computer.");
     if (this.streams.size >= MAX_IN_FLIGHT) return text(503, "Too many requests in flight.");
-    if (this.queued() > MAX_QUEUED || this.sending() > MAX_SENDING + HEAD_ROOM) return text(503, "Too much data in flight.");
+    if (this.queued() > MAX_QUEUED || this.sending("requests") > MAX_SENDING + HEAD_ROOM) return text(503, "Too much data in flight.");
     const url = new URL(request.url);
     const ws = url.pathname === WS_PATH && request.headers.get("upgrade")?.toLowerCase() === "websocket";
     const headers = endToEnd(request.headers, REQUEST_SET);
@@ -394,8 +402,7 @@ var Relay = class extends DurableObject {
         if (total > MAX_BODY) return this.cancel(s, "too_large", text(413, "Request body over 10 MB."));
         for (let off = 0; off < value.byteLength; off += CHUNK) {
           const slice = value.subarray(off, off + CHUNK);
-          if (!await this.room(s, slice.byteLength)) return;
-          this.toConnector(conn, frame(DATA, s.id, slice));
+          if (!await this.room(s, conn, frame(DATA, s.id, slice))) return;
         }
       }
       this.tell(conn, { v: 1, t: "end", id: s.id });
@@ -404,11 +411,13 @@ var Relay = class extends DurableObject {
     }
   }
   fromPublic(s, data) {
+    if (!this.streams.has(s.id)) return;
     const conn = this.connector();
     if (!conn || conn.gen !== s.gen) return this.finish(s, text(502, ""), 1012);
     const f = typeof data === "string" ? frame(WS_TEXT, s.id, encoder.encode(data)) : frame(WS_BINARY, s.id, new Uint8Array(data));
-    if (this.sending() + f.byteLength > MAX_SENDING) return this.cancel(s, "busy");
-    this.toConnector(conn, f);
+    const ahead = this.sending("sockets");
+    if (ahead > 0 && ahead + cost(f) > MAX_SENDING) return this.cancel(s, "busy");
+    this.toConnector(conn, "sockets", f);
   }
   publicClosed(s, code, reason) {
     if (!this.streams.delete(s.id)) return;
@@ -467,6 +476,14 @@ function held(s) {
   return -(s.body?.desiredSize ?? 0);
 }
 __name(held, "held");
+function uplink(gen) {
+  return { gen, sending: { requests: 0, sockets: 0 } };
+}
+__name(uplink, "uplink");
+function cost(data) {
+  return data.length + FRAME_COST;
+}
+__name(cost, "cost");
 function send(ws, m) {
   ws.send(JSON.stringify(m));
 }
