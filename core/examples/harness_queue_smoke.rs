@@ -817,7 +817,7 @@ fn ran_with(run: &mut Run, label: &str, text: &str, sources: &str) {
 
 fn looks_up(run: &mut Run) -> anyhow::Result<()> {
     let first = run.watch.projects.first().cloned().context("first project")?;
-    for (label, pick) in [("skills-claude", CLAUDE), ("skills-codex", CODEX)] {
+    for (label, pick) in [("lookup-claude", CLAUDE), ("lookup-codex", CODEX)] {
         with_cli(run, pick, label, &first, WorktreeChoice::Local)?;
         run.setup(&format!("{label}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
         finds(run, label, "zorb", "zorbing (personal)");
