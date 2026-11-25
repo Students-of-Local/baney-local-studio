@@ -10,6 +10,7 @@ use local_studio_core::{
 };
 
 use crate::app::App;
+use crate::state::PendingSend;
 
 const PROMPT: &str = "Use the bash tool to run exactly this command once: `echo smoke-ok > smoke.txt && cat smoke.txt`. Then reply with only the word done.";
 const MARK: &str = "smoke-ok";
@@ -207,15 +208,25 @@ fn keeps_unsent(app: &Rc<App>, thread: Option<String>) -> bool {
 fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
     let Some(id) = thread.clone() else { return false };
     let holds = |text: &str| app.composer.text() == text;
+    let draft = |file: &str| {
+        PromptDraft { text: format!("returned {file}"), images: vec![], files: vec![file.to_string()] }
+    };
     let returned = |file: &str| {
-        let (thread, text) = (id.clone(), format!("returned {file}"));
-        let draft = PromptDraft { text, images: vec![], files: vec![file.to_string()] };
-        app.apply(vec![Update::ComposerDraft { thread, draft }]);
+        app.apply(vec![Update::ComposerDraft { thread: id.clone(), draft: draft(file) }]);
     };
     let started = |draft: &str| {
         app.apply(vec![Update::ThreadStarted { draft: draft.to_string(), thread: id.clone() }]);
     };
-    returned("a.txt");
+    app.state.borrow_mut().pending.push(PendingSend {
+        request: MISSING.to_string(),
+        thread: id.clone(),
+        text: draft("a.txt").text,
+        draft: draft("a.txt"),
+        queued: false,
+        baseline: 0,
+        queue_baseline: 0,
+    });
+    app.apply(vec![Update::RequestFailed { request: MISSING.to_string(), message: REJECTED.to_string() }]);
     returned("b.txt");
     let away = holds("");
     app.select_thread(thread);
