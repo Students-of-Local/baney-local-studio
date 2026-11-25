@@ -19,6 +19,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio skills search [--for <site or app>] [--in <skill>] [--limit <n>] [--project <dir>] [--json] <words...>
        local-studio skills read <name> [--part <heading>] [--from <n>] [--project <dir>] [--json]
        local-studio skills list [--project <dir>] [--json]
+       local-studio skills create [--save] [--json] [<reply file or ->]
        local-studio skills mcp [--project <dir> | --no-project] [--data <dir>] [--plugins <dir>]
        local-studio tunnel status [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
@@ -71,7 +72,7 @@ fn main() -> ExitCode {
             let exclude: Vec<String> = exclude.iter().map(ToString::to_string).collect();
             plugins::tree_hash(Path::new(dir), &exclude).map(|tree| println!("{tree}"))
         }
-        ["skills", verb @ ("search" | "read" | "list" | "mcp"), rest @ ..] => {
+        ["skills", verb @ ("search" | "read" | "list" | "create" | "mcp"), rest @ ..] => {
             let Some(asked) = skill_args(verb, rest) else {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
@@ -138,6 +139,7 @@ struct SkillArgs<'a> {
     data: Option<&'a str>,
     plugins: Option<&'a str>,
     limit: Option<usize>,
+    save: bool,
     words: Vec<&'a str>,
 }
 
@@ -156,6 +158,7 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
             ("mcp", "--data") => asked.data = Some(args.next()?),
             ("mcp", "--plugins") => asked.plugins = Some(args.next()?),
             ("mcp", "--no-project") => asked.no_project = true,
+            ("create", "--save") => asked.save = true,
             (_, "--project") => asked.project = Some(args.next()?),
             (_, "--") => asked.words.extend(args.by_ref()),
             (_, flag) if flag.starts_with("--") => return None,
@@ -165,13 +168,14 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
     let given = match verb {
         "search" => !asked.words.is_empty() || asked.place.is_some(),
         "read" => !asked.words.is_empty(),
+        "create" => asked.words.len() < 2 && !(asked.save && asked.words.is_empty()),
         _ => asked.words.is_empty(),
     };
     given.then_some(asked)
 }
 
 fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
-    use local_studio_core::skills::{lines, plain, roots, serve, Query, Store};
+    use local_studio_core::skills::{lines, plain, roots, serve, Query, Store, CREATE};
     let data = asked.data.map_or_else(|| local_studio_core::data_dir(None), |dir| Ok(PathBuf::from(dir)))?;
     let plugins = asked.plugins.map(PathBuf::from).or_else(|| plugins::plugins_dir(asked.data));
     let project = match asked.project {
@@ -180,6 +184,10 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
     };
     if verb == "mcp" {
         return serve(data, plugins, (!asked.no_project).then_some(project));
+    }
+    if verb == "create" && asked.words.is_empty() {
+        println!("{}", if json { serde_json::json!({ "ask": CREATE }).to_string() } else { CREATE.to_string() });
+        return Ok(());
     }
     let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(&project))?)?;
     let words = asked.words.join(" ");
@@ -200,6 +208,7 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
             let reading = store.read(&words, asked.part, asked.from)?;
             (serde_json::to_value(&reading), reading.shown())
         }
+        "create" => create(&mut store, &words, asked.save)?,
         _ => {
             let listed = store.list()?;
             let line = |skill: &local_studio_core::skills::Listed| {
@@ -217,6 +226,40 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
         println!("{}", if json { value.to_string().chars().map(shown).collect() } else { text });
     }
     Ok(())
+}
+
+fn create(
+    store: &mut local_studio_core::skills::Store,
+    reply: &str,
+    save: bool,
+) -> Result<(serde_json::Result<serde_json::Value>, String), String> {
+    use local_studio_core::skills::plain;
+    let reply = match reply {
+        "-" => std::io::read_to_string(std::io::stdin()),
+        file => std::fs::read_to_string(file),
+    };
+    let draft = local_studio_core::skills::Draft::parse(&reply.map_err(|error| error.to_string())?)?;
+    let saved = save.then(|| store.save(&draft)).transpose()?;
+    let mut text = vec![format!("{}: {}", draft.name, draft.description)];
+    for (path, body) in [("SKILL.md", &draft.text)].into_iter().chain(draft.files.iter().map(|(p, t)| (p.as_str(), t)))
+    {
+        text.push(format!("with {path}"));
+        text.extend(body.lines().filter(|_| !save).map(|line| format!("  {}", plain(&line.replace('\t', "    ")))));
+    }
+    text.extend(draft.left.iter().map(|info| format!("left out: a block labeled \"{info}\"")));
+    text.extend(draft.marked.iter().map(|line| format!("may be private: {}", plain(line))));
+    text.push(match &saved {
+        Some(saved) => format!("saved in {}", plain(&saved.path.to_string_lossy())),
+        None => "not saved; add --save to save it".to_string(),
+    });
+    let kept: Vec<_> = saved.iter().flat_map(|saved| &saved.kept).map(|path| path.to_string_lossy()).collect();
+    text.extend(kept.iter().map(|path| format!("the one it replaces is now in {}", plain(path))));
+    let value = serde_json::to_value(&draft).map(|mut value| {
+        value["saved"] = serde_json::json!(saved.as_ref().map(|saved| saved.path.to_string_lossy()));
+        value["kept"] = serde_json::json!(kept);
+        value
+    });
+    Ok((value, text.join("\n")))
 }
 
 fn import_t3(dry_run: bool, json: bool) -> Result<(), String> {

@@ -424,6 +424,140 @@ fn plugins(smoke: &mut Smoke) -> Result<(), String> {
     Ok(())
 }
 
+fn save(smoke: &Smoke, text: &str) -> Result<(bool, String), String> {
+    let reply = smoke.home.join("reply.md");
+    put(&reply, text)?;
+    let output = smoke.run(&["create", "--save", &reply.to_string_lossy()])?;
+    let shown = [output.stdout, output.stderr].concat();
+    Ok((output.status.success(), String::from_utf8_lossy(&shown).into_owned()))
+}
+
+fn block(name: &str, body: &str) -> String {
+    format!("Done.\n\n````skill\n---\nname: {name}\ndescription: Grow ferns\n---\n{body}\n````\n")
+}
+
+fn creating(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
+    let reply = smoke.home.join("reply.md");
+    let asked = smoke.run(&["create"])?.stdout;
+    smoke.check("create says what to reply with", String::from_utf8_lossy(&asked).contains("````skill"));
+    smoke.check("and in JSON", smoke.json(&["create"])?["ask"].as_str().is_some_and(|ask| ask.contains("````skill")));
+    let body = "## Water\n```\nmist 2\n```\n~~~~\n```\n~~~~\n## Light\nshade";
+    let extras =
+        "```asks\n1. my frond went brown\n```\n````where\n- `ferns.test`: the shop\n\n````\n````file scripts/mist.py\nprint(2)\n\tmore\n````\n````file scripts/__init__.py\n````\n";
+    put(&reply, &format!("{}{extras}", block("Fern Care", body)))?;
+    let shown = smoke.json(&["create", &reply.to_string_lossy()])?;
+    let plain = smoke.run(&["create", &reply.to_string_lossy()])?.stdout;
+    let plain = String::from_utf8_lossy(&plain).into_owned();
+    smoke.check(
+        "create alone shows every line",
+        plain.contains("  shade\n") && plain.contains("  print(2)\n      more\n"),
+    );
+    let unsaved = shown["folder"] == "fern-care" && shown["saved"].is_null() && !own.join("fern-care").exists();
+    smoke.check("create alone saves nothing", unsaved);
+    let (saved, _) = save(smoke, &format!("{}{extras}", block("Fern Care", body)))?;
+    let text =
+        |name: &str| read(own.join("fern-care").join(name)).map(|text| String::from_utf8_lossy(&text).into_owned());
+    let kept = text("SKILL.md").is_ok_and(|text| text.contains("## Light\nshade"))
+        && text("asks.txt").is_ok_and(|text| text == "my frond went brown\n")
+        && text("scripts/mist.py").is_ok_and(|text| text == "print(2)\n\tmore\n")
+        && text("scripts/__init__.py").is_ok_and(|text| text.is_empty());
+    smoke.check("a saved skill holds its text, phrasings and files", saved && kept);
+    let found = smoke.first(&["why is the frond brown"])? == "Fern Care"
+        && smoke.first(&["--for", "ferns.test"])? == "Fern Care";
+    smoke.check("and is found at once", found);
+    put(&own.join("fern-care/names.txt"), "frond keeper\n")?;
+    let (again, shown) = save(smoke, &block("fern care", "## Soil\npeat\n```bash v1\nls\n"))?;
+    smoke.check("what it replaces is named", shown.contains("is now in") && shown.contains("fern-care-1"));
+    smoke.check("its other names stay", text("names.txt").is_ok_and(|text| text == "frond keeper\n"));
+    let one = smoke.first(&["grow ferns"])? == "fern care" && !smoke.json(&["list"])?.to_string().contains("Fern Care");
+    let old = own.join(".replaced/fern-care-1/asks.txt").exists() && !own.join("fern-care/asks.txt").exists();
+    smoke.check("the same name replaces it, and the old one is kept aside", again && one && old);
+    refusing(smoke, own)
+}
+
+fn refusing(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
+    let x = block("x", "");
+    for (what, reply, error) in [
+        ("no description", x.replace("description: Grow ferns\n", ""), "a name and a description"),
+        ("no name", block("--- ", ""), "a name and a description"),
+        ("two skills", format!("{x}{x}"), "one skill block"),
+        ("no skill", "Done.".to_string(), "one skill block"),
+        ("too much text", block("x", &"word ".repeat(14_000)), "at most"),
+        ("three backticks", x.replace("````", "```"), "needs four backticks"),
+        ("a file in three backticks", format!("{x}```file a.py\nx\n```\n"), "needs four backticks"),
+        ("a reply cut short", format!("{x}````file a.py\nx\n"), "never ends"),
+        (
+            "a skill its own code block ends",
+            x.replace("\n````\n", "\n````sh\nls\n````\nmore\n````\n````asks\ny\n````\n"),
+            "no label",
+        ),
+        ("a label near a real one", format!("{x}````Asks:\nx\n````\n"), "labeled"),
+    ] {
+        let (saved, shown) = save(smoke, &reply)?;
+        smoke.check(&format!("{what} is refused"), !saved && shown.contains(error));
+    }
+    let (loose, shown) = save(smoke, &format!("{x}```a `b` ```\n````toml\nx\n````\n"))?;
+    smoke.check("a block it has no place for is named", loose && shown.contains("left out: a block labeled \"toml\""));
+    for path in ["../x", "/tmp/x", "a/../../x", ".git/config", "a/.env", "skill.md", "asks.txt", "a\\x", "c:x", ""] {
+        let (saved, shown) = save(smoke, &format!("{x}````file {path}\nx\n````\n"))?;
+        smoke.check(&format!("the file \"{path}\" is refused"), !saved && shown.contains("cannot hold"));
+    }
+    let (odd, _) = save(smoke, &block("../../Over There/é", ""))?;
+    smoke.check("a name is a plain folder", odd && own.join("over-there-é/SKILL.md").exists());
+    let made_up = ["plum", "jam9"].concat();
+    let secrets = [
+        format!("password: {made_up}\npassword: <yours>\nAsk for the password."),
+        format!("token token_id={made_up}\nx-api-key: {made_up}"),
+        format!("**Password:** {made_up}\ntool --token {made_up}"),
+    ];
+    let (marked, shown) = save(smoke, &block("keys", &secrets.join("\n")))?;
+    smoke.check("secrets are marked", marked && shown.matches("may be private").count() == 5);
+    let marks = save(smoke, &block("mark", "first"))?.0 && save(smoke, &block("mark++", "second"))?.0;
+    let both = |one: &str, other: &str| {
+        let holds = |folder: &str, text: &str| {
+            read(own.join(folder).join("SKILL.md")).is_ok_and(|all| String::from_utf8_lossy(&all).contains(text))
+        };
+        holds("mark", one) && holds("mark-2", other)
+    };
+    smoke.check("a name with the same folder keeps the other skill", marks && both("first", "second"));
+    let again = save(smoke, &block("mark++", "third"))?.0;
+    smoke.check("and replaces only its own", again && both("first", "third"));
+    skill(&own.join("group"), "inner", "In a group", "")?;
+    let (inner, shown) = save(smoke, &block("inner", ""))?;
+    smoke.check("a name in use deeper is refused", !inner && shown.contains("already has this name"));
+    let group = save(smoke, &block("group", ""))?.0 && own.join("group/inner/SKILL.md").exists();
+    smoke.check("a group's folder is left alone", group && own.join("group-2/SKILL.md").exists());
+    let files = std::fs::read_dir(own).map_err(|error| error.to_string())?;
+    let making = files.flatten().any(|file| file.file_name().to_string_lossy().starts_with(".making"));
+    smoke.check("nothing lands elsewhere", !smoke.home.join("x").exists() && !making);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| path.metadata().map_or(0, |meta| meta.permissions().mode() & 0o777);
+        let folder = own.join("fern-care");
+        smoke.check("a saved skill is private", mode(&folder) == 0o700 && mode(&folder.join("SKILL.md")) == 0o600);
+        let set =
+            |mode| std::fs::set_permissions(own, PermissionsExt::from_mode(mode)).map_err(|error| error.to_string());
+        set(0o500)?;
+        let (stuck, _) = save(smoke, &block("fern care", "## New\nnew"))?;
+        set(0o700)?;
+        smoke.check(
+            "a folder that can't be written keeps the old skill",
+            !stuck && smoke.first(&["peat"])? == "fern care",
+        );
+        let stuck = own.join("fern-z");
+        put(&stuck.join("SKILL.md"), "---\nname: fern care\ndescription: Same name\n---\n")?;
+        let set =
+            |mode| std::fs::set_permissions(&stuck, PermissionsExt::from_mode(mode)).map_err(|error| error.to_string());
+        set(0o500)?;
+        let (half, _) = save(smoke, &block("fern care", "## New\nnew"))?;
+        set(0o700)?;
+        let back = own.join("fern-care/SKILL.md").exists() && smoke.first(&["peat"])? == "fern care";
+        smoke.check("a replace that fails half way puts the old skill back", !half && back);
+    }
+    remove_dir_all(own.join("group")).map_err(|error| error.to_string())
+}
+
 fn index(smoke: &mut Smoke) -> Result<(), String> {
     let file = smoke.data.join("skills.sqlite");
     let mut good = 0;
@@ -634,6 +768,7 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     trust(smoke)?;
     plugins(smoke)?;
     changes(smoke, &own)?;
+    creating(smoke, &own)?;
     #[cfg(unix)]
     links(smoke, &own)?;
     served(smoke, &own)?;
