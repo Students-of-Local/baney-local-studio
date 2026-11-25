@@ -186,7 +186,7 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
         return serve(data, plugins, (!asked.no_project).then_some(project));
     }
     if verb == "create" && asked.words.is_empty() {
-        println!("{CREATE}");
+        println!("{}", if json { serde_json::json!({ "ask": CREATE }).to_string() } else { CREATE.to_string() });
         return Ok(());
     }
     let mut store = Store::open(&data, roots(&data, plugins.as_deref(), Some(&project))?)?;
@@ -241,14 +241,22 @@ fn create(
     let draft = local_studio_core::skills::Draft::parse(&reply.map_err(|error| error.to_string())?)?;
     let saved = save.then(|| store.save(&draft)).transpose()?;
     let mut text = vec![format!("{}: {}", draft.name, draft.description)];
-    text.extend(draft.files.iter().map(|(path, _)| format!("with {path}")));
+    for (path, body) in [("SKILL.md", &draft.text)].into_iter().chain(draft.files.iter().map(|(p, t)| (p.as_str(), t)))
+    {
+        text.push(format!("with {path}"));
+        text.extend(body.lines().filter(|_| !save).map(|line| format!("  {}", plain(line))));
+    }
+    text.extend(draft.left.iter().map(|info| format!("left out: a block labeled \"{info}\"")));
     text.extend(draft.marked.iter().map(|line| format!("may be private: {}", plain(line))));
     text.push(match &saved {
-        Some(path) => format!("saved in {}", plain(&path.to_string_lossy())),
+        Some(saved) => format!("saved in {}", plain(&saved.path.to_string_lossy())),
         None => "not saved; add --save to save it".to_string(),
     });
+    let kept: Vec<_> = saved.iter().flat_map(|saved| &saved.kept).map(|path| path.to_string_lossy()).collect();
+    text.extend(kept.iter().map(|path| format!("the one it replaces is now in {}", plain(path))));
     let value = serde_json::to_value(&draft).map(|mut value| {
-        value["saved"] = serde_json::json!(saved);
+        value["saved"] = serde_json::json!(saved.as_ref().map(|saved| saved.path.to_string_lossy()));
+        value["kept"] = serde_json::json!(kept);
         value
     });
     Ok((value, text.join("\n")))

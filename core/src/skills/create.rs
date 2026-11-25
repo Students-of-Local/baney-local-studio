@@ -1,4 +1,4 @@
-use std::fs::{create_dir, create_dir_all, remove_dir_all, rename};
+use std::fs::{create_dir, create_dir_all, read_to_string, remove_dir_all, rename};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -13,10 +13,12 @@ const MOST_FILES: usize = 20;
 const MOST_ALL: usize = 256 * 1024;
 const FOLDER: usize = 60;
 const LONG: usize = 24;
-const NAMED: [&str; 7] = ["password", "passwd", "secret", "token", "cookie", "api key", "api_key"];
+const NAMED: [&str; 9] = ["password", "passwd", "secret", "token", "cookie", "api key", "api_key", "api-key", "apikey"];
+const KINDS: [&str; 4] = ["skill", "asks", "where", "file"];
+const NAMES: &str = "names.txt";
 
 pub const CREATE: &str = "Turn what you did in this thread into one skill that a small local model can follow without this thread.
-Reply with one block opened and closed by four backticks:
+Reply with one block opened and closed by four backticks, or one more than the longest run of backticks inside it:
 
 ````skill
 ---
@@ -28,9 +30,9 @@ by their label (a selector only as a fallback), how to see that each step worked
 fixed it, and when to stop and ask the person.
 ````
 
-Then, each in its own block: `asks` (five or more ways a person would ask for it, one a line), `where` (the sites or
-apps it is for, one host or app name a line) and `file scripts/name.py` for a script it needs. Write only what you saw
-work. No passwords, tokens, cookies, account numbers or other people's details: use <placeholders> the person fills in.";
+Then, each in its own block opened and closed the same way: `asks` (five or more ways a person would ask for it, one a
+line), `where` (the sites or apps it is for, one host or app name a line) and `file scripts/name.py` for a script it
+needs. Write only what you saw work. No passwords, tokens, cookies, account numbers or other people's details: use <placeholders> the person fills in.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Draft {
@@ -40,11 +42,18 @@ pub struct Draft {
     pub text: String,
     pub files: Vec<(String, String)>,
     pub marked: Vec<String>,
+    pub left: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct Saved {
+    pub path: PathBuf,
+    pub kept: Vec<PathBuf>,
 }
 
 impl Draft {
     pub fn parse(reply: &str) -> Result<Self, String> {
-        let blocks = blocks(reply);
+        let blocks = blocks(reply)?;
         let mut skills = blocks.iter().filter(|block| block.info == "skill");
         let (Some(skill), None) = (skills.next(), skills.next()) else {
             return Err("The reply does not hold one skill block. Ask for it again.".to_string());
@@ -59,17 +68,25 @@ impl Draft {
         if folder.is_empty() || description.is_empty() {
             return Err("The skill needs a name and a description in its front matter.".to_string());
         }
-        let mut files: Vec<(String, String)> = Vec::new();
+        let (mut files, mut left): (Vec<(String, String)>, Vec<String>) = Default::default();
         for block in &blocks {
-            let path = match block.info.split_once(' ').unwrap_or((&block.info, "")) {
-                (kind @ ("asks" | "where"), "") => format!("{kind}.txt"),
-                ("file", path) => beside(path)?,
-                _ => continue,
+            let (path, text) = match block.info.split_once(' ').unwrap_or((&block.info, "")) {
+                ("skill", "") => continue,
+                ("asks", "") => ("asks.txt".to_string(), listed(&block.text)),
+                ("where", "") => ("where.txt".to_string(), listed(&block.text)),
+                ("file", path) if block.long > 3 => (beside(path)?, block.text.clone()),
+                ("file", path) => return Err(format!("The file {} needs four backticks.", text::plain(path))),
+                _ => {
+                    left.push(other(&block.info)?);
+                    continue;
+                }
             };
             if files.iter().any(|(used, _)| used.eq_ignore_ascii_case(&path)) {
                 return Err(format!("The reply holds {path} twice."));
             }
-            files.push((path, block.text.clone()));
+            if !text.is_empty() {
+                files.push((path, text));
+            }
         }
         let texts = || files.iter().map(|(_, text)| text).chain([&skill.text]);
         if texts().any(|text| text.len() > MOST_TEXT) || texts().map(String::len).sum::<usize>() > MOST_ALL {
@@ -79,15 +96,14 @@ impl Draft {
             return Err(format!("A skill has at most {MOST_FILES} files."));
         }
         let marked = texts().flat_map(|text| text.lines()).filter(|line| private(line)).map(text::line).collect();
-        Ok(Self { name, description, folder, text: skill.text.clone(), files, marked })
+        Ok(Self { name, description, folder, text: skill.text.clone(), files, marked, left })
     }
 }
 
 impl Store {
-    pub fn save(&mut self, draft: &Draft) -> Result<PathBuf, String> {
+    pub fn save(&mut self, draft: &Draft) -> Result<Saved, String> {
         let skills = self.own()?;
         self.checked = None;
-        let target = skills.join(&draft.folder);
         let mut old = Vec::new();
         for skill in self.list()? {
             let same = skill.source == "yours" && skill.name.to_lowercase() == draft.name.to_lowercase();
@@ -95,19 +111,31 @@ impl Store {
             if folder.parent() != Some(skills.as_path()) {
                 return Err(format!("{} already has this name. Move or rename it first.", skill.path.display()));
             }
+            if folder.is_symlink() {
+                return Err(format!("{} is a link. Remove it first.", folder.display()));
+            }
             old.push(folder.to_path_buf());
         }
-        if target.symlink_metadata().is_ok() && !old.contains(&target) {
-            old.push(target.clone());
+        let same = |path: &Path| path.canonicalize().is_ok_and(|real| old.contains(&real));
+        let mut names = (1..1000).map(|n| if n == 1 { draft.folder.clone() } else { format!("{}-{n}", draft.folder) });
+        let free = names.find_map(|name| {
+            let target = skills.join(name);
+            (target.symlink_metadata().is_err() || same(&target)).then_some(target)
+        });
+        let target = free.ok_or_else(|| format!("{}: too many skills named {}", skills.display(), draft.folder))?;
+        let mut files = draft.files.clone();
+        let names = old.iter().map(|old| old.join(NAMES)).find(|path| path.is_file() && !path.is_symlink());
+        if let Some(path) = names {
+            files.push((NAMES.to_string(), read_to_string(&path).map_err(failed(&path))?));
         }
         let staged = skills.join(format!(".making-{}", std::process::id()));
         let _ = remove_dir_all(&staged);
-        let outcome = stage(&staged, draft).and_then(|()| swap(&skills, &staged, &target, &old));
+        let outcome = stage(&staged, &draft.text, &files).and_then(|()| swap(&skills, &staged, &target, &old));
         if outcome.is_err() {
             let _ = remove_dir_all(&staged);
         }
         self.checked = None;
-        outcome.map(|()| target)
+        outcome.map(|kept| Saved { path: target, kept })
     }
 }
 
@@ -117,7 +145,7 @@ struct Block {
     text: String,
 }
 
-fn blocks(reply: &str) -> Vec<Block> {
+fn blocks(reply: &str) -> Result<Vec<Block>, String> {
     let mut blocks = Vec::new();
     let mut open: Option<(char, Block)> = None;
     for line in reply.lines() {
@@ -135,14 +163,43 @@ fn blocks(reply: &str) -> Vec<Block> {
                 }
             }
             None => {
-                if let Some((mark, long)) = fence {
+                if let Some((mark, long)) = fence.filter(|(mark, long)| *mark == '~' || !trimmed[*long..].contains('`'))
+                {
                     let info = text::line(&trimmed[long..]);
                     open = Some((mark, Block { info, long, text: String::new() }));
                 }
             }
         }
     }
-    blocks
+    match open {
+        Some((_, block)) => {
+            Err(format!("The {} block never ends, so the reply may be cut short.", text::plain(&block.info)))
+        }
+        None => Ok(blocks),
+    }
+}
+
+fn other(info: &str) -> Result<String, String> {
+    let info = text::plain(info);
+    let first = info.to_lowercase();
+    if first.split(|c: char| !c.is_alphanumeric()).next().is_some_and(|word| KINDS.contains(&word)) {
+        return Err(format!(
+            "The reply holds a block labeled \"{info}\". It can be skill, asks, where or file and a path."
+        ));
+    }
+    Ok(info)
+}
+
+fn listed(text: &str) -> String {
+    let item = |line: &str| {
+        let line = line.trim();
+        let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+        let rest = if rest == line { line.strip_prefix(['-', '*', '+']) } else { rest.strip_prefix(['.', ')']) };
+        let line = rest.filter(|rest| rest.is_empty() || rest.starts_with(' ')).unwrap_or(line);
+        let line = line.trim_matches([' ', '`']);
+        (!line.is_empty()).then(|| format!("{line}\n"))
+    };
+    text.lines().filter_map(item).collect()
 }
 
 fn folder(name: &str) -> String {
@@ -168,7 +225,9 @@ fn private(line: &str) -> bool {
         value.split_whitespace().next().is_some_and(|word| word.len() > 5 && !word.starts_with(['<', '{', '$', '[']))
     };
     let named = NAMED.iter().any(|word| {
-        lower.split_once(word).is_some_and(|(_, after)| {
+        lower.match_indices(word).any(|(at, _)| {
+            let after =
+                lower[at + word.len()..].trim_start_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '-');
             after.trim_start_matches(['"', '\'', '`', ' ']).strip_prefix([':', '=']).is_some_and(filled)
         })
     });
@@ -185,14 +244,14 @@ fn failed(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
     move |error| format!("{}: {error}", path.display())
 }
 
-fn stage(staged: &Path, draft: &Draft) -> Result<(), String> {
+fn stage(staged: &Path, text: &String, files: &[(String, String)]) -> Result<(), String> {
     if let Some(dir) = staged.parent() {
         create_dir_all(dir).map_err(failed(dir))?;
     }
     create_dir(staged).map_err(failed(staged))?;
     private_mode(staged, 0o700)?;
-    let files = draft.files.iter().map(|(path, text)| (path.as_str(), text));
-    for (name, text) in [(SKILL, &draft.text)].into_iter().chain(files) {
+    let files = files.iter().map(|(path, text)| (path.as_str(), text));
+    for (name, text) in [(SKILL, text)].into_iter().chain(files) {
         let path = staged.join(name);
         if let Some(dir) = path.parent() {
             create_dir_all(dir).map_err(failed(dir))?;
@@ -216,7 +275,7 @@ fn private_mode(_: &Path, _: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn swap(skills: &Path, staged: &Path, target: &Path, old: &[PathBuf]) -> Result<(), String> {
+fn swap(skills: &Path, staged: &Path, target: &Path, old: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let replaced = skills.join(".replaced");
     let mut moved: Vec<(&Path, PathBuf)> = Vec::new();
     let mut step = || -> Result<(), String> {
@@ -231,11 +290,15 @@ fn swap(skills: &Path, staged: &Path, target: &Path, old: &[PathBuf]) -> Result<
         }
         rename(staged, target).map_err(failed(target))
     };
-    let outcome = step();
-    if outcome.is_err() {
-        for (from, to) in moved.iter().rev() {
-            rename(to, from).map_err(failed(to))?;
+    match step() {
+        Ok(()) => Ok(moved.into_iter().map(|(_, to)| to).collect()),
+        Err(mut error) => {
+            for (from, to) in moved.iter().rev() {
+                if let Err(stuck) = rename(to, from) {
+                    error = format!("{error}; {} is now {} ({stuck})", from.display(), to.display());
+                }
+            }
+            Err(error)
         }
     }
-    outcome
 }
