@@ -32,6 +32,7 @@ pub use local_studio_version::{CHANNEL, VERSION};
 pub use access::{default_access, model_tier, ModelTier};
 pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
 pub use links::refused_link;
+pub use links::studio::{link_words, outside_link, studio_link, LinkWords, StudioLink};
 pub use model::{
     AccessMode, Approval, ApprovalAnswer, Block, CatalogPlugin, CommandKind, Connection, ConsentAnswer, ConsentNeed,
     ConsentRequest, ConsentRow, ContextUsage, DaemonMismatch, Delivery, FileChange, Goal, Harness, ImageAttachment,
@@ -42,7 +43,7 @@ pub use model::{
     ToolKind, ToolState, TranscriptOp, Update, WorktreeChoice,
 };
 pub use scratch::{check_scratch_agent, stored_keys_empty};
-pub use store::data_dir;
+pub use store::{data_dir, harness_threads, ListedThread};
 pub use studio::{
     process_name, serve_holds_lock, DaemonLaunch, Studio, StudioConfig, StudioError, Subscription, Waker,
 };

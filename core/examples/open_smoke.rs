@@ -31,6 +31,7 @@ const REST: Duration = Duration::from_secs(3);
 const CHAT_LISTED: Duration = Duration::from_secs(15);
 const AGAIN_MS: u128 = 150;
 const DEBUG_AGAIN_MS: u128 = 5_000;
+const AWAY_MS: u128 = 500;
 const CLAUDE: &str = "Claude Code";
 const WORDS: &str =
     "the parser keeps each span, so the error names the line that the reader wrote and not the line the macro made";
@@ -131,6 +132,25 @@ impl Session {
     fn rest(&mut self) -> anyhow::Result<()> {
         let rested = Instant::now() + REST;
         self.pump("rest", |_| Instant::now() >= rested)
+    }
+
+    fn first(&mut self, cold: &str, away: &str) -> anyhow::Result<()> {
+        println!("     {CLAUDE}: opened first in {} ms", self.show(away, MESSAGES)?.as_millis());
+        self.rest()?;
+        self.watch.shown = None;
+        let started = Instant::now();
+        self.studio.select_thread(Some(cold.to_string()));
+        self.studio.select_thread(Some(away.to_string()));
+        self.pump("the other transcript shown", |watch| watch.items(away) >= MESSAGES)?;
+        let left = started.elapsed().as_millis();
+        self.studio.select_thread(Some(cold.to_string()));
+        self.pump("the cold transcript shown", |watch| watch.items(cold) >= MESSAGES)?;
+        let opened = started.elapsed().as_millis();
+        println!("     Eukhe: opened first in {opened} ms, another thread shown after {left} ms of it");
+        ensure!(left < AWAY_MS, "a thread that is opening held up another for {left} ms");
+        self.rest()?;
+        ensure!(self.watch.items(cold) >= MESSAGES, "the cold thread did not stay shown");
+        Ok(())
     }
 
     fn show(&mut self, thread: &str, items: usize) -> anyhow::Result<Duration> {
@@ -320,9 +340,7 @@ fn measure(
             threads.iter().all(|(_, thread)| watch.threads.iter().any(|row| row.id == *thread))
         })?;
         let mut again: HashMap<&str, Vec<Duration>> = HashMap::new();
-        for (name, thread) in threads {
-            println!("     {name}: opened first in {} ms", session.show(thread, MESSAGES)?.as_millis());
-        }
+        session.first(&threads[0].1, &threads[1].1)?;
         for _ in 0..RUNS {
             for (name, thread) in threads {
                 again.entry(name).or_default().push(session.show(thread, MESSAGES)?);

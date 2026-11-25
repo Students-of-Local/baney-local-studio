@@ -21,6 +21,7 @@ const USAGE: &str = "usage: local-studio --version
        local-studio skills list [--project <dir> | --shipped] [--json]
        local-studio skills create [--save] [--json] [<reply file or ->]
        local-studio skills mcp [--project <dir> | --no-project | --shipped] [--data <dir>] [--plugins <dir>]
+       local-studio threads [--json]
        local-studio tunnel status [--json]
        local-studio tunnel setup --relay [<name>] [--account <id>] [--serve <port>] [--mcp <port>] [--yes] [--json]
        local-studio tunnel setup --cloudflare <hostname> [--alias <name>]... [--serve <port>] [--mcp <port>] [--yes] [--json]
@@ -44,7 +45,7 @@ const USAGE: &str = "usage: local-studio --version
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let json = matches!(args.first(), Some(&("tunnel" | "fleet" | "skills"))) && args.contains(&"--json");
+    let json = matches!(args.first(), Some(&("tunnel" | "fleet" | "skills" | "threads"))) && args.contains(&"--json");
     if json {
         args.retain(|arg| *arg != "--json");
     }
@@ -79,6 +80,7 @@ fn main() -> ExitCode {
             };
             skills(verb, &asked, json)
         }
+        ["threads"] => threads(json),
         ["tunnel", "status"] => run_tunnel(|t| Box::pin(t.status()), json),
         ["tunnel", "setup", flags @ ..] => setup(flags, json),
         ["tunnel", "off"] => run_state(|t| Box::pin(t.off()), json),
@@ -770,6 +772,18 @@ fn update_runtime() -> Result<tokio::runtime::Runtime, String> {
 
 fn update_data_dir() -> Result<PathBuf, String> {
     local_studio_core::data_dir(None)
+}
+
+fn threads(json: bool) -> Result<(), String> {
+    let threads = local_studio_core::harness_threads(&local_studio_core::data_dir(None)?)?;
+    if json {
+        println!("{}", serde_json::to_string(&threads).map_err(|error| error.to_string())?);
+        return Ok(());
+    }
+    for thread in threads {
+        println!("{}  {}  {}  {}", thread.id, thread.harness, thread.project, thread.title);
+    }
+    Ok(())
 }
 
 fn update_check() -> Result<(), String> {

@@ -251,6 +251,8 @@ pub(crate) fn child_row(agent_id: &str, entry: &Value) -> Option<ChildRow> {
     })
 }
 
+pub(crate) const NEW_THREAD_TITLE: &str = "New thread";
+
 pub(crate) fn clean_title(text: &str) -> String {
     let typed = skills::typed(text);
     let line = typed.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
