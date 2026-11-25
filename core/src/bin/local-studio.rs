@@ -185,15 +185,14 @@ fn skills(verb: &str, asked: &SkillArgs, json: bool) -> Result<(), String> {
             let path = format!("{}{problem}", skill.path.display());
             [&skill.name, &skill.source, &path].map(|text| plain(text)).join("\t")
         };
-        let text = match listed.as_slice() {
-            [] => "no skills".to_string(),
-            listed => listed.iter().map(line).collect::<Vec<_>>().join("\n"),
-        };
+        let text = listed.iter().map(line).collect::<Vec<_>>().join("\n");
         (serde_json::to_value(&listed), text)
     };
     let value = value.map_err(|error| error.to_string())?;
     let shown = |c: char| if c.is_control() { format!("\\u{:04x}", u32::from(c)) } else { c.to_string() };
-    println!("{}", if json { value.to_string().chars().map(shown).collect() } else { text });
+    if json || !text.is_empty() {
+        println!("{}", if json { value.to_string().chars().map(shown).collect() } else { text });
+    }
     Ok(())
 }
 

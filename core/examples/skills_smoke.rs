@@ -109,6 +109,11 @@ fn words(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("no words is a usage error", usage);
     let control = smoke.run(&["search", "escape"])?.stdout;
     smoke.check("a search prints no control character", !control.is_empty() && !control.contains(&27));
+    let stop = smoke.run(&["search", "what's", "the"])?.stdout;
+    smoke.check("a contraction alone finds nothing", stop == b"nothing found\n");
+    smoke.check("a whole sentence without spaces is found", smoke.first(&["如何开发票"])? == "invoices");
+    smoke.check("Thai too", smoke.first(&["ราคา"])? == "prices");
+    smoke.check("accents in two parts fold", smoke.first(&["cre\u{300}me"])? == "kitchen");
     let inside = smoke.first(&["开票"])? == "invoices" && smoke.first(&["pdf发票"])? == "invoices";
     smoke.check("nor is its section text or a name in capitals missed", inside);
     let hits = smoke.json(&["search", "ladder rung", "--in", "ladder", "--limit", "8"])?;
@@ -150,10 +155,12 @@ fn places(smoke: &mut Smoke) -> Result<(), String> {
         smoke.check(&format!("{place} is {skill}"), smoke.first(&["--for", place])? == skill);
     }
     let sites = smoke.json(&["search", "--for", "notes.test"])?[0]["places"].clone();
-    let sites_only = sites == serde_json::json!(["[fd00::1]", "localhost", "notes.test"]);
+    let sites_only = sites == serde_json::json!(["[fd00::1]", "bold.test", "localhost", "notes.test", "pages.test"]);
     smoke.check("a note beside a site is not a place", sites_only);
     let shown = smoke.run(&["search", "beacon"])?.stdout;
     smoke.check("a place prints no control character", !shown.is_empty() && !shown.contains(&27));
+    let unrelated = smoke.json(&["search", "--for", "docs.forms.test", "marmalade"])?;
+    smoke.check("a skill that only links the site needs a word too", names(&unrelated) == ["kitchen"]);
     let away = smoke.first(&["fill brushes draw"])? == "painter";
     let linked = smoke.json(&["search", "--for", "docs.forms.test", "fill brushes draw"])?;
     let listed = away && linked[0]["name"] == "forms" && linked[0]["places"].as_array().is_some_and(Vec::is_empty);
@@ -442,12 +449,13 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     put(&bulbs.join("asks.txt"), "why did the glow vanish from my lamp\n")?;
     skill(&own, "windy", &"windy ".repeat(100), "")?;
     skill(&own, "invoices", "开发票的步骤 PDF发票", "## 怎么开票\nSteps.")?;
-    let rungs: String = (0..9).map(|n| format!("## Rung {n}\nstep up the ladder\n")).collect();
-    skill(&own, "ladder", "Climb", &rungs)?;
+    let rungs: Vec<String> = (0..9).map(|n| format!("## Rung {n}\nstep up the ladder\n")).collect();
+    skill(&own, "ladder", "Climb", &rungs.concat())?;
+    skill(&own, "prices", "ตรวจราคา", "")?;
     skill(&own, "mark", "One pen", "pen")?;
     skill(&own, "mark++", "Two pens", "pen")?;
     skill(&own, "quoting", "Show text", "````\n```\n## Example\ngargoyle\n```\n````")?;
-    let sites = "## Sites\n- `notes.test`: the notes\n- localhost (the dev page)\n- [fd00::1]\n- not a site\n";
+    let sites = "- ```sh\n  make\n  ```\n## Sites\n- `notes.test`: the notes\n- localhost (the dev page)\n- [fd00::1]\n- not a site\n- [Pages](https://www.pages.test/a) and **more**\n- **bold.test**\n";
     skill(&own, "workbench", "Try things", sites)?;
     let beacon = skill(&own, "beacon", "Light", "beacon")?;
     put(&beacon.join("where.txt"), "Lamp\u{1b}[2J Pro\u{9b}\n")?;

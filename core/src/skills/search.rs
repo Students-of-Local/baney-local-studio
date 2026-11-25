@@ -89,12 +89,12 @@ impl Store {
                 parts.entry(row.get(0)?).or_default().push((row.get(2)?, row.get(1)?));
             }
         }
-        for word in words.iter().filter(|word| word.chars().any(text::unspaced)) {
+        for piece in text::unspaced_pieces(&words) {
             let mut rows = self.db.prepare_cached(
                 "SELECT id FROM skills WHERE instr(lower(name || ' ' || descr), ?1)
                  UNION SELECT rowid >> 20 FROM parts WHERE instr(lower(head || ' ' || body), ?1)",
             )?;
-            for id in rows.query_map([word], |row| row.get(0))? {
+            for id in rows.query_map([piece], |row| row.get(0))? {
                 *scores.entry(id?).or_default() += 1.0;
             }
         }
@@ -113,7 +113,7 @@ impl Store {
                     let (id, own) = (row.get(0)?, row.get(2)?);
                     if own {
                         listing.insert(id);
-                    } else if linking.insert(id) {
+                    } else if linking.insert(id) && (words.is_empty() || scores.contains_key(&id)) {
                         *scores.entry(id).or_default() += top * 0.5;
                     }
                 }

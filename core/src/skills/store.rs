@@ -174,7 +174,7 @@ impl Store {
             let write = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             stored = rows(&write)?;
             let (changed, gone) = due(&stored, &self.roots, &found);
-            let replaced = changed.iter().any(|found| stored.contains_key(&found.path));
+            let replaced = changed.iter().any(|found| stored.get(&found.path).is_some_and(|row| !row.stamp.is_empty()));
             for id in &gone {
                 drop_skill(&write, *id)?;
             }
