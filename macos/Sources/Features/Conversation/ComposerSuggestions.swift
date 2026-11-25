@@ -34,7 +34,7 @@ struct ComposerTrigger: Equatable, Hashable {
         if token.hasPrefix("$") {
             return ComposerTrigger(kind: .skill, query: query, start: start, end: caret)
         }
-        if project, token.hasPrefix("@") {
+        if token.hasPrefix("@") {
             return ComposerTrigger(kind: .mention, query: query, start: start, end: caret)
         }
         if project, token.hasPrefix("#") {
@@ -50,6 +50,7 @@ struct ComposerSuggestion: Identifiable {
         case models
         case compact
         case pullRequest(PullRequest)
+        case install(id: String, insert: String)
     }
 
     let id: String
@@ -99,16 +100,7 @@ struct ComposerSuggestionSource {
             return Self.ranked(items, query: query) { String($0.title.dropFirst()) }
         case .mention:
             guard let request = conversation.mentionRequest else { return [] }
-            return (store.workspace.searchResults[request] ?? []).map { hit in
-                let name = URL(fileURLWithPath: hit.relative).lastPathComponent
-                return ComposerSuggestion(
-                    id: "file:\(hit.relative)",
-                    title: name.isEmpty ? hit.relative : name,
-                    detail: hit.preview,
-                    symbol: hit.relative.hasSuffix("/") ? "folder" : "doc",
-                    action: .insert("@" + hit.relative + " ")
-                )
-            }
+            return (store.workspace.mentions[request] ?? []).map(Self.mention)
         case .pullRequest:
             let pulls = conversation.pullsRequest.flatMap { store.workspace.pullRequests[$0] } ?? []
             let matching = pulls.filter { pull in
@@ -131,8 +123,8 @@ struct ComposerSuggestionSource {
         case .skill:
             return conversation.skillsLoaded ? "No matching skill." : "Loading skills…"
         case .mention:
-            return conversation.mentionRequest.flatMap { store.workspace.searchResults[$0] } == nil
-                ? "Searching workspace files…" : "No matching files or folders."
+            return conversation.mentionRequest.flatMap { store.workspace.mentions[$0] } == nil
+                ? "Searching skills, plugins and files…" : "No matching skill, plugin or file."
         case .pullRequest:
             if let error = conversation.pullsError {
                 return "Couldn’t load pull requests: \(error)"
@@ -140,6 +132,24 @@ struct ComposerSuggestionSource {
             return conversation.pullsRequest.flatMap { store.workspace.pullRequests[$0] } == nil
                 ? "Loading pull requests…" : "No matching pull requests."
         }
+    }
+
+    private static func mention(_ mention: Mention) -> ComposerSuggestion {
+        let path = String(mention.title.dropFirst())
+        let name = mention.kind == .file ? URL(fileURLWithPath: path).lastPathComponent : mention.title
+        let symbol = switch mention.kind {
+        case .skill: "book"
+        case .plugin: "puzzlepiece.extension"
+        case .file: path.hasSuffix("/") ? "folder" : "doc"
+        }
+        return ComposerSuggestion(
+            id: "mention:\(mention.kind):\(mention.title):\(mention.badge)",
+            title: name.isEmpty ? path : name,
+            detail: mention.detail,
+            symbol: symbol,
+            badge: mention.badge.isEmpty ? nil : mention.badge,
+            action: mention.install.isEmpty ? .insert(mention.insert) : .install(id: mention.install, insert: mention.insert)
+        )
     }
 
     private static func bare(_ name: String) -> String {

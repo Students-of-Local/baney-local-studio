@@ -92,7 +92,7 @@ struct ComposerView: View {
             highlighted = 0
         }
         .task(id: trigger) {
-            guard let trigger, case .mention = trigger.kind, let project else { return }
+            guard let trigger, case .mention = trigger.kind else { return }
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
             conversation.searchMentions(trigger.query, project: project)
@@ -305,6 +305,9 @@ struct ComposerView: View {
         case .pullRequest(let pull):
             draft.text = text.replacingCharacters(in: range, with: "#\(pull.number) ")
             conversation.attachPullRequest(pull, to: draft)
+        case .install(let id, let value):
+            draft.text = text.replacingCharacters(in: range, with: value)
+            store.installPlugin(id)
         }
         self.trigger = nil
         conversation.clearMentions()

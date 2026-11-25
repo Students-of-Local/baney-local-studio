@@ -578,10 +578,10 @@ final class ConversationStore {
         core.run { $0.listCommands(request: request, project: project) }
     }
 
-    func searchMentions(_ query: String, project: String) {
+    func searchMentions(_ query: String, project: String?) {
         let request = requests.issue()
         mentionRequest = request
-        core.run { $0.searchFiles(request: request, project: project, query: query, limit: 12) }
+        core.run { $0.mentions(request: request, project: project, query: query, limit: 20) }
     }
 
     func clearMentions() {
