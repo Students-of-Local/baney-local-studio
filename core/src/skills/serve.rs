@@ -9,7 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-use super::store::SHIPPED_DIR;
+use super::store::{app, SHIPPED, SHIPPED_DIR};
 use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
@@ -103,14 +103,15 @@ impl Server {
                 let from = from.ok_or("from is a number, such as 6000")?;
                 let mut store = open()?;
                 let part = text("part");
-                store.read(name, part, from).map(|reading| reading.shown()).or_else(|error| {
-                    let plugin = store.plugin(name).ok_or_else(|| error.clone())?;
-                    match plugin.skills.as_slice() {
-                        [only] if only.name == name => Err(error),
-                        [only] => store.read(&only.name, part, from).map(|reading| reading.shown()),
-                        _ => Ok(super::plugin_block(&plugin, "Read one with skill_read and its name.")),
-                    }
-                })
+                let found = store.read(name, part, from);
+                let shipped = found.as_ref().is_ok_and(|reading| reading.source == SHIPPED);
+                let plugin = store.plugin(name).filter(|_| shipped || found.is_err());
+                let Some(plugin) = plugin else { return found.map(|reading| reading.shown()) };
+                match plugin.skills.as_slice() {
+                    [only] if only.name == name => found.map(|reading| reading.shown()),
+                    [only] => store.read(&only.name, part, from).map(|reading| reading.shown()),
+                    _ => Ok(super::plugin_block(&plugin, "Read one with skill_read and its name.")),
+                }
             }
             _ => Err(format!("no tool named {tool}")),
         }
@@ -149,7 +150,7 @@ impl ServerHandler for Server {
 pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) -> Option<Value> {
     let binary = match std::env::var_os("LOCAL_STUDIO_CLI_BIN").filter(|value| !value.is_empty()) {
         Some(binary) => PathBuf::from(binary),
-        None => std::env::current_exe().and_then(std::fs::canonicalize).ok()?.with_file_name(CLI),
+        None => app()?.with_file_name(CLI),
     };
     let whole = |path: &Path| std::path::absolute(path).ok()?.to_str().map(String::from);
     let (binary, data) = (binary.is_file().then(|| whole(&binary))??, whole(data)?);
@@ -168,13 +169,18 @@ pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) 
     let mut env = Map::new();
     for name in ["EUKHE_CODING_AGENT_DIR", SHIPPED_DIR] {
         if let Some(dir) = std::env::var_os(name).filter(|dir| !dir.is_empty()) {
-            env.insert(name.to_string(), json!(whole(Path::new(&dir))?));
+            let dir = whole(Path::new(&dir));
+            if dir.is_none() && name != SHIPPED_DIR {
+                return None;
+            }
+            env.extend(dir.map(|dir| (name.to_string(), json!(dir))));
         }
     }
     Some(json!({ "command": binary, "args": args, "env": env }))
 }
 
 pub fn serve(server: Server) -> Result<(), String> {
+    app();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| error.to_string())?.block_on(async {
         let running = server.serve(rmcp::transport::stdio()).await.map_err(|error| error.to_string())?;

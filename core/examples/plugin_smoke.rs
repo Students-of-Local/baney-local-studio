@@ -1397,6 +1397,9 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         skill(&data.join("skills"), "marmalade-pot", "pot steps")?;
         skill(&data.join("skills"), "create", "carpentry steps")?;
         skill(&data.join("skills"), "ledger", "your own ledger")?;
+        let shipped = root.join("app-skills");
+        skill(&shipped, "anchor", "anchor steps")?;
+        skill(&shipped, "solo", "shipped steps")?;
         for id in ["alpha", "beta"] {
             manifest(&plugins.join(id), &id.to_uppercase(), "capabilities = []\n")?;
             skill(&plugins.join(id).join("skills"), "setup", &format!("{id} steps"))?;
@@ -1420,6 +1423,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
         std::env::set_var("HOME", root.join("home"));
         std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
+        std::env::set_var("LOCAL_STUDIO_SKILLS_DIR", &shipped);
         std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
         let socket = root.join("d.sock");
         let config = StudioConfig {
@@ -1501,6 +1505,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 "@kit and @Solo",
                 &["All of kit", "- skill hammer: About hammer (", "- command /build: Build it"],
             ),
+            ("shipped", &work, "@anchor", &["anchor steps"]),
             ("absent", &work, "@gantrel", &[]),
             ("own create", &work, "ask @create", &["carpentry steps"]),
             ("spaced", &work, "@marmalade 2026.csv please", &[]),

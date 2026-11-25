@@ -19,6 +19,7 @@ pub use read::Reading;
 pub use search::{lines, Hit, Query};
 pub(crate) use serve::{entry, TOOLS};
 pub use serve::{serve, Server, SERVER};
+pub(crate) use store::app;
 pub use store::{roots, Listed, Roots, Store};
 pub use text::plain;
 
@@ -194,7 +195,7 @@ impl Resources {
             }
             return self.expand_plugin(&name, &args).unwrap_or_else(plain);
         }
-        let listed = at.resources(text);
+        let listed = at.resources(text, &self.plugins);
         let dollar: Vec<(&str, Named)> =
             skills.iter().map(|skill| (skill.name.as_str(), Named::Skill(skill))).collect();
         let mut named: Vec<(&str, Named)> = listed
@@ -250,9 +251,12 @@ pub(crate) struct At {
 }
 
 impl At {
-    fn resources(&self, text: &str) -> Vec<Resource> {
+    fn resources(&self, text: &str, plugins: &[Plugin]) -> Vec<Resource> {
         let own = self.skills.iter().filter(|skill| {
-            !skill.source.starts_with("plugin ") && text.contains(&format!("@{}", skill.name)) && skill.unmoved()
+            !skill.source.starts_with("plugin ")
+                && text.contains(&format!("@{}", skill.name))
+                && !skill.behind(plugins)
+                && skill.unmoved()
         });
         own.map(|skill| Resource {
             name: skill.name.clone(),

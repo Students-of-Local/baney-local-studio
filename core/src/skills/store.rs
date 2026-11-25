@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ignore::WalkBuilder;
@@ -18,7 +19,7 @@ const VERSION: i64 = 3;
 const MAX_FILE: u64 = 256 * 1024;
 const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
-const SHIPPED: &str = "shipped";
+pub(super) const SHIPPED: &str = "shipped";
 pub(super) const SHIPPED_DIR: &str = "LOCAL_STUDIO_SKILLS_DIR";
 const FRESH: Duration = Duration::from_secs(2);
 const FOLDERS: [&str; 3] = [".agents", ".claude", ".eukhe"];
@@ -52,6 +53,12 @@ pub struct Listed {
 }
 
 impl Listed {
+    pub(crate) fn behind(&self, plugins: &[Plugin]) -> bool {
+        let holds = |plugin: &Plugin| plugin.skills.iter().any(|skill| skill.name == self.name);
+        let named = |plugin: &Plugin| plugin.id == self.name || plugin.name == self.name || holds(plugin);
+        self.source == SHIPPED && plugins.iter().any(named)
+    }
+
     pub(super) fn unmoved(&self) -> bool {
         let small = |meta: std::fs::Metadata| meta.is_file() && meta.len() <= MAX_FILE;
         self.path.canonicalize().is_ok_and(|real| real == self.real && std::fs::metadata(real).is_ok_and(small))
@@ -145,12 +152,16 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
     Ok(Roots { list, trusted, here, plugins, shipped: false })
 }
 
+pub(crate) fn app() -> Option<&'static Path> {
+    static APP: OnceLock<Option<PathBuf>> = OnceLock::new();
+    APP.get_or_init(|| std::env::current_exe().and_then(std::fs::canonicalize).ok()).as_deref()
+}
+
 fn shipped() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(SHIPPED_DIR).filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
     }
-    let app = std::env::current_exe().and_then(std::fs::canonicalize).ok()?;
-    let places = app.ancestors().skip(1).take(2);
+    let places = app()?.ancestors().skip(1).take(2);
     places
         .flat_map(|dir| ["share/local-studio/app-skills", "Resources/app-skills"].map(|place| dir.join(place)))
         .find(|dir| dir.is_dir())
