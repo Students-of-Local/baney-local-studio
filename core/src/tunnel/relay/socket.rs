@@ -14,13 +14,17 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
-use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
+use tokio_tungstenite::tungstenite::{Error, Message, Utf8Bytes};
 use tokio_tungstenite::WebSocketStream;
 
 use super::streams::{pairs, Feed, Out, BAD_ANSWER, HEAD, WS_BINARY, WS_TEXT};
 use super::{limits, HANG_UP, RELAY_TAKES};
 
 const NORMAL: u16 = 1000;
+const NO_STATUS: u16 = 1005;
+const LOST: u16 = 1006;
+const TOO_BIG: u16 = 1009;
+const INTERNAL: u16 = 1011;
 const REASON_BYTES: usize = 123;
 
 pub(super) struct Socket {
@@ -29,9 +33,13 @@ pub(super) struct Socket {
 }
 
 pub(super) fn close(code: u64, reason: &str) -> (u16, &str) {
-    let code = u16::try_from(code).ok().filter(|code| *code == NORMAL || (3000..5000).contains(code));
+    let code = match u16::try_from(code) {
+        Ok(NO_STATUS) => NORMAL,
+        Ok(code @ (1000 | 1001 | 1003 | 1007..=1014 | 3000..=4999)) => code,
+        _ => INTERNAL,
+    };
     let end = (0..=reason.len().min(REASON_BYTES)).rev().find(|end| reason.is_char_boundary(*end));
-    (code.unwrap_or(NORMAL), &reason[..end.unwrap_or_default()])
+    (code, &reason[..end.unwrap_or_default()])
 }
 
 impl Socket {
@@ -70,25 +78,26 @@ impl Socket {
                     break;
                 }
             }
-            pending::<()>().await;
+            pending().await
         };
         let down = async {
             loop {
                 match stream.next().await {
                     Some(Ok(Message::Text(text))) => out.relay(WS_TEXT, text.into()).await,
                     Some(Ok(Message::Binary(bytes))) => out.relay(WS_BINARY, bytes).await,
-                    Some(Ok(Message::Close(frame))) => return frame,
+                    Some(Ok(Message::Close(Some(frame)))) => return (frame.code.into(), frame.reason),
+                    Some(Ok(Message::Close(None))) => return (NO_STATUS, Utf8Bytes::default()),
                     Some(Ok(_)) => {}
-                    Some(Err(_)) | None => return None,
+                    Some(Err(Error::Capacity(_))) => return (TOO_BIG, "message too big".into()),
+                    Some(Err(_)) | None => return (LOST, Utf8Bytes::default()),
                 }
             }
         };
-        let frame = tokio::select! {
-            () = up => None,
-            frame = down => frame,
+        let (code, reason) = tokio::select! {
+            never = up => never,
+            closed = down => closed,
         };
-        let (code, reason) = frame.as_ref().map_or((NORMAL, ""), |frame| (frame.code.into(), frame.reason.as_str()));
-        let (code, reason) = close(code.into(), reason);
+        let (code, reason) = close(code.into(), &reason);
         out.last(out.control(json!({ "t": "ws_close", "code": code, "reason": reason }))).await;
         timeout(HANG_UP, stream.next()).await.ok();
         Ok(())
