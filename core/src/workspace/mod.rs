@@ -231,6 +231,15 @@ impl Workspace {
         self.inner.mailbox.notice(NoticeLevel::Error, text);
     }
 
+    pub(crate) fn warn_if(&self, work: impl Future<Output = Result<(), String>> + Send + 'static) {
+        let mailbox = Arc::clone(&self.inner.mailbox);
+        self.inner.runtime.spawn(async move {
+            if let Err(text) = work.await {
+                mailbox.notice(NoticeLevel::Warning, text);
+            }
+        });
+    }
+
     fn answer<F>(&self, request: String, work: F)
     where
         F: Future<Output = Result<Vec<Update>, String>> + Send + 'static,
