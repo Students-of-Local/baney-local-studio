@@ -17,7 +17,7 @@ const ONE: &str = r#"{"loggedIn":true,"accounts":[{"id":"0123456789abcdef0123456
 const TWO: &str = r#"{"loggedIn":true,"accounts":[{"id":"0123456789abcdef0123456789abcdef","name":"Smoke"},{"id":"fedcba9876543210fedcba9876543210","name":"Other"}]}"#;
 
 const NPX: &str = r#"#!/bin/sh
-{ echo "npx $*"; echo "cwd $PWD"; ls -A; env; } >> "$SHIM_STATE/npx.log"
+{ echo "npx $*"; echo "cwd $PWD"; ls -A; echo end; env; } >> "$SHIM_STATE/npx.log"
 shift 2
 case "$1" in
   whoami) cat "$SHIM_STATE/whoami"; grep -q '"loggedIn":true' "$SHIM_STATE/whoami" || exit 1 ;;
@@ -40,14 +40,15 @@ exit 0
 "#;
 
 const MANAGER: &str = r#"#!/bin/sh
-echo "$0 $*" >> "$SHIM_STATE/manager.log"
+{ echo "$0 $*"; env; } >> "$SHIM_STATE/manager.log"
 [ "$1" = "--user" ] && shift
 up() {
   touch "$SHIM_STATE/up"
+  rm -f "$SHIM_STATE/connected"
   if [ -f "$SHIM_STATE/refused" ]; then
     rm "$SHIM_STATE/refused"
     echo '{"state":"unauthorized","at":1,"pid":1}' > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
-  elif [ ! -f "$SHIM_STATE/never" ]; then
+  elif grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
     touch "$SHIM_STATE/connected"
   fi
 }
@@ -73,6 +74,8 @@ fn answer(mut stream: TcpStream, state: &Path, route: &Path) -> Result<(), Strin
         let mut log = fs::OpenOptions::new().create(true).append(true).open(state.join("checks.log")).map_err(text)?;
         let agent = header(&head, "user-agent").starts_with("LocalStudio/");
         writeln!(log, "{path} route={} agent={agent}", route.exists()).map_err(text)?;
+        let mut heads = fs::OpenOptions::new().create(true).append(true).open(state.join("heads.log")).map_err(text)?;
+        writeln!(heads, "{head}").map_err(text)?;
     }
     let (code, more, body) = match path {
         "/_relay/health" => (200, "", json!({"ok":true,"connected":state.join("connected").exists()})),
@@ -99,7 +102,11 @@ impl<'a> Cases<'a> {
         use std::os::unix::fs::PermissionsExt;
         let state = s.root.join("state");
         fs::create_dir_all(&state).map_err(text)?;
-        for (name, body) in [("npx", NPX), ("manager", MANAGER)] {
+        let real = format!("#!/bin/sh\ntouch '{}'\nexit 1\n", state.join("real-manager").display());
+        fs::create_dir(s.root.join("stubs")).map_err(text)?;
+        for (name, body) in
+            [("npx", NPX), ("manager", MANAGER), ("stubs/systemctl", real.as_str()), ("stubs/launchctl", real.as_str())]
+        {
             fs::write(s.root.join(name), body).map_err(text)?;
             fs::set_permissions(s.root.join(name), fs::Permissions::from_mode(0o755)).map_err(text)?;
         }
@@ -140,8 +147,7 @@ impl<'a> Cases<'a> {
             .env("LS_SYSTEMCTL", self.s.root.join("manager"))
             .env("LS_TUNNEL_CHECK_URL", &self.check_url)
             .env("LS_RELAY_WAIT_MS", "2000")
-            .env("SHIM_STATE", &self.state)
-            .env_remove("CLOUDFLARE_ACCOUNT_ID");
+            .env("SHIM_STATE", &self.state);
         change(&mut command);
         let out = command.output().map_err(text)?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -178,7 +184,8 @@ impl<'a> Cases<'a> {
 
     fn written(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
         let mut found = BTreeMap::new();
-        let mut folders = vec![self.s.data.clone(), self.s.home.clone()];
+        let beside = ["tychicus", "tmp"].map(|name| self.s.root.join(name));
+        let mut folders = [vec![self.s.data.clone(), self.s.home.clone()], beside.to_vec()].concat();
         while let Some(folder) = folders.pop() {
             let Ok(entries) = fs::read_dir(&folder) else { continue };
             for path in entries.flatten().map(|entry| entry.path()) {
@@ -198,6 +205,15 @@ impl<'a> Cases<'a> {
         } else {
             self.s.home.join(".config/systemd/user").join(SERVICE_UNIT)
         }
+    }
+
+    fn started(&self) -> usize {
+        let runs = |line: &&str| line.starts_with('/') && (line.contains(" restart ") || line.contains(" bootstrap "));
+        self.log("manager.log").lines().filter(runs).count()
+    }
+
+    fn deploys(&self) -> usize {
+        self.log("npx.log").matches("wrangler@4.163.0 deploy ").count()
     }
 
     fn hosts(&self) -> Result<Value, String> {
@@ -233,10 +249,11 @@ impl<'a> Cases<'a> {
         ensure(!keys.is_empty(), "the shim got a key")?;
         let has = |bytes: &[u8]| keys.iter().any(|key| String::from_utf8_lossy(bytes).contains(key.as_str()));
         ensure(!has(self.said.as_bytes()), format!("{what}: nothing printed holds a key"))?;
-        for name in ["npx.log", "manager.log", "checks.log"] {
+        for name in ["npx.log", "manager.log", "heads.log"] {
             ensure(!has(self.log(name).as_bytes()), format!("{what}: {name} (argv, env) holds no key"))?;
         }
-        let leak = self.written()?.into_iter().find(|(path, bytes)| !path.ends_with("relay.json") && has(bytes));
+        let record = self.s.tunnel("relay.json");
+        let leak = self.written()?.into_iter().find(|(path, bytes)| *path != record && has(bytes));
         ensure(leak.is_none(), format!("{what}: {:?} holds a key", leak.map(|(path, _)| path)))
     }
 }
@@ -289,19 +306,18 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
     c.refused("a lookup that fails", &["smoke"], "relay_lookup")?;
     c.set("lookup-fails", false)?;
     c.set("exists", true)?;
-    let deploys = c.log("npx.log").matches("wrangler@4.163.0 deploy ").count();
+    let deploys = c.deploys();
     let value = c.halted("confirm", &["smoke"])?;
     let named = value["message"].as_str().is_some_and(|said| said.contains("already has a Worker named smoke"));
     ensure(named && value["nextCommand"] == format!("{given} --yes"), format!("S17 asks first: {value}"))?;
-    let after = c.log("npx.log").matches("wrangler@4.163.0 deploy ").count();
-    ensure(after == deploys, "S17 a Worker already there is never deployed over without a yes")?;
+    ensure(c.deploys() == deploys, "S17 a Worker already there is never deployed over without a yes")?;
     c.set("exists", false)?;
     println!("ok: S17 the name is taken");
 
     c.set("deploy-fails", true)?;
     let message = c.refused("a failed deploy", &["smoke"], "relay_deploy")?;
     ensure(message.contains("deploy broke") && !message.contains("early words"), "S6 the last of wrangler's output")?;
-    ensure(message.chars().count() < 350 && !c.log("manager.log").contains("restart"), "S6 cut, no service")?;
+    ensure(message.chars().count() < 350 && c.started() == 0, "S6 cut, no service")?;
     c.set("deploy-fails", false)?;
     println!("ok: S6 deploy fails");
 
@@ -311,39 +327,45 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
     ensure(value["code"] == "relay_key" && message.contains("refused <key>"), format!("S7 relay_key: {value}"))?;
     let left = ["relay.json", "relay", "route.json"].iter().any(|name| c.s.tunnel(name).exists());
     ensure(!left && !c.service_file().exists(), "S7 no relay.json, no service, no folder")?;
+    let allowed = c.s.data.join("remote/serve.json").exists() && c.hosts()? != json!([]);
+    ensure(c.started() == 0 && !allowed, "S7 starts nothing and allows no host")?;
     c.set("secret-fails", false)?;
     c.no_key("S7")?;
     println!("ok: S7 the secret fails");
 
     let mut args = vec!["tunnel", "setup", "--relay", "smoke"];
     args.extend(["--serve", "18194"]);
+    let (before, deploys, keys) = (c.written()?, c.deploys(), c.keys());
+    let path = format!("{}:{}", c.s.root.join("stubs").display(), std::env::var("PATH").map_err(text)?);
     let value = c.ls(&args, |command| {
-        command.env_remove("LS_LAUNCHCTL").env_remove("LS_SYSTEMCTL");
+        command.env_remove("LS_LAUNCHCTL").env_remove("LS_SYSTEMCTL").env("PATH", &path);
     })?;
     ensure(value["code"] == "unsafe_service_path", format!("S16 the real service manager: {value}"))?;
+    let same = c.written()? == before && c.deploys() == deploys && c.keys() == keys;
+    ensure(same && !c.state.join("real-manager").exists(), "S16 changes nothing and runs no service manager")?;
     println!("ok: S16 real service manager");
     Ok(())
 }
 
 pub fn live(c: &mut Cases) -> Result<(), String> {
     c.set("refused", true)?;
-    c.set("exists", true)?;
-    let value = c.setup(&["smoke", "--yes"])?;
+    let earlier = c.log("npx.log").len();
+    let value = c.setup(&["smoke"])?;
     c.live(&value)?;
     ensure(!c.state.join("early-record").exists(), "relay.json is written only after the secret put")?;
     let checks = c.log("checks.log");
     let first = "/_relay/health route=false agent=true";
     ensure(checks.lines().next() == Some(first), format!("the relay's health comes first: {checks}"))?;
     ensure(checks.contains("/mcp ") && !checks.contains("route=true"), format!("route.json comes last: {checks}"))?;
-    let started = |c: &Cases| {
-        c.log("manager.log").lines().filter(|l| l.contains(" restart ") || l.contains(" bootstrap ")).count()
-    };
-    ensure(started(c) == 2, "a key the relay doesn't know yet (401) restarts the service")?;
+    ensure(c.started() == 2, "a key the relay doesn't know yet (401) restarts the service")?;
     for (file, want) in [("relay.js", WORKER_JS), ("wrangler.jsonc", WORKER_CONFIG)] {
         ensure(fs::read_to_string(c.s.tunnel("relay").join(file)).map_err(text)? == want, "the vendored files deploy")?;
     }
-    let npx = c.log("npx.log");
-    ensure(npx.contains("WRANGLER_SEND_METRICS=false"), "wrangler's metrics are off")?;
+    let npx = c.log("npx.log").split_off(earlier);
+    let calls: Vec<&str> = npx.split("npx --yes ").skip(1).collect();
+    ensure(calls.iter().all(|call| call.contains("\nWRANGLER_SEND_METRICS=false\n")), "wrangler's metrics are off")?;
+    let account = format!("\nCLOUDFLARE_ACCOUNT_ID={ACCOUNT}\n");
+    ensure(calls.len() == 4 && calls[1..].iter().all(|call| call.contains(&account)), "wrangler uses the account")?;
     for args in [
         "whoami --json",
         "deployments list --name smoke --json",
@@ -353,7 +375,7 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
         ensure(npx.contains(&format!("npx --yes wrangler@4.163.0 {args}\n")), format!("wrangler runs {args}"))?;
     }
     let cwd = c.s.tunnel("relay").display().to_string();
-    let deploy = format!("deploy --name smoke\ncwd {cwd}\nrelay.js\nwrangler.jsonc\n");
+    let deploy = format!("deploy --name smoke\ncwd {cwd}\nrelay.js\nwrangler.jsonc\nend\n");
     ensure(npx.contains(&deploy), "the deploy folder holds only the two files")?;
     let file = fs::read_to_string(c.service_file()).map_err(text)?;
     let quote = |word: &str| {
@@ -372,11 +394,12 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
     println!("ok: S8 live");
 
     let first = c.keys();
+    c.set("exists", true)?;
     let value = c.ls(&["tunnel", "setup", "--relay", "--yes"], |_| {})?;
     c.live(&value)?;
     let all = c.keys();
     ensure(all.len() == first.len() + 1 && !first.contains(&all[first.len()]), "S9 sets one new key")?;
-    ensure(started(c) == 3, "S9 restarts the service")?;
+    ensure(c.started() == 3, "S9 restarts the service")?;
     ensure(!c.state.join("early-record").exists(), "S9 relay.json changes only after the secret put")?;
     c.no_key("S9")?;
     c.set("deploy-fails", true)?;
@@ -392,6 +415,8 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
         value["message"].as_str().is_some_and(|said| said.contains("deploy broke <key>")),
         format!("the key in wrangler's output is replaced: {value}"),
     )?;
+    ensure(c.started() == 3 && c.keys() == all, "a failed deploy sets no key and restarts nothing")?;
+    c.no_key("S9 a failed deploy")?;
     c.set("deploy-fails", false)?;
     println!("ok: S9 again");
     Ok(())
