@@ -109,10 +109,6 @@ impl Wrangler {
     }
 
     async fn deploy(&self, name: &str) -> Result<String, Halt> {
-        for (file, text) in [("relay.js", WORKER_JS), ("wrangler.jsonc", WORKER_CONFIG)] {
-            let path = self.dir.join(file);
-            fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
-        }
         let out = self.run("relay_deploy", &["deploy", "--name", name], "", DEPLOY_WAIT).await?;
         let lines = fs::read_to_string(self.dir.join(OUTPUT)).unwrap_or_default();
         if let Some(host) = deployed(&lines).filter(|_| out.ok()) {
@@ -122,7 +118,7 @@ impl Wrangler {
         if lower.contains("register a workers.dev subdomain") || lower.contains("/workers/onboarding") {
             let account = self.account.as_deref().unwrap_or_default();
             let url = format!("https://dash.cloudflare.com/{account}/workers/onboarding");
-            let message = "This Cloudflare account has no workers.dev subdomain yet. Open the link, pick one, then run setup again.";
+            let message = "This Cloudflare account has no workers.dev subdomain yet. Open the link, pick one, then run setup again with --yes: the Worker may be there already.";
             return Err(Halt::State(needs("needs_subdomain", "url", &url, message)));
         }
         if out.ok() {
@@ -207,6 +203,17 @@ fn pick(accounts: &[Account], wanted: Option<&str>, again: &str) -> Result<Strin
     }
 }
 
+async fn asked(go: impl FnOnce(&Value) -> bool + Send + 'static, state: &Value) -> Result<bool, Failure> {
+    let stop = stop_signal().map_err(|error| error.to_string())?;
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    let state = state.clone();
+    std::thread::spawn(move || answer.send(go(&state)));
+    tokio::select! {
+        yes = answered => Ok(yes.unwrap_or(false)),
+        () = stop => Err(fail("stopped", "Setup was stopped. Nothing was changed.")),
+    }
+}
+
 fn live_wait() -> Duration {
     let set = std::env::var("LS_RELAY_WAIT_MS").ok().and_then(|ms| ms.parse().ok());
     set.map_or(LIVE_WAIT, Duration::from_millis)
@@ -219,7 +226,7 @@ impl Tunnel {
         account: Option<String>,
         serve: Option<u16>,
         mcp: Option<u16>,
-        go: impl FnOnce(&Value) -> bool,
+        go: impl FnOnce(&Value) -> bool + Send + 'static,
     ) -> Result<Value, Failure> {
         settle(self.setup_relay_steps(name, account, serve, mcp, go).await)
     }
@@ -230,7 +237,7 @@ impl Tunnel {
         account: Option<String>,
         serve: Option<u16>,
         mcp: Option<u16>,
-        go: impl FnOnce(&Value) -> bool,
+        go: impl FnOnce(&Value) -> bool + Send + 'static,
     ) -> Result<Value, Halt> {
         if let Some(id) = account.as_ref().filter(|id| !account_id(id)) {
             return Err(bad_account(id).into());
@@ -277,8 +284,15 @@ impl Tunnel {
         let account_id = wrangler.account.clone().unwrap_or_default();
         let relay = json!({ "name": name, "accountId": account_id });
         let route = new_route("cloudflare", &host, &[], ports);
+        let key = match wrangler.put_key(&name).await {
+            Err(failure) if old.as_ref().is_some_and(|old| old.name == name && old.account_id == account_id) => {
+                let message = format!("{} This machine's relay and route are as they were. If tunnel status says its key is refused, run setup again.", failure.message);
+                return Err(fail(failure.code, message).into());
+            }
+            key => key,
+        };
         let started = async {
-            let key = wrangler.put_key(&name).await?;
+            let key = key?;
             let record = Record { v: 1, url: format!("https://{host}"), name: name.clone(), account_id, key };
             let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
             self.private_write(RECORD, &bytes)?;
@@ -318,7 +332,7 @@ impl Tunnel {
                     said.push(format!("Its files couldn't all be removed ({error}); run local-studio tunnel off."));
                 }
                 said.push(format!(
-                    "The Worker {name} stays on your Cloudflare account, and this machine doesn't connect to it until setup runs again."
+                    "The Worker {name} stays on your Cloudflare account, and this machine doesn't connect to it until setup runs again with --yes."
                 ));
             }
             Err(error) => {
@@ -335,7 +349,7 @@ impl Tunnel {
         wanted: Option<&str>,
         again: &str,
         old: Option<&Record>,
-        go: impl FnOnce(&Value) -> bool,
+        go: impl FnOnce(&Value) -> bool + Send + 'static,
     ) -> Result<String, Halt> {
         let Some(accounts) = wrangler.accounts().await? else {
             let command = format!("npx --yes {WRANGLER} login");
@@ -346,9 +360,9 @@ impl Tunnel {
         let ours = old.is_some_and(|old| old.name == name && old.account_id == account);
         wrangler.account = Some(account);
         if !ours && wrangler.exists(name).await? {
-            let message = format!("Your Cloudflare account already has a Worker named {name}. Setup would replace its code and its relay key, so whatever uses it now stops working. Nothing was changed. Give the relay another name, or run setup again with --yes to replace that Worker.");
+            let message = format!("Your Cloudflare account already has a Worker named {name}. Setup would replace its code and its relay key, so whatever uses it now stops working. Nothing was changed. If it is this machine's own, left by tunnel off or by a setup that didn't finish, run setup again with --yes. Otherwise give the relay another name, or use --yes to replace that Worker.");
             let state = needs("confirm", "nextCommand", &format!("{again} --yes"), &message);
-            if !go(&state) {
+            if !asked(go, &state).await? {
                 return Err(Halt::State(state));
             }
         }
@@ -361,6 +375,10 @@ impl Tunnel {
         if fresh {
             self.ensure_dir()?;
             fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+            for (file, text) in [("relay.js", WORKER_JS), ("wrangler.jsonc", WORKER_CONFIG)] {
+                let path = dir.join(file);
+                fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
+            }
         }
         Ok(dir)
     }
@@ -393,7 +411,7 @@ impl Tunnel {
                 Err(error) if Instant::now() + every > deadline => return Err(live(error)),
                 Err(_) => tokio::time::sleep(every).await,
             }
-            if self.relay_seen().is_some_and(|seen| seen.state == "unauthorized") {
+            if self.relay_seen().is_some_and(|seen| matches!(seen.state.as_str(), "unauthorized" | "replaced")) {
                 install().await.map_err(|error| fail("service_failed", error))?;
             }
         };

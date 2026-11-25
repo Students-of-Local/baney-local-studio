@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -48,9 +48,11 @@ up() {
   touch "$SHIM_STATE/up"
   rm -f "$SHIM_STATE/connected"
   [ -f "$SHIM_STATE/interrupt" ] && kill -INT "$PPID"
-  if [ -f "$SHIM_STATE/refused" ]; then
-    rm "$SHIM_STATE/refused"
-    echo '{"state":"unauthorized","at":1,"pid":1}' > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
+  [ -f "$SHIM_STATE/hangup" ] && kill -HUP "$PPID"
+  turned=$(cd "$SHIM_STATE" && ls -d unauthorized replaced 2>/dev/null)
+  if [ -n "$turned" ]; then
+    rm "$SHIM_STATE/$turned"
+    echo "{\"state\":\"$turned\",\"at\":1,\"pid\":1}" > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
   elif [ ! -f "$SHIM_STATE/never" ] && grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
     touch "$SHIM_STATE/connected"
   fi
@@ -145,14 +147,7 @@ impl<'a> Cases<'a> {
 
     fn ls(&mut self, args: &[&str], change: impl Fn(&mut Command)) -> Result<Value, String> {
         let mut command = self.s.command(args);
-        command
-            .arg("--json")
-            .env("LS_NPX", self.s.root.join("npx"))
-            .env("LS_LAUNCHCTL", self.s.root.join("manager"))
-            .env("LS_SYSTEMCTL", self.s.root.join("manager"))
-            .env("LS_TUNNEL_CHECK_URL", &self.check_url)
-            .env("LS_RELAY_WAIT_MS", "2000")
-            .env("SHIM_STATE", &self.state);
+        self.shims(command.arg("--json"));
         change(&mut command);
         let out = command.output().map_err(text)?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -160,6 +155,17 @@ impl<'a> Cases<'a> {
         self.said.push_str(&String::from_utf8_lossy(&out.stderr));
         println!("$ local-studio {}\n  {}", args.join(" "), stdout.trim());
         serde_json::from_str(stdout.trim()).map_err(|e| format!("not one JSON state ({e}): {stdout}"))
+    }
+
+    fn shims(&self, command: &mut Command) {
+        command
+            .env("LS_NPX", self.s.root.join("npx"))
+            .env("LS_LAUNCHCTL", self.s.root.join("manager"))
+            .env("LS_SYSTEMCTL", self.s.root.join("manager"))
+            .env("LS_TUNNEL_CHECK_URL", &self.check_url)
+            .env("LS_RELAY_WAIT_MS", "2000")
+            .env("SHIM_STATE", &self.state)
+            .env_remove("CLOUDFLARE_ACCOUNT_ID");
     }
 
     fn setup(&mut self, more: &[&str]) -> Result<Value, String> {
@@ -202,6 +208,12 @@ impl<'a> Cases<'a> {
             }
         }
         Ok(found)
+    }
+
+    fn kept(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+        let (folder, mut files) = (self.s.tunnel("relay"), self.written()?);
+        files.retain(|path, _| !path.starts_with(&folder));
+        Ok(files)
     }
 
     fn service_file(&self) -> PathBuf {
@@ -324,6 +336,7 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
     let named = value["message"].as_str().is_some_and(|said| said.contains("already has a Worker named smoke"));
     ensure(named && value["nextCommand"] == format!("{given} --yes"), format!("S17 asks first: {value}"))?;
     ensure(c.deploys() == deploys, "S17 a Worker already there is never deployed over without a yes")?;
+    prompt(c)?;
     c.set("exists", false)?;
     println!("ok: S17 the name is taken");
 
@@ -360,8 +373,45 @@ pub fn before(c: &mut Cases) -> Result<(), String> {
     Ok(())
 }
 
+fn prompt(c: &mut Cases) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let before = c.written()?;
+    let line = format!("exec '{}' tunnel setup --relay smoke --serve 18194 --mcp {}", c.s.bin.display(), c.mcp);
+    let mut command = c.s.command(&[]);
+    let mut script = Command::new("script");
+    script.env_clear().args(["-qec", &line, "/dev/null"]);
+    c.shims(&mut command);
+    for (name, value) in command.get_envs() {
+        match value {
+            Some(value) => script.env(name, value),
+            None => script.env_remove(name),
+        };
+    }
+    let mut child = script.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(text)?;
+    let (mut typed, mut shown) = (child.stdin.take().ok_or("no stdin")?, child.stdout.take().ok_or("no stdout")?);
+    let mut said = Vec::new();
+    while !String::from_utf8_lossy(&said).contains("Replace it? [y/N]") {
+        let mut some = [0; 4096];
+        let read = shown.read(&mut some).map_err(text)?;
+        ensure(read > 0, format!("S17 asks in a terminal: {}", String::from_utf8_lossy(&said)))?;
+        said.extend(&some[..read]);
+    }
+    typed.write_all(b"\x03").and_then(|()| typed.flush()).map_err(text)?;
+    let ended = (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(100));
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    if !ended {
+        let _ = child.kill();
+    }
+    ensure(ended, "S17 Ctrl-C at the question ends setup")?;
+    ensure(c.written()? == before, "S17 Ctrl-C at the question changes nothing")
+}
+
 pub fn live(c: &mut Cases) -> Result<(), String> {
-    c.set("refused", true)?;
+    c.set("unauthorized", true)?;
     let earlier = c.log("npx.log").len();
     let value = c.setup(&["smoke"])?;
     c.live(&value)?;
@@ -388,8 +438,10 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
         ensure(npx.contains(&format!("npx --yes wrangler@4.163.0 {args}\n")), format!("wrangler runs {args}"))?;
     }
     let cwd = c.s.tunnel("relay").display().to_string();
-    let deploy = format!("deploy --name smoke\ncwd {cwd}\nrelay.js\nwrangler.jsonc\nend\n");
-    ensure(npx.contains(&deploy), "the deploy folder holds only the two files")?;
+    for args in ["whoami --json", "deploy --name smoke"] {
+        let ran = format!("wrangler@4.163.0 {args}\ncwd {cwd}\nrelay.js\nwrangler.jsonc\nend\n");
+        ensure(npx.contains(&ran), format!("wrangler {args} runs in a folder that holds only the two files"))?;
+    }
     let file = fs::read_to_string(c.service_file()).map_err(text)?;
     let quote = |word: &str| {
         if cfg!(target_os = "macos") {
@@ -408,27 +460,23 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
 
     let first = c.keys();
     c.set("exists", true)?;
+    c.set("replaced", true)?;
     let value = c.ls(&["tunnel", "setup", "--relay", "--yes"], |_| {})?;
     c.live(&value)?;
     let all = c.keys();
     ensure(all.len() == first.len() + 1 && !first.contains(&all[first.len()]), "S9 sets one new key")?;
-    ensure(c.started() == 3, "S9 restarts the service")?;
+    ensure(c.started() == 4, "S9 restarts the service, again when it was replaced")?;
     ensure(!c.state.join("early-record").exists(), "S9 relay.json changes only after the secret put")?;
     c.no_key("S9")?;
     c.set("deploy-fails", true)?;
-    let kept = |c: &Cases| {
-        let (folder, mut files) = (c.s.tunnel("relay"), c.written()?);
-        files.retain(|path, _| !path.starts_with(&folder));
-        Ok::<_, String>(files)
-    };
-    let before = kept(c)?;
+    let before = c.kept()?;
     let value = c.setup(&["smoke"])?;
-    ensure(value["code"] == "relay_deploy" && kept(c)? == before, "a failed deploy on a live relay changes nothing")?;
+    ensure(value["code"] == "relay_deploy" && c.kept()? == before, "a failed deploy on a live relay changes nothing")?;
     ensure(
         value["message"].as_str().is_some_and(|said| said.contains("deploy broke <key>")),
         format!("the key in wrangler's output is replaced: {value}"),
     )?;
-    ensure(c.started() == 3 && c.keys() == all, "a failed deploy sets no key and restarts nothing")?;
+    ensure(c.started() == 4 && c.keys() == all, "a failed deploy sets no key and restarts nothing")?;
     c.no_key("S9 a failed deploy")?;
     c.set("deploy-fails", false)?;
     println!("ok: S9 again");
@@ -510,11 +558,13 @@ pub fn broken(c: &mut Cases) -> Result<(), String> {
     let value = c.setup(&["smoke", "--yes"])?;
     c.live(&value)?;
     c.set("secret-fails", true)?;
+    let before = c.kept()?;
     let value = c.setup(&["smoke"])?;
     let message = value["message"].as_str().unwrap_or_default();
-    ensure(value["code"] == "relay_key" && message.contains("nothing is exposed"), format!("S18 relay_key: {value}"))?;
-    c.gone("S18 a key that may or may not be set on a live relay")?;
+    ensure(value["code"] == "relay_key" && message.contains("as they were"), format!("S18 relay_key: {value}"))?;
+    ensure(c.kept()? == before && c.state.join("up").exists(), "S18 a refused key leaves the live relay alone")?;
     c.set("secret-fails", false)?;
+    off(c)?;
     println!("ok: S18 the secret fails on a live relay");
 
     for flag in ["never", "stuck"] {
@@ -533,11 +583,13 @@ pub fn broken(c: &mut Cases) -> Result<(), String> {
     off(c)?;
     println!("ok: S19 a service that can't be removed");
 
-    c.set("interrupt", true)?;
-    let value = c.setup(&["smoke", "--yes"])?;
-    ensure(value["code"] == "stopped", format!("S20 Ctrl-C while going live: {value}"))?;
-    c.gone("S20")?;
-    c.set("interrupt", false)?;
+    for flag in ["interrupt", "hangup"] {
+        c.set(flag, true)?;
+        let value = c.setup(&["smoke", "--yes"])?;
+        ensure(value["code"] == "stopped", format!("S20 {flag} while going live: {value}"))?;
+        c.gone("S20")?;
+        c.set(flag, false)?;
+    }
     c.set("interrupt-deploy", true)?;
     let value = c.setup(&["smoke", "--yes"])?;
     ensure(value["code"] == "relay_deploy", format!("S20 Ctrl-C in a deploy: {value}"))?;
