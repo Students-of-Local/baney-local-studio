@@ -836,15 +836,22 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
 
     fn fence(socket: &Path, thread: &str, on: bool) -> anyhow::Result<()> {
         let server = json!({ "type": "stdio", "name": "intruder", "command": "/usr/bin/true", "cwd": "/" });
-        session(socket, thread, |active| {
-            Some(DaemonCommand::ReplaceAcpMcpServers {
-                id: None,
-                active_session_id: active.to_string(),
-                owner_id: "smoke-intruder".to_string(),
-                servers: Value::Array(if on { vec![server] } else { Vec::new() }),
-                rest: Map::default(),
-            })
-        })?;
+        let lists = if on {
+            vec![("local-studio-ask", Vec::new()), ("smoke-intruder", vec![server])]
+        } else {
+            vec![("smoke-intruder", Vec::new())]
+        };
+        for (owner, servers) in lists {
+            session(socket, thread, |active| {
+                Some(DaemonCommand::ReplaceAcpMcpServers {
+                    id: None,
+                    active_session_id: active.to_string(),
+                    owner_id: owner.to_string(),
+                    servers: Value::Array(servers),
+                    rest: Map::default(),
+                })
+            })?;
+        }
         Ok(())
     }
 
