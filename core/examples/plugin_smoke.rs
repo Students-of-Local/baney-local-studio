@@ -163,7 +163,10 @@ impl Harness {
                 println!("     notice {level:?}: {text}");
                 self.view.notices.push(text);
             }
-            Update::RequestFailed { request, message } => println!("     request {request} failed: {message}"),
+            Update::RequestFailed { request, message } => {
+                println!("     request {request} failed: {message}");
+                self.view.other.push(format!("RequestFailed {request}: {message}"));
+            }
             Update::Commands { request, commands } => self.view.commands = Some((request, commands)),
             Update::Skills { skills, .. } => self.view.skills = Some(skills),
             Update::Transcript { thread, op } => self.transcript(&thread, op)?,
@@ -498,7 +501,7 @@ mod local_only {
         Instant, Map, OpenOptionsExt, Ordering, Path, PathBuf, Read, Signal, Studio, StudioConfig, TcpListener,
         ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MAX_TOKENS, MID, STEP,
     };
-    use local_studio_core::{ImageAttachment, PromptDraft};
+    use local_studio_core::{ConsentAnswer, ImageAttachment, PromptDraft};
     use std::sync::OnceLock;
 
     const LOCAL: &str = "ollama-local";
@@ -1349,6 +1352,8 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(failed)
     }
 
+    const WAITS: &str = "Gantrel is still installing. Answer its sheet, then send again.";
+
     fn put(path: &Path, text: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(path.parent().context("parent")?)?;
         Ok(std::fs::write(path, text)?)
@@ -1381,6 +1386,13 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 .iter()
                 .try_for_each(|name| skill(&plugins.join(id).join("skills"), name, &format!("{name} steps")))?;
         }
+        manifest(
+            &root.join("gantrel"),
+            "Gantrel",
+            "capabilities = [\"mcp-server\"]\n[mcp]\ncommand = \"bin/run.sh\"\n",
+        )?;
+        std::fs::create_dir_all(root.join("gantrel/bin"))?;
+        executable(&root.join("gantrel/bin/run.sh"), "#!/bin/sh\nexec cat\n")?;
         skill(&data.join("skills"), "marmalade", "orange steps")?;
         skill(&data.join("skills"), "marmalade-pot", "pot steps")?;
         skill(&data.join("skills"), "ledger", "your own ledger")?;
@@ -1397,6 +1409,14 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         std::fs::create_dir_all(root.join("plain/marmalade"))?;
         let trusted = [work.canonicalize()?, cold.canonicalize()?];
         put(&data.join("state.json"), &json!({ "version": 1, "projects": [], "trusted": trusted }).to_string())?;
+        std::fs::create_dir_all(root.join("bin"))?;
+        let path = std::env::var("PATH")?;
+        let (bin, hang) = (root.join("bin").canonicalize()?, root.canonicalize()?.join("hang"));
+        let hold = format!("while [ -e '{}' ]; do sleep 0.1; done; exit 1", hang.display());
+        let git =
+            format!("#!/bin/sh\ncase \"$*\" in *baney75/Gantrel*) {hold};; esac\nPATH={path:?} exec git \"$@\"\n");
+        executable(&bin.join("git"), &git)?;
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
         std::env::set_var("HOME", root.join("home"));
         std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
         std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
@@ -1412,7 +1432,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let signal = Arc::new(Signal::default());
         let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
         let mut harness = Harness { studio, signal, view: View::default(), step: STEP };
-        let outcome = sends(&mut harness, root, &hits);
+        let outcome = sends(&mut harness, root, &hits).and_then(|()| installs(&mut harness, root, &hang));
         harness.studio.shutdown();
         let stopped = stop_daemon(&socket);
         outcome?;
@@ -1499,6 +1519,48 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         for (key, text) in [("gate", "File it with @ledger"), ("slash", "/review the @Ledger entries")] {
             naming(refused(harness, key, text, settings(CLOUD, CLOUD_MODEL), hits), "runs only on local models")?;
         }
+        Ok(())
+    }
+
+    fn waits(harness: &mut Harness, key: &str) -> anyhow::Result<()> {
+        let thread = harness.view.thread("absent").context("thread")?;
+        for (request, text) in [(format!("{key}-id"), "use @gantrel"), (format!("{key}-name"), "@Gantrel, please")] {
+            harness.studio.send(request.clone(), thread.clone(), prompt(text), Delivery::Queue);
+            let failed = format!("RequestFailed {request}: {WAITS}");
+            harness.pump_until(&failed, STEP, |view| view.other.contains(&failed))?;
+        }
+        let project = harness.view.projects[0].id.clone();
+        harness.studio.start_thread(key.to_string(), Some(project), image_draft("@gantrel"), settings(LOCAL, mid()));
+        harness.pump_until(&format!("{key}: the draft comes back"), STEP, |view| {
+            let back = |update: &String| {
+                ["ComposerDraft", "\"@gantrel\"", "image/png", "notes.txt"].iter().all(|part| update.contains(part))
+            };
+            view.thread(key)
+                .is_some_and(|thread| view.other.iter().any(|update| back(update) && update.contains(&thread)))
+        })
+    }
+
+    fn installs(harness: &mut Harness, root: &Path, hang: &Path) -> anyhow::Result<()> {
+        let studio = Arc::clone(&harness.studio);
+        std::fs::write(hang, "")?;
+        studio.install_plugin("running".to_string(), "gantrel".to_string());
+        let waited = waits(harness, "while-it-runs");
+        std::fs::remove_file(hang)?;
+        waited?;
+        harness.pump_until("the install failed", STEP, |view| {
+            view.other.iter().any(|update| update.starts_with("RequestFailed running"))
+        })?;
+        let work = harness.view.projects[0].id.clone();
+        let text = sent(harness, "after-failure", &work, "@gantrel")?;
+        ensure!(text == "@gantrel", "after a failed install the message became {text:?}");
+        studio.install_plugin("sheet".to_string(), root.join("gantrel").to_string_lossy().into_owned());
+        harness.pump_until("its sheet is open", STEP, |view| {
+            view.other.iter().any(|update| update.starts_with("Consents") && update.contains("\"gantrel\""))
+        })?;
+        waits(harness, "while-it-asks")?;
+        studio.answer_consent("sheet".to_string(), ConsentAnswer::Cancel);
+        let text = sent(harness, "after-cancel", &work, "@gantrel")?;
+        ensure!(text == "@gantrel", "after a declined install the message became {text:?}");
         Ok(())
     }
 }

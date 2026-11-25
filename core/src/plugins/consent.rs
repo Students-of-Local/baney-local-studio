@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use super::compat::{report, text_findings, Translation};
@@ -26,6 +26,7 @@ enum Kind {
 pub struct Pendings {
     items: Vec<Pending>,
     dismissed: HashSet<String>,
+    running: HashMap<String, String>,
 }
 
 impl Pendings {
@@ -42,6 +43,20 @@ impl Pendings {
     #[must_use]
     pub fn offered(&self, plugin: &Plugin) -> bool {
         self.asks(&grant_request(plugin)) || self.items.iter().any(|pending| pending.request.plugin == plugin.id)
+    }
+
+    pub fn begin(&mut self, request: &str, id: &str) {
+        self.running.insert(request.to_string(), id.to_string());
+    }
+
+    pub fn end(&mut self, request: &str) {
+        self.running.remove(request);
+    }
+
+    #[must_use]
+    pub fn installing(&self) -> Vec<String> {
+        let open = self.items.iter().filter(|pending| pending.installs()).map(|pending| &pending.request.plugin);
+        self.running.values().chain(open).cloned().collect()
     }
 
     pub fn push(&mut self, pending: Pending) -> bool {
@@ -66,6 +81,11 @@ impl Pending {
     #[must_use]
     pub fn request(&self) -> &ConsentRequest {
         &self.request
+    }
+
+    #[must_use]
+    pub fn installs(&self) -> bool {
+        self.request.install && self.request.update_from.is_none()
     }
 
     pub fn preset(&mut self, names: &[String]) {
