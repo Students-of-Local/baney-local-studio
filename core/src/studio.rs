@@ -4782,7 +4782,9 @@ impl Actor {
         let failed = self.threads.get(id).is_some_and(|thread| thread.failed_at.is_some());
         if let Some(thread) = self.threads.get_mut(id) {
             thread.pending_run = false;
-            thread.stopping = None;
+            if thread.stopping.take().is_some() {
+                thread.skill.asked = false;
+            }
             thread.ended_by_events = true;
         }
         if !self.running(id) {
