@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -11,6 +12,9 @@ use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use tokio_tungstenite::tungstenite::{Message, WebSocket};
+
+#[path = "support/relay_setup_cases.rs"]
+mod cases;
 
 const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 const RUN_KEY: &str = "RunKeyRunKeyRunKeyRunKeyRunKeyRunKeyRunKey_";
@@ -185,6 +189,9 @@ impl Smoke {
         let mut command = Command::new(&self.bin);
         command
             .args(args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("TMPDIR", self.root.join("tmp"))
             .env("HOME", &self.home)
             .env("LOCAL_STUDIO_DATA_DIR", &self.data)
             .env("TYCHICUS_CONFIG_DIR", self.root.join("tychicus"))
@@ -254,17 +261,25 @@ fn run() -> Result<(), String> {
     };
     let bin = fs::canonicalize(bin).map_err(|e| format!("{bin}: {e}"))?;
     let root = PathBuf::from(scratch).join(format!("relay-setup-{}", std::process::id()));
-    fs::create_dir_all(root.join("home")).map_err(text)?;
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(&root).map_err(text)?;
+    for dir in ["home", "run-home", "tmp"] {
+        fs::create_dir(root.join(dir)).map_err(text)?;
+    }
     let root = fs::canonicalize(&root).map_err(text)?;
     let smoke = Smoke { bin, home: root.join("home"), data: root.join("data"), root };
     println!("scratch: {}", smoke.root.display());
-    s11_run(&smoke)
+    let mut setup = cases::Cases::start(&smoke)?;
+    cases::before(&mut setup)?;
+    cases::live(&mut setup)?;
+    let [data, home] = ["run-data", "run-home"].map(|name| smoke.root.join(name));
+    s11_run(&Smoke { data, home, bin: smoke.bin.clone(), root: smoke.root.clone() })
 }
 
 fn s11_run(s: &Smoke) -> Result<(), String> {
-    let out = s.command(&["tunnel", "relay", "run"]).output().map_err(text)?;
+    let mut service = s.service("run-none", &[])?;
+    let status = until("the exit with no relay.json", QUICK, || service.child.try_wait().ok().flatten())?;
     ensure(
-        out.status.code() == Some(1) && !s.tunnel("relay-state.json").exists(),
+        status.code() == Some(1) && !s.tunnel("relay-state.json").exists(),
         "relay run with no relay.json exits 1 at once and writes nothing",
     )?;
     let relay = StandIn::start()?;
