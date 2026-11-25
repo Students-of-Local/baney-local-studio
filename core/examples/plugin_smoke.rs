@@ -1311,6 +1311,12 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             servers.iter().filter(|(name, up)| *up && name != "plugin-ledger").map(|(name, _)| name.as_str()).collect();
         ensure!(connected.is_empty(), "other MCP servers are connected in the /ledger session: {connected:?}");
         ensure!(!servers.iter().any(|(name, _)| name == "web-search"), "web-search is still in the /ledger session");
+        let offered = server_starts(&ledger_out.with_file_name("tools.jsonl"), "local-studio");
+        ensure!(!offered.is_empty(), "no session was offered Local Studio's own tools");
+        ensure!(
+            !servers.iter().any(|(name, _)| name == "local-studio"),
+            "local-studio is still in the /ledger session"
+        );
         println!(
             "ok   check 4b: the /ledger session lists {} MCP connections, none connected besides the plugin and no web-search; plugin-ledger started {} time(s), each with LOCAL_STUDIO_LOCAL_ONLY=1",
             servers.len(),

@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::workspace::model::Settings;
 
 pub(crate) const SERVER: &str = "local-studio";
-const PROGRAM: &str = if cfg!(windows) { "local-studio-browser.exe" } else { "local-studio-browser" };
+const PROGRAM: &str = "local-studio-browser";
 const PLACES: [&str; 3] = ["browser", "lib/local-studio/browser", "Resources/browser"];
 const PASSED: [&str; 10] = [
     "DBUS_SESSION_BUS_ADDRESS",
@@ -31,6 +31,20 @@ fn program() -> Option<PathBuf> {
             .find(|path| path.is_file())?,
     };
     found.is_file().then(|| std::path::absolute(&found).ok())?
+}
+
+pub(crate) fn holds(servers: &[Value]) -> bool {
+    servers.iter().any(|server| server["name"] == SERVER)
+}
+
+pub(crate) fn keeps(sent: &Value, wanted: &[Value]) -> bool {
+    wanted.contains(sent)
+        || wanted.iter().any(|server| {
+            let tools = |server: &Value| server["args"][4].as_str().map(str::to_string);
+            server["name"] == SERVER
+                && sent["name"] == SERVER
+                && tools(server).zip(tools(sent)).is_some_and(|(wanted, sent)| wanted.contains(&sent))
+        })
 }
 
 pub(crate) fn server(settings: &Settings, thread: &str, local: bool) -> Option<Value> {

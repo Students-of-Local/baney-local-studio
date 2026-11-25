@@ -199,7 +199,7 @@ impl Actor {
         }
         let busy = self.threads.get(id).and_then(|thread| thread.live.as_ref()).is_some_and(|live| live.state.busy);
         if busy {
-            let stale = before.is_none_or(|sent| sent.iter().any(|server| !servers.contains(server)));
+            let stale = before.is_none_or(|sent| sent.iter().any(|server| !crate::tools::keeps(server, &servers)));
             if !stale {
                 return;
             }
@@ -221,6 +221,21 @@ impl Actor {
                 self.mailbox
                     .notice(NoticeLevel::Warning, format!("Plugin tool servers for this thread are off: {error}"));
             }
+        }
+    }
+
+    pub(super) async fn sync_tools(&mut self) {
+        let holding: Vec<(String, String)> = self
+            .threads
+            .keys()
+            .filter_map(|id| Some((id.clone(), self.live_active(id)?)))
+            .filter(|(id, active)| match self.ask_sent.get(active).and_then(Value::as_array) {
+                Some(sent) => crate::tools::holds(sent),
+                None => !self.running(id),
+            })
+            .collect();
+        for (id, active) in holding {
+            self.sync_plugin_servers(&id, &active).await;
         }
     }
 
@@ -248,7 +263,7 @@ impl Actor {
                 self.live_active(id)
                     .and_then(|active| self.ask_sent.get(&active))
                     .and_then(Value::as_array)
-                    .is_some_and(|servers| !servers.is_empty())
+                    .is_some_and(|servers| servers.iter().any(|server| server["name"] != crate::tools::SERVER))
             })
             .cloned()
             .collect();

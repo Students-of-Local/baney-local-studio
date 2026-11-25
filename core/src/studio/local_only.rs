@@ -315,10 +315,7 @@ impl Actor {
     }
 
     fn holds_tools(&self, active: &str) -> bool {
-        self.ask_sent
-            .get(active)
-            .and_then(Value::as_array)
-            .is_some_and(|sent| sent.iter().any(|one| one["name"] == tools::SERVER))
+        !active.is_empty() && self.ask_sent.get(active).and_then(Value::as_array).is_none_or(|sent| tools::holds(sent))
     }
 
     async fn drop_tools(&mut self, active: &str) -> Result<(), String> {

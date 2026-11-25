@@ -1532,6 +1532,7 @@ impl Actor {
                     if changed.is_err() {
                         settings_open = false;
                     }
+                    self.sync_tools().await;
                     self.dirty = true;
                 }
                 changed = self.pull_requests.changed(), if pulls_open => {
