@@ -581,7 +581,7 @@ fn setup(flags: &[&str], json: bool) -> Result<(), String> {
         }
     }
     match (cloudflare, tailnet, relay) {
-        (None, false, Some(name)) if aliases.is_empty() => setup_relay(name, account, serve, mcp, json),
+        (None, false, Some(name)) if aliases.is_empty() => setup_relay(name, account, (serve, mcp), yes, json),
         _ if account.is_some() => Err(usage.to_string()),
         (Some(host), false, None) => {
             run_state(move |t| Box::pin(t.setup_cloudflare(host, aliases, serve, mcp, consent(yes, json))), json)
@@ -595,19 +595,29 @@ fn setup(flags: &[&str], json: bool) -> Result<(), String> {
 fn setup_relay(
     name: Option<String>,
     account: Option<String>,
-    serve: Option<u16>,
-    mcp: Option<u16>,
+    ports: (Option<u16>, Option<u16>),
+    yes: bool,
     as_json: bool,
 ) -> Result<(), String> {
-    run_state(move |t| Box::pin(t.setup_relay(name, account, serve, mcp)), as_json)
+    let go = move |state: &Value| {
+        if yes || as_json || !std::io::stdin().is_terminal() {
+            return yes;
+        }
+        println!("{}", state["message"].as_str().unwrap_or_default());
+        print!("Replace it? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    };
+    run_state(move |t| Box::pin(t.setup_relay(name, account, ports.0, ports.1, go)), as_json)
 }
 
 #[cfg(not(feature = "link"))]
 fn setup_relay(
     _name: Option<String>,
     _account: Option<String>,
-    _serve: Option<u16>,
-    _mcp: Option<u16>,
+    _ports: (Option<u16>, Option<u16>),
+    _yes: bool,
     _as_json: bool,
 ) -> Result<(), String> {
     Err(NO_RELAY.into())

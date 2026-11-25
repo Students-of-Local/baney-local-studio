@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -16,12 +17,16 @@ use super::{
 use crate::link::devices::random;
 use crate::platform::Mode;
 use crate::tunnel::record::{Record, AGAIN, FOLDER, RECORD};
-use crate::tunnel::relay::{WORKER_CONFIG, WORKER_JS};
+use crate::tunnel::relay::{stop_signal, WORKER_CONFIG, WORKER_JS};
 use crate::tunnel::{check_ports, fail, serve_allow, Failure, Ports, Tunnel, UpLock};
+use crate::workspace::process::signal_pid_group;
 
+const NO_WORKER: &str = "[code: 10007]";
+const NO_ENVIRONMENT: &str = "[code: 10090]";
 const NODE_DOWNLOAD: &str = "https://nodejs.org/en/download";
 const OUTPUT: &str = "deploy-output.ndjson";
 const WHOAMI_WAIT: Duration = Duration::from_mins(3);
+const LOOKUP_WAIT: Duration = Duration::from_mins(3);
 const DEPLOY_WAIT: Duration = Duration::from_mins(5);
 const SECRET_WAIT: Duration = Duration::from_mins(3);
 const LIVE_WAIT: Duration = Duration::from_mins(5);
@@ -47,13 +52,25 @@ impl Wrangler {
         command.envs(self.account.as_ref().map(|id| ("CLOUDFLARE_ACCOUNT_ID", id)));
         command.envs((args[0] == "deploy").then(|| ("WRANGLER_OUTPUT_FILE_PATH", self.dir.join(OUTPUT))));
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        crate::platform::own_group_async(&mut command);
         let broke = |error| fail(code, format!("wrangler {}: {error}", args[0]));
+        let stop = stop_signal().map_err(broke)?;
         let mut child = command.spawn().map_err(broke)?;
+        let group = child.id();
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input.as_bytes()).await;
         }
-        let slow = || fail(code, format!("wrangler {} took over {} minutes.", args[0], wait.as_secs() / 60));
-        let output = tokio::time::timeout(wait, child.wait_with_output()).await.map_err(|_| slow())?.map_err(broke)?;
+        let output = tokio::select! {
+            output = child.wait_with_output() => output.map_err(broke),
+            () = tokio::time::sleep(wait) => {
+                Err(fail(code, format!("wrangler {} took over {} minutes.", args[0], wait.as_secs() / 60)))
+            }
+            () = stop => Err(fail(code, format!("wrangler {} was stopped.", args[0]))),
+        };
+        if let (Err(_), Some(group)) = (&output, group) {
+            signal_pid_group("-KILL", group);
+        }
+        let output = output?;
         Ok(Out {
             code: output.status.code().unwrap_or(-1),
             stdout: self.hidden(&output.stdout),
@@ -77,6 +94,17 @@ impl Wrangler {
             Some(false) => Ok(None),
             None if signed_out => Ok(None),
             None => Err(failed("relay_whoami", "wrangler whoami", &out)),
+        }
+    }
+
+    async fn exists(&self, name: &str) -> Result<bool, Failure> {
+        let args = ["deployments", "list", "--name", name, "--json"];
+        let out = self.run("relay_lookup", &args, "", LOOKUP_WAIT).await?;
+        let missing = [NO_WORKER, NO_ENVIRONMENT].iter().any(|code| out.text().contains(code));
+        match (out.ok(), missing) {
+            (true, _) => Ok(true),
+            (false, true) => Ok(false),
+            _ => Err(failed("relay_lookup", "wrangler deployments list", &out)),
         }
     }
 
@@ -168,12 +196,12 @@ fn pick(accounts: &[Account], wanted: Option<&str>, again: &str) -> Result<Strin
     match accounts {
         [] => Err(fail("no_account", "Your Cloudflare sign-in lists no account to put the relay on.").into()),
         [only] => Ok(only.id.clone()),
-        [first, ..] => Err(Halt::State(json!({
+        _ => Err(Halt::State(json!({
             "state": "needs_account",
             "next": "needs_account",
             "route": "cloudflare",
             "accounts": accounts.iter().map(|a| json!({ "id": a.id, "name": a.name })).collect::<Vec<_>>(),
-            "nextCommand": format!("{again} --account {}", first.id),
+            "template": format!("{again} --account ID"),
             "message": "Your Cloudflare sign-in has more than one account. Run the command with the id of the one the relay goes on.",
         }))),
     }
@@ -191,8 +219,9 @@ impl Tunnel {
         account: Option<String>,
         serve: Option<u16>,
         mcp: Option<u16>,
+        go: impl FnOnce(&Value) -> bool,
     ) -> Result<Value, Failure> {
-        settle(self.setup_relay_steps(name, account, serve, mcp).await)
+        settle(self.setup_relay_steps(name, account, serve, mcp, go).await)
     }
 
     async fn setup_relay_steps(
@@ -201,13 +230,17 @@ impl Tunnel {
         account: Option<String>,
         serve: Option<u16>,
         mcp: Option<u16>,
+        go: impl FnOnce(&Value) -> bool,
     ) -> Result<Value, Halt> {
         if let Some(id) = account.as_ref().filter(|id| !account_id(id)) {
             return Err(bad_account(id).into());
         }
         let ports = self.relay_ports(serve, mcp)?;
         check_ports(ports.serve, ports.mcp)?;
-        let given = name.clone();
+        let given = [name.clone(), account.as_ref().map(|id| format!("--account {id}"))];
+        let given_ports = [serve.map(|port| format!("--serve {port}")), mcp.map(|port| format!("--mcp {port}"))];
+        let words = given.into_iter().chain(given_ports).flatten();
+        let again = std::iter::once(AGAIN.to_string()).chain(words).collect::<Vec<_>>().join(" ");
         let unset = || format!("local-studio-{}", machine_slug());
         let _lock = UpLock::take(&self.dir, false)?;
         let old = self.on_relay()?;
@@ -231,52 +264,68 @@ impl Tunnel {
         let dir = self.relay_folder(true)?;
         let hide = old.iter().map(|old| old.key.clone()).collect();
         let mut wrangler = Wrangler { npx, dir, account: None, hide };
-        let again = match &given {
-            Some(name) => format!("{AGAIN} {name}"),
-            None => AGAIN.to_string(),
-        };
-        let deployed = self.relay_deploy(&mut wrangler, &name, account.as_deref(), &again).await;
-        let (host, key) = match deployed {
-            Ok(deployed) => deployed,
+        let before = self.route()?.map(|route| route.hostname);
+        let deployed = self.relay_deploy(&mut wrangler, &name, account.as_deref(), &again, old.as_ref(), go).await;
+        let host = match deployed {
+            Ok(host) => host,
             Err(halt) => {
                 self.relay_folder(false)?;
                 return Err(halt);
             }
         };
+        let before = before.filter(|before| *before != host);
         let account_id = wrangler.account.clone().unwrap_or_default();
-        let record = Record { v: 1, url: format!("https://{host}"), name, account_id, key };
-        let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
-        self.private_write(RECORD, &bytes)?;
+        let relay = json!({ "name": name, "accountId": account_id });
         let route = new_route("cloudflare", &host, &[], ports);
-        let before = self.route()?.map(|route| route.hostname).filter(|before| *before != host);
-        let started = self.start_relay(&manager, &host, ports).await;
-        let started = started.and_then(|checks| self.write_route(&route).map(|()| checks).map_err(Failure::from));
+        let started = async {
+            let key = wrangler.put_key(&name).await?;
+            let record = Record { v: 1, url: format!("https://{host}"), name: name.clone(), account_id, key };
+            let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
+            self.private_write(RECORD, &bytes)?;
+            let stop = stop_signal().map_err(|error| error.to_string())?;
+            let checks = tokio::select! {
+                checks = self.start_relay(&manager, &host, ports) => checks?,
+                () = stop => return Err(fail("stopped", "Setup was stopped before the relay was live.")),
+            };
+            self.write_route(&route)?;
+            Ok::<_, Failure>(checks)
+        };
+        let started = started.await;
         if let Some(before) = before {
             serve_disallow(&before);
         }
         let checks = match started {
             Ok(checks) => checks,
-            Err(failure) => {
-                let service = match manager.remove(OWN).await {
-                    Ok(_) => "The service was stopped and removed, so nothing is exposed.".to_string(),
-                    Err(error) => format!("The service couldn't be removed ({error}); run local-studio tunnel off."),
-                };
-                let _ = fs::remove_file(self.route_path());
-                serve_disallow(&host);
-                self.remove_relay()?;
-                return Err(fail(
-                    failure.code,
-                    format!(
-                        "{} {service} The Worker {} stays on your Cloudflare account and refuses every connector until setup runs again.",
-                        failure.message, record.name
-                    ),
-                )
-                .into());
-            }
+            Err(failure) => return Err(self.relay_undo(&manager, &name, &host, failure).await.into()),
         };
         let mut value = ready(&route, &checks, "Live on your own relay, a Worker on your own Cloudflare account.");
-        value["relay"] = json!({ "name": record.name, "accountId": record.account_id });
+        value["relay"] = relay;
         Ok(value)
+    }
+
+    async fn relay_undo(&self, manager: &Manager, name: &str, host: &str, failure: Failure) -> Failure {
+        serve_disallow(host);
+        let mut said = vec![failure.message];
+        match manager.remove(OWN).await {
+            Ok(had) => {
+                let gone = if had { "The service was stopped and removed" } else { "No service is installed" };
+                said.push(format!("{gone}, so nothing is exposed."));
+                let route = match fs::remove_file(self.route_path()) {
+                    Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
+                    _ => Ok(()),
+                };
+                if let Err(error) = route.and_then(|()| self.remove_relay()) {
+                    said.push(format!("Its files couldn't all be removed ({error}); run local-studio tunnel off."));
+                }
+                said.push(format!(
+                    "The Worker {name} stays on your Cloudflare account, and this machine doesn't connect to it until setup runs again."
+                ));
+            }
+            Err(error) => {
+                said.push(format!("The service couldn't be removed ({error}); run local-studio tunnel off."));
+            }
+        }
+        fail(failure.code, said.join(" "))
     }
 
     async fn relay_deploy(
@@ -285,15 +334,25 @@ impl Tunnel {
         name: &str,
         wanted: Option<&str>,
         again: &str,
-    ) -> Result<(String, String), Halt> {
+        old: Option<&Record>,
+        go: impl FnOnce(&Value) -> bool,
+    ) -> Result<String, Halt> {
         let Some(accounts) = wrangler.accounts().await? else {
             let command = format!("npx --yes {WRANGLER} login");
             let message = format!("Sign in to Cloudflare, or make a free account, first: run {command} in a terminal, sign in in the browser it opens, then run setup again.");
             return Err(Halt::State(needs("needs_signin", "nextCommand", &command, &message)));
         };
-        wrangler.account = Some(pick(&accounts, wanted, again)?);
-        let host = wrangler.deploy(name).await?;
-        Ok((host, wrangler.put_key(name).await?))
+        let account = pick(&accounts, wanted, again)?;
+        let ours = old.is_some_and(|old| old.name == name && old.account_id == account);
+        wrangler.account = Some(account);
+        if !ours && wrangler.exists(name).await? {
+            let message = format!("Your Cloudflare account already has a Worker named {name}. Setup would replace its code and its relay key, so whatever uses it now stops working. Nothing was changed. Give the relay another name, or run setup again with --yes to replace that Worker.");
+            let state = needs("confirm", "nextCommand", &format!("{again} --yes"), &message);
+            if !go(&state) {
+                return Err(Halt::State(state));
+            }
+        }
+        wrangler.deploy(name).await
     }
 
     fn relay_folder(&self, fresh: bool) -> Result<PathBuf, String> {

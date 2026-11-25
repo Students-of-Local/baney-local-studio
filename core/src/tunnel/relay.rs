@@ -25,6 +25,7 @@ mod service;
 mod socket;
 mod streams;
 
+pub(super) use service::stop_signal;
 pub use service::{WORKER_CONFIG, WORKER_JS};
 
 const VERSION: u64 = 1;
