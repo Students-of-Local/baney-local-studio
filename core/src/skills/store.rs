@@ -210,6 +210,13 @@ impl Store {
         Ok(())
     }
 
+    pub(super) fn own(&self) -> Result<PathBuf, String> {
+        let dir = self.file.with_file_name("skills");
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| dir.canonicalize())
+            .map_err(|error| format!("{}: {error}", dir.display()))
+    }
+
     pub(super) fn current(&self) -> rusqlite::Result<bool> {
         let stored = rows(&self.db)?;
         Ok(self.seen.iter().all(|(id, skill)| stored.get(&skill.path).is_some_and(|row| row.id == *id)))

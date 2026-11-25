@@ -7,12 +7,14 @@ use crate::frontmatter;
 use crate::model::{CommandKind, SkillEntry, SkillSource, SlashCommand};
 use crate::plugins::{self, CommandTarget, Plugin};
 
+mod create;
 mod read;
 mod search;
 mod serve;
 mod store;
 mod text;
 
+pub use create::{Draft, CREATE};
 pub use read::Reading;
 pub use search::{lines, Hit, Query};
 pub(crate) use serve::{entry, TOOLS};

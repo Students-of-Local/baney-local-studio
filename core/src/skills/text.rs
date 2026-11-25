@@ -80,7 +80,7 @@ pub(super) struct Part {
     pub(super) text: String,
 }
 
-fn run(line: &str) -> Option<(char, usize)> {
+pub(super) fn run(line: &str) -> Option<(char, usize)> {
     let mark = line.chars().next().filter(|mark| matches!(mark, '`' | '~'))?;
     let long = line.chars().take_while(|c| *c == mark).count();
     (long > 2).then_some((mark, long))
