@@ -199,7 +199,12 @@ pub fn set(app: &App, thread: String, draft: Option<SkillDraft>) {
     }
     let mut state = app.state.borrow_mut();
     match draft {
-        Some(draft) => state.skill_drafts.insert(thread, draft),
+        Some(mut draft) => {
+            if let Some(held) = state.skill_drafts.remove(&thread).filter(|held| held.id == draft.id) {
+                draft.text = held.text;
+            }
+            state.skill_drafts.insert(thread, draft)
+        }
         None => state.skill_drafts.remove(&thread),
     };
 }
@@ -230,6 +235,7 @@ pub fn failed(app: &App, request: &str, message: &str) {
 fn text_view(text: &str, editable: bool) -> gtk::TextView {
     let view = gtk::TextView::builder()
         .editable(editable)
+        .accepts_tab(false)
         .monospace(true)
         .wrap_mode(gtk::WrapMode::WordChar)
         .top_margin(8)
@@ -252,7 +258,9 @@ fn present(app: &Rc<App>, thread: String, draft: &SkillDraft) {
     }
     let error = label("error");
     error.set_visible(false);
-    column.append(&error);
+    for set in [gtk::Label::set_margin_start, gtk::Label::set_margin_end, gtk::Label::set_margin_bottom] {
+        set(&error, 16);
+    }
     if !draft.marked.is_empty() {
         let (row, text) = warning();
         text.set_label(&private(draft.marked.len()));
@@ -285,21 +293,29 @@ fn present(app: &Rc<App>, thread: String, draft: &SkillDraft) {
     header.pack_end(&save);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&error);
     let scroller = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&column).build();
     toolbar.set_content(Some(&scroller));
     dialog.set_child(Some(&toolbar));
+    let typed = move || {
+        let buffer = view.buffer();
+        buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).to_string()
+    };
     let (weak, target) = (Rc::downgrade(app), thread.clone());
-    let id = draft.id.clone();
+    let (id, text) = (draft.id.clone(), typed.clone());
     save.connect_clicked(move |_| {
         if let Some(app) = weak.upgrade() {
-            let buffer = view.buffer();
-            let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
-            keep(&app, target.clone(), id.clone(), text.to_string());
+            keep(&app, target.clone(), id.clone(), text());
         }
     });
-    let closed = thread.clone();
+    let (weak, closed, id) = (Rc::downgrade(app), thread.clone(), draft.id.clone());
     dialog.connect_closed(move |_| {
         OPEN.with(|slot| drop(slot.borrow_mut().take_if(|open| open.thread == closed)));
+        let Some(app) = weak.upgrade() else { return };
+        let mut state = app.state.borrow_mut();
+        if let Some(draft) = state.skill_drafts.get_mut(&closed).filter(|draft| draft.id == id) {
+            draft.text = typed();
+        }
     });
     OPEN.with(|slot| slot.replace(Some(Open { thread, dialog: dialog.clone(), save, error })));
     dialog.present(Some(&app.window));
