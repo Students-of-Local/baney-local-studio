@@ -1,6 +1,6 @@
 # Release channels
 
-Every product in the Local Studio family ships on three channels: **stable**, **nightly** and **dev**. This file is the one scheme for all of them: Local Studio (desktop and iPhone), Silas, Polycarp, Tychicus, Fonsviva, Gantrel, UntoCaesar and Corunis. A product's own RELEASES.md may add detail; where it disagrees with this file, this file wins.
+Every product in the Local Studio family ships on three channels: **stable**, **nightly** and **dev**. This file is the one scheme for all of them: Local Studio (desktop, iPhone, and browser and computer use), Silas, Polycarp, Fonsviva, Gantrel, UntoCaesar and Corunis. A product's own RELEASES.md may add detail; where it disagrees with this file, this file wins.
 
 `scripts/check-channels.sh` enforces the parts a machine can check: no workflow starts on a pushed tag, no workflow pushes the `stable` branch, the `stable` environment runs only from `workflow_call` or `workflow_dispatch`, the version examples sort as stated, every workflow that stamps a build also exports its full version to the build, and docs/remote.md carries the protocol window. CI runs it on every pull request, and `scripts/tests/check-channels-test.sh` proves it fails on bad workflows. `scripts/tests/stamp-test.sh` stamps each channel, builds the `local-studio-version` crate with the stamped environment and fails unless the built binary reports the full version and channel.
 
@@ -28,7 +28,7 @@ Local Studio is a fork of gildrb/local-studio. Upstream changes come in by a pul
 
 ## Version strings
 
-One base version per product, `X.Y.Z`, in one file (Local Studio: the workspace `Cargo.toml`; Tauri apps: `tauri.conf.json`; Tychicus: its manifest). After stable `X.Y.Z` ships, `main` bumps the base to the next minor, `X.(Y+1).0`. Patch numbers on a released minor belong to hotfixes from `stable`, so `main` and a hotfix never claim the same version.
+One base version per product, `X.Y.Z`, in one file (Local Studio: the workspace `Cargo.toml`; Tauri apps: `tauri.conf.json`; browser and computer use: the extension's manifest). After stable `X.Y.Z` ships, `main` bumps the base to the next minor, `X.(Y+1).0`. Patch numbers on a released minor belong to hotfixes from `stable`, so `main` and a hotfix never claim the same version.
 
 | Channel | Version | Example |
 | --- | --- | --- |
@@ -177,7 +177,7 @@ Set up once by hand, before the first stable release: the `stable` branch, start
 | Local Studio iPhone (`ios/` in this repo) | side by side | In progress (PR #4) | Same version and tags as the desktop app, so the protocol always matches |
 | Silas | replace | `vX.Y.Z` tags from the Mac, rolling `nightly` (`-nightly.YYYYMMDDHHMM`) | Add `stable` branch and `dev`; add `+<sha7>` to nightly versions |
 | Polycarp | replace | Rolling `preview` pre-release | Move `preview` to `nightly` through a bridge build (Renaming a feed); add `stable` and `dev` |
-| Tychicus | side by side (extension ids per channel) | `v*` tag release workflow | Replace the `v*` tag trigger with the promotion workflow; add `stable` branch, nightly and dev; extension `version` per the numbers-only rule; Chrome Web Store gets stable only |
+| Browser and computer use (`browser/` in this repo) | side by side (extension ids per channel) | `v*` tag release workflow | Replace the `v*` tag trigger with the promotion workflow; add `stable` branch, nightly and dev; extension `version` per the numbers-only rule; Chrome Web Store gets stable only |
 | Fonsviva | git ref | `main` and `stable` branches | Add `nightly` tag and `vX.Y.Z` tags |
 | Gantrel | git ref | `main` and `stable` (RELEASES.md says no nightly) | Add the `nightly` tag; update RELEASES.md to this scheme |
 | UntoCaesar | git ref | `main` and `stable` | Add `nightly` tag and `vX.Y.Z` tags |
