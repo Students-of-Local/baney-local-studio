@@ -373,6 +373,7 @@ impl App {
                 }
                 self.state.borrow_mut().connection = Some(state);
                 dirty.composer = true;
+                dirty.settings = true;
             }
             Update::Projects { projects } => {
                 let mut state = self.state.borrow_mut();
@@ -797,6 +798,7 @@ impl App {
             if let Some(dialog) = dialog {
                 dialog.refresh(self);
             }
+            crate::wizard::refresh(self);
         }
     }
 
@@ -1051,14 +1053,20 @@ impl App {
         }
         dialog.present(self);
         self.settings.replace(Some(dialog));
+        self.load_providers();
         self.core.run(|studio| {
-            studio.load_providers();
-            studio.find_local_servers(local_studio_core::endpoint_presets());
             studio.load_plugins();
             studio.list_paired_devices();
         });
         let request = self.core.request();
         self.core.run(|studio| studio.list_archived(request));
+    }
+
+    pub fn load_providers(&self) {
+        self.core.run(|studio| {
+            studio.load_providers();
+            studio.find_local_servers(local_studio_core::endpoint_presets());
+        });
     }
 
     pub fn apply_settings(&self, settings: &local_studio_core::Settings) {

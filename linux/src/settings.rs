@@ -273,10 +273,7 @@ impl SettingsDialog {
         let weak = app.clone();
         refresh.connect_clicked(move |_| {
             if let Some(app) = weak.upgrade() {
-                app.core.run(|studio| {
-                    studio.load_providers();
-                    studio.find_local_servers(local_studio_core::endpoint_presets());
-                });
+                app.load_providers();
             }
         });
         group.set_header_suffix(Some(&refresh));

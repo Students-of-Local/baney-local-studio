@@ -1,66 +1,106 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use local_studio_core::Connection;
+use local_studio_core::{Connection, ProviderStatus};
 
 use crate::app::App;
 use crate::format;
 use crate::icons;
 
-#[allow(clippy::too_many_lines)]
-pub fn present(app: &Rc<App>) {
-    let dialog = adw::Dialog::builder().title("Welcome").content_width(560).content_height(520).can_close(true).build();
-    let carousel = adw::Carousel::builder().allow_scroll_wheel(false).allow_mouse_drag(false).vexpand(true).build();
+struct Welcome {
+    connection: adw::Bin,
+    providers: adw::Bin,
+}
+
+thread_local! {
+    static WELCOME: RefCell<Option<Welcome>> = const { RefCell::new(None) };
+}
+
+pub fn refresh(app: &Rc<App>) {
+    WELCOME.with_borrow(|open| {
+        if let Some(welcome) = open {
+            let connected = matches!(app.state.borrow().connection, Some(Connection::Ready));
+            welcome.connection.set_child(Some(&status_row(
+                if connected { "Connected to the Eukhe daemon" } else { "Starting the Eukhe daemon…" },
+                connected,
+            )));
+            welcome.providers.set_child(Some(&providers(app)));
+        }
+    });
+}
+
+fn providers(app: &Rc<App>) -> adw::PreferencesGroup {
     let state = app.state.borrow();
-    let connected = matches!(state.connection, Some(Connection::Ready));
-    carousel.append(&page(
-        icons::COMPUTER,
-        "Welcome to Local Studio",
-        "Local Studio runs coding agents on your machines. Threads live in the Eukhe daemon, so they keep working while this window is closed.",
-        &status_row(
-            if connected { "Connected to the Eukhe daemon" } else { "Starting the Eukhe daemon…" },
-            connected,
-        ),
-    ));
-    let providers = adw::PreferencesGroup::new();
-    let configured: Vec<&local_studio_core::ProviderStatus> =
-        state.providers.iter().filter(|provider| provider.configured).collect();
-    let shown: Vec<&local_studio_core::ProviderStatus> =
-        if configured.is_empty() { state.providers.iter().collect() } else { configured };
-    for provider in shown.iter().take(5) {
+    let group = adw::PreferencesGroup::new();
+    for engine in &state.engines {
+        group.add(&crate::providers::engine_row(&Rc::downgrade(app), &state, engine));
+    }
+    for error in state.provider_error.iter().chain(&state.provider_errors) {
+        let row = adw::ActionRow::builder().title(format::escape(error)).build();
+        row.add_css_class("ls-provider-warning");
+        row.add_prefix(&icons::image(icons::WARNING));
+        group.add(&row);
+    }
+    let engine = |provider: &&ProviderStatus| {
+        state.engines.iter().any(|engine| provider.base_url.as_ref() == Some(&engine.base_url))
+    };
+    let ready = state.providers.iter().any(|provider| provider.configured);
+    let shown = state.providers.iter().filter(|provider| provider.configured == ready && !engine(provider));
+    for provider in shown.take(5) {
         let row = adw::ActionRow::builder()
             .title(format::escape(&provider.name))
             .subtitle(format!("{} models", provider.model_count))
             .build();
-        let label = gtk::Label::new(Some(if provider.configured { "Ready" } else { "Not set up" }));
+        let label = gtk::Label::new(Some(if ready { "Ready" } else { "Not set up" }));
         label.add_css_class("ls-pill");
-        if provider.configured {
+        if ready {
             label.add_css_class("status-done");
         }
         label.set_valign(gtk::Align::Center);
         row.add_suffix(&label);
-        providers.add(&row);
+        group.add(&row);
     }
-    if !state.providers.iter().any(|provider| provider.configured) {
+    if !ready && state.engines.is_empty() {
         let row = adw::ActionRow::builder()
             .title("No provider is ready yet")
-            .subtitle("Paste an API key or add an OpenAI-compatible endpoint in Settings → Providers, or run eukhe in a terminal and use /login for a ChatGPT or Copilot subscription, then check again. For Claude, use Claude Code (your <tt>claude</tt> sign-in).")
+            .subtitle("Start a local server such as Ollama or LM Studio and press Check Again, paste an API key or add an endpoint in Settings → Providers, or run eukhe in a terminal and use /login for a ChatGPT or Copilot subscription. For Claude, use Claude Code (your <tt>claude</tt> sign-in).")
             .build();
-        providers.add(&row);
+        group.add(&row);
     }
-    for error in &state.provider_errors {
-        let row = adw::ActionRow::builder().title(format::escape(error)).build();
-        row.add_css_class("ls-provider-warning");
-        row.add_prefix(&icons::image(icons::WARNING));
-        providers.add(&row);
-    }
-    let add_provider = adw::ButtonRow::builder().title("Add Provider…").action_name("win.provider-settings").build();
-    providers.add(&add_provider);
+    group.add(&adw::ButtonRow::builder().title("Add Provider…").action_name("win.provider-settings").build());
+    let again = adw::ButtonRow::builder().title("Check Again").build();
+    let weak = Rc::downgrade(app);
+    again.connect_activated(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.load_providers();
+        }
+    });
+    group.add(&again);
+    group
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn present(app: &Rc<App>) -> adw::Carousel {
+    let dialog = adw::Dialog::builder().title("Welcome").content_width(560).content_height(520).can_close(true).build();
+    let carousel = adw::Carousel::builder().allow_scroll_wheel(false).allow_mouse_drag(false).vexpand(true).build();
+    let state = app.state.borrow();
+    let welcome = Welcome { connection: adw::Bin::new(), providers: adw::Bin::new() };
+    carousel.append(&page(
+        icons::COMPUTER,
+        "Welcome to Local Studio",
+        "Local Studio runs coding agents on your machines. Threads live in the Eukhe daemon, so they keep working while this window is closed.",
+        &welcome.connection,
+    ));
     carousel.append(&page(
         icons::PROVIDERS,
         "Model providers",
-        "Local Studio uses the providers Eukhe is signed in to, plus the models your Local fleet serves.",
-        &providers,
+        "Local Studio uses the providers Eukhe is signed in to, plus model servers on this computer and the models your Local fleet serves.",
+        &gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&welcome.providers)
+            .build(),
     ));
     let projects = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let add = gtk::Button::builder().label("Add a project folder…").action_name("win.add-project").build();
@@ -171,13 +211,18 @@ pub fn present(app: &Rc<App>) {
     });
     let weak = Rc::downgrade(app);
     dialog.connect_closed(move |_| {
+        WELCOME.set(None);
         if let Some(app) = weak.upgrade() {
             if !app.state.borrow().settings.onboarding_completed {
                 crate::settings::change(&app, |settings| settings.onboarding_completed = true);
             }
         }
     });
+    WELCOME.set(Some(welcome));
+    self::refresh(app);
+    app.load_providers();
     dialog.present(Some(&app.window));
+    carousel
 }
 
 fn page(icon: &str, title: &str, body: &str, content: &impl IsA<gtk::Widget>) -> gtk::Box {
