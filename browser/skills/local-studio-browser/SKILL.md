@@ -1,6 +1,6 @@
 ---
-name: polycarp-browser
-description: Drive the user's real browser through the browser MCP tools (navigate, read_page, click, type, fill). Use when a task needs a live web page or the user's own browser - opening and reading a site, clicking through it, scrolling, filling a form, taking a screenshot, testing a web app or local dev server you built, or anything in a tab behind the user's sign-in (mail, dashboards, feeds, a logged-in account). Not for plain web search or fetching a public URL's text when a fetch tool works.
+name: local-studio-browser
+description: Drive the user's real browser through the browser MCP tools (navigate, read_page, click, type, fill). Use when a task needs a live web page or the user's own browser - opening and reading a site, clicking through it, scrolling, filling a form, taking a screenshot, testing a web app or local dev server you built, or anything in a tab behind the user's sign-in (mail, dashboards, feeds, a logged-in account), or to change how a site looks for good (dark, colors, hide Shorts, filter a feed). Not for plain web search or fetching a public URL's text when a fetch tool works.
 ---
 
 # The browser: the user's browser, your own tabs
@@ -41,7 +41,7 @@ Repeat 3 and 4, acting on the refs in `changes`; call `read_page` again to verif
   `read_page`. Don't loop `read_page` to poll.
 - **Site approval**: opening a new site may ask the user first. If the result says "Not
   allowed to open" a site, tell the user. They can allow it in the Local Studio side panel
-  (Settings > Agents) or with `tychicus allow <host>`. Don't try another URL to get around it.
+  (Settings > Agents) or with `local-studio-browser allow <host>`. Don't try another URL to get around it.
 - **Sign-in, captcha or payment**: never type passwords or card numbers. Call `tabs_show`
   so the user sees the tab, ask them to finish, and continue after they say so.
 - **Error `dialog_open`**: an alert, confirm or prompt box froze the page. The error
@@ -65,6 +65,16 @@ Repeat 3 and 4, acting on the refs in `changes`; call `read_page` again to verif
 - `inspect_page` maps the page: framework, embedded JSON, forms and fields, frames, API calls.
 - `run_js` reads what no tool shows (`"world":"main"` sees the page's own variables). Read
   with it; act with click, type and fill. Never use it to read cookies or to send data off the page.
+
+## Change how a site looks, for good
+
+When the user wants a site different on every visit, save it; don't restyle the page with `run_js`, which a reload undoes.
+
+- Look first: `read_page` or `inspect_page` for the selectors, `site_edit {"action":"list"}` for what is already saved there.
+- `site_edit` with `host`: `style` takes CSS rules (or the word `dark`), `hide` a selector, `block` a request pattern.
+- Tune what you saved with `update` and its `id`; don't stack a second one. `screenshot` to check it.
+- Posts by word or account: `site_filter`. Behavior only a script can give: `site_script`, off until the user turns it on.
+- The user's panel shows a card with Undo. Say in one line what you changed.
 
 ## Files
 
