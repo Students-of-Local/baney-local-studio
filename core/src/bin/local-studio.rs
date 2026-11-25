@@ -485,6 +485,14 @@ fn run_tunnel(call: impl for<'a> FnOnce(&'a Tunnel) -> TunnelCall<'a>, as_json: 
     if let Some(ws) = &status.ws_url {
         println!("  phone address: {ws}");
     }
+    if let Some(relay) = &status.relay {
+        let since = relay.since.and_then(|at| jiff::Timestamp::from_millisecond(at).ok());
+        let since = since.map(|at| format!(" since {at:.0}")).unwrap_or_default();
+        println!("  relay: {}{since}", relay.state);
+    }
+    if let Some(command) = status.next_command.as_ref().filter(|command| !status.message.contains(*command)) {
+        println!("  next: {command}");
+    }
     if let Some(at) = &status.release_at {
         println!("  released on {at} if left down");
     }

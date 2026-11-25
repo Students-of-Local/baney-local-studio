@@ -39,8 +39,8 @@ const CHECK_WAITS: [u64; 7] = [0, 1, 2, 4, 8, 15, 30];
 const DOH: [&str; 2] = ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"];
 const SERVICE_WAIT: Duration = Duration::from_secs(10);
 const RUN_TIMEOUT: Duration = Duration::from_mins(1);
-const WRANGLER: &str = "wrangler@4.163.0";
-const YML: &str = "cloudflared.yml";
+pub(super) const WRANGLER: &str = "wrangler@4.163.0";
+pub(super) const YML: &str = "cloudflared.yml";
 const TAILNET_RECORD: &str = "tailnet.json";
 
 #[must_use]
@@ -1659,6 +1659,7 @@ impl Tunnel {
                 serve_disallow(alias);
             }
         }
+        let on_relay = self.on_relay().is_ok_and(|record| record.is_some());
         let worker = self.relay_off(&mut removed)?;
         if fs::remove_file(self.dir.join(YML)).is_ok() {
             removed.push(YML.to_string());
@@ -1669,12 +1670,10 @@ impl Tunnel {
         }
         let message = if removed.is_empty() {
             "Nothing to turn off.".to_string()
-        } else if let Some(name) = worker {
-            format!(
-                "Off. The Worker {name} stays on your Cloudflare account and refuses every connector. To delete it: npx --yes {WRANGLER} delete --name {name}"
-            )
         } else {
-            "Off. The Cloudflare tunnel, its DNS records and the tailnet node stay.".to_string()
+            let stays = "The Cloudflare tunnel, its DNS records and the tailnet node stay.";
+            let parts = [Some("Off."), (!on_relay).then_some(stays), worker.as_deref()];
+            parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
         };
         Ok(json!({ "state": "off", "next": "none", "removed": removed, "message": message }))
     }

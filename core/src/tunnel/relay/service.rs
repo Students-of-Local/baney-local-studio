@@ -9,6 +9,7 @@ use crate::tunnel::{fail, Failure, Ports, Tunnel, DEFAULT_PORTS};
 pub const WORKER_JS: &str = include_str!("../worker/relay.js");
 pub const WORKER_CONFIG: &str = include_str!("../worker/wrangler.jsonc");
 const PING: Duration = Duration::from_secs(30);
+const LOOK: Duration = Duration::from_secs(2);
 
 impl Tunnel {
     fn relay_note(&self, state: &str, line: &str, log: &impl Fn(&str)) {
@@ -39,10 +40,16 @@ impl Tunnel {
         let record = self.relay_record().transpose().ok_or_else(|| {
             fail("no_relay", format!("No relay on this machine: {} isn't there.", self.relay_path().display()))
         })?;
-        let stop = stop_signal().map_err(|error| error.to_string())?;
+        let signal = stop_signal().map_err(|error| error.to_string())?;
+        let stop = async {
+            tokio::select! {
+                () = signal => false,
+                () = self.relay_gone() => true,
+            }
+        };
         tokio::pin!(stop);
         let ended = match record.and_then(|record| Ok((self.relay_ports(serve, mcp)?, record))) {
-            Err(message) => Some(Ended::BadConfig(message)),
+            Err(message) => Ok(Ended::BadConfig(message)),
             Ok((ports, record)) => {
                 let name = record.url.rsplit('/').next().unwrap_or_default().to_string();
                 self.relay_note("connecting", &format!("connecting to {name}"), &log);
@@ -52,18 +59,31 @@ impl Tunnel {
                 };
                 let config = Config { url: record.url, key: record.key, ports, ping: PING };
                 tokio::select! {
-                    ended = super::run(config, on) => Some(ended),
-                    () = &mut stop => None,
+                    ended = super::run(config, on) => Ok(ended),
+                    gone = &mut stop => Err(gone),
                 }
             }
         };
-        if let Some(ended) = ended {
-            let (state, line) = ending(ended);
-            self.relay_note(state, &line, &log);
-            stop.await;
+        let gone = match ended {
+            Ok(ended) => {
+                let (state, line) = ending(ended);
+                self.relay_note(state, &line, &log);
+                stop.await
+            }
+            Err(gone) => gone,
+        };
+        if gone {
+            log("the relay was turned off on this machine; stopped");
+        } else {
+            self.relay_note("stopped", "stopped", &log);
         }
-        self.relay_note("stopped", "stopped", &log);
         Ok(())
+    }
+
+    async fn relay_gone(&self) {
+        while !matches!(self.relay_path().try_exists(), Ok(false)) {
+            tokio::time::sleep(LOOK).await;
+        }
     }
 }
 

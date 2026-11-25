@@ -311,6 +311,28 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
         s.stays(&mut service, &relay, "bad_config")?;
         s.stop(&mut service, &["relay.json isn't a relay record", "stopped"])?;
     }
+    s.record(&relay.url)?;
+    let mut service = s.service("run-off", &[])?;
+    let _link = relay.open(RUN_KEY, 1)?;
+    s.state(&service, "connected")?;
+    for name in ["relay-state.json", "relay.json"] {
+        fs::remove_file(s.tunnel(name)).map_err(text)?;
+    }
+    let status = until("the exit after relay.json goes", QUICK, || service.child.try_wait().ok().flatten())?;
+    ensure(
+        status.code() == Some(0) && !s.tunnel("relay-state.json").exists(),
+        "a relay turned off under a running connector ends it and leaves no state",
+    )?;
+    let record = json!({"v":1,"url":"https://smoke.workers.dev","name":"smoke","accountId":ACCOUNT,"key":RUN_KEY});
+    s.write("relay.json", &record.to_string())?;
+    let seen = json!({"state":"connected","at":1_700_000_000_001_i64,"pid":std::process::id()});
+    s.write("relay-state.json", &seen.to_string())?;
+    let out = s.command(&["tunnel", "status"]).output().map_err(text)?;
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    ensure(
+        shown.contains("connected to its relay") && shown.contains("relay: connected since 2023-11-14T22:13:20Z"),
+        format!("status without --json shows the relay: {shown}"),
+    )?;
     println!("ok: S11 relay run: connecting, connected, disconnected, unauthorized, replaced, outdated, bad_config");
     Ok(())
 }

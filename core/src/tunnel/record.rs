@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::setup::serve_disallow;
+use super::setup::{serve_disallow, WRANGLER, YML};
 use super::{process_info, RelayState, Status, Tunnel};
 
 pub(super) const RECORD: &str = "relay.json";
@@ -62,7 +62,10 @@ impl Tunnel {
     pub(super) fn on_relay(&self) -> Result<Option<Record>, String> {
         let ours = self.route()?.filter(|route| route.owner == "local-studio" && route.route == "cloudflare");
         let Some(route) = ours else { return Ok(None) };
-        Ok(self.relay_record()?.filter(|record| record.host() == route.hostname))
+        match self.relay_record() {
+            Err(_) if self.dir.join(YML).exists() => Ok(None),
+            record => Ok(record?.filter(|record| record.host() == route.hostname)),
+        }
     }
 
     pub(super) fn relay_seen(&self) -> Option<Seen> {
@@ -83,30 +86,31 @@ impl Tunnel {
         }
         let seen = self.relay_seen();
         let alive = |pid| process_info(pid).is_some_and(|(stat, _)| !stat.starts_with('Z'));
+        let seen = seen.filter(|seen| seen.state == "stopped" || alive(seen.pid));
         let since = seen.as_ref().map(|seen| seen.at);
-        let state = seen.filter(|seen| alive(seen.pid)).map_or("stopped".into(), |seen| seen.state);
+        let state = seen.map_or("stopped".into(), |seen| seen.state);
         let (next, message) = match state.as_str() {
-            "connected" => ("ready", None),
-            "connecting" => ("waiting", Some("This machine is connecting to its relay.")),
-            "disconnected" => ("waiting", Some("This machine lost its relay and keeps trying to reach it again.")),
-            "replaced" => {
-                ("needs_setup", Some("Another machine took this relay over. To take it back, run setup again:"))
-            }
-            "unauthorized" => ("needs_setup", Some("The relay refuses this machine's key. Run setup again:")),
+            "connected" => ("ready", "This machine is connected to its relay."),
+            "connecting" => ("waiting", "This machine is connecting to its relay."),
+            "disconnected" => ("waiting", "This machine lost its relay and keeps trying to reach it again."),
+            "replaced" => ("needs_setup", "Another machine took this relay over. To take it back, run setup again:"),
+            "unauthorized" => ("needs_setup", "The relay refuses this machine's key. Run setup again:"),
             "outdated" => {
-                ("needs_setup", Some("The relay speaks a newer protocol. Update Local Studio, then run setup again:"))
+                ("needs_setup", "The relay speaks a newer protocol. Update Local Studio, then run setup again:")
             }
-            "bad_config" => ("needs_setup", Some("The relay program can't use its settings. Run setup again:")),
-            _ => ("needs_setup", Some("The relay program isn't running on this machine. Run setup again:")),
+            "bad_config" => ("needs_setup", "The relay program can't use its settings. Run setup again:"),
+            _ => ("needs_setup", "The relay program isn't running on this machine. Run setup again:"),
         };
         let command = match next {
             "ready" => None,
             "waiting" => Some(CHECK),
             _ => Some(AGAIN),
         };
-        if let Some(message) = message {
-            status.message = if next == "waiting" { message.into() } else { format!("{message} {AGAIN}") };
-        }
+        status.message = match next {
+            "ready" => format!("{} {message}", status.message),
+            "waiting" => message.into(),
+            _ => format!("{message} {AGAIN}"),
+        };
         status.next = next.into();
         status.next_command = command.map(ToString::to_string);
         status.relay = Some(RelayState { state, since });
@@ -115,7 +119,7 @@ impl Tunnel {
 
     pub(super) fn remove_relay(&self) -> Result<Vec<String>, String> {
         let mut removed = Vec::new();
-        for name in [RECORD, STATE, FOLDER] {
+        for name in [FOLDER, STATE, RECORD] {
             let path = self.dir.join(name);
             let gone = if name == FOLDER { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
             match gone {
@@ -128,11 +132,21 @@ impl Tunnel {
     }
 
     pub(super) fn relay_off(&self, removed: &mut Vec<String>) -> Result<Option<String>, String> {
-        let record = self.relay_record().ok().flatten();
-        if let Some(record) = &record {
+        let record = self.relay_record();
+        let taken = self.relay_seen().is_some_and(|seen| seen.state == "replaced");
+        if let Ok(Some(record)) = &record {
             serve_disallow(record.host());
         }
         removed.extend(self.remove_relay()?);
-        Ok(record.map(|record| record.name))
+        Ok(match record {
+            Ok(None) => None,
+            Ok(Some(Record { name, account_id, .. })) if taken => {
+                Some(format!("Another machine uses the Worker {name} on your Cloudflare account {account_id}, so it stays."))
+            }
+            Ok(Some(Record { name, account_id, .. })) => Some(format!(
+                "The Worker {name} stays on your Cloudflare account. To delete it: CLOUDFLARE_ACCOUNT_ID={account_id} npx --yes {WRANGLER} delete --name {name}"
+            )),
+            Err(_) => Some("relay.json couldn't be read, so a relay Worker may stay on your Cloudflare account.".into()),
+        })
     }
 }
