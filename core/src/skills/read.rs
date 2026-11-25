@@ -117,24 +117,19 @@ fn reading(seen: Listed, body: &str, part: Option<&str>, from: usize) -> Result<
     let sections = text::sections(body);
     let parts: Vec<String> =
         sections.iter().filter(|part| !part.head.is_empty()).map(|part| part.head.clone()).collect();
-    let (part, text, most) = match part {
-        Some(wanted) => {
-            let found = named(&sections, wanted);
-            let Some(first) = found.first() else {
-                let wanted = text::plain(wanted);
-                return Err(format!("{} has no part named {wanted}; its parts: {}", seen.name, parts.join(", ")));
-            };
-            (Some(first.head.clone()), joined(found), WHOLE)
-        }
-        None => {
-            let text = joined(&sections);
-            let first = sections
-                .iter()
-                .position(|part| !part.head.is_empty())
-                .map_or(WHOLE, |first| joined(&sections[..=first]).chars().count());
-            let most = if from > 0 || text.chars().count() <= WHOLE { WHOLE } else { first };
-            (None, text, most)
-        }
+    let (part, text, most) = if let Some(wanted) = part {
+        let found = named(&sections, wanted);
+        let Some(first) = found.first() else {
+            let wanted = text::plain(wanted);
+            return Err(format!("{} has no part named {wanted}; its parts: {}", seen.name, parts.join(", ")));
+        };
+        (Some(first.head.clone()), joined(found), WHOLE)
+    } else {
+        let text = joined(&sections);
+        let first = sections.iter().position(|part| !part.head.is_empty());
+        let start = first.map_or(WHOLE, |first| joined(&sections[..=first]).chars().count());
+        let most = if from > 0 || text.chars().count() <= WHOLE { WHOLE } else { start };
+        (None, text, most)
     };
     let text = page(&text, from, most)?;
     let files = seen.path.parent().map(beside).unwrap_or_default();

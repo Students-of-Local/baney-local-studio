@@ -231,8 +231,8 @@ fn reading(smoke: &mut Smoke) -> Result<(), String> {
     let rest = smoke.json(&["read", "wall", "--from", "6000"])?;
     let rest = rest["text"].as_str().unwrap_or_default();
     smoke.check("--from reads the rest", rest.chars().count() == 5999 && !rest.contains("[Shortened"));
-    let past = smoke.run(&["read", "wall", "--from", "12000"])?;
-    smoke.check("--from past the end is an error", !past.status.success());
+    let beyond = smoke.run(&["read", "wall", "--from", "12000"])?;
+    smoke.check("--from past the end is an error", !beyond.status.success());
     let cut = text.split("from ").last().and_then(|from| from.strip_suffix(']')).unwrap_or("none");
     let on = smoke.json(&["read", "long", "--from", cut])?;
     let on = on["text"].as_str().is_some_and(|text| text.trim_start().starts_with("## Second"));
