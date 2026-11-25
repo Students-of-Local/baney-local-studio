@@ -22,8 +22,21 @@ pub struct Reading {
     pub path: PathBuf,
 }
 
+impl Reading {
+    #[must_use]
+    pub fn shown(&self) -> String {
+        let mut text = self.text.clone();
+        for (label, list) in [("Parts", &self.parts), ("Files", &self.files)] {
+            if !list.is_empty() {
+                text = format!("{text}\n\n{label}: {}", list.join("; "));
+            }
+        }
+        format!("{text}\n\nFolder: {}", text::plain(&self.path.with_file_name("").to_string_lossy()))
+    }
+}
+
 impl Store {
-    pub fn read(&mut self, name: &str, part: Option<&str>) -> Result<Reading, String> {
+    pub fn read(&mut self, name: &str, part: Option<&str>, from: usize) -> Result<Reading, String> {
         let wanted = self.sound(|store| {
             store.refresh()?;
             store.named(name)
@@ -33,7 +46,7 @@ impl Store {
         };
         let content =
             std::fs::read_to_string(&seen.path).map_err(|error| format!("{}: {error}", seen.path.display()))?;
-        reading(seen, &frontmatter::strip(&content), part)
+        reading(seen, &frontmatter::strip(&content), part, from)
     }
 
     pub(super) fn unknown(&self, name: &str) -> String {
@@ -61,18 +74,31 @@ fn grams(key: &str) -> BTreeSet<Vec<char>> {
     chars.windows(chars.len().clamp(1, 3)).map(<[char]>::to_vec).collect()
 }
 
-fn start(sections: &[text::Part], path: &Path) -> String {
-    let heads = sections.iter().filter(|part| part.head.is_empty()).map(|part| part.text.trim().to_string());
-    let first = sections.iter().find(|part| !part.head.is_empty()).map(show);
-    let mut text = heads.chain(first).collect::<Vec<_>>().join("\n\n");
-    if let Some((end, _)) = text.char_indices().nth(WHOLE) {
-        text.truncate(end);
+fn page(text: &str, from: usize, most: usize) -> Result<String, String> {
+    let all = text.chars().count();
+    if from > 0 && from >= all {
+        return Err(format!("the text ends at character {all}"));
     }
-    format!("{text}\n\n[Shortened. The rest is in its other parts and in {}]", path.display())
+    let end = all.min(from.saturating_add(most.min(WHOLE)));
+    let shown: String = text.chars().skip(from).take(end - from).collect();
+    Ok(if end < all {
+        format!("{shown}\n\n[Shortened at character {end} of {all}. The rest: from {end}]")
+    } else {
+        shown
+    })
 }
 
 fn show(part: &text::Part) -> String {
-    format!("## {}\n{}", part.head, part.text.trim_end())
+    match part.head.as_str() {
+        "" => part.text.trim().to_string(),
+        head => format!("## {head}\n{}", part.text.trim_end()),
+    }
+}
+
+fn joined<'a>(parts: impl IntoIterator<Item = &'a text::Part>) -> String {
+    let shown: Vec<String> = parts.into_iter().map(show).collect();
+    let text = shown.join("\n\n");
+    text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect()
 }
 
 fn named<'a>(sections: &'a [text::Part], wanted: &str) -> Vec<&'a text::Part> {
@@ -87,23 +113,25 @@ fn named<'a>(sections: &'a [text::Part], wanted: &str) -> Vec<&'a text::Part> {
     }
 }
 
-fn reading(seen: Listed, body: &str, part: Option<&str>) -> Result<Reading, String> {
+fn reading(seen: Listed, body: &str, part: Option<&str>, from: usize) -> Result<Reading, String> {
     let sections = text::sections(body);
     let parts: Vec<String> =
         sections.iter().filter(|part| !part.head.is_empty()).map(|part| part.head.clone()).collect();
-    let (part, text) = match part {
-        Some(wanted) => {
-            let found = named(&sections, wanted);
-            let Some(first) = found.first() else {
-                let wanted = text::plain(wanted);
-                return Err(format!("{} has no part named {wanted}; its parts: {}", seen.name, parts.join(", ")));
-            };
-            (Some(first.head.clone()), found.iter().map(|part| show(part)).collect::<Vec<_>>().join("\n\n"))
-        }
-        None if body.chars().count() <= WHOLE => (None, body.trim().to_string()),
-        None => (None, start(&sections, &seen.path)),
+    let (part, text, most) = if let Some(wanted) = part {
+        let found = named(&sections, wanted);
+        let Some(first) = found.first() else {
+            let wanted = text::plain(wanted);
+            return Err(format!("{} has no part named {wanted}; its parts: {}", seen.name, parts.join(", ")));
+        };
+        (Some(first.head.clone()), joined(found), WHOLE)
+    } else {
+        let text = joined(&sections);
+        let first = sections.iter().position(|part| !part.head.is_empty());
+        let start = first.map_or(WHOLE, |first| joined(&sections[..=first]).chars().count());
+        let most = if from > 0 || text.chars().count() <= WHOLE { WHOLE } else { start };
+        (None, text, most)
     };
-    let text = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
+    let text = page(&text, from, most)?;
     let files = seen.path.parent().map(beside).unwrap_or_default();
     Ok(Reading { name: seen.name, part, text, parts, files, source: seen.source, path: seen.path })
 }
