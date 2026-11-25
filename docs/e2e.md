@@ -31,7 +31,7 @@ abbey1's GPU is shared through `~/.local/bin/ollama-window`. After the build, `s
 On abbey1, in a clean clone that nobody else uses:
 
 ```sh
-export PATH=$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/opt/nu-0.117.0:$HOME/.local/opt/zig-0.15.2:$HOME/.cache/tychicus-claude/bunbin:$PATH
+export PATH=$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/opt/nu-0.117.0:$HOME/.local/opt/zig-0.15.2:$HOME/.local/opt/bun-1.4.0:$PATH
 export LOCAL_STUDIO_SMOKE_MODEL=ollama/fv-smoke-lfm3-1.7b LOCAL_STUDIO_SMOKE_IMAGE_MODEL=ollama/qwen3-vl:4b
 scripts/e2e.sh          # no status
 scripts/e2e.sh --post   # posts local-studio/e2e
