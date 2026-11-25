@@ -966,8 +966,8 @@ fn service_fails(s: &Smoke) -> Result<(), String> {
 }
 
 fn browser_route(s: &Smoke) -> Result<(), String> {
-    let route = json!({"v":1,"owner":"local-studio-browser","route":"cloudflare","hostname":"old.example.com","aliases":[],"ports":{"mcp":8787}});
-    fs::write(s.route_path(), route.to_string()).map_err(|e| e.to_string())?;
+    let route = json!({"v":1,"owner":"local-studio-browser","route":"cloudflare","hostname":"old.example.com","aliases":[],"ports":{"mcp":8787}}).to_string();
+    fs::write(s.route_path(), &route).map_err(|e| e.to_string())?;
     let serve = s.serve_path();
     let before = fs::read(&serve).ok();
     let mark = s.mark();
@@ -986,7 +986,7 @@ fn browser_route(s: &Smoke) -> Result<(), String> {
     }
     let kept = fs::read_to_string(s.route_path()).map_err(|e| e.to_string())?;
     ensure(
-        s.since(mark).is_empty() && kept == route.to_string() && fs::read(&serve).ok() == before,
+        s.since(mark).is_empty() && kept == route && fs::read(&serve).ok() == before,
         "browser use's route stays as it is",
     )?;
     let (code, value) = s.ls(&["tunnel", "status", "--json"])?;
