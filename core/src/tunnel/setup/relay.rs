@@ -264,6 +264,9 @@ impl Tunnel {
         }
         Self::refuse_tychicus_tunnel(None)?;
         let manager = Manager::detect().await?;
+        if !manager.running(OWN).await {
+            self.relay_free()?;
+        }
         let Some(npx) = tool("LS_NPX", "npx").filter(|npx| npx.is_file()) else {
             let message = "The relay deploys with Cloudflare's wrangler through npx, and npx isn't on this machine. Install Node.js 22 or later, then run setup again.";
             return Ok(needs("needs_node", "url", NODE_DOWNLOAD, message));

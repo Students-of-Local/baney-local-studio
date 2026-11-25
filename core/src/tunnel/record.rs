@@ -57,7 +57,7 @@ impl Tunnel {
             let path = self.relay_path();
             let path = path.display();
             return Err(format!(
-                "Others on this machine can read the relay's key in {path}, so it isn't used. Run {chmod}, then set the relay up again for a new key: {AGAIN}"
+                "Others on this machine can read the relay's key in {path}, so a run doesn't start with it. Run {chmod}, then set the relay up again for a new key: {AGAIN}"
             ));
         }
         self.relay_read()
@@ -82,11 +82,11 @@ impl Tunnel {
     pub(super) fn on_relay(&self) -> Result<Option<Record>, String> {
         let ours = self.route()?.filter(|route| route.owner == "local-studio" && route.route == "cloudflare");
         let Some(route) = ours else { return Ok(None) };
-        let record = self.relay_record();
-        if self.dir.join(YML).exists() && !matches!(&record, Ok(Some(record)) if record.host() == route.hostname) {
+        let stale = self.dir.join(YML).exists();
+        if stale && !matches!(self.relay_read(), Ok(Some(record)) if record.host() == route.hostname) {
             return Ok(None);
         }
-        match record? {
+        match self.relay_record()? {
             Some(record) if record.host() != route.hostname => {
                 let (path, host) = (self.relay_path(), route.hostname);
                 Err(format!("{} isn't for {host}. Run {OFF}, then set the relay up again: {AGAIN}", path.display()))
