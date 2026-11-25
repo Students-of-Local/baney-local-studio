@@ -1004,7 +1004,11 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(())
     }
 
-    fn queued_during_run(harness: &mut Harness, ledger_out: &Path) -> anyhow::Result<()> {
+    fn lists(socket: &Path, thread: &str, server: &str) -> anyhow::Result<bool> {
+        Ok(connections(socket, thread)?.iter().any(|(name, _)| name == server))
+    }
+
+    fn queued_during_run(harness: &mut Harness, socket: &Path, ledger_out: &Path) -> anyhow::Result<()> {
         let studio = Arc::clone(&harness.studio);
         let project = harness.view.projects[0].id.clone();
         let before = server_starts(ledger_out, "plugin-ledger").len();
@@ -1014,6 +1018,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let thread = harness.view.thread("busy").context("busy thread")?;
         studio.select_thread(Some(thread.clone()));
         harness.pump_until("busy thread working", STEP, |view| !view.idle(&thread))?;
+        ensure!(lists(socket, &thread, "local-studio")?, "the busy thread was not offered Local Studio's own tools");
         studio.send("queued".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
         harness
             .pump_until("still working after the queued /ledger", Duration::from_secs(2), |view| !view.idle(&thread))?;
@@ -1026,6 +1031,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 && starts.iter().all(|row| row.get("LOCAL_STUDIO_LOCAL_ONLY").and_then(Value::as_str) == Some("1")),
             "plugin-ledger did not start for the /ledger queued during a local turn: {starts:?}"
         );
+        ensure!(!lists(socket, &thread, "local-studio")?, "local-studio is still in the queued /ledger session");
         Ok(())
     }
 
@@ -1267,7 +1273,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         std::env::set_var(LEDGER_ENV, ledger_out);
         record("draft", draft_returned(harness, hits));
         record("drift", drifted(harness, agent, stubs.port, stubs.drift_port, stubs.drift_hits));
-        record("queued", queued_during_run(harness, ledger_out));
+        record("queued", queued_during_run(harness, socket, ledger_out));
         studio.run_local(cloud.clone(), local.clone());
         harness.pump_until("switched to the local model and running", step, |view| {
             view.threads.iter().any(|row| {
@@ -1318,8 +1324,6 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             servers.iter().filter(|(name, up)| *up && name != "plugin-ledger").map(|(name, _)| name.as_str()).collect();
         ensure!(connected.is_empty(), "other MCP servers are connected in the /ledger session: {connected:?}");
         ensure!(!servers.iter().any(|(name, _)| name == "web-search"), "web-search is still in the /ledger session");
-        let offered = server_starts(&ledger_out.with_file_name("tools.jsonl"), "local-studio");
-        ensure!(!offered.is_empty(), "no session was offered Local Studio's own tools");
         ensure!(
             !servers.iter().any(|(name, _)| name == "local-studio"),
             "local-studio is still in the /ledger session"
