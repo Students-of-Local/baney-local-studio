@@ -5,7 +5,7 @@ Local Studio runs on your computers and has no account and no server of its own.
 ## What never happens
 
 - No telemetry, analytics, crash upload or usage report. The controller's "telemetry" is engine and GPU numbers kept in its own folder and shown to the Local Studio apps and controllers that connect to it.
-- No account name or email is read from a sign-in, and nothing about your accounts is hashed or uploaded.
+- No account name or email is read from a sign-in, and nothing about your accounts is hashed or uploaded. One exception: `local-studio tunnel setup --relay` reads the ids and names of your Cloudflare accounts from wrangler, and with more than one shows them (or returns them with `--json`) so you can pick.
 - The contents of Claude Code, Codex, `gh` and browser sign-in files are never opened, and no other app's keychain items are read. Three kinds of existence check are made, and none opens the file:
   - Claude Code: `.credentials.json` (`.claude.json` on macOS) in `~/.claude-*` folders and in account folders T3 Code's settings name.
   - Codex: `auth.json` in `~/.codex-*` folders and in account folders T3 Code's settings name.

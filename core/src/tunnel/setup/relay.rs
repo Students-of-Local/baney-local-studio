@@ -93,7 +93,7 @@ impl Wrangler {
             Some(true) => Ok(Some(listed(&said.unwrap_or_default()))),
             Some(false) => Ok(None),
             None if signed_out => Ok(None),
-            None => Err(failed("relay_whoami", "wrangler whoami", &out)),
+            None => Err(failed("relay_whoami", "wrangler whoami", &Out { stdout: String::new(), ..out })),
         }
     }
 
