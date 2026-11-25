@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    argv, machine_slug, merge_dns, new_route, normalize_host, ready, serve_disallow, settle, tool, with, Halt, Manager,
-    Out, Want, OWN, WRANGLER,
+    argv, machine_slug, new_route, normalize_host, ready, serve_disallow, settle, tool, with, Halt, Manager, Out, Want,
+    OWN, WRANGLER,
 };
 use crate::link::devices::random;
 use crate::platform::Mode;
@@ -262,7 +262,6 @@ impl Tunnel {
         if !old.as_ref().is_some_and(|old| old.name == name && account.as_ref() == Some(&old.account_id)) {
             self.refuse_for("relay")?;
         }
-        Self::refuse_tychicus_tunnel(None)?;
         let manager = Manager::detect().await?;
         if !manager.running(OWN).await {
             self.relay_free()?;
@@ -460,8 +459,10 @@ impl Tunnel {
             }
         };
         let hosts = [host.to_string()];
-        let mut checks = self.public_checks(&hosts, ports, true, true).await.map_err(live)?;
-        merge_dns(&mut checks, &json!({ "dns": dns }));
+        let mut checks = self.public_checks(&hosts, ports, true).await.map_err(live)?;
+        if dns == "public_only" {
+            checks["dns"] = json!(dns);
+        }
         checks["serveAllowed"] = json!(allowed.is_ok());
         Ok((checks, allowed))
     }

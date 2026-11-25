@@ -7,7 +7,6 @@ use std::process::{Command, ExitCode, Stdio};
 use serde_json::{json, Value};
 
 const SHIM_TUNNEL: &str = "7d3c9a52-1b2e-4f60-9c1d-2a3b4c5d6e7f";
-const TYCHICUS_TUNNEL: &str = "0b6c1e2d-3f40-4a5b-8c7d-9e0f1a2b3c4d";
 const DNS: &str = "studio-mac.tail1234.ts.net";
 
 const CLOUDFLARED: &str = r#"#!/bin/sh
@@ -38,7 +37,6 @@ case "$1" in
     label=${2##*/}
     [ -f "$svc/$label" ] || exit 113
     if [ -f "$SHIM_STATE/fail-$label" ]; then echo "state = not running"; else echo "state = running"; fi ;;
-  disable) touch "$svc/disabled-${2##*/}" ;;
   enable) rm -f "$svc/disabled-${2##*/}" ;;
   bootstrap)
     label=$(basename "$3" .plist)
@@ -106,17 +104,6 @@ if [ "$1" = serve ]; then
   mv "$mounts.new" "$mounts"
 fi
 exit 0
-"#;
-
-const TYCHICUS: &str = r#"#!/bin/sh
-echo "tychicus $*" >> "$SHIM_LOG"
-if [ "$1 $2" = "remote join" ]; then
-  if [ -f "$SHIM_STATE/join-fails" ]; then echo '{"ok":false,"message":"smoke: join refused"}'; exit 1; fi
-  cp "$LOCAL_STUDIO_DATA_DIR/tunnel/route.json" "$SHIM_STATE/tychicus-hosts"
-  echo '{"ok":true,"state":"on","step":"joined"}'
-  exit 0
-fi
-exit 2
 "#;
 
 const SERVE: &str = r#"#!/bin/sh
@@ -188,7 +175,6 @@ struct Smoke {
     root: PathBuf,
     home: PathBuf,
     data: PathBuf,
-    tychicus: PathBuf,
     state: PathBuf,
     log: PathBuf,
     shims: PathBuf,
@@ -284,13 +270,13 @@ fn doh_answer(mut stream: TcpStream, log: &Path, state: &Path) -> std::io::Resul
     stream.write_all(reply.as_bytes())
 }
 
-fn stub(listener: &TcpListener, log: &Path, state: &Path, tychicus_service: &str) {
+fn stub(listener: &TcpListener, log: &Path, state: &Path) {
     for stream in listener.incoming().flatten() {
-        let _ = answer(stream, log, state, tychicus_service);
+        let _ = answer(stream, log, state);
     }
 }
 
-fn answer(mut stream: TcpStream, log: &Path, state: &Path, tychicus_service: &str) -> std::io::Result<()> {
+fn answer(mut stream: TcpStream, log: &Path, state: &Path) -> std::io::Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -309,17 +295,9 @@ fn answer(mut stream: TcpStream, log: &Path, state: &Path, tychicus_service: &st
         .unwrap_or("")
         .trim()
         .to_string();
-    let tychicus_down = !state.join("svc").join(tychicus_service).exists();
-    let old_connector = state.join("old-connector").exists() && !tychicus_down;
-    let tychicus_accepts = !state.join("tychicus-serve").exists()
-        || host == "old.example.com"
-        || fs::read_to_string(state.join("tychicus-hosts")).is_ok_and(|hosts| hosts.contains(&format!("\"{host}\"")));
     let (code, extra, body) = match path.as_str() {
-        _ if old_connector && (host != "old.example.com" || path != "/mcp") => (404, String::new(), "{}"),
-        "/v1/health" if state.join("fail-after-stop").exists() && tychicus_down => (503, String::new(), "{}"),
         "/v1/health" if refuses(state, &host) => (403, String::new(), "{}"),
         "/v1/health" => (200, String::new(), r#"{"ok":true}"#),
-        "/mcp" if !tychicus_accepts => (421, String::new(), "{}"),
         "/mcp" => (
             401,
             format!(
@@ -343,17 +321,16 @@ fn refuses(state: &Path, host: &str) -> bool {
 }
 
 impl Smoke {
-    fn service_name(own: bool) -> &'static str {
-        match (cfg!(target_os = "macos"), own) {
-            (true, true) => "com.localstudio.tunnel",
-            (true, false) => "com.tychicus.cloudflared",
-            (false, true) => "local-studio-tunnel.service",
-            (false, false) => "tychicus-cloudflared.service",
+    fn service_name() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "com.localstudio.tunnel"
+        } else {
+            "local-studio-tunnel.service"
         }
     }
 
-    fn service_file(&self, own: bool) -> PathBuf {
-        let name = Self::service_name(own);
+    fn service_file(&self) -> PathBuf {
+        let name = Self::service_name();
         if cfg!(target_os = "macos") {
             self.home.join("Library").join("LaunchAgents").join(format!("{name}.plist"))
         } else {
@@ -361,8 +338,8 @@ impl Smoke {
         }
     }
 
-    fn service_running(&self, own: bool) -> bool {
-        self.state.join("svc").join(Self::service_name(own)).exists()
+    fn service_running(&self) -> bool {
+        self.state.join("svc").join(Self::service_name()).exists()
     }
 
     fn route_path(&self) -> PathBuf {
@@ -418,12 +395,10 @@ impl Smoke {
             .args(args)
             .env("HOME", &self.home)
             .env("LOCAL_STUDIO_DATA_DIR", &self.data)
-            .env("TYCHICUS_CONFIG_DIR", &self.tychicus)
             .env("LS_CLOUDFLARED", shim("cloudflared"))
             .env("LS_LAUNCHCTL", shim("launchctl"))
             .env("LS_SYSTEMCTL", shim("systemctl"))
             .env("LS_TAILSCALE", shim("tailscale"))
-            .env("LS_TYCHICUS", shim("tychicus"))
             .env("LS_SERVE_BIN", shim("local-studio-serve"))
             .env("LS_TUNNEL_CHECK_URL", &self.check_url)
             .env("LS_TUNNEL_DOH", &self.doh_url)
@@ -457,41 +432,11 @@ impl Smoke {
         lines.iter().position(|line| line.contains(text)).ok_or_else(|| format!("the log has no line with {text:?}"))
     }
 
-    fn stop_line(own: bool) -> String {
+    fn started_line(&self) -> String {
         if cfg!(target_os = "macos") {
-            format!("launchctl bootout gui/{}/{}", uid(), Self::service_name(own))
+            format!("launchctl bootstrap gui/{} {}", uid(), self.service_file().display())
         } else {
-            format!("systemctl --user disable --now {}", Self::service_name(own))
-        }
-    }
-
-    fn disable_line() -> String {
-        if cfg!(target_os = "macos") {
-            format!("launchctl disable gui/{}/{}", uid(), Self::service_name(false))
-        } else {
-            format!("systemctl --user disable --now {}", Self::service_name(false))
-        }
-    }
-
-    fn enable_line() -> String {
-        if cfg!(target_os = "macos") {
-            format!("launchctl enable gui/{}/{}", uid(), Self::service_name(false))
-        } else {
-            format!("systemctl --user enable {}", Self::service_name(false))
-        }
-    }
-
-    fn disabled(&self) -> bool {
-        self.state.join("svc").join(format!("disabled-{}", Self::service_name(false))).exists()
-    }
-
-    fn started_line(&self, own: bool) -> String {
-        if cfg!(target_os = "macos") {
-            format!("launchctl bootstrap gui/{} {}", uid(), self.service_file(own).display())
-        } else if own {
-            format!("systemctl --user restart {}", Self::service_name(own))
-        } else {
-            format!("systemctl --user start {}", Self::service_name(own))
+            format!("systemctl --user restart {}", Self::service_name())
         }
     }
 }
@@ -516,19 +461,17 @@ fn run() -> Result<(), String> {
     };
     let bin = fs::canonicalize(bin).map_err(|e| format!("{bin}: {e}"))?;
     let root = PathBuf::from(scratch).join(format!("tunnel-setup-{}", std::process::id()));
-    let dirs = ["home", "data", "tychicus", "state", "shims"].map(|name| root.join(name));
+    let dirs = ["home", "data", "state", "shims"].map(|name| root.join(name));
     for dir in &dirs {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let root = fs::canonicalize(&root).map_err(|e| e.to_string())?;
-    let [home, data, tychicus, state, shims] =
-        ["home", "data", "tychicus", "state", "shims"].map(|name| root.join(name));
+    let [home, data, state, shims] = ["home", "data", "state", "shims"].map(|name| root.join(name));
     for (name, body) in [
         ("cloudflared", CLOUDFLARED),
         ("launchctl", LAUNCHCTL),
         ("systemctl", SYSTEMCTL),
         ("tailscale", TAILSCALE),
-        ("tychicus", TYCHICUS),
         ("local-studio-serve", SERVE),
     ] {
         shim(&shims, name, body)?;
@@ -540,7 +483,7 @@ fn run() -> Result<(), String> {
     let closed_port = free_port()?;
     {
         let (log, state) = (log.clone(), state.clone());
-        std::thread::spawn(move || stub(&listener, &log, &state, Smoke::service_name(false)));
+        std::thread::spawn(move || stub(&listener, &log, &state));
     }
     let doh_listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let doh_port = doh_listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -553,7 +496,6 @@ fn run() -> Result<(), String> {
         root: root.clone(),
         home,
         data,
-        tychicus,
         state,
         log,
         shims,
@@ -575,12 +517,8 @@ fn run() -> Result<(), String> {
     cloudflare(&smoke)?;
     public_dns(&smoke)?;
     tailnet(&smoke)?;
-    adopt(&smoke)?;
-    adopt_old_connector(&smoke)?;
-    adopt_join_fails(&smoke)?;
-    adopt_fails_to_start(&smoke)?;
-    adopt_fails_after_stop(&smoke)?;
-    adopt_fails_to_stop(&smoke)?;
+    service_fails(&smoke)?;
+    browser_route(&smoke)?;
     contained(&smoke, &real_before)
 }
 
@@ -633,7 +571,6 @@ fn no_waitlist(s: &Smoke, channel: &str) -> Result<(), String> {
     for (args, state) in [
         (&["tunnel", "setup", "--cloudflare", "studio.example.com", "--json"][..], "needs_signin"),
         (&["tunnel", "setup", "--tailnet", "--json"][..], "needs_signin"),
-        (&["tunnel", "adopt", "--json"][..], "error"),
     ] {
         let (_, value) = s.ls(args)?;
         ensure(
@@ -652,7 +589,7 @@ fn no_waitlist(s: &Smoke, channel: &str) -> Result<(), String> {
         "tunnel request is gone",
     )?;
     ensure(!s.route_path().exists() && !Smoke::has(&s.since(mark), "tunnel create"), "sign-in states change nothing")?;
-    println!("ok: on {channel}, setup and adopt run and nothing answers waitlist");
+    println!("ok: on {channel}, setup runs and nothing answers waitlist");
     Ok(())
 }
 
@@ -777,17 +714,17 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
         "cloudflared tunnel create local-studio-".to_string(),
         format!("cloudflared tunnel route dns {SHIM_TUNNEL} studio.example.com"),
         format!("cloudflared tunnel route dns {SHIM_TUNNEL} alt.example.com"),
-        s.started_line(true),
+        s.started_line(),
         "check studio.example.com /v1/health 200".to_string(),
         "check alt.example.com /v1/health 200".to_string(),
     ] {
         Smoke::at(&lines, &want)?;
     }
     ensure(
-        Smoke::at(&lines, &s.started_line(true))? < Smoke::at(&lines, "check studio.example.com /v1/health")?,
+        Smoke::at(&lines, &s.started_line())? < Smoke::at(&lines, "check studio.example.com /v1/health")?,
         "checks run after the service starts",
     )?;
-    ensure(s.service_running(true), "Local Studio's service must be running")?;
+    ensure(s.service_running(), "Local Studio's service must be running")?;
     ensure(
         value["checks"]["serveAllowed"] == true && !Smoke::has(&lines, "local-studio-serve"),
         format!("setup allows the names in serve.json and runs no local-studio-serve: {value}"),
@@ -803,7 +740,7 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     )?;
     let yml = fs::read_to_string(s.yml_path()).map_err(|e| e.to_string())?;
     check_ingress(&yml, SHIM_TUNNEL, &["studio.example.com", "alt.example.com"], 18094, s.closed_port)?;
-    let service = fs::read_to_string(s.service_file(true)).map_err(|e| e.to_string())?;
+    let service = fs::read_to_string(s.service_file()).map_err(|e| e.to_string())?;
     ensure(
         service.contains(&s.shims.join("cloudflared").display().to_string())
             && service.contains("--no-autoupdate")
@@ -909,7 +846,7 @@ fn public_dns(s: &Smoke) -> Result<(), String> {
     Smoke::at(&lines, "doh nodoh.smoke.invalid A accept=true")?;
     ensure(!Smoke::has(&lines, "check nodoh.smoke.invalid"), "no check reaches a name nothing resolves")?;
     ensure(
-        !s.route_path().exists() && !s.service_file(true).exists() && !s.service_running(true),
+        !s.route_path().exists() && !s.service_file().exists() && !s.service_running(),
         "a failed setup leaves no route.json and no service",
     )?;
     println!("ok: a name only DNS over HTTPS knows is checked through it (public_only); none at all fails naming both");
@@ -921,7 +858,7 @@ fn off(s: &Smoke) -> Result<Value, String> {
     let (code, value) = s.ls(&["tunnel", "off", "--json"])?;
     ensure(code == 0 && value["state"] == "off", "off must answer off")?;
     ensure(!s.route_path().exists() && !s.yml_path().exists(), "off removes route.json and cloudflared.yml")?;
-    ensure(!s.service_file(true).exists() && !s.service_running(true), "off removes Local Studio's service")?;
+    ensure(!s.service_file().exists() && !s.service_running(), "off removes Local Studio's service")?;
     let lines = s.since(mark);
     ensure(!Smoke::has(&lines, "tunnel delete") && !Smoke::has(&lines, "route dns"), "off leaves the tunnel and DNS")?;
     Ok(value)
@@ -1001,241 +938,39 @@ fn tailnet(s: &Smoke) -> Result<(), String> {
     Ok(())
 }
 
-fn tychicus_fixture(s: &Smoke) -> Result<(), String> {
-    let credentials = s.home.join(".cloudflared").join(format!("{TYCHICUS_TUNNEL}.json"));
-    fs::write(&credentials, "{}\n").map_err(|e| e.to_string())?;
-    let remote = json!({"publicUrl":"https://old.example.com","port":s.stub_port,"route":"cloudflare"});
-    fs::write(s.tychicus.join("remote.json"), remote.to_string()).map_err(|e| e.to_string())?;
-    let yml = format!(
-        "tunnel: {TYCHICUS_TUNNEL}\ncredentials-file: {}\nno-autoupdate: true\ningress:\n  - hostname: old.example.com\n    service: http://127.0.0.1:{}\n  - service: http_status:404\n",
-        credentials.display(),
-        s.stub_port
-    );
-    fs::write(s.tychicus.join("cloudflared.yml"), yml).map_err(|e| e.to_string())?;
-    let file = s.service_file(false);
-    fs::create_dir_all(file.parent().ok_or("no parent")?).map_err(|e| e.to_string())?;
-    fs::write(&file, "tychicus service fixture\n").map_err(|e| e.to_string())?;
-    fs::create_dir_all(s.state.join("svc")).map_err(|e| e.to_string())?;
-    fs::write(s.state.join("svc").join(Smoke::service_name(false)), "").map_err(|e| e.to_string())?;
-    let _ = fs::remove_file(s.state.join("svc").join(format!("disabled-{}", Smoke::service_name(false))));
-    fs::write(s.state.join("tychicus-serve"), "").map_err(|e| e.to_string())?;
-    let _ = fs::remove_file(s.state.join("tychicus-hosts"));
-    let _ = fs::remove_file(s.state.join("old-connector"));
-    let _ = fs::remove_file(s.state.join("join-fails"));
-    Ok(())
-}
-
-fn adopt(s: &Smoke) -> Result<(), String> {
-    tychicus_fixture(s)?;
+fn service_fails(s: &Smoke) -> Result<(), String> {
     let mark = s.mark();
-    let (code, value) = s.ls_without(&["tunnel", "adopt", "--json"], &[real_manager()])?;
-    ensure(code == 1 && value["code"] == "unsafe_service_path", format!("adopt with the real manager: {value}"))?;
-    ensure(s.since(mark).is_empty(), "a refused adopt touches nothing")?;
-    let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--hostname", "new.example.com", "--json"])?;
-    ensure(code == 0 && value["state"] == "confirm", "adopt without --yes answers confirm")?;
-    ensure(value["plan"].as_array().is_some_and(|plan| !plan.is_empty()), "confirm carries the plan")?;
-    let lines = s.since(mark);
-    ensure(
-        !Smoke::has(&lines, "bootstrap")
-            && !Smoke::has(&lines, "bootout")
-            && !Smoke::has(&lines, "route dns")
-            && !Smoke::has(&lines, "systemctl"),
-        "confirm changes nothing",
-    )?;
-    ensure(!s.route_path().exists() && !s.service_file(true).exists(), "confirm writes nothing")?;
-
-    let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--hostname", "new.example.com", "--yes", "--json"])?;
-    ensure(
-        code == 0 && value["state"] == "ready" && value["tychicus"] == "joined",
-        format!("adopt must be ready: {value}"),
-    )?;
-    ensure(value["checks"]["health"] == "ok" && value["checks"]["mcp"] == "ok", format!("adopt checks: {value}"))?;
-    let lines = s.since(mark);
-    Smoke::at(&lines, &format!("cloudflared tunnel route dns {TYCHICUS_TUNNEL} new.example.com"))?;
-    adopt_order(s, &lines)?;
-    ensure(!Smoke::has(&lines, " 421"), "no check asks Tychicus serve for a name it doesn't accept yet")?;
-    ensure(
-        s.disabled() && !Smoke::has(&lines, &Smoke::enable_line()),
-        "Tychicus's service stays disabled after adopt",
-    )?;
-    ensure(
-        !s.service_running(false) && s.service_file(false).exists(),
-        "Tychicus's service is stopped, its file kept",
-    )?;
-    ensure(s.service_running(true), "Local Studio's service runs")?;
-    let route: Value =
-        serde_json::from_slice(&fs::read(s.route_path()).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    ensure(
-        route["hostname"] == "new.example.com"
-            && route["aliases"] == json!(["old.example.com"])
-            && route["ports"]["mcp"] == s.stub_port,
-        format!("adopt route.json: {route}"),
-    )?;
-    let yml = fs::read_to_string(s.yml_path()).map_err(|e| e.to_string())?;
-    ensure(
-        yml.contains(&format!("tunnel: {TYCHICUS_TUNNEL}"))
-            && yml.contains(&format!("{TYCHICUS_TUNNEL}.json"))
-            && yml.contains("hostname: new.example.com")
-            && yml.contains("hostname: old.example.com"),
-        "the yml keeps Tychicus's tunnel and credentials path and both names",
-    )?;
-    off(s)?;
-    println!("ok: adopt confirm, adopt --yes, Tychicus stopped after checks, join, then /mcp on the new name, off");
-    Ok(())
-}
-
-fn adopt_order(s: &Smoke, lines: &[String]) -> Result<(), String> {
-    let started = Smoke::at(lines, &s.started_line(true))?;
-    let both = Smoke::at(lines, "check old.example.com /mcp 401")?;
-    let disabled = Smoke::at(lines, &Smoke::disable_line())?;
-    let stopped = Smoke::at(lines, &Smoke::stop_line(false))?;
-    let health = Smoke::at(lines, "check new.example.com /v1/health 200")?;
-    let old_health = Smoke::at(lines, "check old.example.com /v1/health 200")?;
-    let joined = Smoke::at(lines, "tychicus remote join --json")?;
-    let new_mcp = Smoke::at(lines, "check new.example.com /mcp 401")?;
-    ensure(
-        started < both
-            && both < disabled
-            && disabled <= stopped
-            && stopped < health
-            && stopped < old_health
-            && health < joined
-            && old_health < joined
-            && joined < new_mcp,
-        format!(
-            "order must be start {started} < old /mcp {both} < Tychicus disable {disabled} <= stop {stopped} < health {health},{old_health} < join {joined} < new /mcp {new_mcp}"
-        ),
-    )?;
-    ensure(
-        lines[..disabled].iter().all(|line| !line.starts_with("check ") || line == "check old.example.com /mcp 401"),
-        format!("before Tychicus stops, only /mcp on the old name is checked: {lines:?}"),
-    )
-}
-
-fn adopt_old_connector(s: &Smoke) -> Result<(), String> {
-    tychicus_fixture(s)?;
-    fs::write(s.state.join("old-connector"), "").map_err(|e| e.to_string())?;
-    let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--hostname", "new.example.com", "--yes", "--json"])?;
-    ensure(
-        code == 0 && value["state"] == "ready" && value["tychicus"] == "joined",
-        format!("adopt through Tychicus's old connector must be ready: {value}"),
-    )?;
-    let lines = s.since(mark);
-    adopt_order(s, &lines)?;
-    ensure(!Smoke::has(&lines, " 404") && !Smoke::has(&lines, " 421"), "no check hits a path the old connector lacks")?;
-    ensure(s.service_running(true) && !s.service_running(false), "Local Studio's connector runs alone")?;
-    off(s)?;
-    println!("ok: adopt checks only what both connectors serve until Tychicus's connector stops");
-    Ok(())
-}
-
-fn adopt_join_fails(s: &Smoke) -> Result<(), String> {
-    tychicus_fixture(s)?;
-    fs::write(s.state.join("join-fails"), "").map_err(|e| e.to_string())?;
-    let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--hostname", "new.example.com", "--yes", "--json"])?;
-    ensure(
-        code == 0
-            && value["state"] == "needs_tychicus_join"
-            && value["tychicus"] == "not_joined"
-            && value["command"] == "tychicus remote join",
-        format!("a refused join answers needs_tychicus_join: {value}"),
-    )?;
-    let lines = s.since(mark);
-    ensure(!Smoke::has(&lines, &Smoke::enable_line()), "a refused join rolls nothing back")?;
-    ensure(!Smoke::has(&lines, "check new.example.com /mcp"), "no /mcp check on a name Tychicus never accepted")?;
-    ensure(
-        s.route_path().exists() && s.service_running(true) && !s.service_running(false) && s.disabled(),
-        "the working tunnel stays: route.json, Local Studio's service, Tychicus's stopped",
-    )?;
-    off(s)?;
-    println!("ok: adopt keeps the working tunnel and answers needs_tychicus_join when the join fails");
-    Ok(())
-}
-
-fn rolled_back(s: &Smoke, value: &Value, code: i32) -> Result<(), String> {
-    ensure(
-        code == 1 && value["state"] == "error" && value["code"] == "adopt_rolled_back",
-        format!("adopt_rolled_back: {value}"),
-    )?;
-    ensure(s.service_running(false), "Tychicus's service runs again")?;
-    ensure(!s.service_file(true).exists() && !s.service_running(true), "no Local Studio service is left")?;
-    ensure(!s.route_path().exists() && !s.yml_path().exists(), "no route.json or Local Studio yml is left")
-}
-
-fn adopt_fails_to_start(s: &Smoke) -> Result<(), String> {
-    tychicus_fixture(s)?;
-    let fail = s.state.join(format!("fail-{}", Smoke::service_name(true)));
+    let fail = s.state.join(format!("fail-{}", Smoke::service_name()));
     fs::write(&fail, "").map_err(|e| e.to_string())?;
-    let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--hostname", "new.example.com", "--yes", "--json"])?;
+    let (code, value) = s.ls(&["tunnel", "setup", "--cloudflare", "studio.example.com", "--yes", "--json"])?;
     fs::remove_file(&fail).map_err(|e| e.to_string())?;
-    rolled_back(s, &value, code)?;
-    let lines = s.since(mark);
-    ensure(
-        !Smoke::has(&lines, &Smoke::stop_line(false)),
-        "Tychicus's service is never stopped when the new one fails",
-    )?;
-    ensure(
-        !Smoke::has(&lines, &Smoke::disable_line()) && !Smoke::has(&lines, &Smoke::enable_line()) && !s.disabled(),
-        "Tychicus's service is never disabled when the new one fails",
-    )?;
-    ensure(!Smoke::has(&lines, "tychicus remote join"), "no join after a rollback")?;
-    println!("ok: adopt rolls back when Local Studio's service fails to start");
+    ensure(code == 1 && value["code"] == "service_failed", format!("setup with a service that stops: {value}"))?;
+    ensure(!s.route_path().exists(), "a failed service leaves no route.json")?;
+    ensure(!s.service_file().exists() && !s.service_running(), "a failed service is removed")?;
+    ensure(!Smoke::has(&s.since(mark), "check "), "a failed service is never checked from outside")?;
+    println!("ok: setup --cloudflare removes a service that doesn't stay running");
     Ok(())
 }
 
-fn adopt_fails_after_stop(s: &Smoke) -> Result<(), String> {
-    tychicus_fixture(s)?;
-    let fail = s.state.join("fail-after-stop");
-    fs::write(&fail, "").map_err(|e| e.to_string())?;
-    fs::write(s.serve_path(), "{").map_err(|e| e.to_string())?;
+fn browser_route(s: &Smoke) -> Result<(), String> {
+    let route = json!({"v":1,"owner":"local-studio-browser","route":"cloudflare","hostname":"old.example.com","aliases":[],"ports":{"mcp":8787}});
+    fs::write(s.route_path(), route.to_string()).map_err(|e| e.to_string())?;
     let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--yes", "--json"])?;
-    fs::remove_file(&fail).map_err(|e| e.to_string())?;
-    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
-    rolled_back(s, &value, code)?;
-    let why = format!("old.example.com isn't allowed in serve.json yet: parse {}: EOF", s.serve_path().display());
-    ensure(
-        value["message"]
-            .as_str()
-            .is_some_and(|said| said.contains("After Tychicus's tunnel stopped") && said.contains(&why)),
-        format!("adopt that rolls back says why serve.json doesn't allow the names: {value}"),
-    )?;
-    let lines = s.since(mark);
-    let disabled = Smoke::at(&lines, &Smoke::disable_line())?;
-    let stopped = Smoke::at(&lines, &Smoke::stop_line(false))?;
-    let enabled = Smoke::at(&lines, &Smoke::enable_line())?;
-    let restarted = Smoke::at(&lines, &s.started_line(false))?;
-    ensure(
-        disabled <= stopped && stopped < enabled && enabled < restarted && !s.disabled(),
-        format!("order must be disable {disabled} <= stop {stopped} < enable {enabled} < start {restarted}"),
-    )?;
-    ensure(!Smoke::has(&lines, "tychicus remote join"), "no join after a rollback")?;
-    println!("ok: adopt rolls back, enabling then restarting Tychicus, when the route fails after the switch");
-    Ok(())
-}
-
-fn adopt_fails_to_stop(s: &Smoke) -> Result<(), String> {
-    tychicus_fixture(s)?;
-    let fail = s.state.join(format!("fail-stop-{}", Smoke::service_name(false)));
-    fs::write(&fail, "").map_err(|e| e.to_string())?;
-    let mark = s.mark();
-    let (code, value) = s.ls(&["tunnel", "adopt", "--yes", "--json"])?;
-    fs::remove_file(&fail).map_err(|e| e.to_string())?;
-    rolled_back(s, &value, code)?;
-    let lines = s.since(mark);
-    let disabled = Smoke::at(&lines, &Smoke::disable_line())?;
-    let enabled = Smoke::at(&lines, &Smoke::enable_line())?;
-    let restarted = Smoke::at(&lines, &s.started_line(false))?;
-    ensure(
-        disabled < enabled && enabled < restarted && !s.disabled(),
-        format!("order must be disable {disabled} < enable {enabled} < start {restarted}"),
-    )?;
-    ensure(!Smoke::has(&lines, "tychicus remote join"), "no join after a rollback")?;
-    println!("ok: adopt rolls back, enabling then restarting Tychicus, when Tychicus won't stop");
+    for (args, code) in [
+        (&["tunnel", "setup", "--cloudflare", "studio.example.com", "--yes", "--json"][..], "other_route"),
+        (&["tunnel", "setup", "--tailnet", "--yes", "--json"][..], "other_route"),
+        (&["tunnel", "up", "--json"][..], "other_route"),
+        (&["tunnel", "off", "--json"][..], "not_ours"),
+    ] {
+        let (exit, value) = s.ls(args)?;
+        let message = value["message"].as_str().unwrap_or_default();
+        ensure(
+            exit == 1 && value["code"] == code && message.contains("local-studio-browser remote off"),
+            format!("{} on browser use's route: {value}", args.join(" ")),
+        )?;
+    }
+    ensure(s.since(mark).is_empty() && s.route_path().exists(), "browser use's route stays as it is")?;
+    fs::remove_file(s.route_path()).map_err(|e| e.to_string())?;
+    println!("ok: a route run by browser use is refused, naming how to turn it off");
     Ok(())
 }

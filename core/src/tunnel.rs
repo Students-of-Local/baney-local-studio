@@ -748,7 +748,7 @@ impl Tunnel {
             .header("Host", hostname)
             .send()
             .await
-            .map_err(|_| format!("Tychicus serve isn't answering on 127.0.0.1:{}. No auth, no tunnel.", ports.mcp))?;
+            .map_err(|_| format!("Browser use isn't answering on 127.0.0.1:{}. No auth, no tunnel.", ports.mcp))?;
         let challenge = mcp.headers().get("www-authenticate").and_then(|value| value.to_str().ok()).unwrap_or("");
         if mcp.status().as_u16() != 401 || !challenge.contains("resource_metadata") {
             return Err(format!(
@@ -914,15 +914,8 @@ impl Tunnel {
             return (Some(Cloudflared::Dev(PathBuf::from(dev))), Vec::new());
         }
         let mut notes = Vec::new();
-        let tychicus = std::env::var_os("TYCHICUS_CONFIG_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| crate::store::home_dir().map(|home| home.join(".config").join("tychicus")))
-            .map(|dir| dir.join("bin").join("cloudflared"));
-        for path in std::iter::once(self.cloudflared_target()).chain(tychicus) {
-            if !path.exists() {
-                continue;
-            }
+        let path = self.cloudflared_target();
+        if path.exists() {
             if pinned_binary(&path) {
                 return (Some(Cloudflared::Pinned(path)), notes);
             }
@@ -1083,18 +1076,7 @@ impl Tunnel {
 
     fn refuse_other_route(&self) -> Result<(), Failure> {
         match self.route()? {
-            Some(route) if !route.is_hosted() => {
-                let off = if route.owner == "tychicus" { " Turn it off first: tychicus remote off" } else { "" };
-                Err(fail(
-                    "other_route",
-                    format!(
-                        "This machine already has a {} route for {}, run by {}, and a machine has one tunnel.{off}",
-                        route.route,
-                        route.hostname,
-                        if route.owner == "tychicus" { "Tychicus" } else { "Local Studio" }
-                    ),
-                ))
-            }
+            Some(route) if !route.is_hosted() => Err(route.refusal()),
             _ => Ok(()),
         }
     }
@@ -1105,15 +1087,39 @@ impl Route {
     pub fn is_hosted(&self) -> bool {
         self.owner == "local-studio" && self.route == "hosted"
     }
+
+    fn owner_name(&self) -> &str {
+        match self.owner.as_str() {
+            "local-studio-browser" => "browser use",
+            "local-studio" => "Local Studio",
+            other => other,
+        }
+    }
+
+    fn off_command(&self) -> String {
+        if self.owner == "local-studio" {
+            return "local-studio tunnel off".to_string();
+        }
+        format!("{} remote off", self.owner)
+    }
+
+    fn refusal(&self) -> Failure {
+        fail(
+            "other_route",
+            format!(
+                "This machine already has a {} route for {}, run by {}, and a machine has one tunnel. Turn it off first: {}",
+                self.route,
+                self.hostname,
+                self.owner_name(),
+                self.off_command()
+            ),
+        )
+    }
 }
 
 fn route_status(route: &Route) -> Status {
     let carried = route.ports.serve.is_some();
-    let owner = match route.owner.as_str() {
-        "tychicus" => "Tychicus",
-        "local-studio" => "Local Studio",
-        other => other,
-    };
+    let owner = route.owner_name();
     let message = if route.is_hosted() {
         "This machine is on the retired hosted route. Turn it off (local-studio tunnel off), then set up your own: local-studio tunnel setup --tailnet, or setup --cloudflare <hostname>.".to_string()
     } else if carried {
@@ -1170,7 +1176,7 @@ fn startable(status: &Status) -> Result<(String, Ports), Failure> {
     if status.rotation_required {
         return Err(fail(
             "rotation_required",
-            "Restored after a second connector: rotate the Tychicus passcode, grants and phones first.",
+            "Restored after a second connector: rotate the browser use passcode, grants and phones first.",
         ));
     }
     let hostname = status.hostname.clone().ok_or("the service gave no hostname")?;

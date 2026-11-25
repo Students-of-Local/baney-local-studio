@@ -198,8 +198,7 @@ impl<'a> Cases<'a> {
 
     fn written(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
         let mut found = BTreeMap::new();
-        let beside = ["tychicus", "tmp"].map(|name| self.s.root.join(name));
-        let mut folders = [vec![self.s.data.clone(), self.s.home.clone()], beside.to_vec()].concat();
+        let mut folders = vec![self.s.data.clone(), self.s.home.clone(), self.s.root.join("tmp")];
         while let Some(folder) = folders.pop() {
             let Ok(entries) = fs::read_dir(&folder) else { continue };
             for path in entries.flatten().map(|entry| entry.path()) {
@@ -573,15 +572,11 @@ pub fn others(c: &mut Cases) -> Result<(), String> {
     c.s.write("route.json", &route.to_string())?;
     c.refused("a domain tunnel", &["smoke"], "other_route")?;
     fs::remove_file(c.s.tunnel("route.json")).map_err(text)?;
-    let tychicus = c.s.root.join("tychicus");
-    fs::create_dir_all(&tychicus).map_err(text)?;
-    for kind in ["cloudflare", "relay"] {
-        let remote = json!({"route":kind,"publicUrl":"https://tychicus.example.com","port":8787});
-        fs::write(tychicus.join("remote.json"), remote.to_string()).map_err(text)?;
-        let message = c.refused("a Tychicus route", &["smoke"], "tychicus_tunnel")?;
-        ensure(message.contains("tychicus remote off"), format!("how to turn Tychicus's off: {message}"))?;
-    }
-    fs::remove_file(tychicus.join("remote.json")).map_err(text)?;
+    let route = route.to_string().replace("\"local-studio\"", "\"local-studio-browser\"");
+    c.s.write("route.json", &route)?;
+    let message = c.refused("a route run by browser use", &["smoke"], "other_route")?;
+    ensure(message.contains("local-studio-browser remote off"), format!("how to turn it off: {message}"))?;
+    fs::remove_file(c.s.tunnel("route.json")).map_err(text)?;
     println!("ok: S14 other routes");
 
     let held = fs::File::create(c.s.tunnel("relay.lock")).map_err(text)?;
