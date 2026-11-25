@@ -10,7 +10,7 @@ A machine has at most one public route: one cloudflared process with one ingress
 | `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-authorization-server/mcp`, `/authorize`, `/token`, `/register`, `/revoke` | `local-studio-browser serve` (8787): browser use and computer use |
 | anything else | 404 |
 
-These are the eleven paths of baney75/local-studio-tunnels docs/INTERFACE.md. One hostname serves both products, split by these exact paths: the tailnet route has one name per machine.
+These are the eleven paths of Students-of-Local/local-studio-tunnels docs/INTERFACE.md. One hostname serves both products, split by these exact paths: the tailnet route has one name per machine.
 
 ## The route record
 
@@ -70,7 +70,7 @@ For a domain the person owns, after the relay in what `local-studio tunnel byo` 
 
 ### Your own relay
 
-`setup --relay [<name>] [--account <id>]` deploys the Worker vendored in `core/src/tunnel/worker/` (byte for byte from baney75/local-studio-tunnels; `SOURCE` names the commit and digests, and `scripts/tests/relay-bundle-test.sh` checks them). The name defaults to `local-studio-<machine>`: 1 to 63 of `a-z`, `0-9` and `-`. Every wrangler run is `npx --yes wrangler@4.163.0` (`LS_NPX` names another `npx`) in `<data dir>/tunnel/relay/` (0700), which holds only the two Worker files and wrangler's output file, with `WRANGLER_SEND_METRICS=false`. Local Studio never opens wrangler's own files and never runs its login.
+`setup --relay [<name>] [--account <id>]` deploys the Worker vendored in `core/src/tunnel/worker/` (byte for byte from Students-of-Local/local-studio-tunnels; `SOURCE` names the commit and digests, and `scripts/tests/relay-bundle-test.sh` checks them). The name defaults to `local-studio-<machine>`: 1 to 63 of `a-z`, `0-9` and `-`. Every wrangler run is `npx --yes wrangler@4.163.0` (`LS_NPX` names another `npx`) in `<data dir>/tunnel/relay/` (0700), which holds only the two Worker files and wrangler's output file, with `WRANGLER_SEND_METRICS=false`. Local Studio never opens wrangler's own files and never runs its login.
 
 Setup runs `whoami --json`, `deployments list --name <name> --json` (unless relay.json already names that Worker and account), `deploy --name <name>`, then `secret put RELAY_KEY --name <name>` with a new 32-byte key on stdin. Only then does it write `<data dir>/tunnel/relay.json` (0600: `v`, `url`, `name`, `accountId`, `key`), the one place the key is kept. The service of the Cloudflare route (same label and unit) runs `local-studio tunnel relay run`, and the workers.dev name goes into `allowTunnelHosts`. Setup polls `https://<host>/_relay/health` until it answers connected and this machine's own service says so too in relay-state.json (a new name can take minutes, so up to 5 minutes, every 5 seconds), restarting the service while the relay doesn't know the new key yet and once when another connection took its place, and then runs the checks below. route.json is written last. If any of that fails or is interrupted once the key is being set, the service, route.json, relay.json and the host allowance go, and the Worker stays; a service that can't be removed keeps relay.json for `off`. A key that can't be set again on a live relay changes nothing on this machine, and Ctrl-C or a hangup after that leaves a live relay's route and new key in place and starts its service once more, unless the ports differ from the route's. `LS_RELAY_WAIT_MS` shortens the wait for checks only. Setup again on a live relay sets a new key and restarts the service.
 
@@ -102,7 +102,7 @@ An agent must be able to set a tunnel up for a person. Every `tunnel` command ta
 
 ### Going live
 
-Before a route carries a path, Local Studio checks auth there (baney75/local-studio-tunnels docs/DESIGN.md, Going live): `/mcp` answers 401 with `WWW-Authenticate` naming the resource metadata, and `/v1/health` answers 200 for the route's hostname and 403 for any other Host. It adds the hostname to `allowTunnelHosts` in `serve.json`. The Cloudflare route uses the pinned, verified cloudflared.
+Before a route carries a path, Local Studio checks auth there (Students-of-Local/local-studio-tunnels docs/DESIGN.md, Going live): `/mcp` answers 401 with `WWW-Authenticate` naming the resource metadata, and `/v1/health` answers 200 for the route's hostname and 403 for any other Host. It adds the hostname to `allowTunnelHosts` in `serve.json`. The Cloudflare route uses the pinned, verified cloudflared.
 
 ## Browser use joins
 

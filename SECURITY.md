@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security problems privately through GitHub: open the [Security tab](https://github.com/baney75/local-studio/security) of this repository and choose **Report a vulnerability**. Do not open a public issue for a security problem.
+Please report security problems privately through GitHub: open the [Security tab](https://github.com/Students-of-Local/baney-local-studio/security) of this repository and choose **Report a vulnerability**. Do not open a public issue for a security problem.
 
 Include the version and channel from Settings or `local-studio --version`, the platform, and the steps that show the problem. You will get a reply within seven days.
 
