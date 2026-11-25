@@ -133,9 +133,13 @@ pub(super) fn pieces(text: &str) -> Vec<&str> {
 pub(super) fn place(text: &str) -> Option<String> {
     let text = line(text);
     let scheme = |scheme: &str| scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
-    let rest = text.split_once("://").filter(|(start, _)| scheme(start)).map_or(text.as_str(), |(_, rest)| rest);
+    let schemed = text.split_once("://").filter(|(start, _)| scheme(start)).map(|(_, rest)| rest);
+    let rest = schemed.unwrap_or(&text);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit('@').next().unwrap_or_default();
+    let address =
+        schemed.is_some() || !host.contains(' ') && (host.contains(['.', '[']) || host.starts_with("localhost"));
+    let host = if address { host } else { rest.trim_end_matches('/') };
     let port = host.rsplit_once(':').filter(|(host, port)| {
         (!host.contains(':') || host.ends_with(']')) && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
     });

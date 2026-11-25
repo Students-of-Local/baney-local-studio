@@ -13,7 +13,7 @@ use crate::{frontmatter, harness::trust, plugins};
 const FILE: &str = "skills.sqlite";
 pub(super) const SKILL: &str = "SKILL.md";
 const BUILT_IN: &str = ".system";
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 const MAX_FILE: u64 = 256 * 1024;
 const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
@@ -205,6 +205,8 @@ impl Store {
             }
             self.seen.insert(id, listed);
         }
+        let shadowed = |skill: &Listed| skill.problem.is_some() && names.contains_key(&skill.name.to_lowercase());
+        hidden.extend(self.seen.extract_if(|_, skill| shadowed(skill)).map(|(_, skill)| skill));
         self.hidden = hidden;
         self.checked = Some(Instant::now());
         Ok(())

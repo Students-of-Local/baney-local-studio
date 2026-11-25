@@ -37,10 +37,7 @@ impl Reading {
 
 impl Store {
     pub fn read(&mut self, name: &str, part: Option<&str>, from: usize) -> Result<Reading, String> {
-        let wanted = self.sound(|store| {
-            store.refresh()?;
-            store.named(name)
-        })?;
+        let wanted = self.settled(|store| store.named(name))?;
         let Some(seen) = wanted.and_then(|id| self.seen.get(&id).cloned()) else {
             return Err(self.unknown(name));
         };
@@ -106,11 +103,18 @@ fn named<'a>(sections: &'a [text::Part], wanted: &str) -> Vec<&'a text::Part> {
     let exact: Vec<&text::Part> =
         headed().filter(|part| part.head.to_lowercase() == wanted.trim().to_lowercase()).collect();
     let key = text::key(wanted);
-    if exact.is_empty() && !key.is_empty() {
-        headed().filter(|part| text::key(&part.head) == key).collect()
-    } else {
-        exact
+    if !exact.is_empty() || key.is_empty() {
+        return exact;
     }
+    let alike: Vec<&text::Part> = headed().filter(|part| text::key(&part.head) == key).collect();
+    if !alike.is_empty() {
+        return alike;
+    }
+    let mut longer: Vec<&text::Part> = headed().filter(|part| text::key(&part.head).starts_with(&key)).collect();
+    if longer.iter().any(|part| part.head != longer[0].head) {
+        longer.clear();
+    }
+    longer
 }
 
 fn reading(seen: Listed, body: &str, part: Option<&str>, from: usize) -> Result<Reading, String> {
@@ -132,12 +136,17 @@ fn reading(seen: Listed, body: &str, part: Option<&str>, from: usize) -> Result<
         (None, text, most)
     };
     let text = page(&text, from, most)?;
-    let files = seen.path.parent().map(beside).unwrap_or_default();
+    let files = seen
+        .path
+        .parent()
+        .map(|dir| beside(dir, matches!(seen.source.as_str(), "yours" | "personal")))
+        .unwrap_or_default();
     Ok(Reading { name: seen.name, part, text, parts, files, source: seen.source, path: seen.path })
 }
 
-fn beside(dir: &Path) -> Vec<String> {
-    let walk = WalkBuilder::new(dir).standard_filters(false).hidden(true).max_depth(Some(3)).build();
+fn beside(dir: &Path, links: bool) -> Vec<String> {
+    let walk =
+        WalkBuilder::new(dir).standard_filters(false).hidden(true).follow_links(links).max_depth(Some(3)).build();
     let mut files: Vec<String> = walk
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
