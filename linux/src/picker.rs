@@ -622,3 +622,18 @@ pub fn render_projects(picker: &Picker, state: &State) {
 fn tilde(home: &Path, path: &str) -> String {
     Path::new(path).strip_prefix(home).map_or_else(|_| path.to_string(), |rest| format!("~/{}", rest.display()))
 }
+
+pub fn find<T: IsA<gtk::Widget>>(root: &gtk::Widget, keep: impl Fn(&T) -> bool) -> Option<T> {
+    let mut stack = vec![root.clone()];
+    while let Some(widget) = stack.pop() {
+        if let Some(found) = widget.downcast_ref::<T>().filter(|found| keep(found)) {
+            return Some(found.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            stack.push(current);
+        }
+    }
+    None
+}

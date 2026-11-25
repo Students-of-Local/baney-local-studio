@@ -11,6 +11,7 @@ use local_studio_core::{
 
 use crate::app::App;
 use crate::composer::TAKE_BACK;
+use crate::picker::find;
 use crate::state::PendingSend;
 
 const PROMPT: &str = "Use the bash tool to run exactly this command once: `echo smoke-ok > smoke.txt && cat smoke.txt`. Then reply with only the word done.";
@@ -504,9 +505,31 @@ fn start_draft(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>) 
         return;
     }
     println!("ok   with no default set the composer shows the daemon's default {shown}");
+    if !picks_on_return(app) {
+        finish(app, phase, failed, false, "Return in the model search did not pick the match");
+        return;
+    }
+    println!("ok   Return in the model search picks the match");
     phase.set(Phase::Opening);
     app.composer.set_text(PROMPT);
     app.composer.submit(app);
+}
+
+fn picks_on_return(app: &Rc<App>) -> bool {
+    let root = app.composer.root.upcast_ref();
+    let Some(menu) = find::<gtk::DropDown>(root, |menu| menu.tooltip_text().as_deref() == Some("Model")) else {
+        return false;
+    };
+    let (Some(search), Some(model)) = (find::<gtk::SearchEntry>(menu.upcast_ref(), |_| true), real_model()) else {
+        return false;
+    };
+    app.syncing.set(true);
+    menu.set_selected(0);
+    app.syncing.set(false);
+    let name = app.state.borrow().models.iter().find(|one| one.id == model.model).map(|one| one.name.clone());
+    search.set_text(&name.filter(|name| !name.is_empty()).unwrap_or_else(|| model.model.clone()).to_uppercase());
+    search.emit_by_name::<()>("activate", &[]);
+    app.state.borrow_mut().draft_settings.model.take() == Some(model)
 }
 
 fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, project: &str) {
