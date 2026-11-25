@@ -84,4 +84,11 @@ export { Bridge };`);
 	await assert.rejects(bridge.call("tabs.list", {}), /bridge closed/);
 	await assert.rejects(bridge.call("tabs.list", {}), /bridge closed/);
 	assert.deepEqual(await bridge.call("tabs.list", {}), { turn: 3 });
+	// A call made while the last connection is still closing goes out on a new one, and the old call still ends.
+	const waiting = bridge.call("never.answered", {});
+	await new Promise((r) => setTimeout(r, 50));
+	bridge.socket.destroy();
+	const [old, next] = await Promise.allSettled([waiting, bridge.call("tabs.list", {})]);
+	assert.match(String(old.reason), /bridge closed/);
+	assert.deepEqual(next.value, { turn: 4 });
 });

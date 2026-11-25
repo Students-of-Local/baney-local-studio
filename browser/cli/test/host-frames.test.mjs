@@ -122,6 +122,20 @@ test("a client frame that is no message drops that client only", { skip: !posix 
 		bad.write(encode(m));
 		await closed;
 	}
+	// A hello whose session won't print, and a request nested too deep to send on.
+	const nested = `${"[".repeat(20_000)}${"]".repeat(20_000)}`;
+	const deep = Buffer.from(`{"type":"request","id":1,"method":"tabs.context","params":${nested}}`);
+	const head = Buffer.alloc(4);
+	head.writeUInt32LE(deep.length);
+	const hello = encode({ type: "hello", client: { name: "a", session: "s" } });
+	for (const bytes of [encode({ type: "hello", client: { auto: true, session: { toString: null, valueOf: null } } }), Buffer.concat([hello, head, deep])]) {
+		const bad = connect(path);
+		const closed = new Promise((r) => bad.once("close", r));
+		bad.on("error", () => undefined);
+		bad.resume();
+		bad.write(bytes);
+		await closed;
+	}
 	const good = connect(path);
 	t.after(() => good.destroy());
 	const out = reader(good);

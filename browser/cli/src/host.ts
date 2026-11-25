@@ -324,12 +324,15 @@ export function runNativeHost(args: readonly string[] = []): void {
 			client.lastDataAt = Date.now();
 			const { messages, error } = parser.push(chunk);
 			for (const m of messages) {
-				if (!isClientFrame(m)) {
-					process.stderr.write(`[local-studio-browser-host] bad frame from ${id}: not a message\n`);
+				try {
+					if (!isClientFrame(m)) throw new Error("not a message");
+					onClientMessage(client, m);
+				} catch (err) {
+					// Whatever it held (a session that won't print, nesting too deep to send), it costs this client only.
+					process.stderr.write(`[local-studio-browser-host] bad frame from ${id}: ${String(err)}\n`);
 					socket.destroy();
 					return;
 				}
-				onClientMessage(client, m);
 			}
 			if (error) {
 				process.stderr.write(`[local-studio-browser-host] bad frame from ${id}: ${String(error)}\n`);

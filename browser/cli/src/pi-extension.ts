@@ -103,7 +103,7 @@ class Bridge {
 	private socket?: ReturnType<typeof connect>;
 	private buffer = Buffer.alloc(0);
 	private seq = 0;
-	private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+	private pending = new Map<number, { socket: unknown; resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 	private opening?: Promise<void>;
 
 	private async ensure(): Promise<void> {
@@ -123,15 +123,23 @@ class Bridge {
 			// What a dropped connection left half read is not the start of this one.
 			this.buffer = Buffer.alloc(0);
 			this.socket = socket;
+			// A host that takes the connection and never answers must not hold every later call.
+			const welcome = setTimeout(() => socket.destroy(), 10000);
 			socket.on("error", reject);
 			socket.on("data", (chunk) => {
-				if (this.socket === socket) this.onData(chunk, resolve);
+				if (this.socket !== socket) return;
+				this.onData(chunk, () => {
+					clearTimeout(welcome);
+					resolve();
+				});
 			});
 			socket.on("close", () => {
+				clearTimeout(welcome);
 				reject(new Error("bridge closed"));
-				if (this.socket !== socket) return;
-				for (const p of this.pending.values()) p.reject(new Error("bridge closed"));
-				this.pending.clear();
+				// Only what went out on this connection: another may be open by now.
+				for (const [id, p] of this.pending) {
+					if (p.socket === socket && this.pending.delete(id)) p.reject(new Error("bridge closed"));
+				}
 			});
 			socket.write(encode({ type: "hello", client: { name: "pi", session: process.env.LOCAL_STUDIO_BROWSER_SESSION || process.env.PI_SESSION_ID || SESSION_FALLBACK } }));
 		});
@@ -165,8 +173,9 @@ class Bridge {
 		await this.ensure();
 		const id = ++this.seq;
 		return new Promise((resolve, reject) => {
-			this.pending.set(id, { resolve, reject });
-			this.socket!.write(encode({ type: "request", id, method, params }));
+			const socket = this.socket!;
+			this.pending.set(id, { socket, resolve, reject });
+			socket.write(encode({ type: "request", id, method, params }));
 			setTimeout(() => {
 				if (this.pending.delete(id)) reject(new Error(\`\${method} timed out\`));
 			}, 120000);
