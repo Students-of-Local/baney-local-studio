@@ -634,6 +634,7 @@ pub struct Studio {
     backlog: Arc<Backlog>,
     mailbox: Arc<Mailbox>,
     pub(crate) workspace: Workspace,
+    pub(crate) plugins_dir: Option<PathBuf>,
     #[cfg(feature = "link")]
     links: crate::link::client::Links,
     #[cfg(feature = "link")]
@@ -738,7 +739,7 @@ impl Studio {
             interactive: true,
             daemon: None,
             daemon_pushed: None,
-            plugins_dir,
+            plugins_dir: plugins_dir.clone(),
             plugin_errors: Vec::new(),
             backlog: Arc::clone(&backlog),
             data_dir,
@@ -777,6 +778,7 @@ impl Studio {
             backlog,
             mailbox,
             workspace,
+            plugins_dir,
             #[cfg(feature = "link")]
             links,
             #[cfg(feature = "link")]

@@ -543,6 +543,7 @@ impl App {
                 Some(Target::GotoFile) => self.goto.loaded(&request, &results),
                 _ => {}
             },
+            Update::Mentions { .. } => {}
             Update::PullRequests { request, pulls } => match self.take_request(&request) {
                 Some(Target::PanelPulls) => self.panel.pulls.loaded(&pulls),
                 Some(Target::PagePulls) => self.pulls.loaded(&pulls),

@@ -2,8 +2,10 @@ use std::fs::{create_dir_all, read, remove_dir_all, remove_file, rename, write};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Output, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use local_studio_core::{Mention, MentionKind, Studio, StudioConfig, Update, Waker};
 use serde_json::{json, Value};
 
 const MANY: usize = 1000;
@@ -760,6 +762,215 @@ fn many(smoke: &mut Smoke) -> Result<(), String> {
     Ok(())
 }
 
+struct Quiet;
+
+impl Waker for Quiet {
+    fn wake(&self) {}
+}
+
+struct At {
+    studio: Arc<Studio>,
+    project: PathBuf,
+    asked: usize,
+}
+
+impl At {
+    fn ask(&mut self, project: Option<String>, query: &str, limit: u32) -> String {
+        self.asked += 1;
+        let asked = format!("at-{}", self.asked);
+        self.studio.mentions(asked.clone(), project, query.to_string(), limit);
+        asked
+    }
+
+    fn once(&mut self, project: Option<String>, query: &str, limit: u32) -> Result<Vec<Mention>, String> {
+        let asked = self.ask(project, query, limit);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            for update in self.studio.tick() {
+                match update {
+                    Update::Mentions { request, items } if request == asked => return Ok(items),
+                    Update::RequestFailed { request, message } if request == asked => return Err(message),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(format!("no answer for @{query}"))
+    }
+
+    fn list(&mut self, query: &str, holds: &str) -> Result<Vec<Mention>, String> {
+        let project = self.project.to_string_lossy().into_owned();
+        self.list_in(Some(&project), query, 0, holds)
+    }
+
+    fn list_in(&mut self, project: Option<&str>, query: &str, limit: u32, holds: &str) -> Result<Vec<Mention>, String> {
+        let mut items = Vec::new();
+        for _ in 0..20 {
+            items = self.once(project.map(String::from), query, limit)?;
+            if titles(&items).contains(&holds) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(items)
+    }
+}
+
+fn titles(items: &[Mention]) -> Vec<&str> {
+    items.iter().map(|item| item.title.as_str()).collect()
+}
+
+fn files(items: &[Mention]) -> usize {
+    items.iter().filter(|item| item.kind == MentionKind::File).count()
+}
+
+fn mentions(smoke: &mut Smoke) -> Result<(), String> {
+    let (top, text) = (smoke.data.with_file_name("at"), |error: std::io::Error| error.to_string());
+    let (data, project, own) = (top.join("data"), top.join("project"), top.join("data/skills"));
+    create_dir_all(top.join("home")).map_err(text)?;
+    skill(&own, "marmalade", "Cook oranges", "src main rs zebra")?;
+    skill(&own, "smart-mart", "Shop", "")?;
+    skill(&own, "outdoors", "Go outside", "Take a kite, or a mar.")?;
+    put(&own.join("ledger/SKILL.md"), "Broken, with no front matter. mar")?;
+    skill(&own, "marzipan", "Hidden twin", "")?;
+    skill(&top.join("home/.claude/skills"), "marzipan", "The other twin", "")?;
+    skill(&project.join(".agents/skills"), "marmot", "Dig", "")?;
+    for name in ["src/main.rs", "marble.txt", "notes/smarts.txt"] {
+        put(&project.join(name), "x")?;
+    }
+    let project = project.canonicalize().map_err(text)?;
+    std::env::set_var("HOME", top.join("home"));
+    std::env::set_var("EUKHE_CODING_AGENT_DIR", top.join("home/agent"));
+    std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
+    std::env::set_var("EUKHE_DAEMON_SOCKET", top.join("d.sock"));
+    let config = StudioConfig {
+        socket_path: Some(top.join("d.sock").to_string_lossy().into_owned()),
+        session_dir: None,
+        data_dir: None,
+        launch: None,
+        controller_main: None,
+        take_over_serve: false,
+    };
+    let studio = Studio::new(config, Arc::new(Quiet)).map_err(|error| error.to_string())?;
+    let mut at = At { studio: Arc::clone(&studio), project, asked: 0 };
+    let outcome = at_list(smoke, &mut at, &data);
+    studio.shutdown();
+    outcome
+}
+
+fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
+    let row = |kind, name: &str, detail: &str, badge: &str, install: &str| Mention {
+        kind,
+        title: format!("@{name}"),
+        detail: detail.to_string(),
+        badge: badge.to_string(),
+        insert: format!("@{name} "),
+        install: install.to_string(),
+    };
+    let items = at.list("Mar", "@marmalade")?;
+    smoke.check(
+        "@mar lists its skill first",
+        items.first() == Some(&row(MentionKind::Skill, "marmalade", "Cook oranges", "yours", "")),
+    );
+    let order = ["@marmalade", "@marzipan", "@smart-mart", "@outdoors"];
+    smoke.check("then names holding it, then skills found by words, hidden ones never", {
+        titles(&items).get(..4) == Some(&order) && items[4..].iter().all(|item| item.kind == MentionKind::File)
+    });
+    smoke.check(
+        "then files, as today's rows",
+        items.contains(&row(MentionKind::File, "marble.txt", "", "", ""))
+            && items.contains(&row(MentionKind::File, "notes/smarts.txt", "notes", "", "")),
+    );
+    smoke.check("an untrusted project's skill is not listed", !titles(&items).contains(&"@marmot"));
+    let state = json!({ "version": 1, "projects": [], "trusted": [at.project] });
+    put(&data.join("state.json"), &state.to_string())?;
+    let items = at.list("mar", "@marmot")?;
+    let trusted = row(MentionKind::Skill, "marmot", "Dig", "project", "");
+    smoke.check("and a trusted project's is", items.contains(&trusted));
+    let nowhere = at.list_in(None, "mar", 0, "@marmalade")?;
+    let own = titles(&nowhere).contains(&"@marmalade") && !titles(&nowhere).contains(&"@marmot");
+    smoke.check("with no project, skills are still listed, and no files", own && files(&nowhere) == 0);
+    smoke.check("@kite finds a skill by its text", titles(&at.list("kite", "@outdoors")?) == ["@outdoors"]);
+    for name in ["src/ma", "main.rs"] {
+        let items = at.list(name, "@src/main.rs")?;
+        smoke.check(&format!("@{name} lists files only"), !items.is_empty() && files(&items) == items.len());
+    }
+    let offered = at.list("gan", "@gantrel")?;
+    let offer = offered.iter().find(|item| item.title == "@gantrel");
+    let install = |item: &Mention| item.badge == "Install" && item.install == "gantrel" && item.insert == "@gantrel ";
+    smoke.check("@gan offers the catalog's gantrel", offer.is_some_and(install));
+    let empty = at.list("", "@marble.txt")?;
+    let shown = titles(&empty).contains(&"@marble.txt");
+    smoke.check("an empty @ lists files, and no plugin that isn't installed", shown && files(&empty) == empty.len());
+    let manifest =
+        "id = \"gantrel\"\nname = \"Crane\"\nversion = \"0.1.0\"\ndescription = \"Lift\"\ncapabilities = []\n";
+    put(&data.join("plugins/gantrel/plugin.toml"), manifest)?;
+    let plugin = row(MentionKind::Plugin, "gantrel", "Lift", "Plugin", "");
+    for query in ["gan", "crane"] {
+        let items = at.list(query, "@gantrel")?;
+        smoke.check(&format!("installed, @{query} lists it as a plugin"), items == [plugin.clone()]);
+    }
+    for n in 0..40 {
+        put(&at.project.join(format!("many/zebra-{n}.txt")), "x")?;
+    }
+    let empty = at.list("", "@gantrel")?;
+    smoke.check(
+        "an empty @ lists files, then installed plugins, in thirty rows",
+        empty.len() == 30 && files(&empty[..29]) == 29 && empty.last() == Some(&plugin),
+    );
+    for n in 0..9 {
+        skill(&data.join("skills"), &format!("zebra-{n}"), "Stripes", "")?;
+        skill(&data.join("skills"), &format!("okapi-{n}"), "Stripes", "")?;
+    }
+    let items = at.list("zebra", "@zebra-0")?;
+    smoke.check("six skills above files", items.len() == 30 && files(&items[6..]) == 24 && files(&items[..6]) == 0);
+    let items = at.list("okapi", "@okapi-0")?;
+    smoke.check("more when no file matches", items.len() == 9 && files(&items) == 0);
+    at_slow(smoke, at, data, &plugin)?;
+    let here = at.project.to_string_lossy().into_owned();
+    let few = at.list_in(Some(&here), "zebra", 4, "@zebra-0")?;
+    smoke.check("a short list still has files", few.len() == 4 && files(&few) == 2);
+    let found = at.list("stripes", "@okapi-0")?;
+    smoke.check("five skills found by their text", found.len() == 5 && files(&found) == 0);
+    for n in 0..7 {
+        skill(&data.join("skills"), &format!("gantrel-{n}"), "Crates", "")?;
+    }
+    put(&at.project.join("gantrel.txt"), "x")?;
+    let items = at.list("gantrel", "@gantrel-0")?;
+    smoke.check("the plugin of that exact name comes first", items.first() == Some(&plugin));
+    let remote = at.once(Some("@desk/home".to_string()), "mar", 0);
+    let refused = "Searching files works only in Local Studio on ";
+    smoke.check("a project on another machine is refused", remote.is_err_and(|said| said.starts_with(refused)));
+    let index = data.join("skills.sqlite");
+    for name in ["skills.sqlite", "skills.sqlite-wal", "skills.sqlite-shm"] {
+        let _ = std::fs::remove_file(data.join(name));
+    }
+    create_dir_all(index.join("in-the-way")).map_err(|error| error.to_string())?;
+    let items = at.list("gantrel", "@gantrel")?;
+    smoke.check("with no index, plugins and files are still listed", items.len() == 2 && items[0] == plugin);
+    Ok(())
+}
+
+fn at_slow(smoke: &mut Smoke, at: &mut At, data: &Path, plugin: &Mention) -> Result<(), String> {
+    let lock = std::fs::File::open(data.join("skills.lock")).map_err(|error| error.to_string())?;
+    lock.lock().map_err(|error| error.to_string())?;
+    let held = Instant::now();
+    let here = at.project.to_string_lossy().into_owned();
+    let items = at.once(Some(here.clone()), "zebra", 0)?;
+    let (took, only) = (held.elapsed(), items.len() == 30 && files(&items) == 30);
+    let slow = at.once(Some(here.clone()), "gan", 0)?;
+    let empty = at.once(Some(here.clone()), "", 0)?;
+    for n in 0..60 {
+        at.ask(Some(here.clone()), &format!("zebra-{n}"), 0);
+    }
+    lock.unlock().map_err(|error| error.to_string())?;
+    smoke.check("a store that takes too long leaves files alone", only && took < Duration::from_secs(3));
+    smoke.check("and a plugin keeps its row", slow == [plugin.clone()] && empty.last() == Some(plugin));
+    let last = at.once(Some(here.clone()), "zebra", 0)?;
+    smoke.check("the last of many has its skills", titles(&last).contains(&"@zebra-0"));
+    Ok(())
+}
+
 fn run(smoke: &mut Smoke) -> Result<(), String> {
     let own = smoke.data.join("skills");
     skill(&own, "kitchen", "Cook at home", "Jam.\n\n## Preserves\nmarmalade and jam\n\n## Sweets\ncrème brûlée")?;
@@ -808,7 +1019,8 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     links(smoke, &own)?;
     served(smoke, &own)?;
     index(smoke)?;
-    many(smoke)
+    many(smoke)?;
+    mentions(smoke)
 }
 
 fn main() -> ExitCode {

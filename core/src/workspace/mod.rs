@@ -9,6 +9,7 @@ mod history;
 mod kernel;
 mod links;
 mod local;
+mod mentions;
 pub mod model;
 pub(crate) mod process;
 mod projects;
@@ -561,6 +562,21 @@ impl Workspace {
         self.answer_blocking(request, move || {
             let results = files::search_files(&project, &query, limit)?;
             Ok(Update::SearchResults { request: reply, results })
+        });
+    }
+
+    pub(crate) fn mentions(
+        &self,
+        request: String,
+        plugins: Option<PathBuf>,
+        project: Option<String>,
+        query: String,
+        limit: u32,
+    ) {
+        let (reply, data, asked) = (request.clone(), self.inner.data_dir.clone(), mentions::turn());
+        self.answer(request, async move {
+            let items = mentions::list(asked, data, plugins, project, query, limit).await?;
+            Ok(vec![Update::Mentions { request: reply, items }])
         });
     }
 

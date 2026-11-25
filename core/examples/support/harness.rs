@@ -208,6 +208,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Files { .. }
         | Update::FileContent { .. }
         | Update::SearchResults { .. }
+        | Update::Mentions { .. }
         | Update::PullRequests { .. }
         | Update::PullRequestDetail { .. }
         | Update::Devices { .. }
