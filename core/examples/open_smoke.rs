@@ -39,6 +39,7 @@ struct Watch {
     threads: Vec<ThreadRow>,
     started: HashMap<String, String>,
     shown: Option<(String, usize)>,
+    resets: usize,
     replied: bool,
     usage: Option<UsageReport>,
 }
@@ -83,6 +84,7 @@ impl Session {
                     }
                     Update::Transcript { thread, op: TranscriptOp::Reset { items } } => {
                         self.watch.shown = Some((thread, items.len()));
+                        self.watch.resets += 1;
                     }
                     Update::Transcript {
                         op: TranscriptOp::Insert { item, .. } | TranscriptOp::Update { item, .. },
@@ -119,10 +121,14 @@ impl Session {
         self.pump("reply finished", |watch| watch.settled(thread))
     }
 
-    fn show(&mut self, thread: &str, items: usize) -> anyhow::Result<Duration> {
+    fn rest(&mut self) -> anyhow::Result<()> {
         let rested = Instant::now() + REST;
-        self.pump("rest", |_| Instant::now() >= rested)?;
-        self.watch.shown = None;
+        self.pump("rest", |_| Instant::now() >= rested)
+    }
+
+    fn show(&mut self, thread: &str, items: usize) -> anyhow::Result<Duration> {
+        self.rest()?;
+        (self.watch.shown, self.watch.resets) = (None, 0);
         let started = Instant::now();
         self.studio.select_thread(Some(thread.to_string()));
         self.pump("transcript shown", |watch| watch.items(thread) >= items)?;
@@ -276,6 +282,9 @@ fn measure(config: impl Fn() -> StudioConfig, other: String, threads: &[(&'stati
         for _ in 0..RUNS {
             for (name, thread) in threads {
                 again.entry(name).or_default().push(session.show(thread, MESSAGES)?);
+                session.rest()?;
+                let resets = session.watch.resets;
+                ensure!(*name == CLAUDE || resets == 1, "{name}: an unchanged thread is sent {resets} times");
             }
         }
         for (name, _) in threads {

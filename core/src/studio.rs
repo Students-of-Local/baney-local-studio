@@ -2282,10 +2282,11 @@ impl Actor {
         thread
             .and_then(|thread| thread.title.clone())
             .or_else(|| self.store.threads.get(id).and_then(|flags| flags.title.clone()))
-            .or_else(|| self.view(id).and_then(|view| view.state.name.clone()))
+            .or_else(|| thread?.live.as_ref()?.state.name.clone())
             .or_else(|| roster.and_then(|row| row.title.clone()))
             .or_else(|| self.saved.get(id).and_then(|row| row.title.clone()))
-            .or_else(|| self.view(id).and_then(|view| view.transcript.first_user_text()))
+            .or_else(|| self.view(id)?.state.name.clone())
+            .or_else(|| self.view(id)?.transcript.first_user_text())
             .or_else(|| thread.and_then(|thread| thread.prompt.clone()))
             .map(|title| threads::clean_title(&title))
             .filter(|title| !title.is_empty())
@@ -2416,6 +2417,7 @@ impl Actor {
         self.settle_pending(id);
         if let Some(thread) = self.threads.get_mut(id) {
             let left = thread.left.take();
+            self.left.retain(|left| left != id);
             let shown = left.as_ref().map(|left| left.transcript.items())
                 == thread.live.as_ref().map(|live| live.transcript.items());
             if self.watched(id) {
@@ -2496,8 +2498,9 @@ impl Actor {
         self.left.retain(|left| left != id);
         self.left.push_back(id.to_string());
         if self.left.len() > LEFT_KEPT {
-            let oldest = self.left.pop_front().and_then(|oldest| self.threads.get_mut(&oldest));
-            if let Some(thread) = oldest {
+            let oldest = self.left.iter().position(|left| !self.watched(left));
+            let oldest = oldest.and_then(|oldest| self.left.remove(oldest));
+            if let Some(thread) = oldest.and_then(|oldest| self.threads.get_mut(&oldest)) {
                 thread.left = None;
             }
         }
