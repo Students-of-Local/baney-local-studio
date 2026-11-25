@@ -71,17 +71,20 @@ pub fn byo(platform: &str) -> Value {
     json!({
         "state": "byo",
         "next": "byo",
+        "command": "local-studio tunnel setup --relay",
         "template": "local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes",
         "url": CLOUDFLARE_SIGNUP,
         "agentPrompt": AGENT_PROMPT,
-        "message": format!("Every Local Studio tunnel runs on your own free Cloudflare account and a domain you own. Do it yourself with the steps below, or tell a coding agent (Claude Code, Codex): \"{AGENT_PROMPT}\" You make the account and add your domain (step 1). The agent asks which domain to use, runs the rest, and hands you the Cloudflare sign-in."),
+        "message": format!("Every Local Studio tunnel runs on your own free Cloudflare account, or on your tailnet. The simplest is a relay of your own, a small Worker on Cloudflare's free plan, with no domain. Do it yourself with the steps below, or tell a coding agent (Claude Code, Codex): \"{AGENT_PROMPT}\" The agent runs the steps and hands you the Cloudflare sign-in."),
         "plan": [
-            format!("Make a free Cloudflare account ({CLOUDFLARE_SIGNUP}) and add a domain you own to it ({CLOUDFLARE_ADD_DOMAIN}). Cloudflare must run its DNS. Only the person can do this. An agent asks the person which domain it is and uses it in place of YOUR-DOMAIN."),
-            "Run: local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes, with your domain in place of YOUR-DOMAIN. It downloads the pinned cloudflared and answers needs_signin with a cloudflared tunnel login command.",
-            "Run that login command, sign in to Cloudflare in the browser it opens and pick your domain. An agent hands the person this command and waits until they say they signed in.",
-            "Run the setup command again. It creates the tunnel local-studio-<this machine>, its DNS record and a login service, checks the public address, and answers ready with your MCP and phone addresses.",
-            "Check it any time with local-studio tunnel status. local-studio tunnel off removes it from this machine.",
-            "Already have a Tychicus tunnel here? Run local-studio tunnel adopt instead. No domain? local-studio tunnel setup --tailnet keeps Local Studio on your tailnet.",
+            "Relay, no domain needed. Run: local-studio tunnel setup --relay. It needs Node.js 22 or later (needs_node has the link). The first time it answers needs_signin with a wrangler login command.".to_string(),
+            format!("Run that login command and sign in to Cloudflare, or make a free account ({CLOUDFLARE_SIGNUP}), in the browser it opens. An agent hands the person this command and waits until they say they signed in."),
+            "Run the setup command again. It may answer needs_account (run its template with the id of the account the person picks), confirm (that account has a Worker of this name already; the person says whether to replace it) or needs_subdomain (the person opens its link and picks a name), then run setup again. It deploys the Worker, starts a login service, checks the public address, and answers ready with your MCP and phone addresses.".to_string(),
+            format!("Own a domain? A tunnel on it instead: add the domain to your Cloudflare account ({CLOUDFLARE_ADD_DOMAIN}). Cloudflare must run its DNS. Only the person can do this. An agent asks the person which domain it is and uses it in place of YOUR-DOMAIN."),
+            "Run: local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes, with your domain in place of YOUR-DOMAIN. It downloads the pinned cloudflared and answers needs_signin with a cloudflared tunnel login command. Run that command, sign in and pick your domain, the same way as above.".to_string(),
+            "Run the setup command again. It creates the tunnel local-studio-<this machine>, its DNS record and a login service, checks the public address, and answers ready with your MCP and phone addresses.".to_string(),
+            "Only your own devices? local-studio tunnel setup --tailnet keeps Local Studio on your tailnet.".to_string(),
+            "Check it any time with local-studio tunnel status. local-studio tunnel off removes it from this machine. Already have a Tychicus tunnel here? Run local-studio tunnel adopt instead.".to_string(),
         ],
     })
 }
