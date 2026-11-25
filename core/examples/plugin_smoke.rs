@@ -1581,6 +1581,27 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         studio.answer_consent("sheet".to_string(), ConsentAnswer::Cancel);
         let text = sent(harness, root, "after-cancel", &work, "@gantrel")?;
         ensure!(text == "@gantrel", "after a declined install the message became {text:?}");
+        let folder = root.join("gantrel").to_string_lossy().into_owned();
+        let seen = harness.view.other.len();
+        studio.install_plugin("kept".to_string(), folder);
+        harness.pump_until("its sheet is open again", STEP, |view| {
+            view.other[seen..].iter().any(|update| update.starts_with("Consents") && update.contains("\"gantrel\""))
+        })?;
+        studio.answer_consent("kept".to_string(), ConsentAnswer::Install { sensitive: Vec::new() });
+        harness.pump_until("it is installed", STEP, |view| {
+            view.other.iter().any(|update| update.contains("RequestDone { request: \"kept\""))
+        })?;
+        std::fs::write(hang, "")?;
+        studio.install_plugin("again".to_string(), "gantrel".to_string());
+        let text = sent(harness, root, "while-it-updates", &work, "@gantrel");
+        let running = !harness.view.other.iter().any(|update| update.starts_with("RequestFailed again"));
+        std::fs::remove_file(hang)?;
+        let text = text?;
+        ensure!(running, "the update ended before the message was sent");
+        ensure!(text.ends_with("@gantrel"), "an installed plugin's update makes the message {text:?}");
+        harness.pump_until("the update failed", STEP, |view| {
+            view.other.iter().any(|update| update.starts_with("RequestFailed again"))
+        })?;
         Ok(())
     }
 }

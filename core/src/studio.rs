@@ -2877,8 +2877,8 @@ impl Actor {
             return Err("Write a message first.".to_string());
         }
         let at = self.at(id, &message).await;
-        if let Err(error) = self.settled(&at, &message) {
-            if request.is_none() && !again {
+        if let Err(error) = if again { Ok(()) } else { self.settled(&at, &message) } {
+            if request.is_none() {
                 self.mailbox.push(Update::ComposerDraft { thread: id.to_string(), draft: prompt });
             }
             return Err(error);
@@ -3034,7 +3034,9 @@ impl Actor {
             return Ok(());
         }
         let catalog = plugins::Catalog::bundled()?;
-        for entry in installing.iter().filter_map(|id| catalog.entry(id)) {
+        let scan = self.plugins_dir.as_deref().map(plugins::scan);
+        let here = |id: &str| scan.iter().flat_map(|scan| &scan.plugins).any(|plugin| plugin.id == id);
+        for entry in installing.iter().filter_map(|id| catalog.entry(id)).filter(|entry| !here(&entry.id)) {
             let name = entry.name.as_ref().unwrap_or(&entry.id);
             if at.names(message, &entry.id) || at.names(message, name) {
                 return Err(format!("{name} is still installing. Answer its sheet, then send again."));
