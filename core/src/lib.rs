@@ -31,6 +31,8 @@ pub use local_studio_version::{CHANNEL, VERSION};
 
 pub use access::{default_access, model_tier, ModelTier};
 pub use highlight::{highlight, highlight_lines, CodeSegment, SyntaxKind};
+#[doc(hidden)]
+pub use links::open::{link_command, LinkEnv, Platform};
 pub use links::refused_link;
 pub use links::studio::{link_words, outside_link, studio_link, LinkWords, StudioLink};
 pub use model::{

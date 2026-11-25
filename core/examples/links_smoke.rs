@@ -1,3 +1,6 @@
+#[path = "support/links_run.rs"]
+mod links_run;
+
 use local_studio_core::{link_words, outside_link, refused_link, studio_link, LinkWords, StudioLink};
 
 const OPENED: &[&str] =
@@ -201,6 +204,7 @@ fn main() -> anyhow::Result<()> {
     grammar()?;
     words()?;
     outside()?;
+    links_run::run()?;
     println!("PASS links_smoke");
     Ok(())
 }
