@@ -794,9 +794,14 @@ impl At {
     }
 
     fn list(&mut self, query: &str, holds: &str) -> Result<Vec<Mention>, String> {
+        let project = self.project.to_string_lossy().into_owned();
+        self.list_in(Some(&project), query, holds)
+    }
+
+    fn list_in(&mut self, project: Option<&str>, query: &str, holds: &str) -> Result<Vec<Mention>, String> {
         let mut items = Vec::new();
         for _ in 0..20 {
-            items = self.once(Some(self.project.to_string_lossy().into_owned()), query, 0)?;
+            items = self.once(project.map(String::from), query, 0)?;
             if titles(&items).contains(&holds) {
                 break;
             }
@@ -877,7 +882,7 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     let items = at.list("mar", "@marmot")?;
     let trusted = row(MentionKind::Skill, "marmot", "Dig", "project", "");
     smoke.check("and a trusted project's is", items.contains(&trusted));
-    let nowhere = at.once(None, "mar", 0)?;
+    let nowhere = at.list_in(None, "mar", "@marmalade")?;
     let own = titles(&nowhere).contains(&"@marmalade") && !titles(&nowhere).contains(&"@marmot");
     smoke.check("with no project, skills are still listed, and no files", own && files(&nowhere) == 0);
     smoke.check("@kite finds a skill by its text", titles(&at.list("kite", "@outdoors")?) == ["@outdoors"]);
@@ -924,6 +929,26 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     smoke.check("a store that takes too long leaves files alone", only && took < Duration::from_secs(3));
     let again = at.list("zebra", "@zebra-0")?;
     smoke.check("and the next list has skills again", titles(&again).contains(&"@zebra-0"));
+    let few = at.once(Some(at.project.to_string_lossy().into_owned()), "zebra", 4)?;
+    smoke.check("a short list still has files", few.len() == 4 && files(&few) == 2);
+    let found = at.list("stripes", "@okapi-0")?;
+    smoke.check("five skills found by their text", found.len() == 5 && files(&found) == 0);
+    for n in 0..7 {
+        skill(&data.join("skills"), &format!("gantrel-{n}"), "Crates", "")?;
+    }
+    put(&at.project.join("gantrel.txt"), "x")?;
+    let items = at.list("gantrel", "@gantrel-0")?;
+    smoke.check("the plugin of that exact name comes first", items.first() == Some(&plugin));
+    let remote = at.once(Some("@desk/home".to_string()), "mar", 0);
+    let refused = "Searching files works only in Local Studio on ";
+    smoke.check("a project on another machine is refused", remote.is_err_and(|said| said.starts_with(refused)));
+    let index = data.join("skills.sqlite");
+    for name in ["skills.sqlite", "skills.sqlite-wal", "skills.sqlite-shm"] {
+        let _ = std::fs::remove_file(data.join(name));
+    }
+    create_dir_all(index.join("in-the-way")).map_err(|error| error.to_string())?;
+    let items = at.list("gantrel", "@gantrel")?;
+    smoke.check("with no index, plugins and files are still listed", items.len() == 2 && items[0] == plugin);
     Ok(())
 }
 
@@ -962,7 +987,6 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     let scroll = format!("{}\n\n## Quill\nsee words\n\n## Quill++\nplus words\n", "山".repeat(3000));
     skill(&own, "scroll", "A scroll", &scroll)?;
     skill(&own, "wall", "A wall", &"brick ".repeat(2000))?;
-    mentions(smoke)?;
     words(smoke)?;
     places(smoke)?;
     named(smoke)?;
@@ -976,7 +1000,8 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     links(smoke, &own)?;
     served(smoke, &own)?;
     index(smoke)?;
-    many(smoke)
+    many(smoke)?;
+    mentions(smoke)
 }
 
 fn main() -> ExitCode {
