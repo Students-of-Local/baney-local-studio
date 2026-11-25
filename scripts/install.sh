@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=baney75/local-studio
+repo=Students-of-Local/baney-local-studio
 nightly_key=dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4QjIxNzIyMDY2NkJFNkMKUldSc3ZtWUdJaGV5ZU1zUnB3bi9heW1vdFlnMllXZG9LOTBnTGhNL0VLQ21OdGRsN1dHcEx5SWkK
 stable_key=dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1NkMxREQ1MDdBNzBDNzUKUldSMURLY0gxUjFzRlF0L0hnZEdRanI0WHpYTmlzWml4VlB4cCtKY1JDNU5RZ241M0k4Um9RM3MK
 

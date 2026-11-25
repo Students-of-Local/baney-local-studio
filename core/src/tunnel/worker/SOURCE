@@ -1,4 +1,4 @@
-repo https://github.com/baney75/local-studio-tunnels relay/dist
+repo https://github.com/Students-of-Local/local-studio-tunnels relay/dist
 commit 48b2d361dc3be4f16e9071fba9cacc305e6353f1
 636992af0243d19fcd6802e60ebd7ec4e9ceb3c0bb308fa1a09ee123c34ce117 relay.js
 c020a9b02ec0d5a271dfef8de77b631496eab63864cb7958bae29c56394f9b71 wrangler.jsonc

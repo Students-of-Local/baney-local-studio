@@ -121,7 +121,7 @@ def run-job [id: string, job: record, root: string, sha: string, log: string, ha
 
 def main [
     pr: int
-    --repo: string = "baney75/local-studio"
+    --repo: string = "Students-of-Local/baney-local-studio"
     --post
 ] {
     let owner = ($repo | split row "/" | first)
