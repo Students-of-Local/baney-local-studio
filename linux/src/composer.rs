@@ -429,19 +429,6 @@ impl Composer {
         self.view.buffer().set_text(text);
     }
 
-    pub fn set_draft(&self, draft: PromptDraft) {
-        self.set_text(&draft.text);
-        self.extras.restore(draft.images, draft.files);
-    }
-
-    pub fn restore(&self, draft: &PromptDraft) -> bool {
-        let free = self.text().trim().is_empty() && !self.extras.has_attachments();
-        if free {
-            self.set_draft(draft.clone());
-        }
-        free
-    }
-
     pub fn leave(&self) -> Option<Unsent> {
         let text = self.text();
         let (images, files, contexts) = self.extras.take();

@@ -20,7 +20,7 @@ env HOME="$dir/home" SHELL=/bin/bash LOCAL_STUDIO_DATA_DIR="$dir/data" EUKHE_COD
   timeout 600 xvfb-run -a -s '-screen 0 1600x1000x24' dbus-run-session -- "$app" --smoke > "$dir/log" 2>&1
 code=$?
 steps=(
-  'ok   a rejected send removed its bubble and returned its text and file to the composer'
+  'ok   a rejected send came back before what was typed since, text and files'
   '     handed back true, taken back true, left a start true true'
   '     forked true true, followed true'
 )

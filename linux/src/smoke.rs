@@ -217,16 +217,21 @@ fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
     let started = |draft: &str| {
         app.apply(vec![Update::ThreadStarted { draft: draft.to_string(), thread: id.clone() }]);
     };
-    app.state.borrow_mut().pending.push(PendingSend {
-        request: MISSING.to_string(),
-        thread: id.clone(),
-        text: draft("a.txt").text,
-        draft: draft("a.txt"),
-        queued: false,
-        baseline: 0,
-        queue_baseline: 0,
-    });
-    app.apply(vec![Update::RequestFailed { request: MISSING.to_string(), message: REJECTED.to_string() }]);
+    let refused = |thread: &str, text: &str| {
+        app.state.borrow_mut().pending.push(PendingSend {
+            request: MISSING.to_string(),
+            thread: thread.to_string(),
+            text: draft(text).text,
+            draft: draft(text),
+            queued: false,
+            baseline: 0,
+            queue_baseline: 0,
+        });
+        app.apply(vec![Update::RequestFailed { request: MISSING.to_string(), message: REJECTED.to_string() }]);
+    };
+    refused(MISSING, "gone.txt");
+    let gone = app.composer.tools.kept() == ["returned gone.txt"];
+    refused(&id, "a.txt");
     returned("b.txt");
     let away = holds("");
     app.select_thread(thread);
@@ -272,7 +277,7 @@ fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
     let merged = away && both && before && files == ["a.txt", "b.txt", "c.txt"];
     println!("     handed back {merged}, taken back {taken}, left a start {stayed} {waits}");
     println!("     forked {forked} {still}, followed {followed}");
-    merged && taken && stayed && waits && forked && still && followed
+    gone && merged && taken && stayed && waits && forked && still && followed
 }
 
 fn press(widget: &gtk::Widget, tooltip: &str) -> bool {
@@ -545,7 +550,7 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
             app.composer.extras.restore(vec![], vec!["smoke.txt".to_string()]);
             app.composer.submit(app);
             app.composer.set_text(KEPT);
-            app.composer.submit(app);
+            app.composer.extras.restore(vec![], vec!["kept.txt".to_string()]);
             if !app.timeline.local_texts().iter().any(|text| text == REJECTED) {
                 finish(app, phase, failed, false, "the rejected send was not drawn when it was sent");
                 return;
@@ -557,13 +562,13 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
                 return;
             }
             let (_, files, _) = app.composer.extras.take();
-            let restored = app.composer.text() == REJECTED && app.timeline.local_texts().is_empty();
-            if !restored || files != ["smoke.txt"] || app.composer.tools.kept() != [KEPT] {
+            let text = app.composer.text();
+            let restored = text == format!("{REJECTED}\n\n{KEPT}") && app.timeline.local_texts().is_empty();
+            if !restored || files != ["smoke.txt", "kept.txt"] {
                 finish(app, phase, failed, false, "a rejected send did not remove its bubble and restore the composer");
                 return;
             }
-            println!("ok   a rejected send removed its bubble and returned its text and file to the composer");
-            println!("ok   a second one, with the composer taken, is in the stash");
+            println!("ok   a rejected send came back before what was typed since, text and files");
             app.composer.set_text("");
             let thread = app.state.borrow().threads.first().map(|row| row.id.clone());
             app.select_thread(thread.clone());

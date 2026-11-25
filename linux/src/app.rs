@@ -1090,15 +1090,15 @@ impl App {
         };
         self.render_pending();
         let here = self.state.borrow().selected.as_deref() == Some(pending.thread.as_str());
-        let back = here && self.composer.restore(&pending.draft);
         let gone = self.state.borrow().row(&pending.thread).is_none();
-        let kept = if back {
+        let kept = if here {
+            self.hand_back(pending.thread, pending.draft);
             ""
-        } else if here || gone {
+        } else if gone {
             self.composer.tools.keep(&pending.draft.text);
             " Its text is in the stash menu."
         } else {
-            self.park(Some(pending.thread), pending.draft.into());
+            self.hand_back(pending.thread, pending.draft);
             " It is back in its thread's composer."
         };
         self.toast(&format!("Could not send the message: {message}{kept}"));
