@@ -916,7 +916,7 @@ impl App {
         self.requests.borrow_mut().remove(request)
     }
 
-    pub fn send(self: &Rc<Self>, prompt: PromptDraft, draft: String) {
+    pub fn send(self: &Rc<Self>, prompt: PromptDraft) {
         let mut state = self.state.borrow_mut();
         if let Some(thread) = state.selected.clone() {
             let busy = state.info.as_ref().is_some_and(|info| info.busy);
@@ -930,8 +930,7 @@ impl App {
                 thread: thread.clone(),
                 baseline: self.timeline.user_count(&text),
                 text,
-                draft,
-                images: u32::try_from(prompt.images.len()).unwrap_or(u32::MAX),
+                draft: prompt.clone(),
                 queued: busy,
                 queue_baseline,
             });
@@ -991,7 +990,7 @@ impl App {
                     created_at: None,
                     kind: ItemKind::User {
                         text: pending.text.clone(),
-                        images: pending.images,
+                        images: u32::try_from(pending.draft.images.len()).unwrap_or(u32::MAX),
                         entry: None,
                         thumbnails: Vec::new(),
                     },
@@ -1009,12 +1008,13 @@ impl App {
             state.pending.remove(index)
         };
         self.render_pending();
-        self.toast(&format!("Could not send the message: {message}"));
-        if self.state.borrow().selected.as_deref() == Some(pending.thread.as_str())
-            && self.composer.text().trim().is_empty()
-        {
-            self.composer.set_text(&pending.draft);
+        let here = self.state.borrow().selected.as_deref() == Some(pending.thread.as_str());
+        let back = here && self.composer.restore(&pending.draft);
+        if !back {
+            self.composer.tools.keep(&pending.draft.text);
         }
+        let kept = if back { "" } else { " Its text is in the stash menu." };
+        self.toast(&format!("Could not send the message: {message}{kept}"));
         self.render(Dirty { composer: true, ..Dirty::default() });
         true
     }

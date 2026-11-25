@@ -144,9 +144,8 @@ pub fn stage(app: &Rc<App>, scene: &str) {
                 thread: FOCUSED.to_string(),
                 baseline: app.timeline.user_count(&text),
                 queue_baseline: 0,
-                draft: text.clone(),
+                draft: local_studio_core::PromptDraft { text: text.clone(), images: vec![], files: vec![] },
                 text,
-                images: 0,
                 queued: live,
             };
             app.state.borrow_mut().pending.push(pending);
