@@ -52,6 +52,12 @@ const BIG: usize = 3_201 * 65_521;
 const BLOCK: u32 = 65_521;
 const RELAY_TAKES: usize = 32 << 20;
 const FRAME_HEAD: usize = 5;
+const FRAME_COST: usize = 128;
+const MAX_SENDING: usize = 16 << 20;
+const MAX_CHARGE: usize = 12 << 20;
+const SYNC_EVERY: usize = 1 << 20;
+const BODY_ROOM: usize = 32 << 20;
+const SYNCS: u32 = 1 << 31;
 
 fn limits(most: usize) -> WebSocketConfig {
     WebSocketConfig::default().max_message_size(Some(most)).max_frame_size(Some(most))
@@ -116,9 +122,43 @@ impl Client {
 
 type Sender = SplitSink<WebSocketStream<TcpStream>, Message>;
 
+#[derive(Default)]
+struct Uplink {
+    waiting: usize,
+    sync: Option<(u32, usize)>,
+    syncs: u32,
+    withheld: bool,
+}
+
+impl Uplink {
+    fn next(&mut self) -> Option<u32> {
+        if self.sync.is_some() || self.waiting < SYNC_EVERY {
+            return None;
+        }
+        self.syncs += 1;
+        let id = SYNCS + self.syncs;
+        self.sync = Some((id, self.waiting));
+        Some(id)
+    }
+
+    fn settle(&mut self, got: &Message) -> Option<()> {
+        let (id, covers) = self.sync.filter(|_| !self.withheld)?;
+        let frame: Value = serde_json::from_str(got.to_text().ok()?).ok()?;
+        (frame["id"] == id && frame["v"] == 1).then(|| {
+            self.waiting -= covers;
+            self.sync = None;
+        })
+    }
+}
+
+fn framed(kind: u8, id: u32, payload: &[u8]) -> Message {
+    Message::binary([&[kind][..], &id.to_be_bytes(), payload].concat())
+}
+
 #[derive(Clone)]
 struct Link {
     client: u16,
+    uplink: Arc<Mutex<Uplink>>,
     frames: Arc<Mutex<Vec<Message>>>,
     changed: Arc<Notify>,
     paused: Arc<AtomicBool>,
@@ -179,6 +219,7 @@ impl Link {
         let (sink, mut stream) = socket.split();
         let link = Self {
             client,
+            uplink: Arc::default(),
             frames: Arc::default(),
             changed: Arc::default(),
             paused: Arc::default(),
@@ -194,6 +235,10 @@ impl Link {
                 let Some(Ok(got)) = stream.next().await else { return };
                 writeln!(lock(&log), "{} bytes {}", got.len(), got.to_text().unwrap_or_default()).ok();
                 let (ping, closed) = (is_ping(&got), got.is_close());
+                let settled = lock(&seen.uplink).settle(&got).is_some();
+                if settled {
+                    seen.sync().await.ok();
+                }
                 lock(&seen.frames).push(got);
                 seen.changed.notify_waiters();
                 if ping && pongs {
@@ -217,6 +262,19 @@ impl Link {
 
     async fn raw(&self, message: Message) -> anyhow::Result<()> {
         Ok(self.sink.lock().await.as_mut().context("the link is cut")?.send(message).await?)
+    }
+
+    async fn together(&self, messages: impl IntoIterator<Item = Message>) -> anyhow::Result<()> {
+        let mut sink = self.sink.lock().await;
+        let sink = sink.as_mut().context("the link is cut")?;
+        for message in messages {
+            sink.feed(message).await?;
+        }
+        Ok(sink.flush().await?)
+    }
+
+    async fn arrived(&self) -> anyhow::Result<()> {
+        self.until("what it was sent", |_| (lock(&self.uplink).waiting < SYNC_EVERY).then_some(())).await
     }
 
     async fn open_stream(&self, mut frame: Value, more: &[(&str, &str)]) -> anyhow::Result<()> {
@@ -246,10 +304,25 @@ impl Link {
     }
 
     async fn message(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
-        let mut frame = vec![kind];
-        frame.extend(id.to_be_bytes());
-        frame.extend(payload);
-        self.raw(Message::binary(frame)).await
+        let frame = framed(kind, id, payload);
+        if kind == 1 {
+            return self.raw(frame).await;
+        }
+        let (ahead, charge) = (lock(&self.uplink).waiting, MAX_CHARGE.min(frame.len() + FRAME_COST));
+        if ahead + charge > MAX_SENDING {
+            self.send(&json!({ "v": 1, "t": "cancel", "id": id, "reason": "busy" })).await?;
+            bail!("the relay cut socket {id} as busy");
+        }
+        self.raw(frame).await?;
+        lock(&self.uplink).waiting += charge;
+        self.sync().await
+    }
+
+    async fn sync(&self) -> anyhow::Result<()> {
+        let next = lock(&self.uplink).next();
+        let Some(id) = next else { return Ok(()) };
+        self.open_stream(json!({ "id": id, "method": "GET", "path": "/_relay/sync", "body": false, "ws": false }), &[])
+            .await
     }
 
     async fn echo(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
@@ -258,10 +331,8 @@ impl Link {
     }
 
     async fn echoed(&self, id: u32, kind: u8, payload: &[u8]) -> anyhow::Result<()> {
-        let mut wanted = vec![kind];
-        wanted.extend(id.to_be_bytes());
-        wanted.extend(payload);
-        self.until("the echo", |frames| frames.contains(&Message::binary(wanted.clone())).then_some(())).await
+        let wanted = framed(kind, id, payload);
+        self.until("the echo", |frames| frames.contains(&wanted).then_some(())).await
     }
 
     async fn ws_close(&self, id: u32, code: u16, reason: &str) -> anyhow::Result<()> {
@@ -713,6 +784,18 @@ async fn replaced(smoke: &Smoke, message: Message) -> anyhow::Result<()> {
     smoke.quiet(NO_REDIAL).await
 }
 
+async fn silent(smoke: &Smoke) -> anyhow::Result<()> {
+    let (mut client, link) = smoke.connect(LONG_PING).await?;
+    let close = CloseFrame { code: CloseCode::from(4001), reason: "silent".into() };
+    link.raw(Message::Close(Some(close))).await?;
+    let why = client.disconnected(&smoke.key).await?;
+    ensure!(why.contains("4001"), "Disconnected said {why}");
+    let link = Link::open(smoke, smoke.dial(QUICK).await?.stream, true).await?;
+    link.send(&hello(1)).await?;
+    client.connected().await?;
+    link.get(1, "GET", "/mcp").await?.is(200, "ok mcp")
+}
+
 async fn c6_outdated(smoke: &Smoke) -> anyhow::Result<()> {
     let mut client = smoke.client(LONG_PING);
     let link = Link::open(smoke, smoke.dial(QUICK).await?.stream, true).await?;
@@ -1151,6 +1234,27 @@ async fn h15_sync(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn h16_cancel_at_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let ids = [1u32, 2];
+    let fill = [BODY_ROOM / 2, BODY_ROOM / 2 - 1024];
+    for (id, bytes) in ids.into_iter().zip(fill) {
+        link.req(id, "POST", &format!("/mcp?stall=edge{id}"), true).await?;
+        link.data(id, &vec![7; bytes]).await?;
+    }
+    link.get(3, "GET", "/v1/health").await?.is(200, "ok serve")?;
+    ensure!(ids.map(|id| link.peek(id).errors) == [0, 0], "the room was too small for the fill");
+    let cancel = json!({ "v": 1, "t": "cancel", "id": ids[0], "reason": "client" });
+    let more = vec![7; 4096];
+    link.together([Message::text(cancel.to_string()), framed(1, ids[1], &more)]).await?;
+    link.get(4, "GET", "/v1/health").await?.is(200, "ok serve")?;
+    let errors = ids.map(|id| link.peek(id).errors);
+    ensure!(errors == [0, 0], "a cancel at the cap ended a live stream: errors {errors:?}");
+    smoke.origin.go.notify_waiters();
+    smoke.origin.uploaded("edge1", &Upload::Broken).await?;
+    link.end(ids[1]).await?;
+    link.answer(ids[1]).await?.is(200, &(fill[1] + more.len()).to_string())
+}
+
 async fn w1_echo(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     let more = [("sec-websocket-protocol", "a, b"), ("sec-websocket-extensions", "permessage-deflate")];
     let answer = link.ws(1, "/v1/ws?x=1", &more).await?;
@@ -1190,11 +1294,31 @@ async fn w3_close_codes(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn w4_large(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+async fn w4_large(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     link.socket(1, "/v1/ws").await?;
-    link.echo(1, 3, &noise(17 << 20)).await?;
-    link.echo(1, 2, &vec![b'x'; 17 << 20]).await?;
+    link.echo(1, 2, b"first").await?;
     let most = RELAY_TAKES - FRAME_HEAD;
+    for (kind, payload) in [(3, noise(17 << 20)), (2, vec![b'x'; 17 << 20]), (3, noise(u32::try_from(most)?))] {
+        link.arrived().await?;
+        link.echo(1, kind, &payload).await?;
+    }
+    link.socket(4, "/v1/ws").await?;
+    link.arrived().await?;
+    link.message(4, 3, &noise(u32::try_from(RELAY_TAKES)?)).await?;
+    link.ws_close(4, 1009, "message too big").await?;
+    link.arrived().await?;
+    lock(&link.uplink).withheld = true;
+    link.socket(5, "/v1/ws").await?;
+    link.echo(5, 2, b"1").await?;
+    let large = noise(17 << 20);
+    link.echo(5, 3, &large).await?;
+    link.echo(1, 2, b"room for small ones").await?;
+    let cut = link.message(5, 3, &large).await;
+    ensure!(cut.is_err(), "a second 17 MiB message was carried while the first waited");
+    let one = |origin: &Origin| origin.sockets.load(Ordering::Acquire) == 1;
+    smoke.origin.until("the cut socket close", QUICK, one).await?;
+    link.quiet(5).await?;
+    link.echo(1, 2, b"small ones still pass").await?;
     link.socket(2, &format!("/v1/ws?send={most}")).await?;
     let whole =
         |got: &Message| got.len() == RELAY_TAKES && got.is_binary() && got.clone().into_data()[..5] == [3, 0, 0, 0, 2];
@@ -1229,7 +1353,9 @@ async fn w7_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
         for id in [first, second] {
             link.socket(id, "/v1/ws?stall").await?;
         }
+        link.arrived().await?;
         link.message(first, 3, &large).await?;
+        link.arrived().await?;
         if closing {
             let close = json!({ "v": 1, "t": "ws_close", "id": first, "code": 1000, "reason": "" });
             link.send(&close).await?;
@@ -1270,6 +1396,7 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     step("C4 replaced frame ends Replaced", replaced(smoke, frame)).await?;
     let close = CloseFrame { code: CloseCode::from(4000), reason: "replaced".into() };
     step("C5 close 4000 alone ends Replaced", replaced(smoke, Message::Close(Some(close)))).await?;
+    step("C5 close 4001 redials", silent(smoke)).await?;
     step("C6 hello v2 closes and ends Outdated", c6_outdated(smoke)).await?;
     step("C7 no pong: Disconnected and redial within 2 s", c7_no_pong(smoke)).await?;
     step("C8 no hello: redial after 10 s", c8_no_hello(smoke)).await?;
@@ -1291,6 +1418,7 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     linked("H13 framing", smoke, h13_framing).await?;
     step("H14 a body of another length", h14_lengths(smoke)).await?;
     linked("H15 a full queue leaves room for a 404", smoke, h15_sync).await?;
+    linked("H16 a cancel at the cap frees its room at once", smoke, h16_cancel_at_cap).await?;
     linked("W1 messages and the subprotocol", smoke, w1_echo).await?;
     linked("W2 a refused upgrade", smoke, w2_refused).await?;
     linked("W3 close codes both ways", smoke, w3_close_codes).await?;
