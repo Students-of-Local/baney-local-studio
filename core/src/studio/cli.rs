@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eukhe_types::daemon::SessionEvent;
@@ -16,7 +16,7 @@ use crate::model::{
     NotificationKind, PromptDraft, Update,
 };
 use crate::session::LiveState;
-use crate::store::{HeldImage, HeldPrompt};
+use crate::store::{HeldImage, HeldPrompt, ThreadFlags};
 use crate::transcript::Transcript;
 
 const IDLE_KILL: Duration = Duration::from_secs(600);
@@ -122,6 +122,27 @@ pub(super) fn name(harness: Harness) -> &'static str {
 fn session_gone(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     ["no rollout", "not found", "no such thread", "unknown thread"].iter().any(|words| lower.contains(words))
+}
+
+struct Session {
+    native: String,
+    resume: bool,
+    fork: Option<String>,
+}
+
+fn cli_session(flags: &ThreadFlags, cwd: &str) -> Session {
+    let native = flags.native_session.clone().unwrap_or_default();
+    let account = flags.account.as_deref().map(Path::new);
+    let exists = |session: &str| harness::claude_session_exists(account, cwd, session);
+    let origin = flags.fork_of.clone().filter(|_| !flags.forked);
+    let (resume, fork) = match flags.harness {
+        Harness::ClaudeCode if exists(&native) => (true, None),
+        Harness::ClaudeCode => (false, origin.filter(|origin| exists(origin))),
+        Harness::Codex if native.is_empty() => (false, origin),
+        Harness::Codex => (true, None),
+        Harness::Eukhe => (false, None),
+    };
+    Session { native, resume, fork }
 }
 
 pub(super) fn unsupported(harness: Harness, what: &str) -> String {
@@ -247,7 +268,8 @@ impl Actor {
             if let Some(harness) = self.harness(id) {
                 let cwd = self.cli_cwd(id);
                 let flags = self.store.flags(id);
-                let native = flags.native_session.unwrap_or_default();
+                let session = cli_session(&flags, &cwd);
+                let native = session.fork.unwrap_or(session.native);
                 let account = flags.account.map(PathBuf::from);
                 self.generation += 1;
                 let token = self.generation;
@@ -298,20 +320,21 @@ impl Actor {
         if let Some(mut stale) = self.drivers.remove(id) {
             stale.driver.kill();
         }
+        self.cli_forked(id);
         let flags = self.store.flags(id);
         let cwd = self.cli_cwd(id);
-        let native = flags.native_session.clone().unwrap_or_default();
+        let Session { native, resume, fork } = cli_session(&flags, &cwd);
+        if harness == Harness::ClaudeCode && flags.fork_of.is_some() && !resume && fork.is_none() {
+            let lost = "Claude Code no longer has this thread's session; it continues in a new one.".to_string();
+            self.mailbox.notice(NoticeLevel::Warning, lost);
+        }
         let account = flags.account.as_deref().map(PathBuf::from);
-        let resume = match harness {
-            Harness::ClaudeCode => harness::claude_session_exists(account.as_deref(), &cwd, &native),
-            Harness::Codex => !native.is_empty(),
-            Harness::Eukhe => false,
-        };
         let configured = harness::trust::has_config(harness, &cwd);
         let launch = Launch {
             harness,
             native,
             resume,
+            fork,
             cwd: cwd.clone(),
             model: flags.model.clone(),
             effort: flags.thinking_level.clone(),
@@ -331,6 +354,15 @@ impl Actor {
             self.cli_launch(id, opening);
         }
         Ok(())
+    }
+
+    fn cli_forked(&mut self, id: &str) {
+        let flags = self.store.flags(id);
+        let pending = flags.harness == Harness::ClaudeCode && flags.fork_of.is_some() && !flags.forked;
+        if pending && cli_session(&flags, &self.cli_cwd(id)).resume {
+            self.store.update(id, |flags| flags.forked = true);
+            self.save();
+        }
     }
 
     fn cli_trusted(&self, cwd: &str) -> bool {
@@ -404,8 +436,12 @@ impl Actor {
         let task = tokio::spawn(async move {
             let opened = Driver::open(first.clone(), Sink::new(&thread, generation, sender.clone())).await;
             let (generation, result, lost) = match opened {
-                Err(error) if first.harness == Harness::Codex && first.resume && session_gone(&error) => {
-                    let fresh = Launch { resume: false, native: String::new(), ..first };
+                Err(error)
+                    if first.harness == Harness::Codex
+                        && (first.resume || first.fork.is_some())
+                        && session_gone(&error) =>
+                {
+                    let fresh = Launch { resume: false, native: String::new(), fork: None, ..first };
                     let sink = Sink::new(&thread, generation + 1, sender.clone());
                     (generation + 1, Driver::open(fresh, sink).await, Some(error))
                 }
@@ -445,10 +481,13 @@ impl Actor {
         let flags = self.store.flags(id);
         if flags.native_session.as_deref() != Some(opened.native.as_str()) {
             let native = opened.native.clone();
-            self.store.update(id, |flags| flags.native_session = Some(native));
+            self.store.update(id, |flags| {
+                flags.native_session = Some(native);
+                flags.forked = flags.fork_of.is_some();
+            });
             self.save();
         }
-        if self.threads.get(id).is_none_or(|thread| thread.live.is_none()) || launch.resume {
+        if self.threads.get(id).is_none_or(|thread| thread.live.is_none()) || launch.resume || flags.fork_of.is_some() {
             self.cli_live(id, &opened.history);
         }
         if let Some(note) = note {
@@ -1059,6 +1098,7 @@ impl Actor {
             thread.stopping = None;
         }
         self.answered(id);
+        self.cli_forked(id);
         self.cli_restart_due(id);
         if let Some(cli) = self.drivers.get(id).filter(|cli| cli.restart && cli.unanswered > 0) {
             self.later(SETTLE, Command::CliSettle { thread: id.to_string(), epoch: cli.epoch });
@@ -1157,7 +1197,8 @@ impl Actor {
             return Limited::Exhausted(first);
         };
         let cwd = self.cli_cwd(id);
-        let native = flags.native_session.unwrap_or_default();
+        let session = cli_session(&flags, &cwd);
+        let native = session.fork.unwrap_or(session.native);
         if let Err(error) = accounts::carry(harness, &from, &to, &cwd, &native) {
             self.mailbox.notice(
                 NoticeLevel::Warning,

@@ -261,7 +261,7 @@ fn at_home() -> bool {
 }
 
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
-    if matches!(method, "thread/start" | "thread/resume") {
+    if matches!(method, "thread/start" | "thread/resume" | "thread/fork") {
         *shared.skills.lock().unwrap_or_else(PoisonError::into_inner) =
             params["config"]["mcp_servers"]["local-studio-skills"].clone();
         let projects = params["config"]["projects"].as_object().cloned().unwrap_or_default();
@@ -298,7 +298,22 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
         }
         "thread/resume" => {
             pause(RESUME_DELAY);
-            shared.respond(id, &shared.thread(&params["threadId"]));
+            let fork = params["threadId"].as_str().filter(|thread| thread.starts_with("fake-fork-"));
+            if fork.and_then(Shared::store).is_some_and(|file| !file.exists()) {
+                shared.refuse(id, "no rollout found for this thread");
+            } else {
+                shared.respond(id, &shared.thread(&params["threadId"]));
+            }
+        }
+        "thread/fork" => {
+            let fork = format!("fake-fork-{}", std::process::id());
+            let files = params["threadId"].as_str().and_then(Shared::store).zip(Shared::store(&fork));
+            let copied = files.and_then(|(origin, file)| std::fs::copy(origin, file).ok());
+            if copied.is_some() {
+                shared.respond(id, &shared.thread(&json!(fork)));
+            } else {
+                shared.refuse(id, "no rollout found for this thread");
+            }
         }
         "thread/read" => shared.respond(id, &shared.thread(&params["threadId"])),
         "thread/compact/start" => {

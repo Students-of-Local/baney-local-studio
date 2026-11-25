@@ -14,7 +14,7 @@ use local_studio_core::{
     NotificationKind, PromptDraft, Settings, SkillDraft, SkillFile, Studio, StudioConfig, ThreadSettings, TranscriptOp,
     Update, Waker, WorktreeChoice,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 #[allow(dead_code)]
 #[path = "support/harness.rs"]
@@ -1545,6 +1545,135 @@ fn reopens_while_programs_start(config: &StudioConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct Origin {
+    thread: &'static str,
+    flags: Value,
+    file: PathBuf,
+    line: Value,
+}
+
+fn origins(root: &Path) -> anyhow::Result<Vec<Origin>> {
+    let (home, cwd) = (root.join("home").canonicalize()?, root.join("work").canonicalize()?);
+    let cwd = cwd.to_string_lossy().into_owned();
+    let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let claude = |account: &str, name: &str| home.join(account).join("projects").join(&escaped).join(name);
+    let message =
+        json!({ "id": "msg-origin", "role": "assistant", "content": [{ "type": "text", "text": "from elsewhere" }] });
+    let turn = json!({ "id": "turn-origin", "items": [{ "id": "item-origin", "type": "agentMessage", "text": "from elsewhere" }] });
+    let said = json!({ "type": "assistant", "message": message });
+    let limited = home.join(".claude-a").to_string_lossy().into_owned();
+    let flags =
+        |harness: &str, fork: &str| json!({ "harness": harness, "forkOf": fork, "cwd": cwd, "access": "fullAccess" });
+    let mut other = flags("claudeCode", "origin-limited");
+    other["account"] = json!(limited);
+    let own = |mut flags: Value, native: &str| {
+        flags["nativeSession"] = json!(native);
+        flags
+    };
+    let rollout = home.join(".codex/sessions/2026/11/21/rollout-2026-11-21T00-00-00-origin-codex.jsonl");
+    Ok(vec![
+        Origin {
+            thread: "fork-claude",
+            flags: own(flags("claudeCode", "origin-claude"), "fork-claude"),
+            file: claude(".claude", "origin-claude.jsonl"),
+            line: said.clone(),
+        },
+        Origin { thread: "fork-codex", flags: flags("codex", "origin-codex"), file: rollout, line: turn },
+        Origin {
+            thread: "fork-limited",
+            flags: own(other, "fork-limited"),
+            file: claude(".claude-a", "origin-limited.jsonl"),
+            line: said,
+        },
+    ])
+}
+
+fn forks(config: &StudioConfig, root: &Path) -> anyhow::Result<Vec<String>> {
+    let origins = origins(root)?;
+    let path = root.join("data/state.json");
+    let mut state: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    for origin in &origins {
+        state["threads"][origin.thread] = origin.flags.clone();
+        std::fs::create_dir_all(origin.file.parent().context("session folder")?)?;
+        std::fs::write(&origin.file, format!("{}\n", origin.line))?;
+    }
+    std::fs::write(&path, serde_json::to_vec(&state)?)?;
+    let (first, second) = (root.join("home/.claude-a").canonicalize()?, root.join("home/.claude-b").canonicalize()?);
+    for dir in [&first, &second] {
+        std::fs::remove_file(dir.join("limited")).ok();
+        unpark(root, dir)?;
+    }
+    std::fs::write(first.join("limited"), "")?;
+    let mut misses = Vec::new();
+    for turn in ["limit one", "limit two"] {
+        let watch = opened(config, |run| {
+            for origin in &origins {
+                let name = origin.thread;
+                run.shown(name, name)?;
+                run.check(&format!("{name}: the other session's transcript is shown before {turn:?}"), |watch| {
+                    watch.replied("from elsewhere").is_some()
+                });
+                run.send(&format!("{turn} {name}"));
+                run.check(&format!("{name}: {turn:?} is answered with the other session's transcript kept"), |watch| {
+                    watch.replied(&format!("reply to {turn} {name}")).is_some()
+                        && watch.replied("from elsewhere").is_some()
+                        && (turn == "limit one" || watch.replied(&format!("reply to limit one {name}")).is_some())
+                        && !watch.busy
+                });
+                if std::fs::read_to_string(&origin.file)? == format!("{}\n", origin.line) {
+                    println!("ok   {name}: the other session's file is unchanged");
+                } else {
+                    run.watch.miss(format!("{name}: the other session's file was written"));
+                }
+            }
+            Ok(())
+        })?;
+        misses.extend(watch.misses);
+    }
+    let moved = thread_flag(root, "fork-limited", "account");
+    if moved.as_deref() != Some(second.to_string_lossy().as_ref()) {
+        misses.push(format!("fork-limited: expected the second account, got {moved:?}"));
+    }
+    misses.extend(lost_forks(config, root, &origins)?);
+    Ok(misses)
+}
+
+fn lost_forks(config: &StudioConfig, root: &Path, origins: &[Origin]) -> anyhow::Result<Vec<String>> {
+    let mut misses = Vec::new();
+    for origin in origins.iter().filter(|origin| origin.thread != "fork-limited") {
+        let name = origin.thread;
+        let native = thread_flag(root, name, "nativeSession").context("the fork has no session of its own")?;
+        let own = origin.file.with_file_name(format!("{native}.jsonl"));
+        let own = if own.exists() {
+            own
+        } else {
+            origin.file.with_file_name(format!("rollout-2026-11-21T00-00-00-{native}.jsonl"))
+        };
+        std::fs::remove_file(&own).with_context(|| format!("remove {}", own.display()))?;
+        if name == "fork-codex" {
+            std::fs::remove_file(&origin.file)?;
+        }
+        let watch = opened(config, |run| {
+            run.focus(name);
+            run.send(&format!("again {name}"));
+            run.check(&format!("{name}: a message after its copy is gone is answered in a new session"), |watch| {
+                watch.replied(&format!("reply to again {name}")).is_some() && !watch.busy
+            });
+            if run.watch.replied("from elsewhere").is_some() {
+                run.watch.miss(format!("{name}: the other session came back after its copy was lost"));
+            }
+            if run.watch.warnings.iter().any(|text| text.contains("continues in a new")) {
+                println!("ok   {name}: the lost copy is mentioned");
+            } else {
+                run.watch.miss(format!("{name}: no warning that its copy is gone: {:?}", run.watch.warnings));
+            }
+            Ok(())
+        })?;
+        misses.extend(watch.misses);
+    }
+    Ok(misses)
+}
+
 fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
@@ -1646,7 +1775,7 @@ fn main() -> anyhow::Result<()> {
         if !watch.warnings.iter().any(|text| text.starts_with("Could not save the Codex model list")) {
             watch.miss("the list that could not be saved is not mentioned".to_string());
         }
-        misses.extend(watch.misses.into_iter().chain(skill_scenarios(&config, &root)?));
+        misses.extend(watch.misses.into_iter().chain(skill_scenarios(&config, &root)?).chain(forks(&config, &root)?));
         Ok(())
     });
     let stopped = stop_daemon(&socket);

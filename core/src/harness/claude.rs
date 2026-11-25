@@ -79,6 +79,12 @@ fn offered(skills: &Value) -> [String; 4] {
     ["--mcp-config".to_string(), servers, "--allowedTools".to_string(), tools]
 }
 
+fn session(launch: &Launch) -> Vec<&str> {
+    let own = [if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()];
+    let origin = launch.fork.iter().flat_map(|origin| ["--resume", origin.as_str(), "--fork-session"]);
+    origin.chain(own).collect()
+}
+
 impl Claude {
     pub(crate) fn spawn(launch: &Launch, sink: Sink) -> Result<Self, String> {
         let binary = program("LOCAL_STUDIO_CLAUDE_BIN", "claude");
@@ -109,7 +115,7 @@ impl Claude {
             command.args(["--setting-sources", "user"]);
         }
         command.args(launch.skills.iter().filter(|_| !Path::new(MANAGED).exists()).flat_map(offered));
-        command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
+        command.args(session(launch));
         if let Some(account) = &launch.account {
             command.env("CLAUDE_CONFIG_DIR", account);
         }
