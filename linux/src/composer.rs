@@ -13,18 +13,21 @@ use crate::picker::{Picker, Row, Spec};
 use crate::state::State;
 
 const PLACEHOLDER: &str = "Ask anything, @tag files/folders, or / for commands";
+pub const TAKE_BACK: &str = "Cancel and Return to the Composer";
 const ADD_PROVIDER: &str = "\u{1}add-provider";
 
+#[derive(Default)]
 pub struct Unsent {
-    text: String,
+    pub text: String,
+    pub files: Vec<String>,
+    pub project: Option<String>,
     images: Vec<ImageAttachment>,
-    files: Vec<String>,
     contexts: Vec<(String, String)>,
 }
 
 impl From<PromptDraft> for Unsent {
     fn from(draft: PromptDraft) -> Self {
-        Self { text: draft.text, images: draft.images, files: draft.files, contexts: Vec::new() }
+        Self { text: draft.text, images: draft.images, files: draft.files, ..Self::default() }
     }
 }
 
@@ -34,8 +37,7 @@ impl Unsent {
     }
 
     pub fn then(mut self, later: Self) -> Self {
-        let held = later.text == self.text || later.text.starts_with(&format!("{}\n\n", self.text));
-        if held || self.text.trim().is_empty() {
+        if self.text.trim().is_empty() {
             self.text = later.text;
         } else if !later.text.trim().is_empty() {
             self.text = format!("{}\n\n{}", self.text, later.text);
@@ -43,6 +45,7 @@ impl Unsent {
         self.images.extend(later.images.into_iter().filter(|image| !self.images.contains(image)).collect::<Vec<_>>());
         self.files.extend(later.files.into_iter().filter(|file| !self.files.contains(file)).collect::<Vec<_>>());
         self.contexts.extend(later.contexts);
+        self.project = later.project.or(self.project);
         self
     }
 }
@@ -443,7 +446,7 @@ impl Composer {
         let text = self.text();
         let (images, files, contexts) = self.extras.take();
         self.reset();
-        Some(Unsent { text, images, files, contexts }).filter(|unsent| !unsent.is_empty())
+        Some(Unsent { text, images, files, contexts, project: None }).filter(|unsent| !unsent.is_empty())
     }
 
     pub fn bring(&self, unsent: Unsent) {
@@ -780,14 +783,11 @@ fn queued_row(app: &Weak<App>, state: &State, id: &str, text: &str, sending: boo
     status.add_css_class("ls-meta");
     row.append(&status);
     let thread = state.selected.clone().unwrap_or_default();
-    for (icon, tooltip, now) in
-        [(icons::UP, "Send Now", true), (icons::CLOSE, "Cancel and Return to the Composer", false)]
-    {
+    for (icon, tooltip, now) in [(icons::UP, "Send Now", true), (icons::CLOSE, TAKE_BACK, false)] {
         let button = icons::flat(icon, tooltip);
         button.add_css_class("circular");
         let thread = thread.clone();
         let id = id.to_string();
-        let text = text.to_string();
         let weak = app.clone();
         button.connect_clicked(move |_| {
             let Some(app) = weak.upgrade() else { return };
@@ -796,7 +796,6 @@ fn queued_row(app: &Weak<App>, state: &State, id: &str, text: &str, sending: boo
                 app.core.run(|studio| studio.send_queued_now(thread, id));
             } else {
                 app.core.run(|studio| studio.remove_queued(thread, id));
-                app.composer.set_text(&text);
             }
         });
         row.append(&button);

@@ -500,11 +500,12 @@ impl App {
                 }
             }
             Update::ComposerText { thread, text } => {
-                if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
-                    self.composer.set_text(&text);
-                } else {
-                    self.unsent.borrow_mut().remove(&Some(thread.clone()));
-                    self.park(Some(thread), PromptDraft { text, images: Vec::new(), files: Vec::new() }.into());
+                if !text.is_empty() {
+                    self.hand_back(thread, PromptDraft { text, images: Vec::new(), files: Vec::new() });
+                } else if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
+                    self.composer.set_text("");
+                } else if let Some(unsent) = self.unsent.borrow_mut().get_mut(&Some(thread)) {
+                    unsent.text.clear();
                 }
             }
             Update::ComposerDraft { thread, draft } => {
@@ -881,6 +882,7 @@ impl App {
                 state.draft_project = state.row(thread).and_then(|row| row.project.clone());
             }
             state.selected.clone_from(&thread);
+            state.draft = None;
             state.page = Page::Thread;
             state.info = None;
             state.approvals.clear();
@@ -928,16 +930,27 @@ impl App {
     }
 
     fn keep_unsent(&self) {
-        let key = self.state.borrow().selected.clone();
-        if let Some(unsent) = self.composer.leave() {
+        let (key, project) = {
+            let state = self.state.borrow();
+            (state.selected.clone(), state.current_project())
+        };
+        if let Some(mut unsent) = self.composer.leave() {
+            unsent.project = project;
             self.park(key, unsent);
         }
     }
 
     fn bring_unsent(&self) {
-        let key = self.state.borrow().selected.clone();
+        let (key, project) = {
+            let state = self.state.borrow();
+            (state.selected.clone(), state.current_project())
+        };
         let unsent = self.unsent.borrow_mut().remove(&key);
-        if let Some(unsent) = unsent {
+        if let Some(mut unsent) = unsent {
+            if key.is_none() && unsent.project != project && !unsent.files.is_empty() {
+                unsent.files.clear();
+                self.toast("The files you attached are in another project, so they were left out.");
+            }
             self.composer.bring(unsent);
         }
     }
@@ -1078,16 +1091,15 @@ impl App {
         self.render_pending();
         let here = self.state.borrow().selected.as_deref() == Some(pending.thread.as_str());
         let back = here && self.composer.restore(&pending.draft);
-        let kept = match (here, back) {
-            (true, true) => "",
-            (true, false) => {
-                self.composer.tools.keep(&pending.draft.text);
-                " Its text is in the stash menu."
-            }
-            (false, _) => {
-                self.park(Some(pending.thread), pending.draft.into());
-                " It is back in its thread's composer."
-            }
+        let gone = self.state.borrow().row(&pending.thread).is_none();
+        let kept = if back {
+            ""
+        } else if here || gone {
+            self.composer.tools.keep(&pending.draft.text);
+            " Its text is in the stash menu."
+        } else {
+            self.park(Some(pending.thread), pending.draft.into());
+            " It is back in its thread's composer."
         };
         self.toast(&format!("Could not send the message: {message}{kept}"));
         self.render(Dirty { composer: true, ..Dirty::default() });

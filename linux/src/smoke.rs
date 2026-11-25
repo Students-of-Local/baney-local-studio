@@ -6,10 +6,11 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::glib;
 use local_studio_core::{
-    ApprovalAnswer, Block, Connection, ItemKind, KernelState, ModelKey, PromptDraft, ToolState, Update,
+    ApprovalAnswer, Block, Connection, ItemKind, KernelState, ModelKey, PromptDraft, QueuedMessage, ToolState, Update,
 };
 
 use crate::app::App;
+use crate::composer::TAKE_BACK;
 use crate::state::PendingSend;
 
 const PROMPT: &str = "Use the bash tool to run exactly this command once: `echo smoke-ok > smoke.txt && cat smoke.txt`. Then reply with only the word done.";
@@ -233,6 +234,14 @@ fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
     app.composer.set_text(KEPT);
     returned("c.txt");
     let before = holds(&format!("returned c.txt\n\n{KEPT}"));
+    let queued = QueuedMessage { id: MISSING.to_string(), text: REJECTED.to_string(), steering: false, sending: false };
+    app.apply(vec![Update::Queue { thread: id.clone(), queued: vec![queued] }]);
+    let pressed = press(app.composer.root.upcast_ref(), TAKE_BACK) && holds(&format!("returned c.txt\n\n{KEPT}"));
+    app.apply(vec![
+        Update::Queue { thread: id.clone(), queued: vec![] },
+        Update::ComposerText { thread: id.clone(), text: REJECTED.to_string() },
+    ]);
+    let taken = pressed && holds(&format!("{REJECTED}\n\nreturned c.txt\n\n{KEPT}"));
     let (_, mut files, _) = app.composer.extras.take();
     files.sort();
     app.composer.set_text("");
@@ -250,9 +259,37 @@ fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
     started("gtk-draft-smoke");
     let followed = holds(REJECTED);
     app.composer.set_text("");
+    app.new_thread(None);
+    app.state.borrow_mut().draft = Some("gtk-draft-smoke".to_string());
+    app.composer.set_text(REJECTED);
+    app.select_thread(Some(id.clone()));
+    app.apply(vec![Update::ThreadStarted { draft: "gtk-draft-smoke".to_string(), thread: MISSING.to_string() }]);
+    let parted = holds("") && app.state.borrow().selected.as_deref() == Some(id.as_str());
+    app.new_thread(None);
+    let waits = parted && holds(REJECTED);
+    app.composer.set_text("");
+    app.select_thread(Some(id.clone()));
     let merged = away && both && before && files == ["a.txt", "b.txt", "c.txt"];
-    println!("     handed back {merged}, left a start {stayed}, forked {forked} {still}, followed {followed}");
-    merged && stayed && forked && still && followed
+    println!("     handed back {merged}, taken back {taken}, left a start {stayed} {waits}");
+    println!("     forked {forked} {still}, followed {followed}");
+    merged && taken && stayed && waits && forked && still && followed
+}
+
+fn press(widget: &gtk::Widget, tooltip: &str) -> bool {
+    if let Some(button) =
+        widget.downcast_ref::<gtk::Button>().filter(|_| widget.tooltip_text().as_deref() == Some(tooltip))
+    {
+        button.emit_clicked();
+        return true;
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if press(&current, tooltip) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
 }
 
 fn turn_done(app: &Rc<App>) -> Option<Vec<local_studio_core::Item>> {
