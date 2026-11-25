@@ -47,7 +47,7 @@ const CONVERSATIONS: &str = "SELECT t.thread_id, t.project_id, t.title, p.driver
      json_extract(p.payload_json, '$.nativeThreadRef.nativeId'), json_extract(t.payload_json, '$.modelSelection'), \
      t.runtime_mode, json_extract(t.payload_json, '$.worktreePath'), \
      (SELECT json_extract(s.payload_json, '$.cwd') FROM orchestration_v2_projection_provider_sessions s \
-      WHERE s.provider_session_id = p.provider_session_id), \
+      WHERE s.provider_session_id = p.provider_session_id AND json_valid(s.payload_json)), \
      COALESCE((SELECT MAX(r.requested_at) FROM orchestration_v2_projection_runs r WHERE r.thread_id = t.thread_id), \
       t.updated_at), \
      json_extract(t.payload_json, '$.settledAt'), json_extract(t.payload_json, '$.snoozedUntil'), \
@@ -56,8 +56,9 @@ const CONVERSATIONS: &str = "SELECT t.thread_id, t.project_id, t.title, p.driver
       AND r.completed_at IS NULL AND r.status NOT IN ('completed', 'cancelled', 'failed', 'interrupted')) \
      FROM orchestration_v2_projection_threads t \
      JOIN orchestration_v2_projection_provider_threads p ON p.provider_thread_id = t.active_provider_thread_id \
-     WHERE t.deleted_at IS NULL AND json_extract(t.payload_json, '$.lineage.parentThreadId') IS NULL \
-     AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') IS NOT NULL ORDER BY 11 DESC";
+     WHERE t.deleted_at IS NULL AND CASE WHEN json_valid(t.payload_json) AND json_valid(p.payload_json) \
+      THEN json_extract(t.payload_json, '$.lineage.parentThreadId') IS NULL \
+      AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') IS NOT NULL END ORDER BY 11 DESC";
 
 pub(super) fn read(database: &Database) -> Result<Vec<Conversation>, String> {
     for table in CONVERSATION_TABLES {
@@ -66,23 +67,23 @@ pub(super) fn read(database: &Database) -> Result<Vec<Conversation>, String> {
         }
     }
     let conversations = database.rows(CONVERSATIONS, |row| {
-        let text = |column: usize| row.get::<_, Option<String>>(column);
-        let time = |column: usize| text(column).map(|at| at.as_deref().and_then(parse_rfc3339_ms));
-        let selection = text(6)?.and_then(|text| serde_json::from_str(&text).ok());
+        let text = |column: usize| row.get::<_, Option<String>>(column).unwrap_or_default();
+        let time = |column: usize| text(column).as_deref().and_then(parse_rfc3339_ms);
+        let selection = text(6).and_then(|text| serde_json::from_str(&text).ok());
         Ok(Conversation {
             id: row.get(0)?,
-            project: text(1)?.unwrap_or_default(),
-            title: text(2)?.unwrap_or_default(),
-            driver: text(3)?.unwrap_or_default(),
-            instance: text(4)?.unwrap_or_default(),
-            session: row.get(5)?,
+            project: text(1).unwrap_or_default(),
+            title: text(2).unwrap_or_default(),
+            driver: text(3).unwrap_or_default(),
+            instance: text(4).unwrap_or_default(),
+            session: text(5).unwrap_or_default(),
             selection: selection.unwrap_or_default(),
-            access: text(7)?.unwrap_or_default(),
-            worktree: text(8)?,
-            cwd: text(9)?,
-            active_at: time(10)?,
-            settled_at: time(11)?,
-            snoozed_until: time(12)?,
+            access: text(7).unwrap_or_default(),
+            worktree: text(8),
+            cwd: text(9),
+            active_at: time(10),
+            settled_at: time(11),
+            snoozed_until: time(12),
             archived: row.get(13)?,
             running: row.get(14)?,
             place: Err(String::new()),
@@ -129,6 +130,9 @@ fn find(
     let harness = harness_of(driver).ok_or_else(|| unsupported_reason(driver))?;
     let mut instances: Vec<&Instance> = t3.instances.iter().filter(|known| known.driver == *driver).collect();
     instances.sort_by_key(|instance| instance.id != conversation.instance);
+    if instances.first().is_some_and(|instance| instance.id == conversation.instance && !instance.enabled) {
+        return Err("Its account is turned off in T3 Code.".to_string());
+    }
     let dirs = instances.into_iter().filter_map(|instance| account_dir(instance, harness));
     let dirs: Vec<PathBuf> = dirs.chain(accounts::home_dir_of(harness)).collect();
     let root = t3.projects.iter().find(|project| project.id == conversation.project).map(|project| &project.path);
@@ -164,6 +168,7 @@ fn access_of(mode: &str) -> AccessMode {
 
 fn thread_flags(t3: &T3Data, ls: &Ls, conversation: &Conversation, found: &Place) -> ThreadFlags {
     let model = map_model(t3, &conversation.selection.instance_id, &conversation.selection.model).ok();
+    let model = model.filter(|model| model.provider == harness::provider_of(found.harness));
     let project = t3.projects.iter().find(|project| project.id == conversation.project);
     let project = project.and_then(|project| std::fs::canonicalize(&project.path).ok());
     let project = project.map(|path| path.to_string_lossy().into_owned());
@@ -202,7 +207,11 @@ pub(super) fn threads_group(engine: &mut Engine<'_>, t3: &T3Data, ls: &mut Ls) {
             continue;
         }
         let state = engine.member(kind, &key, present);
-        let folder = conversation.place.as_ref().ok().map(|place| format!(", {}", display(Path::new(&place.cwd))));
+        let folder = conversation.place.as_ref().ok().map(|place| {
+            let gone = !Path::new(&place.cwd).is_dir();
+            let note = if gone { ". Its folder is gone: you can read it, not continue it." } else { "" };
+            format!(", {}{note}", display(Path::new(&place.cwd)))
+        });
         let detail = format!("{}{}", driver_name(&conversation.driver), folder.unwrap_or_default());
         if let Some(place) = conversation.place.as_ref().ok().filter(|_| !known && engine.live(kind)) {
             ls.threads.push(thread_flags(t3, ls, conversation, place));

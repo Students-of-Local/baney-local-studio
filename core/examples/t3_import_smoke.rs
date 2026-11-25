@@ -83,6 +83,12 @@ fn t3_settings(fixture: &Fixture) -> Value {
                 "enabled": true,
                 "config": { "binaryPath": "/nowhere/codex", "homePath": "", "shadowHomePath": "" }
             },
+            "claudeAgent_off": {
+                "driver": "claudeAgent",
+                "displayName": "off",
+                "enabled": false,
+                "config": { "homePath": fixture.work.to_string_lossy() }
+            },
             "cursor": {
                 "driver": "cursor",
                 "enabled": true,
@@ -273,6 +279,14 @@ fn conversations(worktree: &str) -> Vec<Conversation> {
         ),
         Conversation { status: "running", ..claude("t-running", json!({})) },
         claude("t-gone", json!({})),
+        thread("t-off", "claudeAgent", "claudeAgent_off", "full-access", json!({})),
+        claude(
+            "t-folder",
+            json!({
+                "worktreePath": format!("{worktree}-gone"),
+                "modelSelection": { "instanceId": "codex", "model": "gpt-6.1-sol", "options": [] }
+            }),
+        ),
         claude("t-child", json!({ "lineage": { "parentThreadId": "t-tree" } })),
         claude("t-deleted", json!({})),
         thread("t-cursor", "cursor", "cursor", "full-access", json!({})),
@@ -319,7 +333,11 @@ fn build_threads(database: &rusqlite::Connection, fixture: &Fixture) -> Result<(
                 rusqlite::params![id, status, at, completed],
             )?;
         }
-        let folder = if id == "t-tree" { &tree } else { &path_text(&fixture.alpha) };
+        let folder = match id {
+            "t-tree" => tree.clone(),
+            "t-folder" => format!("{tree}-gone"),
+            _ => path_text(&fixture.alpha),
+        };
         let escaped: String = folder.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
         let session = match (known.driver, id) {
             (_, "t-gone") | ("cursor", _) => continue,
@@ -332,6 +350,11 @@ fn build_threads(database: &rusqlite::Connection, fixture: &Fixture) -> Result<(
         fs::create_dir_all(session.parent().context("session folder")?)?;
         fs::write(session, "{}\n")?;
     }
+    database.execute(
+        "INSERT INTO orchestration_v2_projection_threads VALUES \
+         ('t-broken', 'p-alpha', 't-broken', 'auto', 'provider-t-tree', '2026-11-20T00:00:00.000Z', NULL, NULL, '{broken')",
+        [],
+    )?;
     database.execute(
         "INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('shared', ?1)",
         [json!({ "cwd": fixture.home }).to_string()],
@@ -376,6 +399,10 @@ fn check_threads(fixture: &Fixture, data: &Path, report: &T3Report) -> Result<()
         ),
         ("t-archived", json!({ "archived": true, "cwd": alpha })),
         (
+            "t-folder",
+            json!({ "cwd": path_text(&fixture.alpha.with_file_name("alpha-tree-gone")), "model": null, "thinkingLevel": null }),
+        ),
+        (
             "t-codex",
             json!({
                 "harness": "codex", "nativeSession": null, "cwd": alpha, "access": "supervised", "model": "gpt-6.1-sol",
@@ -392,14 +419,19 @@ fn check_threads(fixture: &Fixture, data: &Path, report: &T3Report) -> Result<()
         }
     }
     ensure!(threads_of(data)?.len() == expected.len(), "threads are {:?}", threads_of(data)?);
-    for (title, words) in
-        [("t-running", "Running in T3 Code"), ("t-gone", "not on this machine"), ("t-cursor", "Not supported yet")]
-    {
+    for (title, words) in [
+        ("t-running", "Running in T3 Code"),
+        ("t-gone", "not on this machine"),
+        ("t-cursor", "Not supported yet"),
+        ("t-off", "turned off in T3 Code"),
+    ] {
         expect_state(report, &format!("thread:{title}"), T3ItemState::Unsupported)?;
         let detail = item_detail(report, &format!("thread:{title}"));
         ensure!(detail.contains(words), "{title}: {detail}");
     }
-    for title in ["t-child", "t-deleted", "t-never"] {
+    let folder = item_detail(report, "thread:t-folder");
+    ensure!(folder.contains("Its folder is gone"), "t-folder: {folder}");
+    for title in ["t-child", "t-deleted", "t-never", "t-broken"] {
         let found = state_of(report, &format!("thread:{title}"));
         ensure!(found.is_none(), "{title} is listed as {found:?}");
     }
@@ -861,6 +893,7 @@ fn studio_stage(fixture: &Fixture, scratch: &Path) -> Result<()> {
         app.report.as_ref().is_some_and(|report| report.applied && report.enabled)
             && app.settings.as_ref().is_some_and(|settings| settings.harness_accounts.claude.len() == 2)
             && app.projects.len() == 2
+            && thread_of(&data, "t-tree").is_ok_and(|thread| thread.is_some())
     })?;
     let report = app.report.clone().context("no report")?;
     ensure!(

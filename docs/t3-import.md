@@ -24,6 +24,7 @@ An account is a config dir. Local Studio points at the same dirs T3 Code uses, s
 
 A thread that came over shows its session as T3 Code left it. The first message you send forks that session (`claude --resume <T3 session> --fork-session`, Codex `thread/fork`), so Local Studio continues in its own copy and never writes T3 Code's. T3 Code keeps working on the original; what happens there after the fork doesn't show here.
 
+- A thread whose folder is gone (a removed worktree) can be read but not continued.
 - A thread running in T3 Code is listed as "Running in T3 Code" and comes over when it stops.
 - A thread whose session file is not on this machine (Claude Code removes old ones) is listed and left out.
 - Each thread comes over once. One you delete in Local Studio is not brought back.
@@ -35,7 +36,7 @@ A thread that came over shows its session as T3 Code left it. The first message 
 - On launch it offers the first-run sheet "Bring over your T3 Code setup" when T3 Code has something new. Each group can be turned off. Not Now keeps sync off; Settings → General → T3 Code turns it on later.
 - With sync on, the core checks the T3 Code files every 3 seconds (size and modified time of `settings.json`, `client-settings.json`, `keybindings.json`, `statev2.sqlite` and `themes/*.json`) and applies changes. Nothing is ever written to T3 Code's folder.
 - Sync is additive and remembers what it brought over, per key, in `<data dir>/t3-sync.json`. A value is updated only while it still equals what the last sync wrote (or the Local Studio default, the first time). A value you change in Local Studio is kept and shows as "changed here, kept". A favorite, project or account you remove is not brought back.
-- `statev2.sqlite` is opened read-only with `immutable=1`, so it never takes a lock T3 Code needs. A project added in the last few seconds may appear only after T3 Code checkpoints its write-ahead log.
+- `statev2.sqlite` is opened read-only with `immutable=1`, so it never takes a lock T3 Code needs. A project or thread changed in the last few seconds may show its change only after T3 Code checkpoints its write-ahead log.
 
 ## CLI
 

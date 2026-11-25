@@ -155,6 +155,9 @@ pub(crate) struct Opened {
 
 impl Driver {
     pub(crate) async fn open(launch: Launch, sink: Sink) -> Result<Opened, String> {
+        if !Path::new(&launch.cwd).is_dir() {
+            return Err(format!("This thread's folder is gone: {}", launch.cwd));
+        }
         match launch.harness {
             Harness::ClaudeCode => {
                 let native = launch.native.clone();
