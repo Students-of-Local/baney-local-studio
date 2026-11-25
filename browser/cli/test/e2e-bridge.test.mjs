@@ -355,6 +355,9 @@ function env() {
 		HOME: home,
 		// Linux looks for browser profiles under XDG_CONFIG_HOME first; a runner may set it.
 		XDG_CONFIG_HOME: join(home, ".config"),
+		XDG_DATA_HOME: join(home, ".local", "share"),
+		XDG_STATE_HOME: join(home, ".local", "state"),
+		XDG_CACHE_HOME: join(home, ".cache"),
 		TABKYRA_SOCKET_DIR: socketDir,
 		TABKYRA_AUTO_ALLOW: "1",
 		TABKYRA_CLIENT_NAME: "e2e",

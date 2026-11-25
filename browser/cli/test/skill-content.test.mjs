@@ -53,8 +53,8 @@ test("notes: the rename helper leaves external URLs alone and takes titles liter
 	const short = join(vault, "Other", "Short.md");
 	writeFileSync(short, "[a](Bio.md) [b](bio) [c](Bio.md#Cells) [d](Bio.pdf) [e](Biology.md)\n");
 	const forms = join(vault, "Forms.md");
-	const kept = "~~~\n[[Bio]]\n~~~\n\n    [[Bio]] in indented code\n";
-	writeFileSync(forms, `See [lesson][bio].\n\n[bio]: School/Bio.md "notes"\n[ab]: <School/Bio.md>\n\n- list\n    - nested [[Bio]]\n\n    - loose nested [[Bio]]\n\n${kept}`);
+	const kept = "~~~\n[[Bio]]\n~~~\n\n    [[Bio]] in indented code\n\n[^1]: Bio\n";
+	writeFileSync(forms, `See [lesson][bio].\n\n[bio]: School/Bio.md "notes"\n[ab]: <School/Bio.md>\n\n- list\n    - nested [[Bio]]\n\n    - loose nested [[Bio]]\n\n    continued [[Bio]]\n\n${kept}`);
 	for (const bad of ["Bio #2", "Plan | v2", "a/b", "x:y"]) assert.equal(py("check", vault, "School/Bio.md", bad).status, 1, bad);
 	assert.equal(py("check", vault, "School/Bio.md", "Biology 101").status, 0);
 	renameSync(join(vault, "School", "Bio.md"), join(vault, "School", "Biology 101.md"));
@@ -83,7 +83,7 @@ test("notes: the rename helper leaves external URLs alone and takes titles liter
 	);
 	assert.equal(
 		readFileSync(forms, "utf8"),
-		`See [lesson][bio].\n\n[bio]: School/Biology%20101.md "notes"\n[ab]: <School/Biology 101.md>\n\n- list\n    - nested [[Biology 101]]\n\n    - loose nested [[Biology 101]]\n\n${kept}`,
+		`See [lesson][bio].\n\n[bio]: School/Biology%20101.md "notes"\n[ab]: <School/Biology 101.md>\n\n- list\n    - nested [[Biology 101]]\n\n    - loose nested [[Biology 101]]\n\n    continued [[Biology 101]]\n\n${kept}`,
 		"reference definitions and nested list items relinked; tilde-fenced and indented code kept byte for byte",
 	);
 	writeFileSync(join(vault, "Left.md"), "[x][b]\n\n[b]: School/Bio.md\n");
@@ -351,4 +351,25 @@ test("spaces: the agent acts only on its own window and never scripts an app by 
 	assert.ok(para.includes("Never run anything that takes focus or raises a window."), "focus is forbidden");
 	// The old wording sent the agent to osascript first, which can reach Donovan's own copy of the app.
 	assert.doesNotMatch(text, /check for a programmatic route before you click|If the app has a scripting interface/);
+});
+
+test("fix: no page text goes into a skill, and nothing is proposed unseen", () => {
+	const text = skill("fix").replace(/\s+/g, " ");
+	assert.ok(!text.includes("example copied from"), "the worked example isn't copied from a run");
+	assert.ok(text.includes("Never paste text from a web page, email or document into a skill"));
+	assert.ok(!text.includes('`"auto"`'), "no setting proposes without a look");
+	assert.ok(text.includes("Show the exact text, and open it only on an explicit yes"));
+	assert.ok(!text.includes("skill print <name> --raw"), "the draft isn't overwritten");
+});
+
+test("academic-research: a retraction is read from the paper's own record", () => {
+	const text = skill("academic-research").replace(/\s+/g, " ");
+	assert.match(text, /own Crossref record, an `updated-by` entry of type `retraction`, `withdrawal` or `expression_of_concern`/);
+});
+
+test("proton-pass: no listing or item view that prints values is allowed", () => {
+	const text = skill("proton-pass").replace(/\s+/g, " ");
+	const off = text.slice(text.indexOf("These are off limits"), text.indexOf("Never turn off output masking"));
+	for (const command of ["op read", "op item get`, in any form", "op inject", "bws secret get", "bws secret list"]) assert.ok(off.includes(command), command);
+	assert.match(text, /Bitwarden lists values too, so ask the user/);
 });

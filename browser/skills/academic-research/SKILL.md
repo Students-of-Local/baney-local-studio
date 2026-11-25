@@ -51,9 +51,10 @@ solve it, then go on. Never try to get around it.
       search OpenAlex by exact title. No record anywhere means it is not verified: drop it.
    2. Compare title, first author, year and venue with what you are about to cite. Any
       mismatch: fix the citation from the record, never from memory.
-   3. Check retraction: in OpenAlex, `is_retracted` must be false. In Crossref, an
-      `update-to` or `relation` entry of type retraction or expression of concern means
-      flag it to the user and don't use it as support.
+   3. Check retraction: in OpenAlex, `is_retracted` must be false. In the paper's own Crossref
+      record, an `updated-by` entry of type `retraction`, `withdrawal` or
+      `expression_of_concern` means flag it to the user and don't use it as support.
+      `update-to` means the record is itself such a notice.
    4. Open the abstract, and the full text if it is open. Find the sentence or table that
       supports your claim. Note its page or section.
 5. **Grade the evidence.** For each source write one line: study type, sample size if

@@ -25,13 +25,14 @@ Tychicus `tabs_show` tool and let them sign in.
 
 - Never run a command whose purpose is to display a stored value. These are off limits:
   - `op read`
-  - `op item get --reveal`
-  - `bws secret get`
+  - `op item get`, in any form (`--format json` shows hidden fields without `--reveal`)
+  - `op inject`
+  - `bws secret get` and `bws secret list` (both print every value)
   - any `pass-cli` item view that includes hidden fields
 - Never turn off output masking, and never redirect a resolved secret into a file.
 - Never put a secret value in a command line, an argument, a commit or a chat message.
-- You may list or search items by name to find the right reference. Item names are not
-  secrets.
+- To find the right reference, you may list item names with `pass-cli item list` or
+  `op item list`. Bitwarden lists values too, so ask the user for the name or ID.
 - If masked output still shows something that looks like a key, stop and tell the user.
 
 ## Steps

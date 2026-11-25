@@ -34,8 +34,8 @@ Repeat 3 and 4, acting on the refs in `changes`; call `read_page` again to verif
 
 ## Stale refs, waits and dialogs
 
-- **"Ref e12 not found: the page changed"**: the refs are gone.
-  Call `read_page` again and use the new ref. Never guess a ref.
+- **A stale ref**: the refs are gone. `read_page` again. If it says the action may already
+  have happened, check first. Never guess a ref.
 - **The page is still loading or updating**: call `wait`, for example
   `{"text":"Order confirmed","timeoutMs":15000}` or `{"selector":"#results"}`, then
   `read_page`. Don't loop `read_page` to poll.
