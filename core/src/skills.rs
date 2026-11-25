@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eukhe_types::slash_commands::parse_slash_command;
 use serde_json::Value;
@@ -162,7 +162,7 @@ impl Resources {
         commands
     }
 
-    pub(crate) fn expand(&self, text: &str) -> Expansion {
+    pub(crate) fn expand(&self, text: &str, at: &At) -> Expansion {
         let skills = self.all_skills();
         let plain = || Expansion { text: text.to_string(), plugins: Vec::new() };
         if let Some((name, args)) = parse_slash_command(text) {
@@ -180,32 +180,123 @@ impl Resources {
             }
             return self.expand_plugin(&name, &args).unwrap_or_else(plain);
         }
-        let mut used: Vec<&Resource> = Vec::new();
+        let listed = at.resources();
+        let dollar: Vec<(&str, Named)> =
+            skills.iter().map(|skill| (skill.name.as_str(), Named::Skill(skill))).collect();
+        let mut named: Vec<(&str, Named)> = listed
+            .iter()
+            .chain(skills.iter().filter(|skill| skill.plugin.is_some()))
+            .map(|skill| (skill.name.as_str(), Named::Skill(skill)))
+            .collect();
+        for plugin in &self.plugins {
+            named.extend([&plugin.id, &plugin.name].map(|name| (name.as_str(), Named::Plugin(plugin))));
+        }
+        let mut used: Vec<String> = Vec::new();
         let mut blocks: Vec<String> = Vec::new();
-        for (index, _) in text.match_indices('$') {
+        let mut plugins: Vec<String> = Vec::new();
+        for (index, mark) in text.match_indices(['$', '@']) {
             let rest = &text[index + 1..];
-            let named = |skill: &&Resource| {
-                let after = rest.strip_prefix(skill.name.as_str());
-                after.is_some_and(|after| !after.starts_with(|c: char| c.is_alphanumeric() || matches!(c, '-' | '_')))
+            let found = if mark == "$" {
+                longest(rest, &dollar, |after| !after.starts_with(in_name))
+            } else if starts_word(&text[..index]) {
+                longest(rest, &named, ends_word).filter(|(name, _)| !at.path(name))
+            } else {
+                None
             };
-            let longest = skills.iter().filter(named).map(|skill| skill.name.len()).max();
-            let Some(skill) = skills.iter().find(|skill| Some(skill.name.len()) == longest && named(skill)) else {
-                continue;
+            let Some((_, found)) = found else { continue };
+            let (key, block, owner) = match found {
+                Named::Skill(skill) => {
+                    (skill.name.clone(), skill_block(skill), skill.plugin.as_ref().map(|(id, _)| id.clone()))
+                }
+                Named::Plugin(plugin) => match plugin.skills.as_slice() {
+                    [only] => (only.name.clone(), plugin_block(plugin), Some(plugin.id.clone())),
+                    _ => (format!("@{}", plugin.id), plugin_block(plugin), Some(plugin.id.clone())),
+                },
             };
-            if used.iter().any(|seen| seen.name == skill.name) {
-                continue;
-            }
-            if let Some(block) = skill_block(skill) {
-                used.push(skill);
-                blocks.push(block);
-            }
+            let Some(block) = block.filter(|_| !used.contains(&key)) else { continue };
+            used.push(key);
+            blocks.push(block);
+            plugins.extend(owner);
         }
         if blocks.is_empty() {
             return plain();
         }
         blocks.push(text.to_string());
-        Expansion::from(blocks.join("\n\n"), used)
+        Expansion { text: blocks.join("\n\n"), plugins }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct At {
+    pub skills: Vec<Listed>,
+    pub here: Option<PathBuf>,
+}
+
+impl At {
+    fn resources(&self) -> Vec<Resource> {
+        let own = self.skills.iter().filter(|skill| !skill.source.starts_with("plugin "));
+        own.map(|skill| Resource {
+            name: skill.name.clone(),
+            file_path: skill.path.display().to_string(),
+            description: skill.description.clone(),
+            source: SkillSource::Personal,
+            plugin: None,
+        })
+        .collect()
+    }
+
+    fn path(&self, name: &str) -> bool {
+        self.here.as_ref().is_some_and(|here| here.join(name).exists())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Named<'a> {
+    Skill(&'a Resource),
+    Plugin(&'a Plugin),
+}
+
+fn longest<'a>(
+    rest: &str,
+    named: &[(&'a str, Named<'a>)],
+    ends: impl Fn(&str) -> bool,
+) -> Option<(&'a str, Named<'a>)> {
+    named
+        .iter()
+        .filter(|(name, _)| !name.is_empty() && rest.strip_prefix(name).is_some_and(&ends))
+        .copied()
+        .reduce(|best, next| if next.0.len() > best.0.len() { next } else { best })
+}
+
+fn in_name(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_')
+}
+
+fn starts_word(before: &str) -> bool {
+    before.chars().next_back().is_none_or(|c| c.is_whitespace() || "([{\"'".contains(c))
+}
+
+fn ends_word(after: &str) -> bool {
+    let mut next = after.chars();
+    match next.next() {
+        Some('.') => !next.next().is_some_and(char::is_alphanumeric),
+        Some(c) => !in_name(c) && !matches!(c, '/' | '\\' | '@'),
+        None => true,
+    }
+}
+
+fn plugin_block(plugin: &Plugin) -> Option<String> {
+    if let [only] = plugin.skills.as_slice() {
+        return skill_block(&Resource::from_plugin(plugin, only));
+    }
+    let mut lines = vec![format!("<plugin name=\"{}\" id=\"{}\">", plugin.name, plugin.id), plugin.description.clone()];
+    let skill =
+        |file: &plugins::PluginFile| format!("- skill {}: {} ({})", file.name, file.description, file.path.display());
+    lines.extend(plugin.skills.iter().map(skill));
+    let command = |command: &plugins::PluginCommand| format!("- command /{}: {}", command.name, command.description);
+    lines.extend(plugin.commands.iter().map(command));
+    lines.push("Read a skill's file before you use it.\n</plugin>".to_string());
+    Some(lines.join("\n"))
 }
 
 pub(crate) struct Expansion {

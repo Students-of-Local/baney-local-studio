@@ -50,6 +50,7 @@ use self::watch::GitWatcher;
 use crate::daemon::DaemonQuery;
 use crate::model::{NoticeLevel, Update};
 use crate::oneshot::TextGen;
+use crate::skills::{self, Listed, Store};
 use crate::studio::Mailbox;
 
 const PULL_REQUEST_TTL: Duration = Duration::from_secs(60);
@@ -92,6 +93,7 @@ struct Inner {
     usage: Arc<Mutex<usage::Ledger>>,
     kernel: kernel::Kernel,
     updates: updates::Updates,
+    skills: Mutex<HashMap<Option<String>, Vec<Listed>>>,
 }
 
 #[derive(Clone)]
@@ -155,6 +157,7 @@ impl Workspace {
             usage: Arc::default(),
             kernel: kernel::Kernel::default(),
             updates: updates::Updates::default(),
+            skills: Mutex::default(),
         });
         let workspace = Self { inner };
         let refresher = workspace.clone();
@@ -573,11 +576,41 @@ impl Workspace {
         query: String,
         limit: u32,
     ) {
-        let (reply, data, asked) = (request.clone(), self.inner.data_dir.clone(), mentions::turn());
+        let (reply, workspace, asked) = (request.clone(), self.clone(), mentions::turn());
         self.answer(request, async move {
-            let items = mentions::list(asked, data, plugins, project, query, limit).await?;
+            let items = mentions::list(asked, workspace, plugins, project, query, limit).await?;
             Ok(vec![Update::Mentions { request: reply, items }])
         });
+    }
+
+    pub(crate) fn find_skills(&self, plugins: Option<PathBuf>, project: Option<String>) {
+        let workspace = self.clone();
+        self.inner.runtime.spawn_blocking(move || {
+            let project = project.filter(|dir| Path::new(dir).is_dir());
+            if let Err(error) = workspace.store_skills(plugins.as_deref(), project.as_deref()) {
+                let text = format!("Could not read the skills for @: {error}");
+                workspace.inner.mailbox.notice(NoticeLevel::Warning, text);
+            }
+        });
+    }
+
+    fn store_skills(&self, plugins: Option<&Path>, project: Option<&str>) -> Result<(Store, Vec<Listed>), String> {
+        let data = &self.inner.data_dir;
+        let mut store = Store::open(data, skills::roots(data, plugins, project.map(Path::new))?)?;
+        let mut listed = store.list()?;
+        listed.retain(|skill| skill.problem.is_none());
+        let mut kept = self.inner.skills.lock().unwrap_or_else(PoisonError::into_inner);
+        kept.insert(project.map(str::to_string), listed.clone());
+        Ok((store, listed))
+    }
+
+    pub(crate) fn has_skills(&self, project: Option<&String>) -> bool {
+        self.inner.skills.lock().unwrap_or_else(PoisonError::into_inner).contains_key(&project.cloned())
+    }
+
+    pub(crate) fn skills(&self, places: &[Option<String>]) -> Vec<Listed> {
+        let kept = self.inner.skills.lock().unwrap_or_else(PoisonError::into_inner);
+        places.iter().find_map(|place| kept.get(place)).cloned().unwrap_or_default()
     }
 
     pub(crate) fn search_text(&self, request: String, project: String, query: String, limit: u32) {

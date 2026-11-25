@@ -822,6 +822,13 @@ fn looks_up(run: &mut Run) -> anyhow::Result<()> {
         run.setup(&format!("{label}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
         finds(run, label, "zorb", "zorbing (personal)");
         finds(run, label, "harness", "abseil (plugin ropes)");
+        finds(run, label, "@zorbing", "zorb steps");
+        finds(run, label, "@Kit", "<plugin name=\"Kit\" id=\"kit\">");
+        run.send("file it with @ledger");
+        run.check(&format!("{label}: a local-only plugin named with @ is refused"), |watch| {
+            watch.refused.iter().any(|refused| refused.contains("ledger") && refused.contains("local models"))
+        });
+        run.watch.refused.clear();
     }
     Ok(())
 }
@@ -1241,6 +1248,12 @@ fn main() -> anyhow::Result<()> {
     skill(&plugin.join("skills"), "abseil", "harness steps")?;
     let manifest = "id = \"ropes\"\nversion = \"0.1.0\"\ndescription = \"Ropes\"\ncapabilities = []\n";
     std::fs::write(plugin.join("plugin.toml"), manifest)?;
+    for (id, name, more) in [("kit", "Kit", ""), ("ledger", "Ledger", "local_only = true\n")] {
+        let dir = root.join("data/plugins").join(id);
+        std::fs::create_dir_all(&dir)?;
+        let head = format!("id = {id:?}\nname = {name:?}\nversion = \"0.1.0\"\ndescription = \"All of {id}\"\n");
+        std::fs::write(dir.join("plugin.toml"), format!("{head}capabilities = []\n{more}"))?;
+    }
     std::env::set_var("HOME", &home);
     std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
     std::env::set_var("CODEX_HOME", home.join(".codex"));

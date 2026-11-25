@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, Tran
 use serde::Serialize;
 
 use super::text;
-use crate::{frontmatter, harness::trust, plugins};
+use crate::plugins::{self, Plugin};
+use crate::{frontmatter, harness::trust};
 
 const FILE: &str = "skills.sqlite";
 pub(super) const SKILL: &str = "SKILL.md";
@@ -33,6 +34,7 @@ pub struct Roots {
     list: Vec<Root>,
     trusted: BTreeSet<String>,
     here: Option<PathBuf>,
+    plugins: Vec<Plugin>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,15 +115,16 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
     let others =
         [".agents", ".claude", ".codex"].into_iter().filter_map(|dir| Some(home.as_ref()?.join(dir).join("skills")));
     list.extend(agent.into_iter().chain(others).map(|dir| Root::yours(&dir, "personal")));
-    let plugins = plugins.map(plugins::scan).unwrap_or_default().plugins;
-    list.extend(plugins.into_iter().filter(|plugin| !plugin.local_only).map(|plugin| Root {
+    let mut plugins = plugins.map(plugins::scan).unwrap_or_default().plugins;
+    plugins.retain(|plugin| !plugin.local_only);
+    list.extend(plugins.iter().map(|plugin| Root {
         source: format!("plugin {}", plugin.id),
         owner: String::new(),
         links: false,
-        files: Some(plugin.skills.into_iter().map(|skill| skill.path).collect()),
-        dir: plugin.dir,
+        files: Some(plugin.skills.iter().map(|skill| skill.path.clone()).collect()),
+        dir: plugin.dir.clone(),
     }));
-    Ok(Roots { list, trusted, here })
+    Ok(Roots { list, trusted, here, plugins })
 }
 
 impl Store {
@@ -138,6 +141,11 @@ impl Store {
             listed.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
             Ok(listed)
         })
+    }
+
+    pub(super) fn plugin(&self, name: &str) -> Option<String> {
+        let plugin = self.roots.plugins.iter().find(|plugin| plugin.id == name || plugin.name == name)?;
+        super::plugin_block(plugin)
     }
 
     pub(super) fn sound<T>(&mut self, step: impl Fn(&mut Self) -> rusqlite::Result<T>) -> Result<T, String> {

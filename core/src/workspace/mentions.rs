@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, Semaphore};
 
-use super::files;
 use super::model::SearchHit;
+use super::{files, Workspace};
 use crate::model::{Mention, MentionKind};
 use crate::plugins::{self, hub, Catalog, Plugin};
-use crate::skills::{self, Hit, Listed, Query, Store};
+use crate::skills::{Hit, Listed, Query};
 
 const ROWS: u32 = 30;
 const ABOVE: usize = 6;
@@ -26,7 +26,7 @@ pub(super) fn turn() -> u64 {
 
 pub(super) async fn list(
     asked: u64,
-    data: PathBuf,
+    workspace: Workspace,
     plugins: Option<PathBuf>,
     project: Option<String>,
     query: String,
@@ -45,7 +45,7 @@ pub(super) async fn list(
         if path || wanted.is_empty() {
             return Found::default();
         }
-        tokio::time::timeout(WAIT, lookup(asked, data, plugins, project, wanted.clone())).await.unwrap_or_default()
+        tokio::time::timeout(WAIT, lookup(asked, workspace, plugins, project, wanted.clone())).await.unwrap_or_default()
     };
     let (files, installed, stored) = tokio::join!(files, installed, stored);
     let named = if path { Vec::new() } else { named(&installed.unwrap_or_default().plugins, &stored, &wanted) };
@@ -68,23 +68,28 @@ fn named_first(files: &[SearchHit], named: Vec<Mention>, limit: usize) -> Vec<Me
     named.into_iter().take(most).chain(files.iter().map(file)).take(limit).collect()
 }
 
-async fn lookup(asked: u64, data: PathBuf, plugins: Option<PathBuf>, project: Option<String>, query: String) -> Found {
+async fn lookup(
+    asked: u64,
+    workspace: Workspace,
+    plugins: Option<PathBuf>,
+    project: Option<String>,
+    query: String,
+) -> Found {
     let turn = LOOKUP.acquire().await;
     if LATEST.load(Ordering::Relaxed) != asked {
         return Found::default();
     }
     let (tell, told) = oneshot::channel();
     std::thread::spawn(move || {
-        let found = stored(&data, plugins.as_deref(), project.as_deref().map(Path::new), &query);
+        let found = stored(&workspace, plugins.as_deref(), project.as_deref(), &query);
         drop(turn);
         tell.send(found).ok();
     });
     told.await.ok().and_then(Result::ok).unwrap_or_default()
 }
 
-fn stored(data: &Path, plugins: Option<&Path>, project: Option<&Path>, query: &str) -> Result<Found, String> {
-    let mut store = Store::open(data, skills::roots(data, plugins, project)?)?;
-    let listed: Vec<Listed> = store.list()?.into_iter().filter(|skill| skill.problem.is_none()).collect();
+fn stored(workspace: &Workspace, plugins: Option<&Path>, project: Option<&str>, query: &str) -> Result<Found, String> {
+    let (mut store, listed) = workspace.store_skills(plugins, project)?;
     let named = listed.iter().filter(|skill| skill.name.to_lowercase().contains(query)).count();
     let hits = store.search(&Query { text: query, limit: named + 2 * FOUND, ..Query::default() }).unwrap_or_default();
     Ok((listed, hits))

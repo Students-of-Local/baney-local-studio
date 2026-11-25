@@ -14,7 +14,10 @@ pub fn skills(server: &Value, words: &str) -> Option<String> {
     let mut stdin = child.stdin.take()?;
     let client = json!({ "name": "fake", "version": "1" });
     let opened = json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": client });
-    let asked = json!({ "name": "skill_search", "arguments": { "words": words } });
+    let asked = match words.split_once('@') {
+        Some((_, name)) => json!({ "name": "skill_read", "arguments": { "name": name.split(' ').next() } }),
+        None => json!({ "name": "skill_search", "arguments": { "words": words } }),
+    };
     for frame in [
         json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": opened }),
         json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
