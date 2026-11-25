@@ -53,6 +53,9 @@ pub fn done(app: &Rc<App>, request: &str, message: &str) {
 pub fn failed(app: &Rc<App>, request: &str, message: &str) {
     settle(app, request);
     app.state.borrow_mut().plugin_error = Some(message.to_string());
+    if app.settings.borrow().is_none() {
+        app.toast(message);
+    }
     app.render(Dirty { settings: true, ..Dirty::default() });
 }
 

@@ -3,9 +3,9 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use local_studio_core::{
-    Branch, Device, DevicePlatform, FileContent, FileEntry, ImageAttachment, ItemKind, PrCheck, PrComment, PrEvent,
-    PullRequest, PullRequestDetail, SearchHit, SlashCommand, ThreadSearchHit, ToolKind, ToolState, TranscriptOp,
-    Update,
+    Branch, Device, DevicePlatform, FileContent, FileEntry, ImageAttachment, ItemKind, Mention, MentionKind, PrCheck,
+    PrComment, PrEvent, PullRequest, PullRequestDetail, SearchHit, SlashCommand, ThreadSearchHit, ToolKind, ToolState,
+    TranscriptOp, Update,
 };
 
 use crate::app::{App, Dirty};
@@ -152,7 +152,7 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         "30-go-to-file" => {
             conversation(app, false);
             app.goto.present(app);
-            app.goto.set_fixture("side", &mentions());
+            app.goto.set_fixture("side", &found_files());
         }
         "31-composer-meter-stash" => {
             conversation(app, false);
@@ -295,7 +295,27 @@ fn commands() -> Vec<SlashCommand> {
     .collect()
 }
 
-fn mentions() -> Vec<SearchHit> {
+fn mentions() -> Vec<Mention> {
+    [
+        (MentionKind::Skill, "side-effects", "Check a change for side effects before it ships", "Personal", ""),
+        (MentionKind::Plugin, "sidecar", "Reads and writes your notes", "Plugin", ""),
+        (MentionKind::Plugin, "sideboard", "Plans a seating chart from a guest list", "Install", "sideboard"),
+        (MentionKind::File, "linux/src/sidebar.rs", "linux/src", "", ""),
+        (MentionKind::File, "macos/Sources/Features/Sidebar/", "macos/Sources/Features", "", ""),
+    ]
+    .into_iter()
+    .map(|(kind, name, detail, badge, install)| Mention {
+        kind,
+        title: format!("@{name}"),
+        detail: detail.to_string(),
+        badge: badge.to_string(),
+        insert: format!("@{name} "),
+        install: install.to_string(),
+    })
+    .collect()
+}
+
+fn found_files() -> Vec<SearchHit> {
     [
         ("linux/src/sidebar.rs", "linux/src"),
         ("macos/Sources/Features/Sidebar/", "macos/Sources/Features"),
