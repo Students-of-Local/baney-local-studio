@@ -1000,10 +1000,9 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
         let items = at.list(name, "@src/main.rs")?;
         smoke.check(&format!("@{name} lists files only"), !items.is_empty() && files(&items) == items.len());
     }
-    let offered = at.list("gan", "@gantrel")?;
-    let offer = offered.iter().find(|item| item.title == "@gantrel");
+    let offer = at.list("gan", "@gantrel")?.into_iter().find(|item| item.title == "@gantrel");
     let install = |item: &Mention| item.badge == "Install" && item.install == "gantrel" && item.insert == "@gantrel ";
-    smoke.check("@gan offers the catalog's gantrel", offer.is_some_and(install));
+    smoke.check("@gan offers the catalog's gantrel", offer.as_ref().is_some_and(install));
     let empty = at.list("", "@marble.txt")?;
     let shown = titles(&empty).contains(&"@marble.txt");
     smoke.check("an empty @ lists files, and no plugin that isn't installed", shown && files(&empty) == empty.len());
