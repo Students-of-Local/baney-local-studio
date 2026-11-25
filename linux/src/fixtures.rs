@@ -110,6 +110,7 @@ pub fn stage(app: &Rc<App>, scene: &str) {
         || crate::t3::stage(app, scene)
         || crate::scenes_updates::stage(app, scene)
         || crate::scenes_plugins::stage(app, scene)
+        || crate::markdown_scenes::stage(app, scene)
     {
         return;
     }

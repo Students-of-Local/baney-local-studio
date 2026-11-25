@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 
 use gtk::prelude::*;
-use gtk::{gdk, gio, pango};
+use gtk::{gdk, gio, glib, pango};
 
 use crate::colors::Colors;
 use crate::format::{self, Markdown, Span, DEEPEST};
@@ -135,6 +135,14 @@ fn create() -> (gtk::TextView, Rc<RefCell<Doc>>) {
         view.set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
     });
     view.add_controller(motion);
+    view.connect_map(|view| {
+        let view = view.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(view) = view.upgrade() {
+                view.queue_resize();
+            }
+        });
+    });
     (view, doc)
 }
 
