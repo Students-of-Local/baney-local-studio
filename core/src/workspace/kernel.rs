@@ -162,6 +162,7 @@ async fn check(program: &Path) -> Check {
 fn command(program: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).env("NO_COLOR", "1").kill_on_drop(true);
+    command.env(crate::plugins::NO_BYTECODE.0, "1");
     if let Some(path) = process::joined_path() {
         command.env("PATH", path);
     }

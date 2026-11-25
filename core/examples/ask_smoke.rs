@@ -621,7 +621,7 @@ fn main() -> anyhow::Result<()> {
         attack_log: root.join("attack.log"),
         squat_log: root.join("squat.log"),
         socket: root.join("d.sock"),
-        daemon: daemon.clone(),
+        daemon: bundle(daemon, &root)?,
         root: root.clone(),
     };
     let plugins_dir = paths.data.join("plugins");
@@ -663,7 +663,37 @@ fn main() -> anyhow::Result<()> {
     let stopped = stop_daemon(&paths.socket);
     outcome?;
     stopped?;
+    unchanged_bundle(&paths.daemon)?;
     println!("PASS ask smoke ({})", root.display());
+    Ok(())
+}
+
+fn bundle(eukhe: &Path, root: &Path) -> anyhow::Result<PathBuf> {
+    let from = eukhe.parent().context("no folder around eukhe")?;
+    let to = root.join("eukhe");
+    std::fs::create_dir_all(&to)?;
+    ensure!(from.join("eukhe-runtime").is_dir(), "{} is no release folder: no eukhe-runtime in it", from.display());
+    for name in ["eukhe", "eukhe-runtime", "skills", "models.bundled.json"] {
+        let copied = Command::new("cp").arg("-R").arg(from.join(name)).arg(&to).status()?;
+        ensure!(copied.success(), "copy {} to {}", from.join(name).display(), to.display());
+    }
+    for cache in bytecode(&to)? {
+        std::fs::remove_dir_all(cache)?;
+    }
+    Ok(to.join("eukhe"))
+}
+
+fn bytecode(folder: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let found = Command::new("find").arg(folder).args(["-name", "__pycache__", "-prune", "-print"]).output()?;
+    ensure!(found.status.success(), "find in {}: {}", folder.display(), String::from_utf8_lossy(&found.stderr));
+    Ok(String::from_utf8(found.stdout)?.lines().map(PathBuf::from).collect())
+}
+
+fn unchanged_bundle(eukhe: &Path) -> anyhow::Result<()> {
+    let folder = eukhe.parent().context("no folder around eukhe")?;
+    let caches = bytecode(folder)?;
+    ensure!(caches.is_empty(), "Python wrote bytecode into the Eukhe folder, which breaks the app's seal: {caches:?}");
+    println!("ok   Python wrote no bytecode into {}", folder.display());
     Ok(())
 }
 
