@@ -47,8 +47,6 @@ const MANAGER: &str = r#"#!/bin/sh
 up() {
   touch "$SHIM_STATE/up"
   rm -f "$SHIM_STATE/connected"
-  [ -f "$SHIM_STATE/interrupt" ] && kill -INT "$PPID"
-  [ -f "$SHIM_STATE/hangup" ] && kill -HUP "$PPID"
   turned=$(cd "$SHIM_STATE" && ls -d taken unauthorized replaced 2>/dev/null | head -n 1)
   if [ -n "$turned" ]; then
     [ "$turned" = unauthorized ] || touch "$SHIM_STATE/connected"
@@ -58,6 +56,8 @@ up() {
     turned=connected
   fi
   [ -z "$turned" ] || echo "{\"state\":\"$turned\",\"at\":1,\"pid\":1}" > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
+  [ -f "$SHIM_STATE/interrupt" ] && kill -INT "$PPID"
+  [ -f "$SHIM_STATE/hangup" ] && kill -HUP "$PPID"
 }
 case "$1" in
   restart|bootstrap) up ;;
@@ -566,16 +566,26 @@ pub fn broken(c: &mut Cases) -> Result<(), String> {
     ensure(value["code"] == "relay_key" && message.contains("as they were"), format!("S18 relay_key: {value}"))?;
     ensure(c.kept()? == before && c.state.join("up").exists(), "S18 a refused key leaves the live relay alone")?;
     c.set("secret-fails", false)?;
-    for flag in ["interrupt", "hangup"] {
+    println!("ok: S18 the secret fails on a live relay");
+    for (flag, turned) in [("interrupt", "unauthorized"), ("interrupt", "replaced"), ("hangup", "unauthorized")] {
         c.set(flag, true)?;
+        c.set(turned, true)?;
         let value = c.setup(&["smoke"])?;
         c.set(flag, false)?;
         let kept = ["relay.json", "route.json"].iter().all(|name| c.s.tunnel(name).exists());
-        let kept = kept && c.hosts()? == json!([HOST]) && c.state.join("up").exists();
-        ensure(value["code"] == "stopped" && kept, format!("S20 {flag} keeps the live relay: {value}"))?;
+        let kept = kept && c.hosts()? == json!([HOST]) && c.state.join("connected").exists();
+        let seen = fs::read_to_string(c.s.tunnel("relay-state.json")).unwrap_or_default().contains("connected");
+        let kept = kept && seen && value["code"] == "stopped";
+        ensure(kept, format!("S20 {flag} while {turned} leaves the live relay running: {value}"))?;
     }
-    off(c)?;
-    println!("ok: S18 the secret fails on a live relay");
+    c.set("interrupt", true)?;
+    let mcp = std::mem::replace(&mut c.mcp, "8799".to_string());
+    let value = c.setup(&["smoke"])?;
+    c.mcp = mcp;
+    c.set("interrupt", false)?;
+    ensure(value["code"] == "stopped", format!("S20 stopped with another port: {value}"))?;
+    c.gone("S20 another port, never checked")?;
+    println!("ok: S20 a live relay stopped while set up again");
 
     c.set("taken", true)?;
     let starts = c.started();

@@ -271,7 +271,7 @@ impl Tunnel {
         let dir = self.relay_folder(true)?;
         let hide = old.iter().map(|old| old.key.clone()).collect();
         let mut wrangler = Wrangler { npx, dir, account: None, hide };
-        let before = self.route()?.map(|route| route.hostname);
+        let routed = self.route()?;
         let deployed = self.relay_deploy(&mut wrangler, &name, account.as_deref(), &again, old.as_ref(), go).await;
         let host = match deployed {
             Ok(host) => host,
@@ -280,7 +280,8 @@ impl Tunnel {
                 return Err(halt);
             }
         };
-        let before = before.filter(|before| *before != host);
+        let same = routed.as_ref().is_some_and(|route| route.hostname == host && route.ports == ports.into());
+        let before = routed.map(|route| route.hostname).filter(|before| *before != host);
         let account_id = wrangler.account.clone().unwrap_or_default();
         let relay = json!({ "name": name, "accountId": account_id });
         let route = new_route("cloudflare", &host, &[], ports);
@@ -311,9 +312,12 @@ impl Tunnel {
         }
         let checks = match started {
             Ok(checks) => checks,
-            Err(failure) if live && failure.code == "stopped" => {
-                let message = format!("{} Its service runs with the new key and keeps trying; tunnel status says whether it is connected.", failure.message);
-                return Err(fail(failure.code, message).into());
+            Err(failure) if live && same && failure.code == "stopped" => {
+                let message = match self.start_relay_service(&manager, ports).await {
+                    Ok(_) => "Its service was started again with the new key. If tunnel status doesn't say it is connected, run setup again.".to_string(),
+                    Err(error) => format!("Its service couldn't be started again ({}); run setup again.", error.message),
+                };
+                return Err(fail(failure.code, format!("{} {message}", failure.message)).into());
             }
             Err(failure) => return Err(self.relay_undo(&manager, &name, &host, failure).await.into()),
         };
@@ -388,7 +392,7 @@ impl Tunnel {
         Ok(dir)
     }
 
-    async fn start_relay(&self, manager: &Manager, host: &str, ports: Ports) -> Result<Value, Failure> {
+    async fn start_relay_service(&self, manager: &Manager, ports: Ports) -> Result<PathBuf, Failure> {
         let program = std::env::current_exe().and_then(fs::canonicalize).map_err(|error| error.to_string())?;
         let (serve, mcp) = (ports.serve.to_string(), ports.mcp.to_string());
         let args = argv(&["tunnel", "relay", "run", "--serve", &serve, "--mcp", &mcp]);
@@ -400,14 +404,16 @@ impl Tunnel {
             }
             None => Vec::new(),
         };
-        let start = || async {
-            let installed = match fs::remove_file(self.dir.join(STATE)) {
-                Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
-                _ => manager.install(OWN, &program, &args, &env, &log).await,
-            };
-            installed.map_err(|error| fail("service_failed", error))
+        let installed = match fs::remove_file(self.dir.join(STATE)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
+            _ => manager.install(OWN, &program, &args, &env, &log).await,
         };
-        start().await?;
+        installed.map_err(|error| fail("service_failed", error))?;
+        Ok(log)
+    }
+
+    async fn start_relay(&self, manager: &Manager, host: &str, ports: Ports) -> Result<Value, Failure> {
+        let log = self.start_relay_service(manager, ports).await?;
         if !manager.wait_running(OWN).await {
             let text = format!("Local Studio's tunnel service didn't stay running. See {}.", log.display());
             return Err(fail("service_failed", text));
@@ -431,7 +437,7 @@ impl Tunnel {
             tokio::time::sleep(every).await;
             if mine == "unauthorized" || (mine == "replaced" && !retaken) {
                 retaken |= mine == "replaced";
-                start().await?;
+                self.start_relay_service(manager, ports).await?;
             }
         };
         let hosts = [host.to_string()];
