@@ -46,7 +46,7 @@ impl Actor {
         crate::daemon::agent_dir().is_some_and(|agent| Provider::configured(&agent, provider).is_local())
     }
 
-    fn thread_model(&self, id: &str) -> Option<(String, String)> {
+    pub(super) fn thread_model(&self, id: &str) -> Option<(String, String)> {
         if let Some(harness) = self.harness(id) {
             return Some((harness::provider_of(harness).to_string(), String::new()));
         }
