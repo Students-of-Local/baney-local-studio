@@ -583,7 +583,7 @@ impl Workspace {
         });
     }
 
-    pub(crate) fn find_skills(&self, plugins: Option<PathBuf>, project: Option<String>) {
+    pub(crate) fn find_skills(&self, plugins: Option<PathBuf>, project: Option<String>) -> tokio::task::JoinHandle<()> {
         let workspace = self.clone();
         self.inner.runtime.spawn_blocking(move || {
             let project = project.filter(|dir| Path::new(dir).is_dir());
@@ -591,7 +591,7 @@ impl Workspace {
                 let text = format!("Could not read the skills for @: {error}");
                 workspace.inner.mailbox.notice(NoticeLevel::Warning, text);
             }
-        });
+        })
     }
 
     fn store_skills(&self, plugins: Option<&Path>, project: Option<&str>) -> Result<(Store, Vec<Listed>), String> {

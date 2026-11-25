@@ -30,7 +30,7 @@ use crate::model::{
 use crate::oneshot::{resolved_provider, TextGen};
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
-use crate::skills::{At, Expansion, Resources};
+use crate::skills::{self, At, Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
@@ -45,6 +45,7 @@ const TAKEOVER_WAIT: Duration = Duration::from_secs(15);
 const TAKEOVER_POLL: Duration = Duration::from_millis(100);
 const PROBED_WITHIN: Duration = Duration::from_secs(1);
 const PROBED_POLL: Duration = Duration::from_millis(20);
+const AT_WAIT: Duration = Duration::from_millis(300);
 const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
 const NEW_THREAD_TITLE: &str = "New thread";
@@ -2799,7 +2800,7 @@ impl Actor {
         if message.trim().is_empty() && prompt.images.is_empty() {
             return Err("Write a message first.".to_string());
         }
-        let at = self.at(id, &message);
+        let at = self.at(id, &message).await;
         let cli = self.harness(id).is_some();
         let active = if cli {
             self.threads.entry(id.to_string()).or_default();
@@ -2813,7 +2814,7 @@ impl Actor {
             return Ok(Gate::Held);
         }
         let snapshot = message.starts_with('/') || message.contains('$');
-        let expansion = if !snapshot && !message.contains('@') {
+        let expansion = if !snapshot && skills::mentions(&message).next().is_none() {
             Expansion { text: message.clone(), plugins: Vec::new() }
         } else if cli || !snapshot {
             Resources::default().with_plugins(self.plugins()).expand(&message, &at)
@@ -2927,13 +2928,14 @@ impl Actor {
         Ok(active)
     }
 
-    fn at(&self, id: &str, message: &str) -> At {
-        if !message.contains('@') {
+    async fn at(&self, id: &str, message: &str) -> At {
+        if skills::mentions(message).next().is_none() {
             return At::default();
         }
         let cwd = Some(self.facts(id, now_ms()).cwd).filter(|cwd| !cwd.is_empty());
+        let listing = self.workspace.find_skills(self.plugins_dir.clone(), cwd.clone());
+        tokio::time::timeout(AT_WAIT, listing).await.ok();
         let skills = self.workspace.skills(&[cwd.clone(), self.thread_project(id), None]);
-        self.workspace.find_skills(self.plugins_dir.clone(), cwd.clone());
         At { skills, here: cwd.map(PathBuf::from) }
     }
 

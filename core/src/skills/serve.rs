@@ -97,10 +97,15 @@ impl Server {
                 };
                 let from = from.ok_or("from is a number, such as 6000")?;
                 let mut store = open()?;
-                match store.read(name, text("part"), from) {
-                    Ok(reading) => Ok(reading.shown()),
-                    Err(error) => store.plugin(name).ok_or(error),
-                }
+                let part = text("part");
+                store.read(name, part, from).map(|reading| reading.shown()).or_else(|error| {
+                    let plugin = store.plugin(name).ok_or_else(|| error.clone())?;
+                    match plugin.skills.as_slice() {
+                        [only] if only.name == name => Err(error),
+                        [only] => store.read(&only.name, part, from).map(|reading| reading.shown()),
+                        _ => Ok(super::plugin_block(&plugin, "Read one with skill_read and its name.")),
+                    }
+                })
             }
             _ => Err(format!("no tool named {tool}")),
         }
