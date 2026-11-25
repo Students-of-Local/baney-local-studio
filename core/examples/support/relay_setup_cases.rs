@@ -4,6 +4,7 @@ use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use local_studio_core::tunnel::relay::{WORKER_CONFIG, WORKER_JS};
 use local_studio_core::tunnel::{SERVICE_LABEL, SERVICE_UNIT};
@@ -27,6 +28,7 @@ case "$1" in
     echo "This Worker does not exist on your account. [code: 10007]" >&2
     exit 1 ;;
   deploy)
+    [ -f "$SHIM_STATE/interrupt-deploy" ] && { (sleep 3; touch "$SHIM_STATE/late") & kill -INT "$PPID"; wait; }
     [ -f "$SHIM_STATE/no-subdomain" ] && { echo "You need to register a workers.dev subdomain before publishing to workers.dev" >&2; exit 1; }
     [ -f "$SHIM_STATE/deploy-fails" ] && { echo "early words"; printf '%0400d\n' 0; echo "deploy broke $(tail -n 1 "$SHIM_STATE/stdin.log" 2>/dev/null)"; exit 1; }
     { echo '{"type":"wrangler-session"}'; echo '{"type":"deploy","targets":["http://a.workers.dev","https://u@b.workers.dev","https://c.example.com","https://smoke.person.workers.dev"]}'; } > "$WRANGLER_OUTPUT_FILE_PATH" ;;
@@ -45,6 +47,7 @@ const MANAGER: &str = r#"#!/bin/sh
 up() {
   touch "$SHIM_STATE/up"
   rm -f "$SHIM_STATE/connected"
+  [ -f "$SHIM_STATE/interrupt" ] && kill -INT "$PPID"
   if [ -f "$SHIM_STATE/refused" ]; then
     rm "$SHIM_STATE/refused"
     echo '{"state":"unauthorized","at":1,"pid":1}' > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
@@ -54,7 +57,9 @@ up() {
 }
 case "$1" in
   restart|bootstrap) up ;;
-  disable|bootout) rm -f "$SHIM_STATE/up" "$SHIM_STATE/connected" ;;
+  disable|bootout)
+    [ -f "$SHIM_STATE/stuck" ] && exit 1
+    rm -f "$SHIM_STATE/up" "$SHIM_STATE/connected" ;;
   is-active) [ -f "$SHIM_STATE/up" ] || exit 3; echo active ;;
   print) [ -f "$SHIM_STATE/up" ] || exit 113; echo "state = running" ;;
 esac
@@ -490,17 +495,58 @@ pub fn others(c: &mut Cases) -> Result<(), String> {
     println!("ok: S14 other routes");
 
     c.set("never", true)?;
-    let value = c.setup(&["smoke"])?;
+    let value = c.setup(&["smoke", "--yes"])?;
     let message = value["message"].as_str().unwrap_or_default();
     ensure(value["code"] == "going_live", format!("S10 going_live: {value}"))?;
-    ensure(
-        message.contains("refuses every connector until setup runs again"),
-        format!("S10 the Worker stays: {value}"),
-    )?;
+    ensure(message.contains("doesn't connect to it until setup runs again"), format!("S10 the Worker stays: {value}"))?;
     c.gone("S10")?;
     c.set("never", false)?;
     c.no_key("S10")?;
     println!("ok: S10 never connects");
+    Ok(())
+}
+
+pub fn broken(c: &mut Cases) -> Result<(), String> {
+    let value = c.setup(&["smoke", "--yes"])?;
+    c.live(&value)?;
+    c.set("secret-fails", true)?;
+    let value = c.setup(&["smoke"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(value["code"] == "relay_key" && message.contains("nothing is exposed"), format!("S18 relay_key: {value}"))?;
+    c.gone("S18 a key that may or may not be set on a live relay")?;
+    c.set("secret-fails", false)?;
+    println!("ok: S18 the secret fails on a live relay");
+
+    for flag in ["never", "stuck"] {
+        c.set(flag, true)?;
+    }
+    let value = c.setup(&["smoke", "--yes"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(
+        value["code"] == "going_live" && message.contains("couldn't be removed") && !message.contains("exposed"),
+        format!("S19 says the service is still there: {value}"),
+    )?;
+    ensure(c.s.tunnel("relay.json").exists() && c.hosts()? == json!([]), "S19 keeps the record for off, not the host")?;
+    for flag in ["never", "stuck"] {
+        c.set(flag, false)?;
+    }
+    off(c)?;
+    println!("ok: S19 a service that can't be removed");
+
+    c.set("interrupt", true)?;
+    let value = c.setup(&["smoke", "--yes"])?;
+    ensure(value["code"] == "stopped", format!("S20 Ctrl-C while going live: {value}"))?;
+    c.gone("S20")?;
+    c.set("interrupt", false)?;
+    c.set("interrupt-deploy", true)?;
+    let value = c.setup(&["smoke", "--yes"])?;
+    ensure(value["code"] == "relay_deploy", format!("S20 Ctrl-C in a deploy: {value}"))?;
+    std::thread::sleep(Duration::from_secs(4));
+    ensure(!c.state.join("late").exists(), "S20 nothing wrangler started goes on after Ctrl-C")?;
+    c.gone("S20")?;
+    c.set("interrupt-deploy", false)?;
+    c.no_key("S20")?;
+    println!("ok: S20 Ctrl-C");
     Ok(())
 }
 
