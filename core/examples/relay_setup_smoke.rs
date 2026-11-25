@@ -271,6 +271,9 @@ fn run() -> Result<(), String> {
     let mut setup = cases::Cases::start(&smoke)?;
     cases::before(&mut setup)?;
     cases::live(&mut setup)?;
+    cases::status(&mut setup)?;
+    cases::others(&mut setup)?;
+    cases::broken(&mut setup)?;
     let [data, home] = ["run-data", "run-home"].map(|name| smoke.root.join(name));
     s11_run(&Smoke { data, home, bin: smoke.bin.clone(), root: smoke.root.clone() })
 }

@@ -3,7 +3,8 @@ use std::fs;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use local_studio_core::tunnel::relay::{WORKER_CONFIG, WORKER_JS};
 use local_studio_core::tunnel::{SERVICE_LABEL, SERVICE_UNIT};
@@ -27,6 +28,7 @@ case "$1" in
     echo "This Worker does not exist on your account. [code: 10007]" >&2
     exit 1 ;;
   deploy)
+    [ -f "$SHIM_STATE/interrupt-deploy" ] && { (sleep 3; touch "$SHIM_STATE/late") & kill -INT "$PPID"; wait; }
     [ -f "$SHIM_STATE/no-subdomain" ] && { echo "You need to register a workers.dev subdomain before publishing to workers.dev" >&2; exit 1; }
     [ -f "$SHIM_STATE/deploy-fails" ] && { echo "early words"; printf '%0400d\n' 0; echo "deploy broke $(tail -n 1 "$SHIM_STATE/stdin.log" 2>/dev/null)"; exit 1; }
     { echo '{"type":"wrangler-session"}'; echo '{"type":"deploy","targets":["http://a.workers.dev","https://u@b.workers.dev","https://c.example.com","https://smoke.person.workers.dev"]}'; } > "$WRANGLER_OUTPUT_FILE_PATH" ;;
@@ -45,16 +47,19 @@ const MANAGER: &str = r#"#!/bin/sh
 up() {
   touch "$SHIM_STATE/up"
   rm -f "$SHIM_STATE/connected"
+  [ -f "$SHIM_STATE/interrupt" ] && kill -INT "$PPID"
   if [ -f "$SHIM_STATE/refused" ]; then
     rm "$SHIM_STATE/refused"
     echo '{"state":"unauthorized","at":1,"pid":1}' > "$LOCAL_STUDIO_DATA_DIR/tunnel/relay-state.json"
-  elif grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
+  elif [ ! -f "$SHIM_STATE/never" ] && grep -q -- "$(tail -n 1 "$SHIM_STATE/stdin.log")" "$LOCAL_STUDIO_DATA_DIR/tunnel/relay.json"; then
     touch "$SHIM_STATE/connected"
   fi
 }
 case "$1" in
   restart|bootstrap) up ;;
-  disable|bootout) rm -f "$SHIM_STATE/up" "$SHIM_STATE/connected" ;;
+  disable|bootout)
+    [ -f "$SHIM_STATE/stuck" ] && exit 1
+    rm -f "$SHIM_STATE/up" "$SHIM_STATE/connected" ;;
   is-active) [ -f "$SHIM_STATE/up" ] || exit 3; echo active ;;
   print) [ -f "$SHIM_STATE/up" ] || exit 113; echo "state = running" ;;
 esac
@@ -218,6 +223,14 @@ impl<'a> Cases<'a> {
 
     fn hosts(&self) -> Result<Value, String> {
         Ok(read_json(&self.s.data.join("remote/serve.json"))?["allowTunnelHosts"].clone())
+    }
+
+    fn gone(&self, what: &str) -> Result<(), String> {
+        let left = ["relay.json", "relay-state.json", "route.json"].iter().find(|name| self.s.tunnel(name).exists());
+        ensure(left.is_none(), format!("{what} leaves {left:?}"))?;
+        ensure(!self.service_file().exists() && !self.state.join("up").exists(), format!("{what} leaves the service"))?;
+        ensure(!self.s.tunnel("relay").exists(), format!("{what} leaves the relay folder"))?;
+        ensure(self.hosts()? == json!([]), format!("{what} leaves the host allowed"))
     }
 
     fn live(&mut self, value: &Value) -> Result<(), String> {
@@ -419,5 +432,134 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
     c.no_key("S9 a failed deploy")?;
     c.set("deploy-fails", false)?;
     println!("ok: S9 again");
+    Ok(())
+}
+
+pub fn status(c: &mut Cases) -> Result<(), String> {
+    let again = "local-studio tunnel setup --relay";
+    let dead = {
+        let mut child = Command::new("true").stdin(Stdio::null()).spawn().map_err(text)?;
+        child.wait().map_err(text)?;
+        child.id()
+    };
+    let me = std::process::id();
+    for (state, pid, want, next, says) in [
+        ("connected", me, "connected", "ready", "connected to its relay"),
+        ("connecting", me, "connecting", "waiting", "connecting to its relay"),
+        ("disconnected", me, "disconnected", "waiting", "lost its relay"),
+        ("replaced", me, "replaced", "needs_setup", again),
+        ("unauthorized", me, "unauthorized", "needs_setup", again),
+        ("outdated", me, "outdated", "needs_setup", "Update Local Studio"),
+        ("bad_config", me, "bad_config", "needs_setup", again),
+        ("stopped", me, "stopped", "needs_setup", again),
+        ("connected", dead, "stopped", "needs_setup", again),
+    ] {
+        c.s.write("relay-state.json", &json!({"state":state,"at":1_700_000_000_001_i64,"pid":pid}).to_string())?;
+        let value = c.ls(&["tunnel", "status"], |_| {})?;
+        let message = value["message"].as_str().unwrap_or_default();
+        ensure(
+            value["relay"] == json!({"state":want,"since":(pid == me).then_some(1_700_000_000_001_i64)})
+                && value["next"] == next
+                && value["hostname"] == HOST
+                && message.contains(says)
+                && (next != "needs_setup" || value["nextCommand"] == again),
+            format!("status when {state}: {value}"),
+        )?;
+    }
+    fs::remove_file(c.s.tunnel("relay-state.json")).map_err(text)?;
+    let value = c.ls(&["tunnel", "status"], |_| {})?;
+    ensure(value["relay"] == json!({"state":"stopped","since":null}), format!("status with no state file: {value}"))?;
+    println!("ok: S12 status");
+    Ok(())
+}
+
+pub fn others(c: &mut Cases) -> Result<(), String> {
+    c.refused("another relay name", &["another"], "other_route")?;
+    c.refused("another account", &["smoke", "--account", OTHER], "other_route")?;
+    let value = c.ls(&["tunnel", "setup", "--cloudflare", "studio.example.com", "--yes"], |_| {})?;
+    ensure(value["code"] == "other_route", format!("a domain tunnel on the relay route: {value}"))?;
+    off(c)?;
+    let route = json!({"v":1,"owner":"local-studio","route":"cloudflare","hostname":"studio.example.com","aliases":[],"ports":{"mcp":8787,"serve":18094}});
+    c.s.write("route.json", &route.to_string())?;
+    c.refused("a domain tunnel", &["smoke"], "other_route")?;
+    fs::remove_file(c.s.tunnel("route.json")).map_err(text)?;
+    let tychicus = c.s.root.join("tychicus");
+    fs::create_dir_all(&tychicus).map_err(text)?;
+    for kind in ["cloudflare", "relay"] {
+        let remote = json!({"route":kind,"publicUrl":"https://tychicus.example.com","port":8787});
+        fs::write(tychicus.join("remote.json"), remote.to_string()).map_err(text)?;
+        let message = c.refused("a Tychicus route", &["smoke"], "tychicus_tunnel")?;
+        ensure(message.contains("tychicus remote off"), format!("how to turn Tychicus's off: {message}"))?;
+    }
+    fs::remove_file(tychicus.join("remote.json")).map_err(text)?;
+    println!("ok: S14 other routes");
+
+    c.set("never", true)?;
+    let value = c.setup(&["smoke", "--yes"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(value["code"] == "going_live", format!("S10 going_live: {value}"))?;
+    ensure(message.contains("doesn't connect to it until setup runs again"), format!("S10 the Worker stays: {value}"))?;
+    c.gone("S10")?;
+    c.set("never", false)?;
+    c.no_key("S10")?;
+    println!("ok: S10 never connects");
+    Ok(())
+}
+
+pub fn broken(c: &mut Cases) -> Result<(), String> {
+    let value = c.setup(&["smoke", "--yes"])?;
+    c.live(&value)?;
+    c.set("secret-fails", true)?;
+    let value = c.setup(&["smoke"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(value["code"] == "relay_key" && message.contains("nothing is exposed"), format!("S18 relay_key: {value}"))?;
+    c.gone("S18 a key that may or may not be set on a live relay")?;
+    c.set("secret-fails", false)?;
+    println!("ok: S18 the secret fails on a live relay");
+
+    for flag in ["never", "stuck"] {
+        c.set(flag, true)?;
+    }
+    let value = c.setup(&["smoke", "--yes"])?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(
+        value["code"] == "going_live" && message.contains("couldn't be removed") && !message.contains("exposed"),
+        format!("S19 says the service is still there: {value}"),
+    )?;
+    ensure(c.s.tunnel("relay.json").exists() && c.hosts()? == json!([]), "S19 keeps the record for off, not the host")?;
+    for flag in ["never", "stuck"] {
+        c.set(flag, false)?;
+    }
+    off(c)?;
+    println!("ok: S19 a service that can't be removed");
+
+    c.set("interrupt", true)?;
+    let value = c.setup(&["smoke", "--yes"])?;
+    ensure(value["code"] == "stopped", format!("S20 Ctrl-C while going live: {value}"))?;
+    c.gone("S20")?;
+    c.set("interrupt", false)?;
+    c.set("interrupt-deploy", true)?;
+    let value = c.setup(&["smoke", "--yes"])?;
+    ensure(value["code"] == "relay_deploy", format!("S20 Ctrl-C in a deploy: {value}"))?;
+    std::thread::sleep(Duration::from_secs(4));
+    ensure(!c.state.join("late").exists(), "S20 nothing wrangler started goes on after Ctrl-C")?;
+    c.gone("S20")?;
+    c.set("interrupt-deploy", false)?;
+    c.no_key("S20")?;
+    println!("ok: S20 Ctrl-C");
+    Ok(())
+}
+
+pub fn off(c: &mut Cases) -> Result<(), String> {
+    c.s.write("relay-state.json", "{}")?;
+    let value = c.ls(&["tunnel", "off"], |_| {})?;
+    let message = value["message"].as_str().unwrap_or_default();
+    ensure(
+        value["state"] == "off" && message.contains("npx --yes wrangler@4.163.0 delete --name smoke"),
+        format!("S13 off names the Worker's delete command: {value}"),
+    )?;
+    c.gone("S13 off")?;
+    c.no_key("S13")?;
+    println!("ok: S13 off");
     Ok(())
 }
