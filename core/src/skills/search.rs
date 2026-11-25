@@ -50,19 +50,26 @@ pub fn lines(hits: &[Hit]) -> String {
 
 impl Store {
     pub fn search(&mut self, query: &Query) -> Result<Vec<Hit>, String> {
-        let found = self.sound(|store| {
+        let found = self.settled(|store| store.find(query));
+        found?.ok_or_else(|| self.unknown(query.within.unwrap_or_default()))
+    }
+
+    pub(super) fn settled<T>(
+        &mut self,
+        step: impl Fn(&Self) -> rusqlite::Result<Option<T>>,
+    ) -> Result<Option<T>, String> {
+        self.sound(|store| {
             for left in (0..TRIES).rev() {
                 store.refresh()?;
                 let read = store.db.unchecked_transaction()?;
                 if left == 0 || store.current()? {
-                    return store.find(query);
+                    return step(store);
                 }
                 drop(read);
                 store.checked = None;
             }
             Ok(None)
-        });
-        found?.ok_or_else(|| self.unknown(query.within.unwrap_or_default()))
+        })
     }
 
     fn find(&self, query: &Query) -> rusqlite::Result<Option<Vec<Hit>>> {

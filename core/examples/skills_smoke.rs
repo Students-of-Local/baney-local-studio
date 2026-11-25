@@ -148,6 +148,9 @@ fn places(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("a host that only ends in the name is another site", other);
     let app = smoke.json(&["search", "--for", "Paint Pro"])?;
     smoke.check("where.txt names an app, no words needed", names(&app) == ["painter"]);
+    let apps = smoke.first(&["--for", "draw#"])? == "painter" && smoke.first(&["--for", "Ink/Wash"])? == "painter";
+    let less = smoke.first(&["--for", "Draw"])?.is_empty() && smoke.first(&["--for", "Ink"])?.is_empty();
+    smoke.check("an app's name is not cut like an address", apps && less);
     let words = smoke.first(&["open paint pro please"])? == "painter";
     smoke.check("its words are searched too", words && smoke.first(&["a zither hunt now"])? == "site-learning");
     let alone = smoke.json(&["search", "--for", "tubes.test", "marmalade"])?;
@@ -243,6 +246,10 @@ fn reading(smoke: &mut Smoke) -> Result<(), String> {
         let only = text.contains(words) && text.matches("words").count() == 1;
         smoke.check(&format!("--part {wanted} is that part alone"), only);
     }
+    let start = smoke.json(&["read", "kitchen", "--part", "Swee..."])?;
+    smoke.check("the start of a heading is enough", start["part"] == "Sweets");
+    let many = smoke.run(&["read", "ladder", "--part", "Rung"])?;
+    smoke.check("but not of several", !many.status.success());
     let empty = smoke.run(&["read", "scroll", "--part", ""])?;
     smoke.check("an empty part is no part", !empty.status.success());
     let part = smoke.json(&["read", "long", "--part", "second"])?;
@@ -284,6 +291,7 @@ fn changes(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     smoke.check("read says why it skips it", why.contains("larger than 256 KB"));
     skill(&smoke.home.join(".agents/skills"), "broken", "Works", "")?;
     smoke.check("a broken skill takes no name from a good one", smoke.described("broken", "Works")?);
+    smoke.check("and is not found where it can't be read", smoke.first(&["toucan"])?.is_empty());
     write(own.join("broken/SKILL.md"), [0xff, 0xfe, 0x00]).map_err(|error| error.to_string())?;
     smoke.check("a binary SKILL.md is reported", smoke.problem("cannot be read as text")?);
     skill(&own.join("kitchen"), "inner", "Nested", "")?;
@@ -327,6 +335,12 @@ fn links(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     let nosy = skill(&project, "nosy", "Nosy", "macaw")?;
     link(&secret, &nosy.join("where.txt"))?;
     link(&secret, &nosy.join("asks.txt"))?;
+    link(&secret, &nosy.join("notes.md"))?;
+    let tooled = skill(own, "tooled", "Tooled", "")?;
+    link(&secret, &tooled.join("notes.md"))?;
+    let theirs = smoke.json(&["read", "nosy"])?["files"] == json!([]);
+    let mine = smoke.json(&["read", "tooled"])?["files"] == json!(["notes.md"]);
+    smoke.check("linked files are listed in your own skill, not in a project's", theirs && mine);
     let hits = smoke.json(&["search", "macaw"])?;
     let unread = names(&hits) == ["nosy"] && smoke.first(&["condor"])?.is_empty();
     smoke.check("a file beside it that links elsewhere is not read", unread && !hits.to_string().contains("condor"));
@@ -766,7 +780,7 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     skill(&own, "colors", "\"Escape \\e[31mred\"", "escape")?;
     skill(&own, "tubes", "Watch clips", "## Sites\n- `tubes.test`\n\n## Captions\nvideo words")?;
     let painter = skill(&own, "painter", "Draw", "Brushes.")?;
-    put(&painter.join("where.txt"), "Paint Pro\n")?;
+    put(&painter.join("where.txt"), "Paint Pro\nDraw#\nInk/Wash\n")?;
     skill(&own, "forms", "Fill out", "https://docs.forms.test/a https://docs.forms.test/b fill")?;
     let learning = skill(&own, "site-learning", "Learn a site", "Try it.")?;
     put(&learning.join("names.txt"), "old-tricks\nzither-hunt\n")?;
