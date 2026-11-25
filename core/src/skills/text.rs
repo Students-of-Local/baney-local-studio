@@ -75,6 +75,10 @@ pub(super) fn matching(words: &[String]) -> String {
     words.iter().map(|word| format!("\"{word}\"")).collect::<Vec<_>>().join(" OR ")
 }
 
+pub(super) fn told(word: &str) -> String {
+    format!("{{name descr asks}} : \"{word}\"")
+}
+
 pub(super) struct Part {
     pub(super) head: String,
     pub(super) text: String,

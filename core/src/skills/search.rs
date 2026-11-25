@@ -10,6 +10,7 @@ const SHOWN: usize = 240;
 const SHOWN_ITEM: usize = 80;
 const SHOWN_PLACES: usize = 5;
 const TRIES: usize = 4;
+const COVERED: f64 = 3.0;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
@@ -108,6 +109,17 @@ impl Store {
         for (id, ranked) in &parts {
             let more: f64 = ranked.iter().skip(1).take(2).map(|(score, _)| score).sum();
             *scores.entry(*id).or_default() += ranked.first().map_or(0.0, |(score, _)| *score) + 0.3 * more;
+        }
+        let mut covered: HashMap<i64, u32> = HashMap::new();
+        for word in &words {
+            let mut rows = self.db.prepare_cached("SELECT rowid FROM whole WHERE whole MATCH ?1")?;
+            for id in rows.query_map([text::told(word)], |row| row.get(0))? {
+                *covered.entry(id?).or_default() += 1;
+            }
+        }
+        let asked = f64::from(u32::try_from(words.len()).unwrap_or(u32::MAX).max(1));
+        for (id, score) in &mut scores {
+            *score *= 1.0 + COVERED * f64::from(covered.get(id).copied().unwrap_or_default()) / asked;
         }
         let (mut listing, mut linking) = (HashSet::new(), HashSet::new());
         let wanted = query.place.and_then(text::place);
