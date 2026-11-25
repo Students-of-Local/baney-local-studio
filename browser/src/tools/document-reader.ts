@@ -123,10 +123,15 @@ const KIND_WORD: Record<UnitKind, [string, string]> = {
 	part: ["Part", "parts"],
 };
 
+/** The last unit's number: a deck whose slides are numbered 1 and 3 ends at 3, though it has two. */
+export function lastUnitNumber(doc: ParsedDocument): number {
+	return doc.units.at(-1)?.n ?? 0;
+}
+
 function header(doc: ParsedDocument, u: DocUnit): string {
 	const [word] = KIND_WORD[doc.kind];
 	const name = u.name ? ` "${u.name}"` : "";
-	return `--- ${word} ${u.n}${name} of ${doc.units.length} ---`;
+	return `--- ${word} ${u.n}${name} of ${lastUnitNumber(doc)} ---`;
 }
 
 export interface Range {
@@ -232,10 +237,11 @@ export function readOverview(doc: ParsedDocument, fileName: string, budget: numb
 		lastWhole = u.n;
 	}
 	const shown = Math.min(body.length, doc.totalChars);
-	if (lastWhole === doc.units.length) return { text: `${head}${body}` };
+	const lastN = lastUnitNumber(doc);
+	if (lastWhole === lastN) return { text: `${head}${body}` };
 	const next = lastWhole + 1;
 	const span = Math.max(1, lastWhole);
-	const note = `\n\n[This is only the start. ${lastWhole ? `${lastWhole > 1 ? `${plural[0].toUpperCase()}${plural.slice(1)} 1-${lastWhole}` : `${word} 1`} of ${doc.units.length} shown` : `Part of ${word.toLowerCase()} 1 shown`}; ${fmt(Math.max(0, doc.totalChars - shown))} characters left out to fit the model's context. To read on, call extract_document with pages "${next}-${Math.min(doc.units.length, next + span - 1)}". To find a passage, call it with query and a few words from it: that returns the matching ${plural} with their numbers.]`;
+	const note = `\n\n[This is only the start. ${lastWhole ? `${lastWhole > 1 ? `${plural[0].toUpperCase()}${plural.slice(1)} 1-${lastWhole}` : `${word} 1`} of ${lastN} shown` : `Part of ${word.toLowerCase()} 1 shown`}; ${fmt(Math.max(0, doc.totalChars - shown))} characters left out to fit the model's context. To read on, call extract_document with pages "${next}-${Math.min(lastN, next + span - 1)}". To find a passage, call it with query and a few words from it: that returns the matching ${plural} with their numbers.]`;
 	return { text: `${head}${body}${note}` };
 }
 
@@ -394,7 +400,7 @@ export function readSearch(
 			: "";
 	const read =
 		hints.readOn?.(top) ??
-		`Read a ${word.toLowerCase()} in full with pages (like "${top}" or "${Math.max(1, top - 1)}-${Math.min(doc.units.length, top + 1)}") before you quote it.`;
+		`Read a ${word.toLowerCase()} in full with pages (like "${top}" or "${Math.max(1, top - 1)}-${Math.min(lastUnitNumber(doc), top + 1)}") before you quote it.`;
 	const tail = `\n\nBest match first. ${read}${open}`;
 	const allowed = Math.floor(budget / CHARS_PER_TOKEN);
 	const build = (n: number) =>

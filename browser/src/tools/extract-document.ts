@@ -14,6 +14,7 @@ import { CHARS_PER_TOKEN, estimateTextTokens } from "../models/context-budget.js
 import { EXTRACT_DOCUMENT_TOOL_DESCRIPTION } from "../prompts/prompts.js";
 import {
 	htmlText,
+	lastUnitNumber,
 	type ParsedDocument,
 	parseExtracted,
 	parseRange,
@@ -96,7 +97,14 @@ function formatOf(mimeType: string, fileName: string): string {
 	return ["pdf", "docx", "xlsx", "pptx"].includes(ext) ? ext : "text";
 }
 
-async function download(url: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+/** The extension a downloaded document's name lacks, from its first bytes or the Content-Type; pi-web-ui's loadAttachment goes by the name. */
+function documentExtension(data: ArrayBuffer, contentType: string): string | undefined {
+	if (new TextDecoder().decode(data.slice(0, 5)) === "%PDF-") return "pdf";
+	const format = formatOf(contentType.toLowerCase(), "");
+	return format === "text" ? undefined : format;
+}
+
+async function download(url: string, signal?: AbortSignal): Promise<{ data: ArrayBuffer; contentType: string }> {
 	const response = await fetch(url, { signal });
 	if (!response.ok)
 		throw new Error(
@@ -107,7 +115,7 @@ async function download(url: string, signal?: AbortSignal): Promise<ArrayBuffer>
 		throw new Error(`The document is ${(length / 1048576).toFixed(1)} MB, over the 50 MB this reads.`);
 	const data = await response.arrayBuffer();
 	if (data.byteLength > MAX_SIZE) throw new Error("The document is over the 50 MB this reads.");
-	return data;
+	return { data, contentType: response.headers.get("content-type") ?? "" };
 }
 
 /** pi-web-ui's fetch: direct first, then the CORS proxy when one is set. */
@@ -117,18 +125,23 @@ async function loadFromWeb(
 	signal?: AbortSignal,
 ): Promise<LoadedDocument> {
 	let data: ArrayBuffer;
+	let contentType: string;
 	try {
-		data = await download(url, signal);
+		({ data, contentType } = await download(url, signal));
 	} catch (err) {
 		if (!isCorsError(err)) throw err;
 		if (!corsProxyUrl)
 			throw new Error(
 				"The site blocks downloads from extensions (CORS). Set a CORS proxy in Settings, or ask the user to download the file and attach it with the paperclip, then read it with attachment.",
 			);
-		data = await download(corsProxyUrl + encodeURIComponent(url), signal);
+		({ data, contentType } = await download(corsProxyUrl + encodeURIComponent(url), signal));
 	}
 	let fileName = url.split("#")[0].split("?")[0].split("/").pop() || "document";
 	if (url.startsWith("https://arxiv.org/") && !fileName.includes(".")) fileName = `${fileName}.pdf`;
+	if (!/\.(pdf|docx|xlsx|xls|pptx)$/i.test(fileName)) {
+		const ext = documentExtension(data, contentType);
+		if (ext) fileName = `${fileName}.${ext}`;
+	}
 	// A long web page reads as text in parts, like a text file.
 	if (/^\s*(<!doctype html|<html)/i.test(new TextDecoder().decode(data.slice(0, 512)))) {
 		const extractedText = htmlText(new TextDecoder().decode(data));
@@ -234,7 +247,7 @@ export function createExtractDocumentTool(options: ExtractDocumentOptions): Extr
 			const chars = Math.max(200, given);
 			let range: { first: number; last: number } | undefined;
 			if (!args.query?.trim() && args.pages?.trim()) {
-				range = parseRange(args.pages, doc.units.length);
+				range = parseRange(args.pages, lastUnitNumber(doc));
 				if (!range)
 					throw new Error(
 						`pages takes one number or a range, like "12" or "40-55", not ${JSON.stringify(args.pages)}.`,
@@ -249,7 +262,8 @@ export function createExtractDocumentTool(options: ExtractDocumentOptions): Extr
 				const b = Math.max(0, budget - which.length);
 				if (args.query?.trim()) return which + readSearch(doc, fileName, args.query, b, attached ? "" : key).text;
 				if (range) return which + readRange(doc, fileName, range, offset, b).text;
-				if (offset) return which + readRange(doc, fileName, { first: 1, last: doc.units.length }, offset, b).text;
+				if (offset)
+					return which + readRange(doc, fileName, { first: 1, last: lastUnitNumber(doc) }, offset, b).text;
 				return which + readOverview(doc, fileName, b).text;
 			};
 			// The guard measures a result in tokens by script (context-budget.ts), and a page of CJK text or code holds

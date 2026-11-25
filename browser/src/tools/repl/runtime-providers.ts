@@ -106,6 +106,11 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 		// Get the REPL sandbox's abort signal (if available)
 		const replSandboxId = message.sandboxId;
 		const abortSignal = replSandboxId ? this.sandboxAbortSignals.get(replSandboxId) : undefined;
+		const cancelled = { success: false, error: "Script execution was cancelled", cancelled: true };
+		if (abortSignal?.aborted) {
+			respond(cancelled);
+			return;
+		}
 
 		// The session's current tab (created on about:blank if the session has none)
 		let tab: chrome.tabs.Tab;
@@ -211,6 +216,11 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 		}
 
 		try {
+			// Stop pressed while the tab or its skills were loading: the listener above came too late to hear it
+			if (abortSignal?.aborted) {
+				respond(cancelled);
+				return;
+			}
 			// userScripts world when the browser exposes it (sandboxed CSP), else an isolated content-script world
 			{
 				const result = await injectScript<

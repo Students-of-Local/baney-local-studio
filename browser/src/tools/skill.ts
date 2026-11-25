@@ -355,7 +355,7 @@ export const skillTool: AgentTool<typeof skillParamsSchema, any> = {
 					if (!updated.name.includes(old_string)) {
 						throw new Error("Update failed: old_string not found in name field.");
 					}
-					newName = updated.name.replace(old_string, new_string);
+					newName = updated.name.replace(old_string, () => new_string);
 					// Check if new name already exists
 					const existingWithNewName = await skillsRepo.getSkill(newName);
 					if (existingWithNewName) {
@@ -369,13 +369,13 @@ export const skillTool: AgentTool<typeof skillParamsSchema, any> = {
 					if (!updated.shortDescription.includes(old_string)) {
 						throw new Error("Update failed: old_string not found in shortDescription field.");
 					}
-					updated.shortDescription = updated.shortDescription.replace(old_string, new_string);
+					updated.shortDescription = updated.shortDescription.replace(old_string, () => new_string);
 				}
 
 				if (args.updates.domainPatterns) {
 					const { old_string, new_string } = args.updates.domainPatterns;
 					updated.domainPatterns = updated.domainPatterns.map((pattern) =>
-						pattern.replace(old_string, new_string),
+						pattern.replace(old_string, () => new_string),
 					);
 				}
 
@@ -384,7 +384,7 @@ export const skillTool: AgentTool<typeof skillParamsSchema, any> = {
 					if (!updated.library.includes(old_string)) {
 						throw new Error("Update failed: old_string not found in library field.");
 					}
-					updated.library = updated.library.replace(old_string, new_string);
+					updated.library = updated.library.replace(old_string, () => new_string);
 
 					// Validate updated library syntax
 					const validation = await validateJavaScriptSyntax(updated.library);
@@ -398,7 +398,7 @@ export const skillTool: AgentTool<typeof skillParamsSchema, any> = {
 					if (!updated.description.includes(old_string)) {
 						throw new Error("Update failed: old_string not found in description field.");
 					}
-					updated.description = updated.description.replace(old_string, new_string);
+					updated.description = updated.description.replace(old_string, () => new_string);
 				}
 
 				if (args.updates.examples) {
@@ -406,7 +406,7 @@ export const skillTool: AgentTool<typeof skillParamsSchema, any> = {
 					if (!updated.examples.includes(old_string)) {
 						throw new Error("Update failed: old_string not found in examples field.");
 					}
-					updated.examples = updated.examples.replace(old_string, new_string);
+					updated.examples = updated.examples.replace(old_string, () => new_string);
 				}
 
 				updated.lastUpdated = new Date().toISOString();

@@ -2,6 +2,50 @@ import type { SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
 import { getCurrentBrowserSession } from "../browser/current.js";
 import { NATIVE_INPUT_EVENTS_DESCRIPTION } from "../prompts/prompts.js";
 
+interface KeyInfo {
+	key: string;
+	code: string;
+	keyCode: number;
+	shift?: boolean;
+	text?: string;
+}
+
+// Character -> [code, Windows virtual key code, needs Shift]
+const PUNCTUATION_KEYS: Record<string, [string, number, boolean]> = {
+	".": ["Period", 190, false],
+	",": ["Comma", 188, false],
+	"-": ["Minus", 189, false],
+	"=": ["Equal", 187, false],
+	";": ["Semicolon", 186, false],
+	"'": ["Quote", 222, false],
+	"/": ["Slash", 191, false],
+	"\\": ["Backslash", 220, false],
+	"`": ["Backquote", 192, false],
+	"[": ["BracketLeft", 219, false],
+	"]": ["BracketRight", 221, false],
+	")": ["Digit0", 48, true],
+	"!": ["Digit1", 49, true],
+	"@": ["Digit2", 50, true],
+	"#": ["Digit3", 51, true],
+	$: ["Digit4", 52, true],
+	"%": ["Digit5", 53, true],
+	"^": ["Digit6", 54, true],
+	"&": ["Digit7", 55, true],
+	"*": ["Digit8", 56, true],
+	"(": ["Digit9", 57, true],
+	_: ["Minus", 189, true],
+	"+": ["Equal", 187, true],
+	":": ["Semicolon", 186, true],
+	'"': ["Quote", 222, true],
+	"?": ["Slash", 191, true],
+	"|": ["Backslash", 220, true],
+	"~": ["Backquote", 192, true],
+	"{": ["BracketLeft", 219, true],
+	"}": ["BracketRight", 221, true],
+	"<": ["Comma", 188, true],
+	">": ["Period", 190, true],
+};
+
 /**
  * Provides native input event functions to JavaScript REPL using Chrome Debugger API.
  * Dispatches REAL browser events (isTrusted: true) for automation of anti-bot sites.
@@ -30,7 +74,7 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 		return tab.id;
 	}
 
-	private getKeyInfo(key: string): { key: string; code: string; keyCode: number } {
+	private getKeyInfo(key: string): KeyInfo {
 		// Key mapping: simple names -> CDP parameters
 		// Supports standard key names that LLMs typically know
 		const keyMap: Record<string, { key: string; code: string; keyCode: number }> = {
@@ -106,12 +150,14 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 				};
 			}
 
-			// For other single characters, just use the character itself
-			return {
-				key: char,
-				code: `Key${upperChar}`,
-				keyCode: keyCode,
-			};
+			// Punctuation on a US layout: its own code and virtual key, with Shift for the shifted ones
+			const punct = PUNCTUATION_KEYS[char];
+			if (punct) {
+				return { key: char, code: punct[0], keyCode: punct[1], shift: punct[2] };
+			}
+
+			// Anything else goes in as text, with no virtual key code that would name another key
+			return { key: char, code: "", keyCode: 0, text: char };
 		}
 
 		throw new Error(
@@ -194,8 +240,9 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 				// Find element and get its center coordinates
 				const result = (await chrome.debugger.sendCommand({ tabId: tabId }, "Runtime.evaluate", {
 					expression: `(() => {
-							const el = document.querySelector(${JSON.stringify(message.selector)});
-							if (!el) throw new Error('Selector not found: ${message.selector}');
+							const sel = ${JSON.stringify(message.selector)};
+							const el = document.querySelector(sel);
+							if (!el) throw new Error('Selector not found: ' + sel);
 							const rect = el.getBoundingClientRect();
 							return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 						})()`,
@@ -239,8 +286,9 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 				// Focus element first
 				const focusResult = (await chrome.debugger.sendCommand({ tabId: tabId }, "Runtime.evaluate", {
 					expression: `(() => {
-							const el = document.querySelector(${JSON.stringify(message.selector)});
-							if (!el) throw new Error('Selector not found: ${message.selector}');
+							const sel = ${JSON.stringify(message.selector)};
+							const el = document.querySelector(sel);
+							if (!el) throw new Error('Selector not found: ' + sel);
 							el.focus();
 							return true;
 						})()`,
@@ -273,23 +321,27 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 				console.log("[NativeInput] Pressing key:", message.key);
 
 				const keyInfo = this.getKeyInfo(message.key);
+				const keyFields = keyInfo.keyCode
+					? {
+							key: keyInfo.key,
+							code: keyInfo.code,
+							windowsVirtualKeyCode: keyInfo.keyCode,
+							nativeVirtualKeyCode: keyInfo.keyCode,
+							...(keyInfo.shift ? { modifiers: this.MODIFIER_SHIFT } : {}),
+						}
+					: { key: keyInfo.key };
 
 				// Press single key with proper CDP parameters
 				const keyDownResult = await chrome.debugger.sendCommand({ tabId: tabId }, "Input.dispatchKeyEvent", {
 					type: "keyDown",
-					key: keyInfo.key,
-					code: keyInfo.code,
-					windowsVirtualKeyCode: keyInfo.keyCode,
-					nativeVirtualKeyCode: keyInfo.keyCode,
+					...keyFields,
+					...(keyInfo.text ? { text: keyInfo.text } : {}),
 				});
 				console.log("[NativeInput] Key down result:", keyDownResult);
 
 				const keyUpResult = await chrome.debugger.sendCommand({ tabId: tabId }, "Input.dispatchKeyEvent", {
 					type: "keyUp",
-					key: keyInfo.key,
-					code: keyInfo.code,
-					windowsVirtualKeyCode: keyInfo.keyCode,
-					nativeVirtualKeyCode: keyInfo.keyCode,
+					...keyFields,
 				});
 				console.log("[NativeInput] Key up result:", keyUpResult);
 
