@@ -19,12 +19,24 @@ pub fn run() -> Result<()> {
         "home/docs/deck.pages",
         "home/docs/Tool/Contents",
         "share/applications/sub",
+        "home/docs/site.com",
         "more/applications/folder.desktop",
+        "share/dbus-1/services",
     ] {
         create_dir_all(root.join(dir))?;
     }
-    for file in ["x.command", "x.sh", "runner", "a.PDF", "it's \"100%\"].txt"] {
-        fake(&root.join("home/docs").join(file), 0)?;
+    for file in ["x.command", "x.sh", "runner", "script.pdf"] {
+        fake(&root.join("home/docs").join(file))?;
+    }
+    for (file, bytes) in [
+        ("a.PDF", &b"%PDF-1.7"[..]),
+        ("it's \"100%\"].txt", b"text"),
+        ("jar.pdf", b"PK\x03\x04"),
+        ("b.docx", b"PK\x03\x04"),
+        ("program.txt", b"\x7fELF\x02"),
+        ("alias.pdf", b"book\0\0\0\0mark\0\0\0\0"),
+    ] {
+        write(root.join("home/docs").join(file), bytes)?;
     }
     for (link, to) in [("trap.pdf", "x.sh"), ("b", "a.PDF"), ("gone", "nowhere")] {
         symlink(to, root.join("home/docs").join(link))?;
@@ -37,18 +49,25 @@ pub fn run() -> Result<()> {
         ("share/applications/-dash", "Type=Application\nName=Dash\n"),
         ("share/applications/sub/inner", "Type=Application\nName=Inner\n"),
         ("more/applications/far", "Type=Application\nName=Far\n"),
+        ("share/applications/userapp", "Type=Application\nName=Fox\nNoDisplay=true\n"),
+        ("share/applications/wolf", "Type=Application\nName=Fox\n"),
+        ("more/applications/fox", "Type=Application\nName=The Fox\n"),
     ] {
         write(root.join(format!("{file}.desktop")), format!("[Desktop Entry]\n{text}"))?;
     }
     for program in ["gnome/gnome-control-center", "gnome/gdbus", "gnome/xdg-open", "gnome/gtk-launch"] {
-        fake(&root.join(program), 0)?;
+        fake(&root.join(program))?;
     }
-    for (program, exit) in [("kde/systemsettings", 0), ("kde/xdg-open", 0)] {
-        fake(&root.join(program), exit)?;
+    for program in ["kde/systemsettings", "kde/xdg-open", "kde/gnome-control-center", "bare/gdbus", "bare/xdg-open"] {
+        fake(&root.join(program))?;
     }
+    write(
+        root.join("share/dbus-1/services/org.fake.FileManager1.service"),
+        "[D-BUS Service]\nName=org.freedesktop.FileManager1\n",
+    )?;
     create_dir_all(root.join("broken/systemsettings"))?;
     write(root.join("broken/gnome-control-center"), "")?;
-    let vars = "HOME=home PATH=gnome LINKS_LOG=log XDG_DATA_HOME=share XDG_DATA_DIRS=more LOCAL_STUDIO_DATA_DIR=data \
+    let vars = "HOME=home PATH=gnome XDG_DATA_HOME=share XDG_DATA_DIRS=more LOCAL_STUDIO_DATA_DIR=data \
         EUKHE_CODING_AGENT_DIR=agent EUKHE_DAEMON_SOCKET=daemon.sock T3CODE_HOME=t3";
     for (name, value) in vars.split_whitespace().filter_map(|var| var.split_once('=')) {
         std::env::set_var(name, root.join(value));
@@ -59,9 +78,9 @@ pub fn run() -> Result<()> {
     Ok(std::fs::remove_dir_all(&root)?)
 }
 
-fn fake(path: &Path, exit: u8) -> Result<()> {
+fn fake(path: &Path) -> Result<()> {
     create_dir_all(path.parent().context("no folder")?)?;
-    write(path, format!("#!/bin/sh\n{{ printf '%s|' \"$0\" \"$@\"; echo $$; }} >> \"$LINKS_LOG\"\nexit {exit}\n"))?;
+    write(path, "#!/bin/sh\n")?;
     Ok(set_permissions(path, Permissions::from_mode(0o755))?)
 }
 
@@ -83,7 +102,13 @@ fn plans(root: &Path) -> Result<()> {
             _ => Platform::Linux,
         };
         let path = std::env::join_paths([PathBuf::from("gnome"), root.join("broken"), root.join(bins)])?;
-        let got = plan(rest, on, &LinkEnv { path, ..LinkEnv::here() });
+        let mut env = LinkEnv { path, desktop: String::new(), ..LinkEnv::here() };
+        match bins {
+            "kde" => env.desktop = "KDE".to_string(),
+            "bare" => env.data_dirs.clear(),
+            _ => {}
+        }
+        let got = plan(rest, on, &env);
         ensure!(got == want, "{asked}\n  wanted {want}\n  got    {got}");
     }
     for pane in PANES.split_whitespace() {

@@ -19,15 +19,22 @@ mac none file?path=~/docs/deck.pages/ -> ! That kind of file doesn't open from a
 linux gnome file?path=~/docs/x.sh -> ! That kind of file doesn't open from a link. Show it instead.
 linux gnome file?path=~/docs/runner -> ! That kind of file doesn't open from a link. Show it instead.
 linux gnome file?path=~/docs/trap.pdf -> ! That kind of file doesn't open from a link. Show it instead.
-windows none file?path=~/docs/x.sh -> ! That kind of file doesn't open from a link. Show it instead.
 mac none file?path=~/docs/missing.pdf -> ! missing.pdf is not there.
 mac none file?path=$R/home/docs/a.PDF -> /usr/bin/open|$R/home/docs/a.PDF
 linux gnome file?path=~/docs/b -> $R/gnome/xdg-open|$R/home/docs/a.PDF
 linux kde file?path=~/docs/ -> $R/kde/xdg-open|$R/home/docs
 linux none file?path=~/docs -> ! This computer has no xdg-open, which Local Studio needs for that.
-windows none file?path=~/docs/a.PDF -> C:\Windows\explorer.exe|$R/home/docs/a.PDF
+windows none file?path=~/docs/a.PDF -> ! Opening files from a link is not there yet on Windows.
+linux gnome file?path=~/docs/b.docx -> $R/gnome/xdg-open|$R/home/docs/b.docx
+linux gnome file?path=~/docs/site.com -> $R/gnome/xdg-open|$R/home/docs/site.com
+mac none file?path=~/docs/site.com -> ! That kind of file doesn't open from a link. Show it instead.
+linux gnome file?path=~/docs/script.pdf -> ! That kind of file doesn't open from a link. Show it instead.
+linux gnome file?path=~/docs/jar.pdf -> ! That kind of file doesn't open from a link. Show it instead.
+linux gnome file?path=~/docs/program.txt -> ! That kind of file doesn't open from a link. Show it instead.
+mac none file?path=~/docs/alias.pdf -> ! That kind of file doesn't open from a link. Show it instead.
 mac none reveal?path=~/docs/trap.pdf -> /usr/bin/open|-R|$R/home/docs/trap.pdf
-windows none reveal?path=~/docs/x.sh -> C:\Windows\explorer.exe|/select,$R/home/docs/x.sh
+windows none reveal?path=~/docs/x.sh -> ! Showing files from a link is not there yet on Windows.
+linux bare reveal?path=~/docs/x.sh -> $R/bare/xdg-open|$R/home/docs
 mac none reveal?path=~/docs/gone -> /usr/bin/open|-R|$R/home/docs/gone
 linux gnome reveal?path=~/docs/missing -> ! missing is not there.
 linux gnome reveal?path=~/docs/it's%20%22100%25%22%5D.txt -> $R/gnome/gdbus|call|--session|--dest|org.freedesktop.FileManager1|--object-path|/org/freedesktop/FileManager1|--method|org.freedesktop.FileManager1.ShowItems|['file://$R/home/docs/it%27s%20%22100%25%22%5D.txt']|
@@ -45,6 +52,8 @@ linux gnome app/Dash -> ! There is no app named Dash here.
 linux gnome app/Inner -> ! There is no app named Inner here.
 linux gnome app/Folder -> ! There is no app named Folder here.
 linux gnome app/Far -> $R/gnome/gtk-launch|far
+linux gnome app/Fox -> $R/gnome/gtk-launch|fox
+linux gnome app/userapp -> ! There is no app named userapp here.
 linux kde app/Calculator -> ! This computer has no gtk-launch, which Local Studio needs for that.
 mac none shortcut/Focus%20On -> /usr/bin/shortcuts|run|Focus On
 linux gnome shortcut/Focus -> ! Shortcuts run on a Mac.

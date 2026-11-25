@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::studio::{file_name, section_title, title_in, StudioLink, EXTENSION_SECTIONS, PANES};
@@ -11,6 +12,17 @@ const OPEN: &str = "/usr/bin/open";
 const EXPLORER: &str = r"C:\Windows\explorer.exe";
 const DOCUMENTS: &str = "pdf txt md csv tsv log rtf doc docx xls xlsx ppt pptx odt ods odp pages numbers key epub \
     png jpg jpeg gif webp heic mp3 m4a wav flac mp4 mov mkv webm ics vcf json yaml toml";
+const ZIPPED: &str = "docx xlsx pptx odt ods odp pages numbers key epub";
+const RUNS: &[&[u8]] = &[
+    b"#!",
+    b"MZ",
+    b"\x7fELF",
+    b"\xfe\xed\xfa",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"book\0\0\0\0mark",
+];
 
 const PANE_IDS: &[(&str, &str, &str, &str, &str)] = &[
     ("general", "systempreferences.GeneralSettings", "system", "", ""),
@@ -72,7 +84,8 @@ impl Platform {
 pub struct LinkEnv {
     pub path: OsString,
     pub home: PathBuf,
-    pub app_dirs: Vec<PathBuf>,
+    pub data_dirs: Vec<PathBuf>,
+    pub desktop: String,
 }
 
 impl LinkEnv {
@@ -83,8 +96,8 @@ impl LinkEnv {
         let own = set("XDG_DATA_HOME").map_or_else(|| home.join(".local/share"), PathBuf::from);
         let shared = set("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
         let dirs = std::iter::once(own).chain(std::env::split_paths(&shared)).filter(|dir| dir.is_absolute());
-        let app_dirs = dirs.map(|dir| dir.join("applications")).collect();
-        Self { path: set("PATH").unwrap_or_default(), home, app_dirs }
+        let desktop = set("XDG_CURRENT_DESKTOP").unwrap_or_default().to_string_lossy().into_owned();
+        Self { path: set("PATH").unwrap_or_default(), home, data_dirs: dirs.collect(), desktop }
     }
 }
 
@@ -115,13 +128,13 @@ fn system(pane: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, Stri
         Platform::Mac => (OPEN.into(), mac, "x-apple.systempreferences:com.apple."),
         Platform::Windows => (EXPLORER.into(), windows, "ms-settings:"),
         Platform::Linux => {
-            if let Ok(program) = program("gnome-control-center", env) {
-                (program, gnome, "")
-            } else if let Ok(program) = program("systemsettings", env) {
-                (program, kde, "")
-            } else {
-                return Err("This computer has no settings program Local Studio knows.".to_string());
-            }
+            let on_gnome = env.desktop.is_empty()
+                || env.desktop.split(':').any(|name| ["GNOME", "Unity"].iter().any(|g| name.eq_ignore_ascii_case(g)));
+            let found = [("gnome-control-center", gnome), ("systemsettings", kde)];
+            let mut found = found.into_iter().skip(usize::from(!on_gnome));
+            found
+                .find_map(|(name, panel)| Some((program(name, env).ok()?, panel, "")))
+                .ok_or_else(|| "This computer has no settings program Local Studio knows.".to_string())?
         }
     };
     if panel.is_empty() {
@@ -133,25 +146,35 @@ fn system(pane: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, Stri
 
 fn file(given: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, String> {
     let path = expand(given, env).canonicalize().map_err(|_| missing(given))?;
-    if !document(&path) {
+    if on == Platform::Windows {
+        return Err("Opening files from a link is not there yet on Windows.".to_string());
+    }
+    if !document(&path, on) {
         return Err("That kind of file doesn't open from a link. Show it instead.".to_string());
     }
-    let opener = match on {
-        Platform::Mac => OPEN.into(),
-        Platform::Linux => program("xdg-open", env)?,
-        Platform::Windows => EXPLORER.into(),
-    };
+    let opener = if on == Platform::Mac { OPEN.into() } else { program("xdg-open", env)? };
     Ok(vec![opener, path.into()])
 }
 
-fn document(path: &Path) -> bool {
+fn document(path: &Path, on: Platform) -> bool {
     let Ok(metadata) = fs::metadata(path) else { return false };
     if metadata.is_dir() {
         let plain = path.file_name().is_some_and(|name| !name.to_string_lossy().contains('.'));
-        return plain && ["Info.plist", "Contents"].iter().all(|part| fs::symlink_metadata(path.join(part)).is_err());
+        let bundle = || ["Info.plist", "Contents"].iter().any(|part| fs::symlink_metadata(path.join(part)).is_ok());
+        return on != Platform::Mac || (plain && !bundle());
     }
     let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
-    metadata.is_file() && DOCUMENTS.split(' ').any(|known| known.eq_ignore_ascii_case(extension))
+    let listed = |list: &str| list.split(' ').any(|known| known.eq_ignore_ascii_case(extension));
+    metadata.is_file() && listed(DOCUMENTS) && starts_as_document(path, listed(ZIPPED))
+}
+
+fn starts_as_document(path: &Path, zipped: bool) -> bool {
+    let mut start = Vec::new();
+    let Ok(file) = fs::File::open(path) else { return false };
+    if file.take(16).read_to_end(&mut start).is_err() {
+        return false;
+    }
+    !RUNS.iter().any(|runs| start.starts_with(runs)) && (zipped || !start.starts_with(b"PK\x03\x04"))
 }
 
 fn reveal(given: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, String> {
@@ -159,13 +182,9 @@ fn reveal(given: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, Str
     fs::symlink_metadata(&path).map_err(|_| missing(given))?;
     match on {
         Platform::Mac => Ok(vec![OPEN.into(), "-R".into(), path.into()]),
-        Platform::Windows => {
-            let mut select = OsString::from("/select,");
-            select.push(path);
-            Ok(vec![EXPLORER.into(), select])
-        }
+        Platform::Windows => Err("Showing files from a link is not there yet on Windows.".to_string()),
         Platform::Linux => {
-            let Ok(gdbus) = program("gdbus", env) else {
+            let Some(gdbus) = program("gdbus", env).ok().filter(|_| has_file_manager(env)) else {
                 return Ok(vec![program("xdg-open", env)?, path.parent().unwrap_or(&path).into()]);
             };
             let call =
@@ -175,6 +194,15 @@ fn reveal(given: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, Str
             Ok(std::iter::once(gdbus).chain(call.split(' ').map(OsString::from)).chain(items).collect())
         }
     }
+}
+
+fn has_file_manager(env: &LinkEnv) -> bool {
+    let files = env.data_dirs.iter().flat_map(|dir| fs::read_dir(dir.join("dbus-1/services")).into_iter().flatten());
+    files.flatten().map(|entry| entry.path()).any(|file| {
+        let named = file.file_name().is_some_and(|name| name.to_string_lossy().contains("FileManager1"));
+        let offers = |text: String| text.lines().any(|line| line.trim() == "Name=org.freedesktop.FileManager1");
+        named && fs::read_to_string(&file).is_ok_and(offers)
+    })
 }
 
 fn encoded(path: &Path) -> String {
@@ -196,7 +224,9 @@ fn app(name: &str, on: Platform, env: &LinkEnv) -> Result<Vec<OsString>, String>
 
 fn app_stem(name: &str, env: &LinkEnv) -> Option<String> {
     let mut seen = HashSet::new();
-    for dir in &env.app_dirs {
+    let mut named = None;
+    for dir in &env.data_dirs {
+        let dir = dir.join("applications");
         let mut files: Vec<PathBuf> =
             fs::read_dir(dir).into_iter().flatten().flatten().map(|entry| entry.path()).collect();
         files.sort();
@@ -204,12 +234,16 @@ fn app_stem(name: &str, env: &LinkEnv) -> Option<String> {
             let stem = file.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_suffix(".desktop"));
             let Some(stem) = stem.filter(|stem| !stem.is_empty() && !stem.starts_with('-')) else { continue };
             let same = |text: &str| text.to_lowercase() == name.to_lowercase();
-            if seen.insert(stem.to_string()) && app_name(&file).is_some_and(|shown| same(&shown) || same(stem)) {
+            let Some(shown) = seen.insert(stem.to_string()).then(|| app_name(&file)).flatten() else { continue };
+            if same(stem) {
                 return Some(stem.to_string());
+            }
+            if named.is_none() && same(&shown) {
+                named = Some(stem.to_string());
             }
         }
     }
-    None
+    named
 }
 
 fn app_name(file: &Path) -> Option<String> {
@@ -218,7 +252,8 @@ fn app_name(file: &Path) -> Option<String> {
     let entry = text.lines().map(str::trim).skip_while(|line| *line != "[Desktop Entry]").skip(1);
     let pairs = entry.take_while(|line| !line.starts_with('[')).filter_map(|line| line.split_once('='));
     let value = |key| pairs.clone().find(|(known, _)| known.trim() == key).map(|(_, value)| value.trim());
-    let runs = value("Type") == Some("Application") && value("Hidden") != Some("true");
+    let runs =
+        value("Type") == Some("Application") && ["Hidden", "NoDisplay"].iter().all(|key| value(key) != Some("true"));
     runs.then(|| value("Name").unwrap_or_default().to_string())
 }
 

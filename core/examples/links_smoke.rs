@@ -1,3 +1,4 @@
+#[cfg(unix)]
 #[path = "support/links_run.rs"]
 mod links_run;
 
@@ -204,6 +205,7 @@ fn main() -> anyhow::Result<()> {
     grammar()?;
     words()?;
     outside()?;
+    #[cfg(unix)]
     links_run::run()?;
     println!("PASS links_smoke");
     Ok(())
