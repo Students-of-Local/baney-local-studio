@@ -14,13 +14,18 @@ git commit -qm base
 fail=0
 
 check() {
-  local want=$1 event=$2 what=$3 edit=$4 got
+  local want=$1 event=$2 what=$3 edit=$4
   git checkout -q -B pr main
   eval "$edit"
   git add -A
-  git commit -qm "$what" --allow-empty
+  git commit -qm "$what"
   git checkout -q -B merge main
   git merge -q --no-ff -m merge pr >/dev/null
+  report "$want" "$event" "$what"
+}
+
+report() {
+  local want=$1 event=$2 what=$3 got
   : >out
   GITHUB_EVENT_NAME=$event GITHUB_OUTPUT=$work/out "$script" >/dev/null
   got=$(cat out)
@@ -44,4 +49,10 @@ check true pull_request "a folder that only starts like browser" 'mkdir browser-
 check true pull_request "a core file named like a browser path" 'mkdir -p core/browser; echo b >core/browser/a'
 check true push "browser only" 'echo b >browser/a'
 check true "" "browser only, outside GitHub" 'echo b >browser/a'
+git checkout -q main
+git commit -q --allow-empty -m empty
+report true pull_request "a merge that changes nothing"
+git checkout -q --orphan root
+git commit -qm root
+report true pull_request "a commit git has no parent for"
 exit "$fail"
