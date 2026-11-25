@@ -113,6 +113,7 @@ impl SocketTakeover for Takeover {
 async fn start(launch: &DaemonLaunch, socket: &Path, bundled: Option<&str>, interactive: bool) -> anyhow::Result<()> {
     let mut command = Command::new(&launch.program);
     command.args(["--mode", "daemon", "--daemon-socket"]).arg(socket);
+    command.env(crate::plugins::NO_BYTECODE.0, "1");
     if let Some(path) = crate::workspace::process::joined_path() {
         command.env("PATH", path);
     }
