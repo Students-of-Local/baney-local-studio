@@ -68,6 +68,7 @@
               pkgs.xvfb
               pkgs.dbus
               pkgs.rsync
+              pkgs.patchelf
             ];
             buildInputs = [
               pkgs.gtk4

@@ -143,7 +143,7 @@ No telemetry, no account, no server of ours. [PRIVACY.md](PRIVACY.md) lists ever
 
 ## Limits
 
-- macOS 26+ on Apple Silicon and Linux. Windows builds the core only, for now.
+- macOS 26+ on Apple Silicon, and Linux. The Linux download is for x86_64 and uses your system's libraries: glibc 2.39, GTK 4.22, libadwaita 1.9 and WebKitGTK 6 or newer, as in Ubuntu 26.04 and Arch. On NixOS, build from source. Windows builds the core only, for now.
 - Not sandboxed: agents run code with your user's permissions. Use Supervised mode to approve each step.
 - Subscription sign-in for ChatGPT and GitHub Copilot happens in Eukhe (`eukhe`, then `/login`). Claude runs only through Claude Code and your `claude` sign-in ([docs/harness.md](docs/harness.md)); Local Studio hides Eukhe's Claude sign-in because it identifies as Claude Code and can get the account restricted. Anthropic API keys still work in Eukhe.
 
