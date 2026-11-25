@@ -171,6 +171,7 @@ impl Composer {
             None::<&gtk::Expression>,
             "string",
         )));
+        pick_on_return(&model);
         let thinking = thinking_picker(&app);
         let access = access_picker(&app);
         let stop = icons::button(icons::STOP, "Stop Generation");
@@ -673,6 +674,24 @@ fn picker(model: &gtk::StringList, tooltip: &str) -> gtk::DropDown {
     dropdown.add_css_class("flat");
     dropdown.set_show_arrow(true);
     dropdown
+}
+
+fn pick_on_return(dropdown: &gtk::DropDown) {
+    let root = dropdown.upcast_ref();
+    let search = crate::picker::find::<gtk::SearchEntry>(root, |_| true);
+    let list = crate::picker::find::<gtk::ListView>(root, |_| true);
+    let (Some(search), Some(list)) = (search, list) else { return };
+    search.connect_activate(move |search| {
+        search.emit_by_name::<()>("search-changed", &[]);
+        let Some(matches) = list.model().and_downcast::<gtk::SingleSelection>() else { return };
+        if matches.n_items() == 0 {
+            return;
+        }
+        if !search.text().is_empty() {
+            matches.set_selected(0);
+        }
+        list.emit_by_name::<()>("activate", &[&matches.selected()]);
+    });
 }
 
 fn thinking_picker(app: &Weak<App>) -> Picker {

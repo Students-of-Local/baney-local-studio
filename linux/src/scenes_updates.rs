@@ -63,28 +63,14 @@ fn state(scene: &str) -> AppUpdateState {
     }
 }
 
-fn find<T: IsA<gtk::Widget>>(root: &gtk::Widget, keep: impl Fn(&T) -> bool) -> Option<T> {
-    let mut stack = vec![root.clone()];
-    while let Some(widget) = stack.pop() {
-        if let Some(found) = widget.downcast_ref::<T>().filter(|found| keep(found)) {
-            return Some(found.clone());
-        }
-        let mut child = widget.first_child();
-        while let Some(current) = child {
-            child = current.next_sibling();
-            stack.push(current);
-        }
-    }
-    None
-}
-
 fn reveal(app: &Rc<App>, open_menu: bool) {
     let weak = Rc::downgrade(app);
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
         let Some(dialog) = weak.upgrade().and_then(|app| app.window.visible_dialog()) else { return };
         let root: gtk::Widget = dialog.upcast();
-        let Some(group) = find::<adw::PreferencesGroup>(&root, |group| group.title() == "Updates" && group.is_mapped())
-        else {
+        let Some(group) = crate::picker::find::<adw::PreferencesGroup>(&root, |group| {
+            group.title() == "Updates" && group.is_mapped()
+        }) else {
             return;
         };
         let Some(scroller) = group.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>()
@@ -97,7 +83,7 @@ fn reveal(app: &Rc<App>, open_menu: bool) {
             adjustment.set_value((f64::from(point.y()) - 24.0).clamp(0.0, adjustment.upper() - adjustment.page_size()));
         }
         if open_menu {
-            if let Some(button) = find::<gtk::MenuButton>(group.upcast_ref(), WidgetExt::is_mapped) {
+            if let Some(button) = crate::picker::find::<gtk::MenuButton>(group.upcast_ref(), WidgetExt::is_mapped) {
                 button.popup();
             }
         }
