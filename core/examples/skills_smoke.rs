@@ -934,7 +934,6 @@ fn mentions(smoke: &mut Smoke) -> Result<(), String> {
     }
     let project = project.canonicalize().map_err(text)?;
     std::env::set_var("HOME", top.join("home"));
-    skill(&top.join("shipped"), "crane", "Lift", "")?;
     std::env::set_var("LOCAL_STUDIO_SKILLS_DIR", top.join("shipped"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", top.join("home/agent"));
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
@@ -1010,6 +1009,7 @@ fn at_list(smoke: &mut Smoke, at: &mut At, data: &Path) -> Result<(), String> {
     smoke.check("an empty @ lists files, and no plugin that isn't installed", shown && files(&empty) == empty.len());
     let manifest =
         "id = \"gantrel\"\nname = \"Crane\"\nversion = \"0.1.0\"\ndescription = \"Lift\"\ncapabilities = []\n";
+    skill(&data.with_file_name("shipped"), "gantrel", "Shipped", "")?;
     put(&data.join("plugins/gantrel/plugin.toml"), manifest)?;
     let plugin = row(MentionKind::Plugin, "gantrel", "Lift", "Plugin", "");
     for query in ["gan", "crane"] {
