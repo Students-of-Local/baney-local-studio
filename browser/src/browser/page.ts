@@ -55,13 +55,15 @@ const configuredWorlds = new Set<string>();
 
 /**
  * Run code in a tab's USER_SCRIPT world and return its JSON-serialisable result.
- * `code` must be an expression or an IIFE; promises are awaited.
+ * `code` must be an expression or an IIFE; promises are awaited. `main` is what the debugger evaluates in
+ * the page's own world when userScripts can't run, where the page reaches every global.
  */
 export async function runInPage<T = unknown>(
 	tabId: number,
 	code: string,
 	worldId = SNAPSHOT_WORLD_ID,
 	csp = SNAPSHOT_CSP,
+	main = wrapCode(code),
 ): Promise<T> {
 	const tab = await chrome.tabs.get(tabId);
 	if (tab.url && isRestrictedUrl(tab.url)) {
@@ -71,7 +73,7 @@ export async function runInPage<T = unknown>(
 	// userScripts needs the "Allow user scripts" toggle; without it, evaluate through the
 	// debugger in the main world (CSP does not apply to Runtime.evaluate).
 	const api = userScriptsApi();
-	if (!api) return cdpEvaluate<T>(tabId, wrapped);
+	if (!api) return cdpEvaluate<T>(tabId, main);
 	let results: Awaited<ReturnType<typeof api.execute>>;
 	try {
 		if (!configuredWorlds.has(worldId)) {
@@ -92,7 +94,7 @@ export async function runInPage<T = unknown>(
 		});
 	} catch (err) {
 		// Present but refused (permission or toggle): the code never ran, so evaluate it through the debugger.
-		if (isUserScriptsGated(err)) return cdpEvaluate<T>(tabId, wrapped);
+		if (isUserScriptsGated(err)) return cdpEvaluate<T>(tabId, main);
 		throw err;
 	}
 	const first = results[0];
@@ -109,7 +111,8 @@ export async function runInPage<T = unknown>(
 // called by that key with its arguments. The install script's text is the same for every document, so V8 takes it from
 // its compilation cache instead of compiling it again. A document not known to have the function (the tab's first call,
 // or the first after a navigation commits) gets the install and the call, sent together; one that answers that it is
-// missing gets them the same way.
+// missing gets them the same way. The page's own world, where the debugger runs code when userScripts can't, has no
+// library: the page could put its own object in its place and be handed every call's arguments.
 
 /** A page function: `source` is a function expression, self-contained, whose arguments are JSON. */
 export interface PageLib {
@@ -121,6 +124,8 @@ export interface PageLib {
 export interface LibCall {
 	lib: PageLib;
 	args: unknown[];
+	/** Its arguments are the user's secrets: in the page's own world its code is hidden from the page (runLib). */
+	secret?: boolean;
 }
 
 /** The global the functions hang on, in whichever world runs them. Not enumerable, and an entry can't be replaced. */
@@ -183,22 +188,26 @@ function libKnown(tabId: number): Set<string> {
 /** Run a page function in the tab's top document: by its key when the document has it, else installed and run. */
 export async function runLib<T>(tabId: number, call: LibCall): Promise<T> {
 	const { key, install } = libScript(call.lib);
+	// Strict code is hidden from Function.caller: a page getter that runs as the call returns can't read its text.
+	const whole = `${call.secret ? '"use strict"; ' : ""}${wrapCode(libCode(call))}`;
+	if (!userScriptsApi()) return runInPage<T>(tabId, libCode(call), SNAPSHOT_WORLD_ID, SNAPSHOT_CSP, whole);
+	const run = <V>(code: string, main: string) => runInPage<V>(tabId, code, SNAPSHOT_WORLD_ID, SNAPSHOT_CSP, main);
 	const byKey = `(() => { const L = globalThis.${LIB_GLOBAL}; const f = L && L[${key}]; return typeof f === "function" ? f(${libArgs(call.args)}) : ${JSON.stringify(LIB_MISS)}; })()`;
 	const known = libKnown(tabId);
 	if (known.has(key)) {
-		const got = await runInPage<T | typeof LIB_MISS>(tabId, byKey);
+		const got = await run<T | typeof LIB_MISS>(byKey, whole);
 		if (got !== LIB_MISS) return got as T;
 	}
 	// A document not known to have it: the install and the call, sent one after the other without waiting, so they cost
 	// about one round trip (the debugger runs them in order). Installing twice is a no-op.
-	const installed = runInPage<boolean>(tabId, install).catch(() => false);
-	const again = runInPage<T | typeof LIB_MISS>(tabId, byKey);
+	const installed = run<boolean>(install, wrapCode("false")).catch(() => false);
+	const again = run<T | typeof LIB_MISS>(byKey, whole);
 	// Its failure is the caller's, but it may come while the install is awaited: handled from the start.
 	again.catch(() => undefined);
 	if (await installed) known.add(key);
 	const value = await again;
 	// A page that took the global, or the two arriving out of order: the whole code, which always runs.
-	return value === LIB_MISS ? runInPage<T>(tabId, libCode(call)) : (value as T);
+	return value === LIB_MISS ? run<T>(libCode(call), whole) : (value as T);
 }
 
 function isLibCall(c: string | LibCall): c is LibCall {
@@ -1892,7 +1901,8 @@ function lineOf(
  * under the frame's host. A frame is read only when its own line is listed as shown, by the
  * document around it, and frameState finds it shown too, so no other frame can stand in for
  * it. A frame on a host not allowed for agents keeps its line, which names the host, and nothing
- * of it is read. Frames of one level are read at once, all under one time limit.
+ * of it is read, also when it went there after it was found: the document read is checked as the
+ * frame was. Frames of one level are read at once, all under one time limit.
  */
 async function readFrames(
 	tabId: number,
@@ -1947,21 +1957,25 @@ async function readFrames(
 		});
 		const wanted = room > 0 ? picks.slice(0, Math.max(0, MAX_FRAMES - read)) : [];
 		const got = await Promise.all(
-			wanted.map(({ f }) =>
-				bounded(
+			wanted.map(async ({ f, own }) => {
+				const s = await bounded(
 					runInFrame<Snapshot & FramesAt>(tabId, f, code(room, textRoom)),
 					Math.max(0, Math.min(FRAME_READ_MS, end - Date.now())),
-				),
-			),
+				);
+				if (!s?.nodes) return s;
+				const bar = web(s.url) ? await rule(s.url) : "guarded";
+				if (bar === "blocked") own.states = [`not allowed for agents: ${frameHost(s.url)}`];
+				return bar ? undefined : s;
+			}),
 		);
 		wanted.forEach(({ f, own }, i) => {
 			const s = got[i];
-			// No answer (its document is being replaced), or one still being parsed.
+			// No answer or a barred one (its document was replaced), or one still being parsed.
 			if (!s?.nodes || s.parsing) whole = false;
 			if (s?.settling) settling = true;
 			if (!s?.nodes || room <= 0) return;
 			read++;
-			const label = frameHost(f.url);
+			const label = frameHost(s.url);
 			const nodes = s.nodes.slice(0, room).map((n) => {
 				const x = Math.round(f.offset.x + f.scale * n.x);
 				const y = Math.round(f.offset.y + f.scale * n.y);
@@ -2559,7 +2573,7 @@ export function writeSignIn(
 	origin: string,
 	values: SignInValues,
 ): Promise<{ wrote: Array<keyof SignInFields>; why?: string }> {
-	return runLib(tabId, { lib: SIGN_IN_LIB, args: [fields, origin, values] });
+	return runLib(tabId, { lib: SIGN_IN_LIB, args: [fields, origin, values], secret: true });
 }
 
 /**
@@ -2731,7 +2745,7 @@ export async function awaitDrawn(capMs: number): Promise<number> {
 	return Math.round(performance.now() - t0);
 }
 
-/** Scroll the page or an element; returns the new scroll position. */
+/** Scroll the page or an element, at once whatever its scroll-behavior; returns the new scroll position. */
 export async function scrollPage(
 	tabId: number,
 	options: { dx?: number; dy?: number; selector?: string; ref?: string; to?: "top" | "bottom" },
@@ -2772,9 +2786,8 @@ export async function scrollPage(
 				box = box.parentElement || (root instanceof ShadowRoot ? root.host : null);
 			}
 			if (!page(box)) {
-				if (o.to === "top") box.scrollTo(box.scrollLeft, 0);
-				else if (o.to === "bottom") box.scrollTo(box.scrollLeft, box.scrollHeight);
-				else box.scrollBy(o.dx || 0, o.dy || 0);
+				if (o.to) box.scrollTo({ top: o.to === "top" ? 0 : box.scrollHeight, behavior: "instant" });
+				else box.scrollBy({ left: o.dx || 0, top: o.dy || 0, behavior: "instant" });
 				// Agent tabs sit in the background, where the frame that fires "scroll" comes late, and a list
 				// that draws its rows on scroll would still show the old ones to the next read. Fire it now,
 				// then give the page one frame (at most 150 ms) to draw.
@@ -2787,9 +2800,8 @@ export async function scrollPage(
 			target = null;
 		}
 		if (target) target.scrollIntoView({ block: "center", behavior: "instant" });
-		else if (o.to === "top") window.scrollTo(0, 0);
-		else if (o.to === "bottom") window.scrollTo(0, document.documentElement.scrollHeight);
-		else window.scrollBy(o.dx || 0, o.dy || 0);
+		else if (o.to) window.scrollTo({ left: 0, top: o.to === "top" ? 0 : document.documentElement.scrollHeight, behavior: "instant" });
+		else window.scrollBy({ left: o.dx || 0, top: o.dy || 0, behavior: "instant" });
 		return { scrollX: Math.round(window.scrollX), scrollY: Math.round(window.scrollY), pageHeight: document.documentElement.scrollHeight };
 	})()`;
 	const framed = options.ref ? await frameForRef(tabId, options.ref, rule) : undefined;
