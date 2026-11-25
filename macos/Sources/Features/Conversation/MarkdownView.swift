@@ -7,9 +7,10 @@ struct MarkdownView: View {
     let text: String
     var size: CGFloat = 13.5
     var secondary = false
+    var studioLinks = false
 
     var body: some View {
-        MarkdownText(rendering: MarkdownRenderer.rendering(MarkdownSource(text: text, size: size, secondary: secondary)))
+        MarkdownText(rendering: MarkdownRenderer.rendering(MarkdownSource(text: text, size: size, secondary: secondary, studioLinks: studioLinks)))
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

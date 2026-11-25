@@ -17,11 +17,12 @@ enum ShellConfirmation: Equatable {
     case unpin([String])
     case restartDaemon(UInt32)
     case localOnly(thread: String, plugin: String, message: String, local: ModelKey?)
+    case studioLink(StudioLink)
 
     var threads: [String] {
         switch self {
         case .delete(let ids), .stopAndDelete(let ids), .archive(let ids), .unpin(let ids): ids
-        case .restartDaemon, .localOnly: []
+        case .restartDaemon, .localOnly, .studioLink: []
         }
     }
 }

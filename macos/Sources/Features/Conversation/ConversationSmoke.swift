@@ -303,7 +303,7 @@ final class ConversationSmoke {
         guard draft.contexts.count == 1, draft.promptText.contains("Terminal:\n```\n$ make\nok\n```") else { return "attachContext did not add a terminal chip" }
         draft.clear()
         print("ok   attachContext(text:source:) added a terminal context chip")
-        return vimChecks() ?? copyChecks()
+        return vimChecks() ?? copyChecks() ?? linkChecks()
     }
 
     private func vimChecks() -> String? {
@@ -340,6 +340,48 @@ final class ConversationSmoke {
         vim.feed("0", in: textView)
         guard textView.selectedRange().location == 0 else { return "vim 0 put the caret at \(textView.selectedRange().location), expected 0" }
         print("ok   vim composer motions (dw, dd, u, cw, yy p)")
+        return nil
+    }
+
+    private func linkChecks() -> String? {
+        let source = "[**harm**less](localstudio://app/Terminal) [web](https://example.com) [odd](localstudio://app/a/b) [quiet](localstudio://shortcut/Focus)"
+        func rendered(_ studioLinks: Bool) -> MarkdownNSTextView {
+            let view = MarkdownNSTextView()
+            view.show(MarkdownRenderer.rendering(MarkdownSource(text: source, size: 13, secondary: false, studioLinks: studioLinks)))
+            return view
+        }
+        func links(_ view: MarkdownNSTextView) -> [(url: String, location: Int)] {
+            var found: [(String, Int)] = []
+            guard let storage = view.textStorage else { return found }
+            storage.enumerateAttribute(.link, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+                if let url = value as? URL { found.append((url.absoluteString, range.location)) }
+            }
+            return found
+        }
+        let plain = rendered(false)
+        guard plain.string == "harmless web odd quiet", links(plain).count == 4 else { return "text outside a reply shows \(plain.string.debugDescription)" }
+        let view = rendered(true)
+        let shown = view.string.replacingOccurrences(of: "\u{A0}", with: "|")
+        let words = [StudioLink.app(name: "Terminal"), .shortcut(name: "Focus")].map { "|\(linkWords(link: $0).title)|" }
+        guard shown == "\(words[0]) web odd \(words[1])" else { return "a reply's links show \(shown.debugDescription)" }
+        let found = links(view)
+        guard found.map(\.url) == ["localstudio://app/Terminal", "https://example.com", "localstudio://shortcut/Focus"] else { return "a reply's links are \(found)" }
+        guard view.textStorage?.attribute(.toolTip, at: found[0].location, effectiveRange: nil) as? String == "Terminal" else { return "a link button has no tooltip" }
+        var web: [String] = []
+        var own: [String] = []
+        view.openURL = OpenURLAction { url in
+            web.append(url.absoluteString)
+            return .handled
+        }
+        view.openStudioLink = { own.append($0) }
+        for link in found {
+            view.clicked(onLink: URL(string: link.url) as Any, at: link.location)
+        }
+        guard web == ["https://example.com"], own == ["localstudio://app/Terminal", "localstudio://shortcut/Focus"] else { return "clicks went to \(web) and \(own)" }
+        store.openStudioLink(own[1])
+        guard store.shell.confirmation == .studioLink(.shortcut(name: "Focus")) else { return "a shortcut link did not ask first" }
+        store.shell.confirmation = nil
+        print("ok   localstudio:// links in a reply are buttons with the app's own words, stay links elsewhere, and a shortcut asks first")
         return nil
     }
 

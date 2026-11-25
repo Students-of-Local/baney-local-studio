@@ -58,6 +58,7 @@ struct RootView: View {
             }
             return panels.openLink(url) ? .handled : .systemAction
         })
+        .environment(\.linkStore, store)
         .ignoresSafeArea(.container, edges: .top)
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -180,6 +181,7 @@ struct RootView: View {
         case .unpin: return "Unpin \(noun)?"
         case .restartDaemon: return "Restart the Eukhe daemon?"
         case .localOnly: return "Runs only on local models"
+        case .studioLink(let link): return "\(linkWords(link: link).title)?"
         }
     }
 
@@ -192,6 +194,7 @@ struct RootView: View {
         case .restartDaemon(let busy):
             "\(busy) Eukhe sessions are running. Restarting stops their runs; their threads stay saved and reopen on the new daemon."
         case .localOnly(_, _, let message, _): message
+        case .studioLink: "A link in this thread asks for it. A shortcut can do anything it was made to do."
         }
     }
 
@@ -203,13 +206,14 @@ struct RootView: View {
         case .unpin: "Unpin"
         case .restartDaemon: "Restart"
         case .localOnly(_, _, _, let local): local.map { "Switch to \($0.model) and Run" } ?? "OK"
+        case .studioLink: "Run Shortcut"
         }
     }
 
     private func confirmationRole(_ confirmation: ShellConfirmation) -> ButtonRole? {
         switch confirmation {
         case .delete, .stopAndDelete, .restartDaemon: .destructive
-        case .archive, .unpin, .localOnly: nil
+        case .archive, .unpin, .localOnly, .studioLink: nil
         }
     }
 }
