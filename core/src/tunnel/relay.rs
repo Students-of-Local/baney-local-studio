@@ -45,6 +45,7 @@ const RELAY_TAKES: usize = 32 << 20;
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Sink = SplitSink<Socket, Message>;
 
+#[derive(Clone)]
 pub struct Config {
     pub url: String,
     pub key: String,

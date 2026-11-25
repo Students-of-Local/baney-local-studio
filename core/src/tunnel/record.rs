@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::setup::{serve_disallow, WRANGLER, YML};
 use super::{process_info, RelayState, Status, Tunnel};
+use crate::platform::mode;
 
 pub(super) const RECORD: &str = "relay.json";
 pub(super) const STATE: &str = "relay-state.json";
@@ -43,7 +44,24 @@ impl Tunnel {
         self.dir.join(RECORD)
     }
 
+    fn relay_chmod(&self) -> Option<String> {
+        let path = self.relay_path();
+        let open = fs::metadata(&path).is_ok_and(|meta| mode(&meta) & 0o077 != 0);
+        open.then(|| format!("chmod 600 '{}'", path.display().to_string().replace('\'', "'\\''")))
+    }
+
     pub(super) fn relay_record(&self) -> Result<Option<Record>, String> {
+        if let Some(chmod) = self.relay_chmod() {
+            let path = self.relay_path();
+            let path = path.display();
+            return Err(format!(
+                "Others on this machine can read the relay's key in {path}, so it isn't used. Run {chmod}, then set the relay up again for a new key: {AGAIN}"
+            ));
+        }
+        self.relay_read()
+    }
+
+    fn relay_read(&self) -> Result<Option<Record>, String> {
         let path = self.relay_path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -86,7 +104,7 @@ impl Tunnel {
             Err(message) => {
                 status.message = message;
                 status.next = "needs_setup".into();
-                status.next_command = Some(OFF.into());
+                status.next_command = Some(self.relay_chmod().unwrap_or(OFF.into()));
                 status.relay = Some(RelayState { state: "bad_config".into(), since: None });
                 return status;
             }
@@ -101,7 +119,10 @@ impl Tunnel {
             "connecting" => ("waiting", "This machine is connecting to its relay."),
             "disconnected" => ("waiting", "This machine lost its relay and keeps trying to reach it again."),
             "replaced" => ("needs_setup", "Another machine took this relay over. To take it back, run setup again:"),
-            "unauthorized" => ("needs_setup", "The relay refuses this machine's key. Run setup again:"),
+            "unauthorized" => (
+                "needs_setup",
+                "The relay refuses this machine's key, and this machine asks again every minute. If that doesn't end, run setup again:",
+            ),
             "outdated" => {
                 ("needs_setup", "The relay speaks a newer protocol. Update Local Studio, then run setup again:")
             }
@@ -138,10 +159,15 @@ impl Tunnel {
         Ok(removed)
     }
 
-    pub(super) fn relay_off(&self, taken: bool, removed: &mut Vec<String>) -> Result<Option<String>, String> {
-        let record = self.relay_record();
+    pub(super) fn relay_off(
+        &self,
+        taken: bool,
+        removed: &mut Vec<String>,
+        left: &mut Vec<String>,
+    ) -> Result<Option<String>, String> {
+        let record = self.relay_read();
         if let Ok(Some(record)) = &record {
-            serve_disallow(record.host());
+            serve_disallow(record.host(), left);
         }
         removed.extend(self.remove_relay()?);
         Ok(match record {

@@ -1,15 +1,20 @@
 use std::future::Future;
+use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::{Config, Ended, Event};
+use super::{address, Config, Ended, Event};
 use crate::link::devices::now_ms;
 use crate::tunnel::record::{Seen, AGAIN, STATE};
-use crate::tunnel::{fail, Failure, Ports, Tunnel, DEFAULT_PORTS};
+use crate::tunnel::{fail, Failure, Ports, Tunnel, UpLock, DEFAULT_PORTS};
 
 pub const WORKER_JS: &str = include_str!("../worker/relay.js");
 pub const WORKER_CONFIG: &str = include_str!("../worker/wrangler.jsonc");
 const PING: Duration = Duration::from_secs(30);
 const LOOK: Duration = Duration::from_secs(2);
+const REFUSED_WAIT: Duration = Duration::from_mins(1);
+const LOCK: &str = "relay.lock";
+const BUSY: &str = "Another local-studio tunnel relay run is already running on this data folder.";
 
 impl Tunnel {
     fn relay_note(&self, state: &str, line: &str, log: &impl Fn(&str)) {
@@ -24,11 +29,28 @@ impl Tunnel {
     }
 
     pub(in crate::tunnel) fn relay_ports(&self, serve: Option<u16>, mcp: Option<u16>) -> Result<Ports, String> {
-        let route = self.route()?.map(|route| route.ports);
+        let given = serve.is_some() && mcp.is_some();
+        let route = if given { None } else { self.route()?.map(|route| route.ports) };
         Ok(Ports {
             serve: serve.or(route.and_then(|ports| ports.serve)).unwrap_or(DEFAULT_PORTS.serve),
             mcp: mcp.or(route.map(|ports| ports.mcp)).unwrap_or(DEFAULT_PORTS.mcp),
         })
+    }
+
+    fn relay_config(&self, serve: Option<u16>, mcp: Option<u16>) -> Result<(Config, String), String> {
+        let record = self.relay_record()?.ok_or_else(|| self.no_relay())?;
+        let ports = self.relay_ports(serve, mcp)?;
+        let config = Config { url: record.url, key: record.key, ports, ping: PING };
+        let address = address(&config)?;
+        let host = address.split('/').nth(2).unwrap_or_default().to_string();
+        Ok((config, host))
+    }
+
+    fn no_relay(&self) -> String {
+        format!(
+            "No relay on this machine: {} isn't there. To set one up, run setup: {AGAIN}",
+            self.relay_path().display()
+        )
     }
 
     pub async fn relay_run(
@@ -37,10 +59,17 @@ impl Tunnel {
         mcp: Option<u16>,
         log: impl Fn(&str) + Send + Sync,
     ) -> Result<(), Failure> {
-        let record = self.relay_record().transpose().ok_or_else(|| {
-            fail("no_relay", format!("No relay on this machine: {} isn't there.", self.relay_path().display()))
-        })?;
+        let _lock = UpLock::named(&self.dir, LOCK, Some(BUSY))?;
         let signal = stop_signal().map_err(|error| error.to_string())?;
+        if matches!(self.relay_path().try_exists(), Ok(false)) {
+            if std::io::stdin().is_terminal() {
+                return Err(fail("no_relay", self.no_relay()));
+            }
+            log(&self.no_relay());
+            signal.await;
+            log("stopped");
+            return Ok(());
+        }
         let stop = async {
             tokio::select! {
                 () = signal => false,
@@ -48,18 +77,12 @@ impl Tunnel {
             }
         };
         tokio::pin!(stop);
-        let ended = match record.and_then(|record| Ok((self.relay_ports(serve, mcp)?, record))) {
+        let ended = match self.relay_config(serve, mcp) {
             Err(message) => Ok(Ended::BadConfig(message)),
-            Ok((ports, record)) => {
-                let name = record.url.rsplit('/').next().unwrap_or_default().to_string();
-                self.relay_note("connecting", &format!("connecting to {name}"), &log);
-                let on = |event| match event {
-                    Event::Connected => self.relay_note("connected", &format!("connected to {name}"), &log),
-                    Event::Disconnected(why) => self.relay_note("disconnected", &format!("{why}; trying again"), &log),
-                };
-                let config = Config { url: record.url, key: record.key, ports, ping: PING };
+            Ok((config, host)) => {
+                self.relay_note("connecting", &format!("connecting to {host}"), &log);
                 tokio::select! {
-                    ended = super::run(config, on) => Ok(ended),
+                    ended = self.relay_serve(&config, &host, &log) => Ok(ended),
                     gone = &mut stop => Err(gone),
                 }
             }
@@ -85,6 +108,33 @@ impl Tunnel {
             tokio::time::sleep(LOOK).await;
         }
     }
+
+    async fn relay_serve(&self, config: &Config, host: &str, log: &(impl Fn(&str) + Send + Sync)) -> Ended {
+        let refused = AtomicBool::new(false);
+        let on = |event| {
+            refused.store(false, Ordering::Relaxed);
+            match event {
+                Event::Connected => self.relay_note("connected", &format!("connected to {host}"), log),
+                Event::Disconnected(why) => self.relay_note("disconnected", &format!("{why}; trying again"), log),
+            }
+        };
+        loop {
+            match super::run(config.clone(), &on).await {
+                Ended::Unauthorized if refused.swap(true, Ordering::Relaxed) => {}
+                Ended::Unauthorized => {
+                    let (state, line) = ending(Ended::Unauthorized);
+                    self.relay_note(state, &line, log);
+                }
+                ended => return ended,
+            }
+            tokio::time::sleep(refused_wait()).await;
+        }
+    }
+}
+
+fn refused_wait() -> Duration {
+    let set = std::env::var("LS_RELAY_RETRY_MS").ok().and_then(|ms| ms.parse().ok());
+    set.map_or(REFUSED_WAIT, Duration::from_millis)
 }
 
 fn ending(ended: Ended) -> (&'static str, String) {
@@ -93,7 +143,7 @@ fn ending(ended: Ended) -> (&'static str, String) {
             ("replaced", format!("another machine took this relay over; to take it back, run setup again: {AGAIN}"))
         }
         Ended::Unauthorized => {
-            ("unauthorized", format!("the relay refused this machine's key; run setup again: {AGAIN}"))
+            ("unauthorized", format!("the relay refused this machine's key; asking again every minute. If that doesn't end, run setup again: {AGAIN}"))
         }
         Ended::Outdated => (
             "outdated",

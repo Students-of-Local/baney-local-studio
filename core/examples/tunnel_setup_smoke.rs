@@ -809,10 +809,28 @@ fn cloudflare(s: &Smoke) -> Result<(), String> {
     ensure(!Smoke::has(&lines, "tunnel create"), "setup again must reuse the tunnel")?;
     Smoke::at(&lines, "check studio.example.com /mcp 401")?;
 
+    fs::write(s.serve_path(), "{").map_err(|e| e.to_string())?;
+    let (code, value) = s.ls(&again)?;
+    let says = |value: &Value| {
+        let said = value["message"].as_str().unwrap_or_default();
+        ["studio.example.com", "alt.example.com"].iter().all(|name| said.contains(name))
+            && said.contains(&format!("parse {}: EOF", s.serve_path().display()))
+    };
+    ensure(
+        code == 0 && value["state"] == "ready" && value["checks"]["serveAllowed"] == false && says(&value),
+        format!("setup says why serve.json doesn't allow the names: {value}"),
+    )?;
+    let value = off(s)?;
+    ensure(says(&value), format!("off says why serve.json still allows the names: {value}"))?;
+    ensure(fs::read(s.serve_path()).is_ok_and(|text| text == b"{"), "a serve.json that doesn't parse is left alone")?;
+    fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
+
+    let (code, value) = s.ls(&again)?;
+    ensure(code == 0 && value["checks"]["serveAllowed"] == true, format!("setup once serve.json is gone: {value}"))?;
     off(s)?;
     s.check_serve(&allowed(json!([])))?;
     fs::remove_file(s.serve_path()).map_err(|e| e.to_string())?;
-    println!("ok: setup --cloudflare, needs_signin, ready, again, off");
+    println!("ok: setup --cloudflare, needs_signin, ready, again, a bad serve.json, off");
     Ok(())
 }
 
@@ -871,7 +889,7 @@ fn public_dns(s: &Smoke) -> Result<(), String> {
     Ok(())
 }
 
-fn off(s: &Smoke) -> Result<(), String> {
+fn off(s: &Smoke) -> Result<Value, String> {
     let mark = s.mark();
     let (code, value) = s.ls(&["tunnel", "off", "--json"])?;
     ensure(code == 0 && value["state"] == "off", "off must answer off")?;
@@ -879,7 +897,7 @@ fn off(s: &Smoke) -> Result<(), String> {
     ensure(!s.service_file(true).exists() && !s.service_running(true), "off removes Local Studio's service")?;
     let lines = s.since(mark);
     ensure(!Smoke::has(&lines, "tunnel delete") && !Smoke::has(&lines, "route dns"), "off leaves the tunnel and DNS")?;
-    Ok(())
+    Ok(value)
 }
 
 fn tailnet(s: &Smoke) -> Result<(), String> {

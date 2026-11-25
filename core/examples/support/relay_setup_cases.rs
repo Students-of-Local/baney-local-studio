@@ -10,7 +10,7 @@ use local_studio_core::tunnel::relay::{WORKER_CONFIG, WORKER_JS};
 use local_studio_core::tunnel::{SERVICE_LABEL, SERVICE_UNIT};
 use serde_json::{json, Value};
 
-use super::{ensure, head, header, mode, origin, read_json, text, Smoke, ACCOUNT};
+use super::{chmod, ensure, head, header, mode, origin, read_json, text, Smoke, ACCOUNT};
 
 const OTHER: &str = "fedcba9876543210fedcba9876543210";
 const HOST: &str = "smoke.person.workers.dev";
@@ -498,7 +498,7 @@ pub fn status(c: &mut Cases) -> Result<(), String> {
         ("connecting", me, "connecting", "waiting", "connecting to its relay"),
         ("disconnected", me, "disconnected", "waiting", "lost its relay"),
         ("replaced", me, "replaced", "needs_setup", again),
-        ("unauthorized", me, "unauthorized", "needs_setup", again),
+        ("unauthorized", me, "unauthorized", "needs_setup", "asks again every minute"),
         ("outdated", me, "outdated", "needs_setup", "Update Local Studio"),
         ("bad_config", me, "bad_config", "needs_setup", again),
         ("stopped", me, "stopped", "needs_setup", again),
@@ -519,6 +519,16 @@ pub fn status(c: &mut Cases) -> Result<(), String> {
     fs::remove_file(c.s.tunnel("relay-state.json")).map_err(text)?;
     let value = c.ls(&["tunnel", "status"], |_| {})?;
     ensure(value["relay"] == json!({"state":"stopped","since":null}), format!("status with no state file: {value}"))?;
+    chmod(&c.s.tunnel("relay.json"), 0o644)?;
+    let value = c.ls(&["tunnel", "status"], |_| {})?;
+    let next = format!("chmod 600 '{}'", c.s.tunnel("relay.json").display());
+    ensure(
+        value["relay"]["state"] == "bad_config" && value["nextCommand"] == next,
+        format!("status when others can read relay.json: {value}"),
+    )?;
+    let message = c.refused("a relay.json others can read", &["smoke"], "error")?;
+    ensure(message.contains(&next), format!("setup names the chmod: {message}"))?;
+    chmod(&c.s.tunnel("relay.json"), 0o600)?;
     println!("ok: S12 status");
     Ok(())
 }
@@ -633,6 +643,7 @@ pub fn broken(c: &mut Cases) -> Result<(), String> {
 
 pub fn off(c: &mut Cases) -> Result<(), String> {
     c.s.write("relay-state.json", "{}")?;
+    chmod(&c.s.tunnel("relay.json"), 0o644)?;
     let value = c.ls(&["tunnel", "off"], |_| {})?;
     let message = value["message"].as_str().unwrap_or_default();
     ensure(

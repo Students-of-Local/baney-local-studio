@@ -279,8 +279,18 @@ fn serve_program() -> PathBuf {
     tool("LS_SERVE_BIN", "local-studio-serve").unwrap_or_else(|| PathBuf::from("local-studio-serve"))
 }
 
-pub(super) fn serve_disallow(hostname: &str) {
-    let _ = serve_edit(hostname, true);
+pub(super) fn serve_disallow(hostname: &str, left: &mut Vec<String>) {
+    if let Err(error) = serve_edit(hostname, true) {
+        let said = format!("{hostname} may still be allowed in serve.json: {error}.");
+        if !left.contains(&said) {
+            left.push(said);
+        }
+    }
+}
+
+fn with(message: &str, more: &[String]) -> String {
+    let parts: Vec<&str> = std::iter::once(message).chain(more.iter().map(String::as_str)).collect();
+    parts.join(" ")
 }
 
 fn tailscale_program() -> Option<PathBuf> {
@@ -1149,7 +1159,7 @@ impl Tunnel {
         credentials: &Path,
         hostnames: &[String],
         ports: Ports,
-    ) -> Result<bool, Failure> {
+    ) -> Result<Vec<String>, Failure> {
         let yml = self.dir.join(YML);
         self.private_write(YML, ingress(tunnel, credentials, hostnames, ports).as_bytes())?;
         let args = argv(&["tunnel", "--no-autoupdate", "--config", &yml.display().to_string(), "run"]);
@@ -1165,8 +1175,7 @@ impl Tunnel {
                 format!("Local Studio's tunnel service didn't stay running, so it was removed. See {}.", log.display()),
             ));
         }
-        let allowed: Vec<bool> = hostnames.iter().map(|name| serve_allow(name)).collect();
-        Ok(allowed.iter().all(|ok| *ok))
+        Ok(hostnames.iter().filter_map(|name| serve_allow(name).err()).collect())
     }
 
     async fn start_cloudflare(
@@ -1177,12 +1186,12 @@ impl Tunnel {
         credentials: &Path,
         hostnames: &[String],
         ports: Ports,
-    ) -> Result<Value, Failure> {
-        let allowed = self.start_service(manager, cloudflared, tunnel, credentials, hostnames, ports).await?;
+    ) -> Result<(Value, Vec<String>), Failure> {
+        let refused = self.start_service(manager, cloudflared, tunnel, credentials, hostnames, ports).await?;
         match self.public_checks(hostnames, ports, true, true).await {
             Ok(mut checks) => {
-                checks["serveAllowed"] = json!(allowed);
-                Ok(checks)
+                checks["serveAllowed"] = json!(refused.is_empty());
+                Ok((checks, refused))
             }
             Err(error) => {
                 let _ = manager.remove(OWN).await;
@@ -1242,10 +1251,11 @@ impl Tunnel {
             route_dns(cloudflared.path(), &id, name).await?;
         }
         let credentials = creds.join(format!("{id}.json"));
-        let checks = self.start_cloudflare(&manager, cloudflared.path(), &id, &credentials, &names, ports).await?;
+        let (checks, refused) =
+            self.start_cloudflare(&manager, cloudflared.path(), &id, &credentials, &names, ports).await?;
         let route = new_route("cloudflare", &host, &names[1..], ports);
         self.write_route(&route)?;
-        let mut value = ready(&route, &checks, "Live on your own Cloudflare account.");
+        let mut value = ready(&route, &checks, &with("Live on your own Cloudflare account.", &refused));
         value["tunnel"] = json!(name);
         value["tunnelId"] = json!(id);
         Ok(value)
@@ -1436,14 +1446,16 @@ impl Tunnel {
         let mut stopped = false;
         let switched =
             self.adopt_switch(&manager, cloudflared.path(), &old, &names, ports, was_running, &mut stopped).await;
-        let (route, checks) = match switched {
+        let (route, checks, refused) = match switched {
             Ok(done) => done,
             Err(cause) => {
                 let new = (host != old.hostname).then_some(host.as_str());
                 return Err(self.roll_back(&manager, &cause, stopped, was_running, new).await.into());
             }
         };
-        Ok(self.adopt_join(&route, checks, &names, ports, &old.tunnel).await)
+        let mut value = self.adopt_join(&route, checks, &names, ports, &old.tunnel).await;
+        value["message"] = json!(with(value["message"].as_str().unwrap_or_default(), &refused));
+        Ok(value)
     }
 
     async fn adopt_join(
@@ -1581,8 +1593,8 @@ impl Tunnel {
         ports: Ports,
         was_running: bool,
         stopped: &mut bool,
-    ) -> Result<(Route, Value), String> {
-        let allowed = self
+    ) -> Result<(Route, Value, Vec<String>), String> {
+        let refused = self
             .start_service(manager, cloudflared, &old.tunnel, &old.credentials, names, ports)
             .await
             .map_err(|failure| failure.message)?;
@@ -1610,10 +1622,10 @@ impl Tunnel {
         checks["mcp"] = served["mcp"].clone();
         merge_dns(&mut checks, &health);
         merge_dns(&mut checks, &served);
-        checks["serveAllowed"] = json!(allowed);
+        checks["serveAllowed"] = json!(refused.is_empty());
         let route = new_route("cloudflare", &names[0], &names[1..], ports);
         self.write_route(&route)?;
-        Ok((route, checks))
+        Ok((route, checks, refused))
     }
 
     pub async fn off(&self) -> Result<Value, Failure> {
@@ -1660,14 +1672,15 @@ impl Tunnel {
             let _ = fs::remove_file(self.token_path());
             removed.push("cloudflared".to_string());
         }
+        let mut left = Vec::new();
         if let Some(route) = &route {
-            serve_disallow(&route.hostname);
+            serve_disallow(&route.hostname, &mut left);
             for alias in route.aliases.iter().flatten() {
-                serve_disallow(alias);
+                serve_disallow(alias, &mut left);
             }
         }
         let on_relay = !matches!(self.on_relay(), Ok(None));
-        let worker = self.relay_off(taken, &mut removed)?;
+        let worker = self.relay_off(taken, &mut removed, &mut left)?;
         if fs::remove_file(self.dir.join(YML)).is_ok() {
             removed.push(YML.to_string());
         }
@@ -1682,7 +1695,7 @@ impl Tunnel {
             let parts = [Some("Off."), (!on_relay).then_some(stays), worker.as_deref()];
             parts.into_iter().flatten().collect::<Vec<_>>().join(" ")
         };
-        Ok(json!({ "state": "off", "next": "none", "removed": removed, "message": message }))
+        Ok(json!({ "state": "off", "next": "none", "removed": removed, "message": with(&message, &left) }))
     }
 }
 

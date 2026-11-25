@@ -20,6 +20,7 @@ const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 const RUN_KEY: &str = "RunKeyRunKeyRunKeyRunKeyRunKeyRunKeyRunKey_";
 const QUICK: Duration = Duration::from_secs(10);
 const NO_REDIAL: Duration = Duration::from_secs(3);
+const RETRY_MS: &str = "5000";
 
 type Link = WebSocket<TcpStream>;
 
@@ -70,6 +71,11 @@ fn text(error: impl std::fmt::Display) -> String {
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path).map_or(0, |meta| meta.permissions().mode() & 0o777)
+}
+
+fn chmod(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
@@ -205,7 +211,9 @@ impl Smoke {
         let stdout = stderr.try_clone().map_err(text)?;
         let mut all = vec!["tunnel", "relay", "run"];
         all.extend(args);
-        let child = self.command(&all).stdout(stdout).stderr(stderr).spawn().map_err(text)?;
+        let mut command = self.command(&all);
+        command.env("LS_RELAY_RETRY_MS", RETRY_MS);
+        let child = command.stdout(stdout).stderr(stderr).spawn().map_err(text)?;
         Ok(Service { child, log })
     }
 
@@ -217,7 +225,8 @@ impl Smoke {
     fn write(&self, name: &str, contents: &str) -> Result<(), String> {
         let path = self.tunnel(name);
         fs::create_dir_all(self.data.join("tunnel")).map_err(text)?;
-        fs::write(&path, contents).map_err(|e| format!("{}: {e}", path.display()))
+        fs::write(&path, contents).map_err(|e| format!("{}: {e}", path.display()))?;
+        chmod(&path, 0o600)
     }
 
     fn state(&self, service: &Service, want: &str) -> Result<(), String> {
@@ -242,17 +251,21 @@ impl Smoke {
     }
 
     fn stop(&self, service: &mut Service, lines: &[&str]) -> Result<(), String> {
-        let pid = service.child.id().to_string();
-        let sent = Command::new("kill").args(["-TERM", &pid]).status().map_err(text)?;
-        ensure(sent.success(), format!("SIGTERM to {pid}: {sent}"))?;
-        let status = until("the exit after SIGTERM", QUICK, || service.child.try_wait().ok().flatten())?;
-        ensure(status.code() == Some(0), format!("SIGTERM exits 0, not {status}"))?;
+        term(service)?;
         self.state(service, "stopped")?;
         let log = fs::read_to_string(&service.log).map_err(text)?;
         let got: Vec<&str> = log.lines().collect();
         let same = got.len() == lines.len() && got.iter().zip(lines).all(|(got, want)| got.contains(want));
         ensure(same && !log.contains(RUN_KEY), format!("one plain line per state {lines:?}, no key: {log}"))
     }
+}
+
+fn term(service: &mut Service) -> Result<(), String> {
+    let pid = service.child.id().to_string();
+    let sent = Command::new("kill").args(["-TERM", &pid]).status().map_err(text)?;
+    ensure(sent.success(), format!("SIGTERM to {pid}: {sent}"))?;
+    let status = until("the exit after SIGTERM", QUICK, || service.child.try_wait().ok().flatten())?;
+    ensure(status.code() == Some(0), format!("SIGTERM exits 0, not {status}"))
 }
 
 fn run() -> Result<(), String> {
@@ -281,11 +294,16 @@ fn run() -> Result<(), String> {
 
 fn s11_run(s: &Smoke) -> Result<(), String> {
     let mut service = s.service("run-none", &[])?;
-    let status = until("the exit with no relay.json", QUICK, || service.child.try_wait().ok().flatten())?;
+    until("the wait with no relay.json", QUICK, || {
+        fs::read_to_string(&service.log).ok().filter(|log| log.contains("relay.json isn't there"))
+    })?;
+    std::thread::sleep(Duration::from_millis(500));
     ensure(
-        status.code() == Some(1) && !s.tunnel("relay-state.json").exists(),
-        "relay run with no relay.json exits 1 at once and writes nothing",
+        service.child.try_wait().map_err(text)?.is_none() && !s.tunnel("relay-state.json").exists(),
+        "relay run as a service with no relay.json stays up and writes nothing",
     )?;
+    term(&mut service)?;
+    ensure(!s.tunnel("relay-state.json").exists(), "nor when it stops")?;
     let relay = StandIn::start()?;
     let (serve, mcp) = (origin(200)?, origin(418)?);
     let route = json!({"v":1,"owner":"local-studio","route":"cloudflare","hostname":"smoke.workers.dev","aliases":[],"ports":{"mcp":mcp,"serve":serve}});
@@ -301,7 +319,27 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
     s.state(&service, "disconnected")?;
     relay.refuse(RUN_KEY)?;
     s.stays(&mut service, &relay, "unauthorized")?;
-    s.stop(&mut service, &["connecting to", "connected to", "trying again", "refused this machine's key", "stopped"])?;
+    let since = read_json(&s.tunnel("relay-state.json"))?;
+    relay.refuse(RUN_KEY)?;
+    s.stays(&mut service, &relay, "unauthorized")?;
+    ensure(read_json(&s.tunnel("relay-state.json"))? == since, "a second 401 leaves the state as it was")?;
+    let link = relay.open(RUN_KEY, 1)?;
+    s.state(&service, "connected")?;
+    let before = fs::read(s.tunnel("relay-state.json")).map_err(text)?;
+    let mut second = s.service("run-second", &[])?;
+    let status = until("a second relay run's exit", QUICK, || second.child.try_wait().ok().flatten())?;
+    let said = fs::read_to_string(&second.log).map_err(text)?;
+    ensure(
+        status.code() == Some(1) && said.lines().count() == 1 && said.contains("already running"),
+        format!("a second relay run prints one line and exits 1: {said}"),
+    )?;
+    ensure(fs::read(s.tunnel("relay-state.json")).map_err(text)? == before, "a second relay run writes no state")?;
+    ensure(relay.next().is_none(), "a second relay run dials nothing")?;
+    s.stop(
+        &mut service,
+        &["connecting to", "connected to", "trying again", "refused this machine's key", "connected to", "stopped"],
+    )?;
+    drop(link);
 
     let other = origin(204)?.to_string();
     let mut service = s.service("run-replaced", &["--mcp", &other])?;
@@ -319,19 +357,46 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
     drop(link);
     s.stop(&mut service, &["connecting to", "update Local Studio", "stopped"])?;
 
-    s.record("https://relay.example.com/path")?;
-    let mut service = s.service("run-bad-url", &[])?;
-    s.stays(&mut service, &relay, "bad_config")?;
-    s.stop(&mut service, &["connecting to", "https://<host>", "stopped"])?;
-    let out = s.command(&["tunnel", "status", "--json"]).output().map_err(text)?;
-    let said: Value = serde_json::from_slice(&out.stdout).map_err(text)?;
-    ensure(said["relay"]["state"] == "bad_config", format!("a relay.json for another address is bad_config: {said}"))?;
+    s.write("route.json", "{")?;
+    let mut service = s.service("run-flags", &["--serve", &serve.to_string(), "--mcp", &other])?;
+    let mut link = relay.open(RUN_KEY, 1)?;
+    s.state(&service, "connected")?;
+    ensure(answered(&mut link)? == 204, "both port flags leave route.json unread")?;
+    s.stop(&mut service, &["connecting to", "connected to", "stopped"])?;
+    drop(link);
+    s.write("route.json", &route.to_string())?;
+    records(s, &relay)?;
+    taken(s)?;
+    println!("ok: S11 relay run: connecting, connected, disconnected, unauthorized and back, replaced, outdated, bad_config, one per folder");
+    Ok(())
+}
+
+fn records(s: &Smoke, relay: &StandIn) -> Result<(), String> {
+    for (name, host) in [("run-path", "relay.example.com/path"), ("run-user", "u:LEAK@h.example?t=LEAK")] {
+        s.record(&format!("https://{host}"))?;
+        let mut service = s.service(name, &[])?;
+        s.stays(&mut service, relay, "bad_config")?;
+        s.stop(&mut service, &["https://<host>", "stopped"])?;
+        ensure(!fs::read_to_string(&service.log).map_err(text)?.contains("LEAK"), "no raw address in the log")?;
+        let out = s.command(&["tunnel", "status", "--json"]).output().map_err(text)?;
+        let said: Value = serde_json::from_slice(&out.stdout).map_err(text)?;
+        ensure(
+            said["relay"]["state"] == "bad_config",
+            format!("a relay.json for another address is bad_config: {said}"),
+        )?;
+    }
+
+    s.record(&relay.url)?;
+    chmod(&s.tunnel("relay.json"), 0o640)?;
+    let mut service = s.service("run-open", &[])?;
+    s.stays(&mut service, relay, "bad_config")?;
+    s.stop(&mut service, &["chmod 600 '", "stopped"])?;
 
     let extra = json!({"v":1,"url":relay.url,"name":"smoke","accountId":ACCOUNT,"key":RUN_KEY,"more":RUN_KEY});
     for (name, record) in [("run-extra", extra.to_string()), ("run-cut", format!("{{\"v\":1,\"key\":\"{RUN_KEY}"))] {
         s.write("relay.json", &record)?;
         let mut service = s.service(name, &[])?;
-        s.stays(&mut service, &relay, "bad_config")?;
+        s.stays(&mut service, relay, "bad_config")?;
         s.stop(&mut service, &["relay.json isn't a relay record", "stopped"])?;
     }
     s.record(&relay.url)?;
@@ -355,10 +420,7 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
     ensure(
         shown.contains("connected to its relay") && shown.contains("relay: connected since 2023-11-14T22:13:20Z"),
         format!("status without --json shows the relay: {shown}"),
-    )?;
-    taken(s)?;
-    println!("ok: S11 relay run: connecting, connected, disconnected, unauthorized, replaced, outdated, bad_config");
-    Ok(())
+    )
 }
 
 fn taken(s: &Smoke) -> Result<(), String> {

@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    argv, machine_slug, merge_dns, new_route, normalize_host, ready, serve_disallow, settle, tool, Halt, Manager, Out,
-    Want, OWN, WRANGLER,
+    argv, machine_slug, merge_dns, new_route, normalize_host, ready, serve_disallow, settle, tool, with, Halt, Manager,
+    Out, Want, OWN, WRANGLER,
 };
 use crate::link::devices::random;
 use crate::platform::Mode;
@@ -299,19 +299,20 @@ impl Tunnel {
             let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
             self.private_write(RECORD, &bytes)?;
             let stop = stop_signal().map_err(|error| error.to_string())?;
-            let checks = tokio::select! {
-                checks = self.start_relay(&manager, &host, ports) => checks?,
+            let live = tokio::select! {
+                live = self.start_relay(&manager, &host, ports) => live?,
                 () = stop => return Err(fail("stopped", "Setup was stopped before the relay was live.")),
             };
             self.write_route(&route)?;
-            Ok::<_, Failure>(checks)
+            Ok::<_, Failure>(live)
         };
         let started = started.await;
+        let mut left = Vec::new();
         if let Some(before) = before {
-            serve_disallow(&before);
+            serve_disallow(&before, &mut left);
         }
-        let checks = match started {
-            Ok(checks) => checks,
+        let (checks, refused) = match started {
+            Ok(live) => live,
             Err(failure) if live && same && failure.code == "stopped" => {
                 let message = match self.start_relay_service(&manager, ports).await {
                     Ok(_) => "Its service was started again with the new key. If tunnel status doesn't say it is connected, run setup again.".to_string(),
@@ -319,15 +320,24 @@ impl Tunnel {
                 };
                 return Err(fail(failure.code, format!("{} {message}", failure.message)).into());
             }
-            Err(failure) => return Err(self.relay_undo(&manager, &name, &host, failure).await.into()),
+            Err(failure) => return Err(self.relay_undo(&manager, &name, &host, failure, left).await.into()),
         };
-        let mut value = ready(&route, &checks, "Live on your own relay, a Worker on your own Cloudflare account.");
+        left.extend(refused.err());
+        let message = with("Live on your own relay, a Worker on your own Cloudflare account.", &left);
+        let mut value = ready(&route, &checks, &message);
         value["relay"] = relay;
         Ok(value)
     }
 
-    async fn relay_undo(&self, manager: &Manager, name: &str, host: &str, failure: Failure) -> Failure {
-        serve_disallow(host);
+    async fn relay_undo(
+        &self,
+        manager: &Manager,
+        name: &str,
+        host: &str,
+        failure: Failure,
+        mut left: Vec<String>,
+    ) -> Failure {
+        serve_disallow(host, &mut left);
         let mut said = vec![failure.message];
         match manager.remove(OWN).await {
             Ok(had) => {
@@ -348,7 +358,7 @@ impl Tunnel {
                 said.push(format!("The service couldn't be removed ({error}); run local-studio tunnel off."));
             }
         }
-        fail(failure.code, said.join(" "))
+        fail(failure.code, with(&said.join(" "), &left))
     }
 
     async fn relay_deploy(
@@ -412,7 +422,12 @@ impl Tunnel {
         Ok(log)
     }
 
-    async fn start_relay(&self, manager: &Manager, host: &str, ports: Ports) -> Result<Value, Failure> {
+    async fn start_relay(
+        &self,
+        manager: &Manager,
+        host: &str,
+        ports: Ports,
+    ) -> Result<(Value, Result<(), String>), Failure> {
         let log = self.start_relay_service(manager, ports).await?;
         if !manager.wait_running(OWN).await {
             let text = format!("Local Studio's tunnel service didn't stay running. See {}.", log.display());
@@ -443,7 +458,7 @@ impl Tunnel {
         let hosts = [host.to_string()];
         let mut checks = self.public_checks(&hosts, ports, true, true).await.map_err(live)?;
         merge_dns(&mut checks, &json!({ "dns": dns }));
-        checks["serveAllowed"] = json!(allowed);
-        Ok(checks)
+        checks["serveAllowed"] = json!(allowed.is_ok());
+        Ok((checks, allowed))
     }
 }
