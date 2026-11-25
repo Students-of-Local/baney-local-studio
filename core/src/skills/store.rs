@@ -12,7 +12,7 @@ use crate::plugins::{self, Plugin};
 use crate::{frontmatter, harness::trust};
 
 const FILE: &str = "skills.sqlite";
-pub(super) const SKILL: &str = "SKILL.md";
+pub(crate) const SKILL: &str = "SKILL.md";
 const BUILT_IN: &str = ".system";
 const VERSION: i64 = 3;
 const MAX_FILE: u64 = 256 * 1024;

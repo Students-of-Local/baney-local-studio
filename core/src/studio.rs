@@ -68,6 +68,7 @@ const DELIVERY_SLACK_MS: i64 = 2_000;
 
 mod ask;
 mod cli;
+mod create;
 mod local_only;
 mod remote;
 mod t3;
@@ -490,6 +491,20 @@ enum Command {
         request: String,
         id: String,
         capability: String,
+    },
+    SaveSkill {
+        request: String,
+        thread: String,
+        text: String,
+    },
+    SkillSaved {
+        request: String,
+        thread: String,
+        text: String,
+        outcome: Result<String, String>,
+    },
+    DiscardSkill {
+        thread: String,
     },
     ListArchived {
         request: String,
@@ -996,6 +1011,14 @@ impl Studio {
         self.send_command(Command::RevokePlugin { request, id, capability });
     }
 
+    pub fn save_skill(&self, request: String, thread: String, text: String) {
+        self.send_command(Command::SaveSkill { request, thread, text });
+    }
+
+    pub fn discard_skill(&self, thread: String) {
+        self.send_command(Command::DiscardSkill { thread });
+    }
+
     pub fn list_archived(&self, request: String) {
         self.send_command(Command::ListArchived { request });
     }
@@ -1272,6 +1295,7 @@ struct Thread {
     rlm_children: Vec<Subagent>,
     refused: Option<PromptDraft>,
     served: Option<(String, Vec<String>)>,
+    skill: create::Making,
 }
 
 struct Actor {
@@ -1952,6 +1976,9 @@ impl Actor {
                 };
                 self.mailbox.push(update);
             }
+            Command::SaveSkill { request, thread, text } => self.save_skill(request, thread, text),
+            Command::SkillSaved { request, thread, text, outcome } => self.skill_saved(request, &thread, text, outcome),
+            Command::DiscardSkill { thread } => self.discard_skill(&thread),
             Command::ListArchived { request } => {
                 let threads = self.rows(true);
                 self.mailbox.push(Update::ArchivedThreads { request, threads });
@@ -2224,7 +2251,7 @@ impl Actor {
         thread.live.as_ref().or(thread.left.as_ref())
     }
 
-    fn emit_focus(&self, id: &str, transcript: bool) {
+    fn emit_focus(&mut self, id: &str, transcript: bool) {
         let Some(view) = self.view(id) else { return };
         if let Some(info) = self.info(id) {
             self.mailbox.push(Update::Thread { thread: id.to_string(), info });
@@ -2235,6 +2262,7 @@ impl Actor {
                 op: crate::model::TranscriptOp::Reset { items: view.transcript.items().to_vec() },
             });
         }
+        self.emit_skill_draft(id);
         self.emit_approvals(id);
         self.emit_questions(id);
         self.emit_queue(id);
@@ -2868,7 +2896,14 @@ impl Actor {
         if gate != Gate::Send {
             return Ok(gate);
         }
-        let message = if cli { message } else { expansion.text };
+        let message = {
+            let expanded = if cli { message.clone() } else { expansion.text };
+            if create::asked(&prompt) {
+                create::message(&message, &expanded)
+            } else {
+                expanded
+            }
+        };
         let images = (!prompt.images.is_empty()).then(|| {
             Value::Array(
                 prompt
@@ -4670,6 +4705,7 @@ impl Actor {
             }
             SessionEvent::MessageStart { message: AgentMessage::User(user), .. } => {
                 user_at = Some(i64::try_from(user.timestamp).unwrap_or(now));
+                thread.skill.asked |= create::answering(live.transcript.items());
             }
             SessionEvent::TurnEnd { error: Some(error), .. } => {
                 thread.failed_at = Some(now);
@@ -4737,6 +4773,7 @@ impl Actor {
             }
         }
         self.fetch_entries(id, true).await;
+        self.skill_turn_ended(id);
         if !failed {
             self.run_finished(id, false);
         } else if self.focused.as_deref() != Some(id) {

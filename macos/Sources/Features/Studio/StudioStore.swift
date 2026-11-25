@@ -347,6 +347,8 @@ final class StudioStore {
             machines.setDevices(devices)
         case .localOnly(let thread, let plugin, let message, let local):
             shell.confirmation = .localOnly(thread: thread, plugin: plugin, message: message, local: local)
+        case .skillDraft:
+            break
         }
     }
 }

@@ -219,6 +219,7 @@ impl Harness {
             | Update::T3Sync { .. }
             | Update::RequestDone { .. }
             | Update::LocalOnly { .. }
+            | Update::SkillDraft { .. }
             | Update::ProjectScripts { .. }
             | Update::ProjectSettings { .. }
             | Update::WorktreeSetup { .. }

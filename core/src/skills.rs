@@ -19,6 +19,7 @@ pub use read::Reading;
 pub use search::{lines, Hit, Query};
 pub(crate) use serve::{entry, TOOLS};
 pub use serve::{serve, SERVER};
+pub(crate) use store::SKILL;
 pub use store::{roots, Listed, Roots, Store};
 pub use text::plain;
 

@@ -157,6 +157,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ComposerText { .. }
         | Update::ComposerDraft { .. }
         | Update::LocalOnly { .. }
+        | Update::SkillDraft { .. }
         | Update::Models { .. }
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }

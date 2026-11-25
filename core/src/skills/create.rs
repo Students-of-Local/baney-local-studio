@@ -63,13 +63,6 @@ impl Draft {
         if skill.long < 4 {
             return Err("The skill block needs four backticks, so a code block inside it does not end it.".to_string());
         }
-        let field = |key: &str| frontmatter::field(&skill.text, key).map(|value| text::line(&value));
-        let name = field("name").unwrap_or_default();
-        let description = field("description").unwrap_or_default();
-        let folder = folder(&name);
-        if folder.is_empty() || description.is_empty() {
-            return Err("The skill needs a name and a description in its front matter.".to_string());
-        }
         let (mut files, mut left): (Vec<(String, String)>, Vec<String>) = Default::default();
         for block in &blocks {
             let (path, text) = match block.info.split_once(' ').unwrap_or((&block.info, "")) {
@@ -93,7 +86,22 @@ impl Draft {
                 files.push((path, text));
             }
         }
-        let texts = || files.iter().map(|(_, text)| text).chain([&skill.text]);
+        Self::of(skill.text.clone(), files, left)
+    }
+
+    pub fn with_text(self, text: String) -> Result<Self, String> {
+        Self::of(text, self.files, self.left)
+    }
+
+    fn of(text: String, files: Vec<(String, String)>, left: Vec<String>) -> Result<Self, String> {
+        let field = |key: &str| frontmatter::field(&text, key).map(|value| text::line(&value));
+        let name = field("name").unwrap_or_default();
+        let description = field("description").unwrap_or_default();
+        let folder = folder(&name);
+        if folder.is_empty() || description.is_empty() {
+            return Err("The skill needs a name and a description in its front matter.".to_string());
+        }
+        let texts = || files.iter().map(|(_, text)| text).chain([&text]);
         if texts().any(|text| text.len() > MOST_TEXT) || texts().map(String::len).sum::<usize>() > MOST_ALL {
             return Err(format!("A skill is at most {} KB, {} KB a file.", MOST_ALL / 1024, MOST_TEXT / 1024));
         }
@@ -101,7 +109,17 @@ impl Draft {
             return Err(format!("A skill has at most {MOST_FILES} files."));
         }
         let marked = texts().flat_map(|text| text.lines()).filter(|line| private(line)).map(text::line).collect();
-        Ok(Self { name, description, folder, text: skill.text.clone(), files, marked, left })
+        Ok(Self { name, description, folder, text, files, marked, left })
+    }
+
+    pub(crate) fn replaces(&self, data: &Path) -> bool {
+        let same = |entry: std::fs::DirEntry| {
+            let folder = entry.file_name().to_string_lossy().into_owned();
+            let Ok(content) = read_to_string(entry.path().join(SKILL)) else { return false };
+            let name = frontmatter::field(&content, "name").unwrap_or_else(|| folder.clone());
+            !folder.starts_with('.') && text::line(&name).to_lowercase() == self.name.to_lowercase()
+        };
+        std::fs::read_dir(data.join("skills")).into_iter().flatten().filter_map(Result::ok).any(same)
     }
 }
 
