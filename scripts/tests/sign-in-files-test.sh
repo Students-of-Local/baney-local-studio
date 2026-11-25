@@ -18,7 +18,6 @@ core/src/harness/accounts.rs|existence only|names(harness).is_some_and(|(_, _, m
 core/src/harness/accounts.rs|existence only|.filter(|dir| dir.is_dir() && dir.join(marker).exists())
 core/src/workspace/t3/source.rs|T3 Code's data files, named in PRIVACY.md|.find(|dir| MARKERS.iter().any(|marker| dir.join(marker).is_file()))
 core/src/tunnel/setup.rs|existence only|if !creds.join("cert.pem").exists() {
-core/src/tunnel/setup.rs|existence only|if !cloudflared_dir()?.join("cert.pem").exists() {
 core/src/workspace/providers.rs|Eukhe's own file, named in PRIVACY.md|let auth = read_object(&agent.join("auth.json")).unwrap_or_else(|error| {
 core/src/workspace/providers.rs|Eukhe's own file, named in PRIVACY.md|let lock = path.with_file_name("auth.json.lock");
 core/src/workspace/providers.rs|Eukhe's own file, named in PRIVACY.md|let path = agent.join("auth.json");
