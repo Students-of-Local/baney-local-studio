@@ -307,6 +307,15 @@ fn s11_run(s: &Smoke) -> Result<(), String> {
     term(&mut service)?;
     ensure(!s.tunnel("relay-state.json").exists(), "nor when it stops")?;
     let relay = StandIn::start()?;
+    let mut service = s.service("run-late", &[])?;
+    until("the wait for relay.json", QUICK, || {
+        fs::read_to_string(&service.log).ok().filter(|log| log.contains("relay.json isn't there"))
+    })?;
+    s.record(&relay.url)?;
+    let link = relay.open(RUN_KEY, 1)?;
+    s.state(&service, "connected")?;
+    s.stop(&mut service, &["relay.json isn't there", "connecting to", "connected to", "stopped"])?;
+    drop(link);
     let (serve, mcp) = (origin(200)?, origin(418)?);
     let route = json!({"v":1,"owner":"local-studio","route":"cloudflare","hostname":"smoke.workers.dev","aliases":[],"ports":{"mcp":mcp,"serve":serve}});
     s.write("route.json", &route.to_string())?;
@@ -393,6 +402,17 @@ fn records(s: &Smoke, relay: &StandIn) -> Result<(), String> {
     let mut service = s.service("run-open", &[])?;
     s.stays(&mut service, relay, "bad_config")?;
     s.stop(&mut service, &["chmod 600 '", "stopped"])?;
+    s.record("https://smoke.workers.dev")?;
+    chmod(&s.tunnel("relay.json"), 0o640)?;
+    s.write("cloudflared.yml", "")?;
+    let out = s.command(&["tunnel", "status", "--json"]).output().map_err(text)?;
+    let said: Value = serde_json::from_slice(&out.stdout).map_err(text)?;
+    let fix = said["nextCommand"].as_str().unwrap_or_default();
+    ensure(
+        said["relay"]["state"] == "bad_config" && fix.starts_with("chmod 600 '"),
+        format!("an old cloudflared.yml doesn't hide an open relay.json: {said}"),
+    )?;
+    fs::remove_file(s.tunnel("cloudflared.yml")).map_err(text)?;
 
     let extra = json!({"v":1,"url":relay.url,"name":"smoke","accountId":ACCOUNT,"key":RUN_KEY,"more":RUN_KEY});
     for (name, record) in [("run-extra", extra.to_string()), ("run-cut", format!("{{\"v\":1,\"key\":\"{RUN_KEY}"))] {

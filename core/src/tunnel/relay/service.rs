@@ -15,6 +15,7 @@ const LOOK: Duration = Duration::from_secs(2);
 const REFUSED_WAIT: Duration = Duration::from_mins(1);
 const LOCK: &str = "relay.lock";
 const BUSY: &str = "Another local-studio tunnel relay run is already running on this data folder.";
+const HELD: &str = "A local-studio tunnel relay run that isn't the service is running on this data folder, and the service can't start beside it. Stop it, then run setup again.";
 
 impl Tunnel {
     fn relay_note(&self, state: &str, line: &str, log: &impl Fn(&str)) {
@@ -60,14 +61,19 @@ impl Tunnel {
         log: impl Fn(&str) + Send + Sync,
     ) -> Result<(), Failure> {
         let signal = stop_signal().map_err(|error| error.to_string())?;
+        tokio::pin!(signal);
         if matches!(self.relay_path().try_exists(), Ok(false)) {
             if std::io::stdin().is_terminal() {
                 return Err(fail("no_relay", self.no_relay()));
             }
             log(&self.no_relay());
-            signal.await;
-            log("stopped");
-            return Ok(());
+            tokio::select! {
+                () = &mut signal => {
+                    log("stopped");
+                    return Ok(());
+                }
+                () = self.relay_there() => {}
+            }
         }
         let _lock = UpLock::named(&self.dir, LOCK, Some(BUSY))?;
         let stop = async {
@@ -101,6 +107,19 @@ impl Tunnel {
             self.relay_note("stopped", "stopped", &log);
         }
         Ok(())
+    }
+
+    pub(in crate::tunnel) fn relay_free(&self) -> Result<(), Failure> {
+        if self.dir.join(LOCK).exists() {
+            UpLock::named(&self.dir, LOCK, Some(HELD))?;
+        }
+        Ok(())
+    }
+
+    async fn relay_there(&self) {
+        while matches!(self.relay_path().try_exists(), Ok(false)) {
+            tokio::time::sleep(LOOK).await;
+        }
     }
 
     async fn relay_gone(&self) {

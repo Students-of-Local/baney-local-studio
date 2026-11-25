@@ -584,6 +584,15 @@ pub fn others(c: &mut Cases) -> Result<(), String> {
     fs::remove_file(tychicus.join("remote.json")).map_err(text)?;
     println!("ok: S14 other routes");
 
+    let held = fs::File::create(c.s.tunnel("relay.lock")).map_err(text)?;
+    held.lock().map_err(text)?;
+    let keys = c.keys().len();
+    let message = c.refused("setup beside another relay run", &["smoke", "--yes"], "busy")?;
+    ensure(message.contains("Stop it, then run setup again"), format!("what to stop: {message}"))?;
+    ensure(c.keys().len() == keys, "setup beside another relay run makes no new key")?;
+    drop(held);
+    println!("ok: S18 another relay run");
+
     c.set("never", true)?;
     let value = c.setup(&["smoke", "--yes"])?;
     let message = value["message"].as_str().unwrap_or_default();
