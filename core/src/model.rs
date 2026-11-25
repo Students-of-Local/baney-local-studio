@@ -541,6 +541,7 @@ pub struct PluginEntry {
 #[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SkillDraft {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub folder: String,

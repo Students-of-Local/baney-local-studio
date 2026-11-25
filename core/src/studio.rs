@@ -495,12 +495,13 @@ enum Command {
     SaveSkill {
         request: String,
         thread: String,
+        draft: String,
         text: String,
     },
     SkillSaved {
         request: String,
         thread: String,
-        text: String,
+        draft: String,
         outcome: Result<String, String>,
     },
     DiscardSkill {
@@ -1011,8 +1012,8 @@ impl Studio {
         self.send_command(Command::RevokePlugin { request, id, capability });
     }
 
-    pub fn save_skill(&self, request: String, thread: String, text: String) {
-        self.send_command(Command::SaveSkill { request, thread, text });
+    pub fn save_skill(&self, request: String, thread: String, draft: String, text: String) {
+        self.send_command(Command::SaveSkill { request, thread, draft, text });
     }
 
     pub fn discard_skill(&self, thread: String) {
@@ -1480,7 +1481,7 @@ impl Actor {
                     }
                     Some(command) => {
                         self.backlog.change(&command, false);
-                        self.handle(command).await;
+                        Box::pin(self.handle(command)).await;
                     }
                     None => return,
                 },
@@ -1976,8 +1977,10 @@ impl Actor {
                 };
                 self.mailbox.push(update);
             }
-            Command::SaveSkill { request, thread, text } => self.save_skill(request, thread, text),
-            Command::SkillSaved { request, thread, text, outcome } => self.skill_saved(request, &thread, text, outcome),
+            Command::SaveSkill { request, thread, draft, text } => self.save_skill(request, thread, &draft, text),
+            Command::SkillSaved { request, thread, draft, outcome } => {
+                self.skill_saved(request, &thread, draft, outcome);
+            }
             Command::DiscardSkill { thread } => self.discard_skill(&thread),
             Command::ListArchived { request } => {
                 let threads = self.rows(true);
