@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -56,6 +56,21 @@ test("install registers com.localstudio.browser for Helium and Chrome, skips abs
 		assert.deepEqual(readdirSync(join(dir, "NativeMessagingHosts")), ["com.localstudio.browser.json"], "and no other name");
 	}
 	assert.equal(existsSync(absent), false);
+});
+
+test("a launcher that is a symlink is replaced, never written through", { skip: process.platform === "win32" }, () => {
+	const dir = join(home, ".local-studio", "browser");
+	const own = join(home, "my-script");
+	for (const name of ["local-studio-browser", "local-studio-browser-host"]) {
+		writeFileSync(own, "mine\n");
+		rmSync(join(dir, name), { force: true });
+		symlinkSync(own, join(dir, name));
+		run("install", "--force");
+		assert.equal(readFileSync(own, "utf8"), "mine\n", `${name}'s target is untouched`);
+		assert.equal(lstatSync(join(dir, name)).isSymbolicLink(), false);
+		assert.match(readFileSync(join(dir, name), "utf8"), /^#!\/bin\/sh\n/);
+	}
+	assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp")), []);
 });
 
 test("status reports each browser's host state", () => {
