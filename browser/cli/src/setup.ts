@@ -9,7 +9,7 @@ import { COMMAND_NAME } from "./self.ts";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { BridgeClient, listSockets } from "./client.ts";
+import { BridgeClient, BridgeRpcError, listSockets } from "./client.ts";
 import { buildState, builtVersion, sourceVersion } from "./doctor.ts";
 import { harnesses, launcherBinary, launcherValid, MCP_NAME, runCommand, shellJoin, which } from "./harness.ts";
 import { browserDirs, install, installedBrowserDirs, registeredBrowserNames } from "./install.ts";
@@ -175,22 +175,38 @@ async function probe(): Promise<Probe> {
 	return { connected: false, error };
 }
 
-/** Ask the running extension to reload itself (it comes back on the new build), unless that would cut off an agent: those come back. */
-async function reloadExtension(socket: string): Promise<string[]> {
+/**
+ * The agents a reload would cut off mid-call, or undefined when the extension didn't say. One too old to list its
+ * sessions has none to lose: it answers "Unknown method", or a reply without a list.
+ */
+async function attachedAgents(client: BridgeClient): Promise<string[] | undefined> {
+	try {
+		const listed = (await client.call("sessions.list", { all: false, tabs: false }, 15000)) as { sessions?: Array<{ name: string; connected: number }> } | null;
+		return Array.isArray(listed?.sessions) ? agentsWorking(listed.sessions) : [];
+	} catch (err) {
+		return err instanceof BridgeRpcError && /^Unknown method/.test(err.message) ? [] : undefined;
+	}
+}
+
+/**
+ * Ask the running extension to reload itself (it comes back on the new build). Returns why not when an agent is working
+ * in the browser or the extension didn't say whether one is.
+ */
+async function reloadExtension(socket: string): Promise<string | undefined> {
 	const client = new BridgeClient({ name: "setup" });
 	try {
 		await client.connect(socket);
-		// An extension that can't list its sessions is one a reload helps.
-		const listed = (await client.call("sessions.list", { all: false, tabs: false }, 15000).catch(() => ({ sessions: [] }))) as { sessions: Array<{ name: string; connected: number }> };
-		const busy = agentsWorking(listed.sessions);
-		if (busy.length > 0) return busy;
+		const agents = await attachedAgents(client);
+		if (agents === undefined) return "the extension didn't say whether an agent is working in the browser";
+		if (agents.length > 0) return `${agents.length === 1 ? "an agent is" : `${agents.length} agents are`} working in the browser (${agents.join(", ")})`;
+		console.log("  Reloading the extension...");
 		await client.call("bridge.reload", {}, 5000);
 	} catch {
 		/* the reload drops the connection; that is expected */
 	} finally {
 		client.close();
 	}
-	return [];
+	return undefined;
 }
 
 /** Offer each detected harness the MCP server. Returns false if an attempted add failed. */
@@ -266,16 +282,16 @@ interface ReloadState {
  * Connected and running the build on disk. A stale running copy is reloaded once; if it
  * still runs another version after RELOAD_GRACE_MS, `mismatch` says so and the caller stops.
  */
-async function connectedOnCurrentBuild(state: ReloadState): Promise<Probe & { ready: boolean; mismatch?: boolean; busy?: string[] }> {
+async function connectedOnCurrentBuild(state: ReloadState): Promise<Probe & { ready: boolean; mismatch?: boolean; held?: string }> {
 	const p = await probe();
 	if (!p.connected) return { ...p, ready: false };
 	const built = builtVersion();
 	if (!p.version) return { ...p, ready: !built && !p.error };
 	if (!built || p.version === built) return { ...p, ready: true };
 	if (state.reloadedAt === undefined && p.socket) {
-		console.log(`  ${sym.warn} The browser runs the extension ${p.version}, the build is ${built}. Reloading the extension...`);
-		const busy = await reloadExtension(p.socket);
-		if (busy.length > 0) return { ...p, ready: false, busy };
+		console.log(`  ${sym.warn} The browser runs the extension ${p.version}, the build is ${built}.`);
+		const held = await reloadExtension(p.socket);
+		if (held !== undefined) return { ...p, ready: false, held };
 		state.reloadedAt = Date.now();
 		return { ...p, ready: false };
 	}
@@ -283,13 +299,12 @@ async function connectedOnCurrentBuild(state: ReloadState): Promise<Probe & { re
 	return { ...p, ready: false, mismatch };
 }
 
-/** How step 4 ended: connected on this build, not reloaded under a working agent, not waited for (--no-wait), or not connected in time. */
-type Loaded = "connected" | "busy" | "skipped" | "failed";
+/** How step 4 ended: connected on this build, not reloaded (an agent may be working), not waited for (--no-wait), or not connected in time. */
+type Loaded = "connected" | "held" | "skipped" | "failed";
 
-function leftRunning(busy: string[]): Loaded {
-	const are = busy.length === 1 ? "an agent is" : `${busy.length} agents are`;
-	console.log(`  ${sym.warn} Not reloaded: ${are} working in the browser (${busy.join(", ")}). Run ${c.bold(`${COMMAND_NAME} reload`)} when ${busy.length === 1 ? "it is" : "they are"} done.`);
-	return "busy";
+function notReloaded(why: string): Loaded {
+	console.log(`  ${sym.warn} Not reloaded: ${why}. Run ${c.bold(`${COMMAND_NAME} reload`)} when no agent is working.`);
+	return "held";
 }
 
 async function loadExtension(options: SetupOptions): Promise<Loaded> {
@@ -299,7 +314,7 @@ async function loadExtension(options: SetupOptions): Promise<Loaded> {
 		console.log(`  ${sym.ok} The extension is loaded and connected ${c.dim(`(${first.version ?? "unknown version"})`)}.`);
 		return "connected";
 	}
-	if (first.busy) return leftRunning(first.busy);
+	if (first.held !== undefined) return notReloaded(first.held);
 	const dir = extensionDir();
 	if (!first.connected) {
 		console.log(
@@ -341,9 +356,9 @@ async function loadExtension(options: SetupOptions): Promise<Loaded> {
 	while (Date.now() < deadline) {
 		const p = await connectedOnCurrentBuild(reload);
 		last = p;
-		if (p.busy) {
+		if (p.held !== undefined) {
 			if (live) process.stdout.write("\r\x1b[2K");
-			return leftRunning(p.busy);
+			return notReloaded(p.held);
 		}
 		if (p.mismatch) {
 			if (live) process.stdout.write("\r\x1b[2K");
@@ -409,9 +424,9 @@ export async function runSetup(options: SetupOptions): Promise<number> {
 		console.log(`  ${c.dim('"Use Local Studio to open news.ycombinator.com and list the top five stories."')}`);
 		return 0;
 	}
-	const next = connected ? "fix the agent step above" : loaded === "busy" ? "reload the extension when the agents are done" : "load the extension";
+	const next = connected ? "fix the agent step above" : loaded === "held" ? "reload the extension when no agent is working" : "load the extension";
 	console.log(`${sym.warn} ${c.bold("Almost there.")} ${next[0].toUpperCase()}${next.slice(1)}, then run ${c.bold(`${COMMAND_NAME} doctor`)} to check everything.`);
 	// --no-wait asked not to wait for the extension, so its not being connected is the step it skipped, not a failure:
 	// `local-studio-browser update` runs this with no browser open and goes on to install the rest (it stopped at step 12 of 15 on Parish1).
-	return (loaded === "skipped" || loaded === "busy") && harnessesOk ? 0 : 1;
+	return (loaded === "skipped" || loaded === "held") && harnessesOk ? 0 : 1;
 }

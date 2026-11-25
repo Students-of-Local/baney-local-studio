@@ -24,6 +24,9 @@ let server;
 let version;
 let sessions;
 let reloads;
+let hellos;
+/** The extension is away for this many connections. */
+let awayFor;
 
 before(async () => {
 	root = mkdtempSync(join(tmpdir(), "local-studio-setup-reload-"));
@@ -44,10 +47,14 @@ before(async () => {
 				const msg = JSON.parse(buffered.subarray(4, 4 + buffered.readUInt32LE(0)).toString());
 				buffered = buffered.subarray(4 + buffered.readUInt32LE(0));
 				const answer = (result) => socket.write(frame({ type: "response", id: msg.id, result }));
-				if (msg.type === "hello") socket.write(frame({ type: "welcome", clientId: "c1", hostVersion: "0", extensionConnected: true }));
+				const fail = (id, code, message) => socket.write(frame({ type: "response", id, error: { code, message } }));
+				if (msg.type === "hello") socket.write(frame({ type: "welcome", clientId: "c1", hostVersion: "0", extensionConnected: hellos++ >= awayFor }));
 				else if (msg.method === "bridge.debug") answer({ version });
-				else if (msg.method === "sessions.list" && sessions === undefined) socket.write(frame({ type: "response", id: msg.id, error: { code: "unknown_method", message: "sessions.list" } }));
-				else if (msg.method === "sessions.list") answer({ sessions });
+				else if (msg.method === "sessions.list") {
+					if (sessions === "unknown") fail(msg.id, "not_found", "Unknown method sessions.list");
+					else if (sessions === "failing") fail(msg.id, "internal", "worker restarting");
+					else answer(sessions);
+				}
 				else if (msg.method === "bridge.reload") {
 					reloads++;
 					version = built;
@@ -68,6 +75,7 @@ after(() => {
 async function setup(...args) {
 	version = "0.0.1";
 	reloads = 0;
+	hellos = 0;
 	const child = spawn(process.execPath, [cli, "setup", "--yes", ...args], {
 		env: {
 			HOME: join(root, "home"),
@@ -90,22 +98,34 @@ async function setup(...args) {
 }
 
 test("an old extension nobody is using is reloaded onto this build", async () => {
-	for (const listed of [[], [{ name: "done", connected: 0 }], undefined]) {
+	awayFor = 0;
+	for (const listed of [{ sessions: [] }, { sessions: [{ name: "done", connected: 0 }] }, {}, null, "unknown"]) {
 		sessions = listed;
 		const { code, out } = await setup("--timeout", "20");
 		assert.equal(reloads, 1, out);
-		assert.match(out, /Connected/);
+		assert.match(out, /Reloading the extension\.\.\.[\s\S]*Connected/);
 		assert.equal(code, 0, out);
 	}
 });
 
 test("an old extension an agent is working in is left alone, with the next step", async () => {
-	sessions = [{ name: "research", connected: 1 }];
-	for (const args of [["--no-wait"], ["--timeout", "20"]]) {
+	sessions = { sessions: [{ name: "research", connected: 1 }] };
+	for (const [away, ...args] of [[0, "--no-wait"], [0, "--timeout", "20"], [2, "--timeout", "20"]]) {
+		awayFor = away;
 		const { code, out } = await setup(...args);
 		assert.equal(reloads, 0, out);
-		assert.match(out, /Not reloaded: an agent is working in the browser \(research\)/);
-		assert.match(out, /local-studio-browser reload/);
+		assert.doesNotMatch(out, /Reloading/);
+		assert.match(out, /Not reloaded: an agent is working in the browser \(research\)\. Run local-studio-browser reload/);
+		assert.equal(out.match(/Not reloaded/g).length, 1, out);
 		assert.equal(code, 0, out);
 	}
+});
+
+test("an extension that doesn't say whether an agent is working is left alone", async () => {
+	sessions = "failing";
+	awayFor = 0;
+	const { code, out } = await setup("--no-wait");
+	assert.equal(reloads, 0, out);
+	assert.match(out, /Not reloaded: the extension didn't say whether an agent is working/);
+	assert.equal(code, 0, out);
 });
