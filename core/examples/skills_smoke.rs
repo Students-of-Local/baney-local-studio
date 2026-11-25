@@ -89,12 +89,19 @@ fn words(smoke: &mut Smoke) -> Result<(), String> {
     smoke.check("a word in one section finds that skill and part", part);
     let found = smoke.first(&["why did the glow vanish from my lamp"])? == "bulbs";
     smoke.check("asks.txt finds a skill whose SKILL.md shares no word", found);
+    let asked = smoke.run(&["read", "bulbs"])?;
+    let text = String::from_utf8_lossy(&asked.stdout).into_owned();
+    smoke.check("a short skill reads whole", asked.status.success() && text.contains("Turn it off first"));
+    smoke.check("asks.txt is never shown", !text.contains("vanish") && !text.contains("asks.txt"));
     let asks = smoke.data.join("skills/bulbs/asks.txt");
     put(&asks, "my ceiling went dark\n")?;
     let fresh = smoke.first(&["why is the ceiling dark"])? == "bulbs" && smoke.first(&["glow vanish"])?.is_empty();
     smoke.check("an edit of asks.txt alone is seen", fresh);
     let shown = smoke.run(&["search", "windy"])?.stdout;
-    smoke.check("a long description is cut to one short line", shown.len() < 300 && shown.ends_with(b"...\n"));
+    smoke.check(
+        "a long description is cut to one short line",
+        shown.len() < 400 && String::from_utf8_lossy(&shown).lines().next().is_some_and(|line| line.ends_with("...")),
+    );
     let nothing = smoke.run(&["search", "what", "is", "the"])?;
     let quiet = nothing.status.success() && String::from_utf8_lossy(&nothing.stdout) == "nothing found\n";
     smoke.check("stop words alone find nothing, exit 0", quiet);
@@ -105,7 +112,7 @@ fn words(smoke: &mut Smoke) -> Result<(), String> {
     }
     smoke.check("accents fold", smoke.first(&["creme brulee"])? == "kitchen");
     smoke.check("an unspaced language is found by part of a word", smoke.first(&["发票"])? == "invoices");
-    let usage = smoke.run(&["search"])?.status.code() == Some(2);
+    let usage = smoke.run(&["search"])?.status.code() == Some(2) && smoke.run(&["read"])?.status.code() == Some(2);
     smoke.check("no words is a usage error", usage);
     let control = smoke.run(&["search", "escape"])?.stdout;
     smoke.check("a search prints no control character", !control.is_empty() && !control.contains(&27));
@@ -141,7 +148,7 @@ fn places(smoke: &mut Smoke) -> Result<(), String> {
     let app = smoke.json(&["search", "--for", "Paint Pro"])?;
     smoke.check("where.txt names an app, no words needed", names(&app) == ["painter"]);
     let words = smoke.first(&["open paint pro please"])? == "painter";
-    smoke.check("its words are searched too", words && smoke.first(&["an old tricks site"])? == "site-learning");
+    smoke.check("its words are searched too", words && smoke.first(&["a zither hunt now"])? == "site-learning");
     let alone = smoke.json(&["search", "--for", "tubes.test", "marmalade"])?;
     smoke.check("a site's skill with none of the words comes first", names(&alone) == ["tubes", "kitchen"]);
     for (place, skill) in [
@@ -176,6 +183,13 @@ fn named(smoke: &mut Smoke) -> Result<(), String> {
         let within = smoke.json(&["search", "pen", "--in", name])?;
         smoke.check(&format!("{name} is itself"), names(&within) == [name] && smoke.first(&[name])? == name);
     }
+    let read = smoke.json(&["read", "Old-Tricks"])?;
+    smoke.check("read takes an old name", read["name"] == "site-learning");
+    let unknown = smoke.run(&["read", "site", "lerning"])?;
+    let text = String::from_utf8_lossy(&unknown.stdout).into_owned();
+    smoke.check("an unknown name names the nearest", !unknown.status.success() && text.contains("site-learning"));
+    let typo = String::from_utf8_lossy(&smoke.run(&["read", "kitchn"])?.stdout).into_owned();
+    smoke.check("a misspelled word is near too", typo.contains("near it: kitchen"));
     let hits = smoke.json(&["search", "duplicate"])?;
     let own = names(&hits) == ["twin"] && hits[0]["source"] == "yours";
     smoke.check("a hidden skill is not found", own);
@@ -202,6 +216,39 @@ fn naming(smoke: &mut Smoke) -> Result<(), String> {
     Ok(())
 }
 
+fn reading(smoke: &mut Smoke) -> Result<(), String> {
+    let long = smoke.json(&["read", "long"])?;
+    let text = long["text"].as_str().unwrap_or_default();
+    let parts = long["parts"].as_array().map_or(0, Vec::len);
+    let whole = text.contains("Introduction.") && text.contains("first words") && !text.contains("second words");
+    smoke.check("a long skill reads as introduction, first part and the list", whole && parts == 3);
+    smoke.check("and says it is shortened", text.contains("[Shortened. "));
+    let same = smoke.json(&["read", "scroll"])?["text"].as_str().is_some_and(|text| !text.contains("[Shortened"));
+    smoke.check("6,000 characters count as characters, not bytes", same);
+    let wall = smoke.json(&["read", "wall"])?["text"].as_str().map_or(0, |text| text.chars().count());
+    smoke.check("one long part is cut", (6000..6300).contains(&wall));
+    for (wanted, words) in [("quill", "see words"), ("Quill++", "plus words")] {
+        let part = smoke.json(&["read", "scroll", "--part", wanted])?;
+        let text = part["text"].as_str().unwrap_or_default();
+        let only = text.contains(words) && text.matches("words").count() == 1;
+        smoke.check(&format!("--part {wanted} is that part alone"), only);
+    }
+    let empty = smoke.run(&["read", "scroll", "--part", ""])?;
+    smoke.check("an empty part is no part", !empty.status.success());
+    let part = smoke.json(&["read", "long", "--part", "second"])?;
+    let text = part["text"].as_str().unwrap_or_default();
+    smoke.check("a part reads alone", text.contains("second words") && !text.contains("first words"));
+    smoke.check("a heading in a code fence is no part", text.contains("## not a part"));
+    let files = long["files"].as_array().cloned().unwrap_or_default();
+    smoke.check("files beside it are listed, never inlined", files == ["scripts/run.py"]);
+    let missing = smoke.run(&["read", "long", "--part", "nope"])?;
+    let text = String::from_utf8_lossy(&missing.stdout).into_owned();
+    smoke.check("an unknown part lists the parts", !missing.status.success() && text.contains("First, Second, Third"));
+    let within = smoke.json(&["search", "--in", "long", "third"])?;
+    smoke.check("--in searches one skill", names(&within) == ["long"] && within[0]["parts"][0] == "Third");
+    Ok(())
+}
+
 fn changes(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     let folder = skill(own, "draft", "A pelican", "magpies")?;
     smoke.check("a new skill is listed", smoke.described("draft", "A pelican")?);
@@ -223,6 +270,8 @@ fn changes(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     put(&own.join("huge/SKILL.md"), &"cassowary ".repeat(30_000))?;
     let huge = smoke.problem("larger than 256 KB")? && smoke.first(&["cassowary"])?.is_empty();
     smoke.check("a huge SKILL.md is reported, and skipped", huge);
+    let why = String::from_utf8_lossy(&smoke.run(&["read", "huge"])?.stdout).into_owned();
+    smoke.check("read says why it skips it", why.contains("larger than 256 KB"));
     skill(&smoke.home.join(".agents/skills"), "broken", "Works", "")?;
     smoke.check("a broken skill takes no name from a good one", smoke.described("broken", "Works")?);
     write(own.join("broken/SKILL.md"), [0xff, 0xfe, 0x00]).map_err(|error| error.to_string())?;
@@ -465,13 +514,23 @@ fn run(smoke: &mut Smoke) -> Result<(), String> {
     put(&painter.join("where.txt"), "Paint Pro\n")?;
     skill(&own, "forms", "Fill out", "https://docs.forms.test/a https://docs.forms.test/b fill")?;
     let learning = skill(&own, "site-learning", "Learn a site", "Try it.")?;
-    put(&learning.join("names.txt"), "old-tricks\n")?;
+    put(&learning.join("names.txt"), "old-tricks\nzither-hunt\n")?;
     skill(&own, "twin", "A duplicate", "mine")?;
     skill(&smoke.home.join(".claude/skills"), "twin", "A duplicate", "theirs")?;
+    let filler = "more words here\n".repeat(150);
+    let body = format!(
+        "Introduction.\n\n## First\nfirst words\n{filler}\n## Second\nsecond words\n```\n## not a part\n```\n{filler}\n## Third\nthird\n{filler}"
+    );
+    let long = skill(&own, "long", "A long one", &body)?;
+    put(&long.join("scripts/run.py"), "print()")?;
+    let scroll = format!("{}\n\n## Quill\nsee words\n\n## Quill++\nplus words\n", "山".repeat(3000));
+    skill(&own, "scroll", "A scroll", &scroll)?;
+    skill(&own, "wall", "A wall", &"brick ".repeat(2000))?;
     words(smoke)?;
     places(smoke)?;
     named(smoke)?;
     naming(smoke)?;
+    reading(smoke)?;
     trust(smoke)?;
     plugins(smoke)?;
     changes(smoke, &own)?;

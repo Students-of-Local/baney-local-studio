@@ -62,7 +62,7 @@ impl Store {
             }
             Ok(None)
         });
-        found?.ok_or_else(|| format!("no skill is named {}", text::plain(query.within.unwrap_or_default())))
+        found?.ok_or_else(|| self.unknown(query.within.unwrap_or_default()))
     }
 
     fn find(&self, query: &Query) -> rusqlite::Result<Option<Vec<Hit>>> {
