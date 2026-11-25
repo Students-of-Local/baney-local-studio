@@ -433,7 +433,7 @@ enum SettingKey: CaseIterable {
         case .addMachine: "pairing link connect remote"
         case .installedPlugins: "extensions permissions grants capabilities remove commands skills mcp"
         case .pluginUpdates: "update channel stable nightly dev"
-        case .pluginCatalog: "browse install tychicus hildegard gantrel smoothstone"
+        case .pluginCatalog: "browse install browser computer use hildegard gantrel smoothstone"
         case .pluginSource: "git url github folder unpinned"
         case .archivedThreads: "unarchive restore"
         case .snapshotEnabled, .snapshotShortcut, .snapshotPermission: "screenshot capture window screen recording"

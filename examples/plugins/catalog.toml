@@ -30,8 +30,8 @@ tree = "sha256:76b07693b90c1dd5f6223db97d8ade0a950c036cac61191647f1166847e6bc59"
 
 [[plugin]]
 id = "tychicus-browser"
-name = "Tychicus Browser"
-description = "Work in Chromium tabs in the background through the Tychicus extension"
+name = "Browser use"
+description = "Work in Chromium tabs in the background through the Local Studio extension"
 capabilities = []
 git = "https://github.com/baney75/tychicus"
 rev = "fa6fcbe4aa8ef245dd9df25f5c0c35dd5bf7b7f7"
@@ -40,7 +40,7 @@ tree = "sha256:6517d70f3ad016a838dc9d669cc2dc3c4691fc5a1c370675409b1e45364902c5"
 
 [[plugin]]
 id = "tychicus-computer"
-name = "Tychicus Computer"
+name = "Computer use"
 description = "Read and operate desktop apps through accessibility APIs"
 capabilities = []
 git = "https://github.com/baney75/tychicus"

@@ -209,7 +209,7 @@ This settles #36 second-S3. One process owns `<data>/studio.lock` at a time, and
 
 ## Tunnel listener contract
 
-For the one shared tunnel (Tychicus and Local Studio, owned by the tunnel lead):
+For the one shared tunnel (Local Studio, and its browser and computer use server on 8787):
 
 - The tunnel's Local Studio ingress forwards `/v1/ws` and `/v1/health` to `http://127.0.0.1:18094`, serve's tunnel listener, never to 18093. The tunnel client's `Ports.serve` points there.
 - The hostname reaches serve through `serve.json` `allowTunnelHosts`, written with `local-studio-serve allow-tunnel-host <name>` (or `--remove`) or by `local-studio tunnel` itself, and serve picks it up without a restart. Its twin `local-studio-serve allow-host <name>` (or `--remove`) edits the local listener's `allowHosts` the same way, and with `--json` prints `{"state":"added"|"removed"|"unchanged","allowHosts":[...],"port":18093,"live":true|false}`; `local-studio tunnel setup --tailnet` calls it. Serve also adds `wss://<name>/v1/ws` to `machine.urls`, so phones learn the route on their next `hello`. The owner records the ports it actually listens on in `<data>/remote/listening.json` (its pid, `port`, `tunnelPort`, and the tunnel port pinned by `--tunnel-port`), so `allow-host`, `allow-tunnel-host` and `status` (`ownerPorts`) probe the ports serve was started with, not only serve.json's, and `allow-tunnel-host` writes no default `tunnelPort` over a flag. The tunnel listener runs only while `allowTunnelHosts` lists a host: removing the last one stops it, and a bind that fails because another process holds the port is logged once and retried every 2 s.

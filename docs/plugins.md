@@ -58,7 +58,7 @@ Each row carries the capability id, `needed` or `sensitive`, a plain sentence of
 Three optional manifest fields feed the sheet. A build from before them refuses a manifest that uses them.
 
 ```toml
-name = "Tychicus"
+name = "Browser use"
 icon = "icon.png"
 
 [gates]

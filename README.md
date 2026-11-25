@@ -104,7 +104,7 @@ The plugin family, in progress:
 
 | Plugin | What it is | State |
 | --- | --- | --- |
-| [Tychicus](https://github.com/baney75/tychicus) | Browser use and computer use for your agents | Both plugins in the bundled catalog; becoming the default plugin |
+| [Browser use and computer use](browser) | Your agents work in your browser through the Local Studio extension, and in desktop apps | Both plugins in the bundled catalog; moving into this repository |
 | [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | In the bundled catalog |
 | [Gantrel](https://github.com/baney75/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
 | [UntoCaesar](https://github.com/baney75/UntoCaesar) | Local-AI tax filing that never leaves your machine | Engine and manifest on a branch |
