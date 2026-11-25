@@ -530,11 +530,20 @@ impl Codex {
                 params["config"]["mcp_servers"] = json!({ SERVER: skills });
                 params["config"]["mcp_servers"][SERVER]["default_tools_approval_mode"] = json!("approve");
             }
-            if launch.resume {
+            if let Some(origin) = &launch.fork {
+                params["threadId"] = json!(origin);
+                let forked = process.rpc.call("thread/fork", params).await?;
+                let thread = forked.get("thread").cloned().unwrap_or(Value::Null);
+                let id = thread
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Codex forked a thread without an id.".to_string())?;
+                Ok::<_, String>((id.to_string(), history(&thread)))
+            } else if launch.resume {
                 params["threadId"] = json!(launch.native);
                 let resumed = process.rpc.call("thread/resume", params).await?;
                 let thread = resumed.get("thread").cloned().unwrap_or(Value::Null);
-                Ok::<_, String>((launch.native.clone(), history(&thread)))
+                Ok((launch.native.clone(), history(&thread)))
             } else {
                 let started = process.rpc.call("thread/start", params).await?;
                 let id = started

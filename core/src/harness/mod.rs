@@ -126,6 +126,7 @@ pub(crate) struct Launch {
     pub(crate) harness: Harness,
     pub(crate) native: String,
     pub(crate) resume: bool,
+    pub(crate) fork: Option<String>,
     pub(crate) cwd: String,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<String>,
@@ -157,8 +158,9 @@ impl Driver {
         match launch.harness {
             Harness::ClaudeCode => {
                 let native = launch.native.clone();
-                let history = if launch.resume {
-                    let (cwd, session, account) = (launch.cwd.clone(), native.clone(), launch.account.clone());
+                let saved = launch.fork.clone().or_else(|| launch.resume.then(|| native.clone()));
+                let history = if let Some(session) = saved {
+                    let (cwd, account) = (launch.cwd.clone(), launch.account.clone());
                     tokio::task::spawn_blocking(move || claude::history(account.as_deref(), &cwd, &session))
                         .await
                         .unwrap_or_default()

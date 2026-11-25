@@ -44,18 +44,23 @@ fn limited() -> bool {
     account().is_some_and(|dir| dir.join(LIMITED).is_file())
 }
 
-fn session_file(args: &[String]) -> Option<PathBuf> {
-    let session = args.windows(2).find(|pair| pair[0] == "--session-id" || pair[0] == "--resume")?[1].clone();
+fn session_file(args: &[String]) -> Option<(PathBuf, Option<PathBuf>)> {
+    let named = |flag: &str| args.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].clone());
     let root = account()?;
     let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    Some(root.join("projects").join(escaped).join(format!("{session}.jsonl")))
+    let file = |session: String| root.join("projects").join(&escaped).join(format!("{session}.jsonl"));
+    let own = named("--session-id").or_else(|| named("--resume"))?;
+    Some((file(own), named("--resume").map(file).filter(|_| args.iter().any(|arg| arg == "--fork-session"))))
 }
 
-fn remember(file: Option<&PathBuf>, lines: &[Value]) {
-    let Some(file) = file else { return };
+fn remember(session: Option<&(PathBuf, Option<PathBuf>)>, lines: &[Value]) {
+    let Some((file, origin)) = session else { return };
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).ok();
+    }
+    if let Some(origin) = origin.as_ref().filter(|_| !file.exists()) {
+        std::fs::copy(origin, file).ok();
     }
     let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) else { return };
     for line in lines {
@@ -67,7 +72,7 @@ fn run(
     turn: u32,
     frame: &Value,
     (effort, sources, servers): (&str, &str, Option<&Value>),
-    (inbox, file): (&Receiver<Value>, Option<&PathBuf>),
+    (inbox, session): (&Receiver<Value>, Option<&(PathBuf, Option<PathBuf>)>),
     waiting: &mut VecDeque<Value>,
 ) {
     let text = frame["message"]["content"].as_str().unwrap_or_default().to_string();
@@ -138,7 +143,7 @@ fn run(
         },
     });
     emit(&assistant);
-    remember(file, &[json!({ "type": "user", "message": { "role": "user", "content": text } }), assistant]);
+    remember(session, &[json!({ "type": "user", "message": { "role": "user", "content": text } }), assistant]);
     emit(&json!({ "type": "result", "subtype": "success", "is_error": false, "result": reply }));
 }
 
@@ -154,7 +159,7 @@ fn main() {
         let allowed = args.iter().any(|arg| arg == ALLOWED);
         allowed.then(|| serde_json::from_str::<Value>(&pair[1]).ok()).flatten()
     });
-    let file = session_file(&args);
+    let session = session_file(&args);
     let (frames, inbox) = mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -178,7 +183,7 @@ fn main() {
         match frame["type"].as_str() {
             Some("user") => {
                 turn += 1;
-                run(turn, &frame, (&effort, &sources, servers.as_ref()), (&inbox, file.as_ref()), &mut waiting);
+                run(turn, &frame, (&effort, &sources, servers.as_ref()), (&inbox, session.as_ref()), &mut waiting);
             }
             Some("control_request") => answer_control(&frame),
             _ => {}
