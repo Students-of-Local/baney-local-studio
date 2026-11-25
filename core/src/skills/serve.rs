@@ -9,6 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
+use super::store::SHIPPED_DIR;
 use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
@@ -165,8 +166,10 @@ pub(crate) fn entry(data: &Path, plugins: Option<&Path>, project: Option<&str>) 
         None => args.push("--no-project"),
     }
     let mut env = Map::new();
-    if let Some(agent) = std::env::var_os("EUKHE_CODING_AGENT_DIR") {
-        env.insert("EUKHE_CODING_AGENT_DIR".to_string(), json!(whole(Path::new(&agent))?));
+    for name in ["EUKHE_CODING_AGENT_DIR", SHIPPED_DIR] {
+        if let Some(dir) = std::env::var_os(name).filter(|dir| !dir.is_empty()) {
+            env.insert(name.to_string(), json!(whole(Path::new(&dir))?));
+        }
     }
     Some(json!({ "command": binary, "args": args, "env": env }))
 }

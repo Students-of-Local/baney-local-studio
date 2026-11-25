@@ -168,6 +168,9 @@ fn skill_args<'a>(verb: &str, args: &[&'a str]) -> Option<SkillArgs<'a>> {
             (_, word) => asked.words.push(word),
         }
     }
+    if asked.shipped && (asked.project.is_some() || asked.no_project) {
+        return None;
+    }
     let given = match verb {
         "search" => !asked.words.is_empty() || asked.place.is_some(),
         "read" => !asked.words.is_empty(),

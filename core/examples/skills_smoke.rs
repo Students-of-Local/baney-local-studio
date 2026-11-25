@@ -744,10 +744,11 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
 fn shipped(smoke: &mut Smoke) -> Result<(), String> {
     let text = |error: std::io::Error| error.to_string();
     let app = smoke.data.with_file_name("app");
-    let dir = app.join("share/local-studio/skills");
+    let dir = app.join("share/local-studio/app-skills");
     skill(&dir, "bulbs", "Sell lamps", "A filament price")?;
     skill(&dir, "harbor", "Moor a boat", "Tie it to the cleat.")?;
-    let own = std::mem::replace(&mut smoke.binary, app.join("local-studio"));
+    create_dir_all(app.join("bin")).map_err(text)?;
+    let own = std::mem::replace(&mut smoke.binary, app.join("bin/local-studio"));
     std::fs::copy(&own, &smoke.binary).map_err(text)?;
     let source = |skill: Option<Value>| skill.and_then(|skill| skill["source"].as_str().map(str::to_string));
     let (harbor, bulbs) = (source(smoke.listed("harbor")?), source(smoke.listed("bulbs")?));
@@ -785,6 +786,18 @@ fn shipped(smoke: &mut Smoke) -> Result<(), String> {
     child.wait().map_err(text)?;
     smoke.check("the MCP server does too", found.contains("harbor") && !found.contains("kitchen"));
     smoke.check("and yours are all still listed after", smoke.listed("kitchen")?.is_some());
+    let both = smoke.run(&["list", "--shipped", "--project", "."])?.status.code() == Some(2);
+    smoke.check("--shipped with a project is a usage error", both);
+    remove_dir_all(&dir).map_err(text)?;
+    for (what, target) in
+        [("your own skills", smoke.data.join("skills")), ("a folder that holds them", smoke.data.clone())]
+    {
+        std::os::unix::fs::symlink(&target, &dir).map_err(text)?;
+        let listed = smoke.json(&["list", "--shipped"])?;
+        smoke.check(&format!("{what} are never the shipped ones"), names(&listed).is_empty());
+        smoke.check("and stay yours", source(smoke.listed("kitchen")?).as_deref() == Some("yours"));
+        remove_file(&dir).map_err(text)?;
+    }
     smoke.binary = own;
     remove_dir_all(&app).map_err(text)
 }

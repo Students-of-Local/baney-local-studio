@@ -19,7 +19,7 @@ const MAX_FILE: u64 = 256 * 1024;
 const MAX_SKILLS: usize = 5000;
 const MAX_DEPTH: usize = 4;
 const SHIPPED: &str = "shipped";
-const SHIPPED_DIR: &str = "LOCAL_STUDIO_SKILLS_DIR";
+pub(super) const SHIPPED_DIR: &str = "LOCAL_STUDIO_SKILLS_DIR";
 const FRESH: Duration = Duration::from_secs(2);
 const FOLDERS: [&str; 3] = [".agents", ".claude", ".eukhe"];
 pub(super) const BESIDE: [&str; 3] = ["asks.txt", "names.txt", "where.txt"];
@@ -138,7 +138,10 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
         files: Some(plugin.skills.iter().map(|skill| skill.path.clone()).collect()),
         dir: plugin.dir.clone(),
     }));
-    list.extend(shipped().map(|dir| Root { links: false, ..Root::yours(&dir, SHIPPED) }));
+    let app = shipped().map(|dir| Root { links: false, ..Root::yours(&dir, SHIPPED) });
+    let apart = |app: &Root| list.iter().all(|root| !root.dir.starts_with(&app.dir) && !app.dir.starts_with(&root.dir));
+    let app = app.filter(apart);
+    list.extend(app);
     Ok(Roots { list, trusted, here, plugins, shipped: false })
 }
 
@@ -149,7 +152,7 @@ fn shipped() -> Option<PathBuf> {
     let app = std::env::current_exe().and_then(std::fs::canonicalize).ok()?;
     let places = app.ancestors().skip(1).take(2);
     places
-        .flat_map(|dir| ["share/local-studio/skills", "Resources/skills"].map(|place| dir.join(place)))
+        .flat_map(|dir| ["share/local-studio/app-skills", "Resources/app-skills"].map(|place| dir.join(place)))
         .find(|dir| dir.is_dir())
 }
 
