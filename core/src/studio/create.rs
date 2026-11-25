@@ -58,8 +58,8 @@ fn parse(answer: &[Item]) -> Result<Draft, String> {
             texts.collect::<Vec<_>>().join("\n")
         })
         .collect();
-    let last = texts.iter().rev().find_map(|text| Draft::parse(text).ok());
-    last.map_or_else(|| Draft::parse(&texts.join("\n")), Ok)
+    let whole = Draft::parse(&texts.join("\n"));
+    whole.or_else(|reason| texts.iter().rev().find_map(|text| Draft::parse(text).ok()).ok_or(reason))
 }
 
 fn id(draft: &Draft) -> String {
@@ -82,7 +82,7 @@ impl Actor {
     fn skill_draft(&self, thread: &str) -> Option<SkillDraft> {
         let draft = self.skill_answer(thread)?;
         let id = id(&draft);
-        if self.store.flags(thread).skill_done.as_ref() == Some(&id) {
+        if self.store.flags(thread).skills_done.contains(&id) {
             return None;
         }
         let replaces = draft.replaces(&self.data_dir);
@@ -110,14 +110,15 @@ impl Actor {
         let items = live.transcript.items();
         let Some(answer) = answers(items).next().filter(|_| !(live.state.busy && answering(items))) else { return };
         let failed = matches!(answer.last().map(|item| &item.kind), Some(ItemKind::Assistant { error: Some(_), .. }));
-        let parsed = parse(answer);
+        let (parsed, ours) = (parse(answer), answering(items));
         let Some(thread) = self.threads.get_mut(id) else { return };
-        let told = thread.skill.asked && thread.stopping.is_none() && thread.failed_at.is_none();
-        thread.skill.asked &= failed;
-        let again = parsed.as_ref().ok().filter(|_| told).map(self::id);
-        if again.is_some() && self.store.flags(id).skill_done == again {
-            self.store.update(id, |flags| flags.skill_done = None);
-            self.save();
+        let told = ours && thread.skill.asked && thread.stopping.is_none() && thread.failed_at.is_none();
+        thread.skill.asked &= ours && failed && parsed.is_err();
+        if let Some(again) = parsed.as_ref().ok().filter(|_| told).map(self::id) {
+            if self.store.flags(id).skills_done.contains(&again) {
+                self.store.update(id, |flags| flags.skills_done.retain(|done| *done != again));
+                self.save();
+            }
         }
         if let (Err(reason), true, false) = (&parsed, told, failed) {
             let text = format!("The reply holds no skill. Send @create again. {reason}");
@@ -126,6 +127,13 @@ impl Actor {
         let draft = self.skill_draft(id);
         if self.threads.get(id).is_some_and(|thread| thread.skill.offered != draft) {
             self.push_skill_draft(id, draft);
+        }
+    }
+
+    pub(super) fn skill_turn_missed(&mut self, id: &str) {
+        let Some(thread) = self.threads.get(id) else { return };
+        if thread.skill.asked && thread.live.as_ref().is_some_and(|live| !live.state.busy) {
+            self.skill_turn_ended(id);
         }
     }
 
@@ -140,10 +148,18 @@ impl Actor {
         if id(&draft) != wanted {
             return Err("A newer reply holds another skill. Read it, then save.".to_string());
         }
+        if let Some(plugin) = self.store.flags(&thread).local_only {
+            return Err(format!(
+                "This thread ran {plugin}, which runs only on local models, and any model can read a saved skill. It wasn't saved."
+            ));
+        }
         let name = draft.name.to_lowercase();
         let draft = draft.with_text(text)?;
-        if draft.name.to_lowercase() != name && draft.replaces(&self.data_dir) {
-            return Err(format!("You already have a skill named {}. Give this one another name.", draft.name));
+        let same = draft.name.to_lowercase() == name;
+        if draft.replaces(&self.data_dir) && !(same && self.skill_replaces(&thread, wanted)) {
+            self.emit_skill_draft(&thread);
+            let then = if same { "Save again to replace it" } else { "Give this one another name" };
+            return Err(format!("You already have a skill named {}. {then}.", draft.name));
         }
         let making = self.threads.get_mut(&thread).ok_or_else(|| format!("Unknown thread {thread}."))?;
         if making.skill.saving {
@@ -175,17 +191,25 @@ impl Actor {
         }
     }
 
-    pub(super) fn discard_skill(&mut self, id: &str) {
-        let draft = self.threads.get(id).and_then(|thread| thread.skill.offered.as_ref());
-        if let Some(draft) = draft.map(|draft| draft.id.clone()) {
+    fn skill_replaces(&self, thread: &str, draft: &str) -> bool {
+        let offered = self.threads.get(thread).and_then(|thread| thread.skill.offered.as_ref());
+        offered.is_some_and(|offered| offered.id == draft && offered.replaces)
+    }
+
+    pub(super) fn discard_skill(&mut self, id: &str, draft: String) {
+        let offered = self.threads.get(id).and_then(|thread| thread.skill.offered.as_ref());
+        if offered.is_some_and(|offered| offered.id == draft) {
             self.finish_skill(id, draft);
         }
     }
 
     fn finish_skill(&mut self, id: &str, draft: String) {
-        let offered = self.threads.get(id).and_then(|thread| thread.skill.offered.as_ref());
-        let offered = offered.is_some_and(|offered| offered.id == draft);
-        self.store.update(id, |flags| flags.skill_done = Some(draft));
+        let Some(thread) = self.threads.get(id) else { return };
+        let offered = thread.skill.offered.as_ref().is_some_and(|offered| offered.id == draft);
+        self.store.update(id, |flags| {
+            flags.skills_done.retain(|done| *done != draft);
+            flags.skills_done.push(draft);
+        });
         self.save();
         if offered {
             self.push_skill_draft(id, None);

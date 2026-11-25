@@ -103,9 +103,6 @@ impl Draft {
         if folder.is_empty() || description.is_empty() {
             return Err("The skill needs a name and a description in its front matter.".to_string());
         }
-        if name.to_lowercase().split_whitespace().next() == Some("create") {
-            return Err("A skill can't be named create. Give it another name.".to_string());
-        }
         let texts = || files.iter().map(|(_, text)| text).chain([&text]);
         if texts().any(|text| text.len() > MOST_TEXT) || texts().map(String::len).sum::<usize>() > MOST_ALL {
             return Err(format!("A skill is at most {} KB, {} KB a file.", MOST_ALL / 1024, MOST_TEXT / 1024));
@@ -130,6 +127,9 @@ impl Draft {
 
 impl Store {
     pub fn save(&mut self, draft: &Draft) -> Result<Saved, String> {
+        if draft.name.to_lowercase().split_whitespace().next() == Some("create") {
+            return Err("A skill's name can't start with create. Give it another name.".to_string());
+        }
         let skills = self.own()?;
         self.checked = None;
         let (mut old, mut hides) = (Vec::new(), Vec::new());
