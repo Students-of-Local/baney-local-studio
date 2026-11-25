@@ -14,7 +14,7 @@ mod serve;
 mod store;
 mod text;
 
-pub use create::{asked, Draft, CREATE, MAKE};
+pub use create::{asked, skill_marks, Draft, CREATE, MAKE};
 pub use read::Reading;
 pub use search::{lines, Hit, Query};
 pub(crate) use serve::{entry, TOOLS};
