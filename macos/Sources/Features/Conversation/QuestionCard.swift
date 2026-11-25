@@ -42,7 +42,7 @@ private struct QuestionCardBody: View {
             }
             .foregroundStyle(Theme.primary)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Plugin \(question.header) asks")
+            .accessibilityLabel("\(question.header) asks")
             Text(question.question)
                 .font(.system(size: 13))
                 .lineSpacing(2)

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -9,8 +9,8 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
     AccessMode, Approval, ApprovalAnswer, Block, Connection, DaemonLaunch, Delivery, Harness, Item, ItemKind,
-    ModelOption, NoticeLevel, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus, TranscriptOp,
-    Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    ModelOption, NoticeLevel, PromptDraft, Question, Studio, StudioConfig, ThreadRow, ThreadSettings, ThreadStatus,
+    TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::Map;
 
@@ -67,6 +67,8 @@ pub struct Watch {
     finished: u32,
     approvals: Vec<Approval>,
     pub denied: Vec<(Approval, Instant)>,
+    questions: Vec<(String, Question)>,
+    tools: BTreeMap<String, (String, String)>,
     answers: BTreeMap<u64, String>,
     users: BTreeMap<u64, String>,
     latest: Option<String>,
@@ -136,10 +138,10 @@ fn observe(watch: &mut Watch, item: &Item, live: bool) {
         ItemKind::User { text, .. } => {
             watch.users.insert(item.id, text.clone());
         }
-        ItemKind::Tool { .. }
-        | ItemKind::TurnSummary { .. }
-        | ItemKind::Notice { .. }
-        | ItemKind::Compaction { .. } => {}
+        ItemKind::Tool { call_id, name, output, .. } => {
+            watch.tools.insert(call_id.clone(), (name.clone(), output.clone()));
+        }
+        ItemKind::TurnSummary { .. } | ItemKind::Notice { .. } | ItemKind::Compaction { .. } => {}
     }
 }
 
@@ -165,6 +167,11 @@ fn apply(watch: &mut Watch, update: Update) {
         Update::Approvals { thread, approvals } if watch.thread.as_deref() == Some(thread.as_str()) => {
             watch.approvals = approvals;
         }
+        Update::Questions { thread, request, questions, .. } if watch.thread.as_deref() == Some(thread.as_str()) => {
+            watch.questions.retain(|(known, _)| *known != request);
+            watch.questions.extend(questions.into_iter().map(|question| (request.clone(), question)));
+        }
+        Update::QuestionsSettled { request, .. } => watch.questions.retain(|(known, _)| *known != request),
         Update::Usage { report, .. } => watch.usage = Some(report),
         Update::Commands { .. } | Update::Skills { .. } => watch.resources += 1,
         Update::Connection { state } => watch.connection = Some(state),
@@ -186,7 +193,6 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::Thread { .. }
         | Update::Approvals { .. }
         | Update::Questions { .. }
-        | Update::QuestionsSettled { .. }
         | Update::ArchivedThreads { .. }
         | Update::ThreadSearch { .. }
         | Update::Queue { .. }
@@ -382,6 +388,35 @@ pub fn approval_turn(
         )?;
     }
     Ok(asked)
+}
+
+fn answers_question(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str) -> anyhow::Result<()> {
+    let finished = watch.begin();
+    let text = "Use your AskUserQuestion tool to ask me one question, \"Which color?\", with the options Red and Blue. Then reply with only the color I picked.";
+    studio.send(format!("send-question-{finished}"), thread.to_string(), prompt(text), Delivery::Queue);
+    expecting(studio, signal, watch, ("the question shows as a card", STEP_TIMEOUT), |watch| {
+        !watch.questions.is_empty()
+    })?;
+    let (request, question) = watch.questions[0].clone();
+    let labels: Vec<&str> = question.options.iter().map(|option| option.label.as_str()).collect();
+    println!("     question card: {} asks {:?} {labels:?}", question.header, question.question);
+    ensure!(question.header == "Claude Code" && labels.contains(&"Blue"), "the card is {question:?}");
+    studio.answer_questions(
+        thread.to_string(),
+        request,
+        HashMap::from([(question.question.clone(), "Blue".to_string())]),
+    );
+    pump(studio, signal, watch, "the answered turn finished", |watch| {
+        watch.finished > finished && watch.questions.is_empty()
+    })?;
+    let answered = watch.tools.values().any(|(name, output)| name == "AskUserQuestion" && output.contains("Blue"));
+    ensure!(
+        answered,
+        "AskUserQuestion's result does not hold the answer: {:?}",
+        watch.tools.values().collect::<Vec<_>>()
+    );
+    println!("ok   AskUserQuestion showed a card and Claude Code got the answer");
+    Ok(())
 }
 
 fn card_shows_command(
@@ -767,6 +802,9 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
         println!("ok   approve wrote approved.txt ({approved} approvals)");
         codex_supervised_holds(&studio, &signal, watch, (target, &thread), work)?;
 
+        if target.harness == Harness::ClaudeCode {
+            answers_question(&studio, &signal, watch, &thread)?;
+        }
         card_shows_command(&studio, &signal, watch, &thread, work)?;
         stop_settles_approval(&studio, &signal, watch, &thread)?;
         ensure!(!work.join("stopped.txt").exists(), "stopped.txt was written although its approval was never given");
