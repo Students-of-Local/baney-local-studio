@@ -389,6 +389,7 @@ pub fn engine_row(app: &Weak<App>, state: &State, engine: &LocalEngine) -> adw::
             let request = track(&app, &id);
             let id = id.clone();
             app.core.run(|studio| studio.use_local_engine(request, id));
+            app.render(Dirty { settings: true, ..Dirty::default() });
         });
         row.add_suffix(&button);
     }

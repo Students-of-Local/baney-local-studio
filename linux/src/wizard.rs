@@ -7,10 +7,12 @@ use local_studio_core::{Connection, ProviderStatus};
 use crate::app::App;
 use crate::format;
 use crate::icons;
+use crate::state::State;
 
 struct Welcome {
     connection: adw::Bin,
     providers: adw::Bin,
+    shown: RefCell<String>,
 }
 
 thread_local! {
@@ -25,9 +27,25 @@ pub fn refresh(app: &Rc<App>) {
                 if connected { "Connected to the Eukhe daemon" } else { "Starting the Eukhe daemon…" },
                 connected,
             )));
-            welcome.providers.set_child(Some(&providers(app)));
+            let shown = providers_key(&app.state.borrow());
+            if *welcome.shown.borrow() != shown {
+                welcome.providers.set_child(Some(&providers(app)));
+                welcome.shown.replace(shown);
+            }
         }
     });
+}
+
+fn providers_key(state: &State) -> String {
+    format!(
+        "{:?}{:?}{:?}{:?}{:?}{}",
+        state.providers,
+        state.engines,
+        state.provider_errors,
+        state.provider_error,
+        state.provider_pending,
+        state.providers_loaded
+    )
 }
 
 fn providers(app: &Rc<App>) -> adw::PreferencesGroup {
@@ -45,7 +63,7 @@ fn providers(app: &Rc<App>) -> adw::PreferencesGroup {
     let engine = |provider: &&ProviderStatus| {
         state.engines.iter().any(|engine| provider.base_url.as_ref() == Some(&engine.base_url))
     };
-    let ready = state.providers.iter().any(|provider| provider.configured);
+    let ready = state.providers.iter().any(|provider| provider.configured && !engine(&provider));
     let shown = state.providers.iter().filter(|provider| provider.configured == ready && !engine(provider));
     for provider in shown.take(5) {
         let row = adw::ActionRow::builder()
@@ -61,7 +79,9 @@ fn providers(app: &Rc<App>) -> adw::PreferencesGroup {
         row.add_suffix(&label);
         group.add(&row);
     }
-    if !ready && state.engines.is_empty() {
+    if !ready && state.engines.is_empty() && !state.providers_loaded {
+        group.add(&adw::ActionRow::builder().title("Loading providers…").build());
+    } else if !ready && state.engines.is_empty() {
         let row = adw::ActionRow::builder()
             .title("No provider is ready yet")
             .subtitle("Start a local server such as Ollama or LM Studio and press Check Again, paste an API key or add an endpoint in Settings → Providers, or run eukhe in a terminal and use /login for a ChatGPT or Copilot subscription. For Claude, use Claude Code (your <tt>claude</tt> sign-in).")
@@ -85,7 +105,7 @@ pub fn present(app: &Rc<App>) -> adw::Carousel {
     let dialog = adw::Dialog::builder().title("Welcome").content_width(560).content_height(520).can_close(true).build();
     let carousel = adw::Carousel::builder().allow_scroll_wheel(false).allow_mouse_drag(false).vexpand(true).build();
     let state = app.state.borrow();
-    let welcome = Welcome { connection: adw::Bin::new(), providers: adw::Bin::new() };
+    let welcome = Welcome { connection: adw::Bin::new(), providers: adw::Bin::new(), shown: RefCell::default() };
     carousel.append(&page(
         icons::COMPUTER,
         "Welcome to Local Studio",
