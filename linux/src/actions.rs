@@ -481,7 +481,7 @@ pub fn confirm_action(
     destructive: bool,
     accept: impl Fn(&Rc<App>) + 'static,
 ) {
-    let dialog = adw::AlertDialog::new(Some(heading), Some(&format::escape(body)));
+    let dialog = adw::AlertDialog::new(Some(heading), Some(body));
     dialog.add_responses(&[("cancel", "Cancel"), ("accept", verb)]);
     dialog.set_response_appearance(
         "accept",

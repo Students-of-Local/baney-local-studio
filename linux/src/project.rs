@@ -187,7 +187,7 @@ fn identity_page(app: &Rc<App>, info: &Project, dialog: &adw::PreferencesDialog)
         let Some(app) = weak.upgrade() else { return };
         let confirm = adw::AlertDialog::new(
             Some("Remove Project?"),
-            Some(&format::escape(&format!("“{label}” leaves the sidebar. Its folder and threads are not deleted."))),
+            Some(&format!("“{label}” leaves the sidebar. Its folder and threads are not deleted.")),
         );
         confirm.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
         confirm.set_response_appearance("remove", adw::ResponseAppearance::Destructive);

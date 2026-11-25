@@ -279,7 +279,7 @@ fn publish(app: &Rc<App>) {
 }
 
 pub fn record_shortcut(app: &Rc<App>, command: String, title: &str) {
-    let dialog = adw::AlertDialog::new(Some("Press a Shortcut"), Some(&crate::format::escape(title)));
+    let dialog = adw::AlertDialog::new(Some("Press a Shortcut"), Some(title));
     let label = gtk::Label::new(Some("Waiting for keys… (Esc cancels)"));
     label.add_css_class("ls-pill");
     label.add_css_class("ls-mono");
