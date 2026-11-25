@@ -292,7 +292,6 @@ fn finishes(config: StudioConfig) -> anyhow::Result<()> {
     std::env::set_var("LOCAL_STUDIO_TEST_TIMER_MS", "100");
     let signal = Arc::new(Signal::default());
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
-    std::env::remove_var("LOCAL_STUDIO_TEST_TIMER_MS");
     let mut watch = Watch::default();
     let outcome = (|| {
         pump(&studio, &signal, &mut watch, "daemon connected again", |watch| {
