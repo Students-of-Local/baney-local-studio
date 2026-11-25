@@ -58,16 +58,27 @@ impl Shared {
         self.write(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
-    fn ask(&self, turn: &str, number: u64) -> Option<String> {
+    fn ask(&self, turn: &str, number: u64, tool: bool) -> Option<String> {
         let id = json!(format!("approval-{number}"));
         let (sender, answer) = channel();
         self.answers.lock().unwrap_or_else(PoisonError::into_inner).push((id.clone(), sender));
-        self.write(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "item/commandExecution/requestApproval",
-            "params": { "turnId": turn, "itemId": format!("command-{number}"), "command": SKILL_READ },
-        }));
+        let (method, params) = if tool {
+            let meta = json!({
+                "codex_approval_kind": "mcp_tool_call",
+                "persist": ["session", "always"],
+                "tool_name": "open_page",
+                "tool_params": { "url": "https://example.com" },
+            });
+            let schema = json!({ "type": "object", "properties": {} });
+            let message = "Allow the pages MCP server to run tool \"open_page\"?";
+            let params = json!({ "threadId": "", "turnId": turn, "serverName": "pages", "mode": "form",
+                "message": message, "requestedSchema": schema, "_meta": meta });
+            ("mcpServer/elicitation/request", params)
+        } else {
+            let params = json!({ "turnId": turn, "itemId": format!("command-{number}"), "command": SKILL_READ });
+            ("item/commandExecution/requestApproval", params)
+        };
+        self.write(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         loop {
             if let Ok(decision) = answer.recv_timeout(Duration::from_millis(20)) {
                 return Some(decision);
@@ -82,7 +93,11 @@ impl Shared {
         let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(index) = answers.iter().position(|(known, _)| known == id) {
             let (_, sender) = answers.remove(index);
-            sender.send(result["decision"].as_str().unwrap_or_default().to_string()).ok();
+            let answer = match result["action"].as_str() {
+                Some(action) => format!("{action} {}", result["_meta"]["persist"].as_str().unwrap_or("once")),
+                None => result["decision"].as_str().unwrap_or_default().to_string(),
+            };
+            sender.send(answer).ok();
         }
     }
 
@@ -208,10 +223,11 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         return;
     }
     let made = skill::reply(text);
-    let asks = made.is_none() && text.contains("skill") && !text.contains("````skill");
+    let tool = text.contains("open a page");
+    let asks = tool || made.is_none() && text.contains("skill") && !text.contains("````skill");
     let mut reply = made.unwrap_or_else(|| format!("reply to {text}"));
     if asks {
-        let Some(decision) = shared.ask(&turn, number) else {
+        let Some(decision) = shared.ask(&turn, number, tool) else {
             shared.interrupted.store(false, Ordering::Relaxed);
             shared.completed(&turn, "interrupted", None);
             return;
