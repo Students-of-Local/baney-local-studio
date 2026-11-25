@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a change to the app, the browser extension, computer use or the command line tools.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and what got in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: The behavior you want. Commands or tool calls you'd expect to use help.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety
+      description: Does this let an agent do more under your sign-in, open more sites, or reach the browser from elsewhere? If so, who approves it?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead

@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in the app, the browser extension, computer use or the command line tools failed or behaved wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form has the same sections as the report the `/bug` skill writes and the side panel's **Review report** (Settings > Privacy). If you have one of those, paste each section into its box.
+
+        Not for problems with a website itself, or with your own code. Security problems go to [SECURITY.md](https://github.com/baney75/local-studio/blob/main/SECURITY.md), not here.
+
+        **Scrub before you submit.** Replace emails, names, phone numbers, addresses, account and student IDs, page URLs past the domain, paths under your home folder, and anything that looks like a key or token with a label in square brackets, such as `[email]`. Never paste page text from your signed-in sites.
+  - type: textarea
+    id: did
+    attributes:
+      label: What I did
+      description: Numbered steps someone else can follow, on a public test page if you can.
+      placeholder: |
+        1. Opened a thread in a new project
+        2. Asked it to open example.com
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: The exact error message from the tool result, terminal or side panel, scrubbed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What I expected
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`local-studio --version`, and the side panel's About screen for the extension."
+      placeholder: Local Studio 0.1.0 (dev), extension 1.4.1, Chrome 141, macOS 26
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor
+      description: "For the browser or computer use, the lines `local-studio-browser doctor` reported as failed."
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: fingerprint
+    attributes:
+      label: Fingerprint
+      description: "Optional. `[component]/[error]` with numbers and paths taken out, as the `/bug` skill writes it. It finds duplicates."
+      placeholder: mcp/dialog_open
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched open issues for this problem (or this fingerprint).
+          required: true
+        - label: I removed personal data, secrets and signed-in page text from everything above.
+          required: true
