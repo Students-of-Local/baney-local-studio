@@ -163,6 +163,23 @@ final class StudioStore {
         core.run { $0.installPlugin(request: request, source: id) }
     }
 
+    func saveSkill(thread: String, draft: String, text: String, failed: ((String) -> Void)? = nil) {
+        conversation.setSavingSkill(thread: thread, true)
+        let request = requests.issue { [weak self] outcome in
+            self?.conversation.setSavingSkill(thread: thread, false)
+            switch (outcome, failed) {
+            case (.done(let message), _): self?.post(.info, message)
+            case (.failed(let message), .some(let failed)): failed(message)
+            case (.failed(let message), .none): self?.post(.error, message)
+            }
+        }
+        core.run { $0.saveSkill(request: request, thread: thread, draft: draft, text: text) }
+    }
+
+    func discardSkill(thread: String, draft: String) {
+        core.run { $0.discardSkill(thread: thread, draft: draft) }
+    }
+
     func post(_ level: NoticeLevel, _ text: String) {
         notice = StudioNotice(level: level, text: text)
     }
@@ -347,8 +364,8 @@ final class StudioStore {
             machines.setDevices(devices)
         case .localOnly(let thread, let plugin, let message, let local):
             shell.confirmation = .localOnly(thread: thread, plugin: plugin, message: message, local: local)
-        case .skillDraft:
-            break
+        case .skillDraft(let thread, let draft):
+            conversation.setSkillDraft(thread: thread, draft: draft)
         }
     }
 }

@@ -21,6 +21,8 @@ final class ConversationStore {
     private(set) var anchors: [TimelineAnchor] = []
     private(set) var approvals: [Approval] = []
     private(set) var pluginQuestions: [String: [PluginQuestion]] = [:]
+    private(set) var skillDrafts: [String: SkillDraft] = [:]
+    private(set) var savingSkills: Set<String> = []
     private(set) var queued: [QueuedMessage] = []
     private(set) var models: [ModelOption] = []
     private(set) var favorites: [ModelKey] = []
@@ -508,6 +510,19 @@ final class ConversationStore {
             list.append(pending)
         }
         pluginQuestions[thread] = list
+    }
+
+    func setSkillDraft(thread: String, draft: SkillDraft?) {
+        guard skillDrafts[thread] != draft else { return }
+        skillDrafts[thread] = draft
+    }
+
+    func setSavingSkill(thread: String, _ saving: Bool) {
+        if saving {
+            savingSkills.insert(thread)
+        } else {
+            savingSkills.remove(thread)
+        }
     }
 
     func settleQuestion(thread: String, request: String) {

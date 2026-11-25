@@ -177,6 +177,37 @@ extension SnapshotCatalog {
                 view: thread
             ),
             SnapshotEntry(
+                name: "conversation-skill-draft",
+                size: CGSize(width: 980, height: 720),
+                focus: "t1",
+                updates: [
+                    .thread(thread: "t1", info: fixtures.info(busy: false)),
+                    .transcript(thread: "t1", op: .reset(items: fixtures.changedFiles)),
+                    .skillDraft(thread: "t1", draft: fixtures.skill(marked: false)),
+                ],
+                view: thread
+            ),
+            SnapshotEntry(
+                name: "conversation-skill-draft-marked",
+                size: CGSize(width: 980, height: 720),
+                focus: "t1",
+                updates: [
+                    .thread(thread: "t1", info: fixtures.info(busy: false)),
+                    .transcript(thread: "t1", op: .reset(items: fixtures.changedFiles)),
+                    .skillDraft(thread: "t1", draft: fixtures.skill(marked: true)),
+                ],
+                view: thread
+            ),
+            SnapshotEntry(
+                name: "conversation-skill-review",
+                size: CGSize(width: 640, height: 600),
+                updates: [],
+                view: { _ in
+                    let draft = fixtures.skill(marked: true)
+                    return AnyView(SkillDraftSheet(draft: draft, saving: false) { _, _, _ in } cancel: {}.ignoresSafeArea())
+                }
+            ),
+            SnapshotEntry(
                 name: "conversation-errors",
                 size: CGSize(width: 980, height: 700),
                 focus: "t1",
@@ -503,6 +534,39 @@ extension SnapshotCatalog {
 }
 
 enum ConversationFixtures {
+    static func skill(marked: Bool) -> SkillDraft {
+        let name = "reserve-a-court"
+        let about = "Reserve a tennis court at the parks site, for a date, an hour and a court you name"
+        let secret = "Sign in with password: the one on the fridge"
+        let steps = """
+        ## Find a free hour
+
+        1. GET https://parks.example/api/courts?date=<yyyy-mm-dd>. Each row has `court`, `hour` and `free`.
+        2. If the hour is not free, say which hours are and ask.
+
+        ## Reserve it
+
+        1. Open https://parks.example/reserve and fill "Court", "Date" and "Hour".
+        2. Press "Reserve". The page answers "Reserved" and a number.
+        3. Ask before paying a fee.
+        """
+        return SkillDraft(
+            id: name,
+            name: name,
+            description: about,
+            folder: name,
+            text: "---\nname: \(name)\ndescription: \(about)\n---\n\n\(marked ? "\(secret).\n\n" : "")\(steps)\n",
+            files: [
+                SkillFile(path: "asks.txt", text: "book a court\nreserve tennis for saturday\nis a court free\n"),
+                SkillFile(path: "where.txt", text: "parks.example\n"),
+                SkillFile(path: "scripts/free.py", text: "import json, sys\nprint([row for row in json.load(sys.stdin) if row[\"free\"]])\n"),
+            ],
+            marked: marked ? [secret] : [],
+            left: marked ? ["json"] : [],
+            replaces: marked
+        )
+    }
+
     static let base: Int64 = 1_794_064_920_000
 
     static let project = Project(
