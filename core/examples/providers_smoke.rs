@@ -555,7 +555,7 @@ fn discovery(harness: &mut Harness, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn canned(answer: Option<String>) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
+fn canned(answer: Option<String>, counted: fn(&str) -> bool) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -563,12 +563,15 @@ fn canned(answer: Option<String>) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
     std::thread::spawn(move || {
         let mut held = Vec::new();
         for mut stream in listener.incoming().flatten() {
-            count.fetch_add(1, Ordering::SeqCst);
             if let Some(answer) = &answer {
-                let lines = BufReader::new(&stream).lines().map_while(Result::ok);
+                let mut lines = BufReader::new(&stream).lines().map_while(Result::ok);
+                if counted(&lines.next().unwrap_or_default()) {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
                 lines.take_while(|line| !line.is_empty()).for_each(drop);
                 let _ = stream.write_all(answer.as_bytes());
             } else {
+                count.fetch_add(1, Ordering::SeqCst);
                 held.push(stream);
             }
         }
@@ -609,8 +612,9 @@ fn local_servers(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Resu
     };
     let list = r#"{"data":[{"id":"other"}]}"#;
     let big = format!(r#"{{"data":[{{"id":"{}"}}]}}"#, "x".repeat(2 << 20));
-    let (elsewhere, elsewhere_hits) = canned(reply("200 OK", list))?;
-    let (proxy, proxy_hits) = canned(reply("200 OK", list))?;
+    let (elsewhere, elsewhere_hits) = canned(reply("200 OK", list), |line| line.contains("/studio-only/"))?;
+    let (proxy, proxy_hits) =
+        canned(reply("200 OK", list), |line| line.split(' ').nth(1).is_some_and(|target| target.starts_with("http")))?;
     let bad = [
         None,
         reply("401 Unauthorized", list),
@@ -619,12 +623,14 @@ fn local_servers(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Resu
         reply("200 OK", r#"{"data":[]}"#),
         reply("200 OK", r#"{"data":[{"id":"text-embedding-nomic-embed-text-v1.5"}]}"#),
         reply("200 OK", &big),
-        reply(&format!("302 Found\r\nLocation: http://127.0.0.1:{elsewhere}/v1/models"), ""),
+        reply(&format!("302 Found\r\nLocation: http://127.0.0.1:{elsewhere}/studio-only/v1/models"), ""),
     ];
-    let mut urls =
-        vec![format!("http://[::ffff:127.0.0.1]:{elsewhere}/v1"), format!("http://127.0.0.1:{}/v1", free_port()?)];
+    let mut urls = vec![
+        format!("http://[::ffff:127.0.0.1]:{elsewhere}/studio-only/v1"),
+        format!("http://127.0.0.1:{}/v1", free_port()?),
+    ];
     for answer in bad {
-        urls.push(format!("http://127.0.0.1:{}/v1", canned(answer)?.0));
+        urls.push(format!("http://127.0.0.1:{}/v1", canned(answer, |_| true)?.0));
     }
     let base = format!("http://127.0.0.1:{port}/v1");
     urls.push(format!("{base}/"));
