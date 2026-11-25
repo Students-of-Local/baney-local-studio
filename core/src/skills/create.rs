@@ -19,6 +19,7 @@ const KINDS: [&str; 4] = ["skill", "asks", "where", "file"];
 const QUOTES: [char; 5] = ['"', '\'', '`', '*', ' '];
 static MADE: AtomicU64 = AtomicU64::new(0);
 const NAMES: &str = "names.txt";
+const ASKS: &str = "asks.txt";
 
 pub const MAKE: &str = "@create";
 pub const CREATE: &str = "Turn what you did in this thread into one skill that a small local model can follow without this thread.
@@ -76,7 +77,7 @@ impl Draft {
         for block in &blocks {
             let (path, text) = match block.info.split_once(' ').unwrap_or((&block.info, "")) {
                 ("skill", "") => continue,
-                ("asks", "") => ("asks.txt".to_string(), listed(&block.text)),
+                ("asks", "") => (ASKS.to_string(), listed(&block.text)),
                 ("where", "") => ("where.txt".to_string(), listed(&block.text).lines().map(place).collect()),
                 ("file", path) if block.long > 3 => (beside(path)?, block.text.clone()),
                 ("file", path) => return Err(format!("The file {} needs four backticks.", text::plain(path))),
@@ -96,6 +97,12 @@ impl Draft {
             }
         }
         Self::of(skill.text.clone(), files, left)
+    }
+
+    pub(crate) fn trial(self) -> (String, String) {
+        let asks = self.files.iter().find(|(path, _)| path == ASKS).and_then(|(_, text)| text.lines().next());
+        let ask = asks.unwrap_or_default().to_string();
+        (self.name, ask)
     }
 
     pub fn with_text(self, text: String) -> Result<Self, String> {

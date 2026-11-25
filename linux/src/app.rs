@@ -745,6 +745,7 @@ impl App {
                 crate::skill_draft::set(self, thread, draft);
                 dirty.composer = true;
             }
+            Update::SkillTry { .. } => {}
             Update::Notice { level, text } => match level {
                 local_studio_core::NoticeLevel::Error | local_studio_core::NoticeLevel::Warning => {
                     self.show_notice(&text);

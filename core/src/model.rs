@@ -961,6 +961,11 @@ pub enum Update {
         thread: String,
         draft: Option<SkillDraft>,
     },
+    SkillTry {
+        thread: String,
+        model: ModelKey,
+        text: String,
+    },
     LocalOnly {
         thread: String,
         plugin: String,

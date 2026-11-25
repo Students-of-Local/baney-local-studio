@@ -134,9 +134,7 @@ fn apply(watch: &mut Watch, update: Update) {
                     Some(start) if watch.starts.last() != Some(&start) => watch.starts.push(start),
                     Some(_) => {}
                     None => {
-                        watch
-                            .idle_while_working
-                            .push("busy without a start time: the counter would vanish".to_string());
+                        watch.idle_while_working.push("busy without a start time: the counter would vanish".into());
                     }
                 }
             } else if watch.busy_infos > 0 {
@@ -158,6 +156,7 @@ fn apply(watch: &mut Watch, update: Update) {
         | Update::ComposerDraft { .. }
         | Update::LocalOnly { .. }
         | Update::SkillDraft { .. }
+        | Update::SkillTry { .. }
         | Update::Models { .. }
         | Update::DaemonDefault { .. }
         | Update::Machines { .. }

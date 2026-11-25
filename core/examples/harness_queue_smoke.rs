@@ -54,6 +54,7 @@ struct Watch {
     codex: bool,
     done: Vec<String>,
     drafts: BTreeMap<String, Option<SkillDraft>>,
+    trials: Vec<(String, String, String)>,
 }
 
 impl Watch {
@@ -144,6 +145,9 @@ fn apply(watch: &mut Watch, update: Update) {
         Update::RequestDone { request, message } => watch.done.push(format!("{request}: {message}")),
         Update::SkillDraft { thread, draft } => {
             watch.drafts.insert(thread, draft);
+        }
+        Update::SkillTry { thread, model, text } => {
+            watch.trials.push((thread, format!("{}/{}", model.provider, model.model), text));
         }
         Update::RequestFailed { request, message } => {
             println!("     request failed: {message}");
@@ -1353,8 +1357,11 @@ fn makes_skills(run: &mut Run, data: &Path, threads: &mut Vec<[String; 2]>) -> a
     Ok(())
 }
 
+const LOCAL: &str = r#"{"providers":{"trial":{"baseUrl":"http://127.0.0.1:9/v1","api":"openai-completions","models":[{"id":"kite"}]}}}"#;
+
 fn saves_skills(run: &mut Run, data: &Path, threads: &[[String; 2]]) -> anyhow::Result<()> {
     let skills = data.join("skills");
+    let models = PathBuf::from(std::env::var_os("EUKHE_CODING_AGENT_DIR").context("agent dir")?).join("models.json");
     for ((name, _), [thread, _]) in MAKERS.iter().zip(threads) {
         let one = format!("{name}-one");
         run.shown(name, thread)?;
@@ -1365,8 +1372,13 @@ fn saves_skills(run: &mut Run, data: &Path, threads: &[[String; 2]]) -> anyhow::
         let create = "---\nname: create\ndescription: x\n---\n";
         refused_save(run, &format!("{name}: a skill named create"), first.clone(), create, "A skill's name can't")?;
         ensure!(!skills.join(&one).exists(), "{name}: the refused text was saved");
+        std::fs::write(&models, "{}")?;
+        run.watch.trials.clear();
         save_skill(run, name, &skill::text(&one));
         on_disk(run, &skills.join(&one), &skill::text(&one))?;
+        run.until(Duration::from_millis(500), |_| false);
+        ensure!(run.watch.trials.is_empty(), "{name}: a trial is offered with no local model");
+        std::fs::write(&models, LOCAL)?;
         let again = format!("{one} again");
         ask_for(run, name, &again);
         drafted(run, name, &again, true);
@@ -1375,6 +1387,10 @@ fn saves_skills(run: &mut Run, data: &Path, threads: &[[String; 2]]) -> anyhow::
         save_skill(run, name, &skill::text(&again));
         on_disk(run, &skills.join(&one), &skill::text(&again))?;
         on_disk(run, &skills.join(format!(".replaced/{one}-1")), &skill::text(&one))?;
+        let wanted = (thread.clone(), "trial/kite".to_string(), format!("@{one} book a zorb"));
+        run.check(&format!("{name}: a trial on the local model is offered once"), |watch| {
+            watch.trials == [wanted.clone()]
+        });
     }
     let mut edits = Vec::new();
     for ((name, _), [_, second]) in MAKERS.iter().zip(threads) {
