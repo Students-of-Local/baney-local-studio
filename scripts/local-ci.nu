@@ -122,9 +122,9 @@ def run-job [id: string, job: record, root: string, sha: string, log: string, ha
 def main [
     pr: int
     --repo: string = "Students-of-Local/baney-local-studio"
+    --owner: string = "baney75"
     --post
 ] {
-    let owner = ($repo | split row "/" | first)
     let info = (^gh pr view $pr --repo $repo --json headRefOid,isCrossRepository,author,state | from json)
     if $info.isCrossRepository or $info.author.login != $owner {
         error make {msg: $"local CI runs only the owner's own branches; #($pr) is from ($info.author.login)"}
