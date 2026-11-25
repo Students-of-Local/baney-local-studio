@@ -28,7 +28,7 @@ ed25519-dalek = "2"
 getrandom = "0.2"
 hkdf = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util", "io-std", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util", "fs"] }
 uniffi = "0.32.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ignore = "0.4"

@@ -223,11 +223,20 @@ fn reading(smoke: &mut Smoke) -> Result<(), String> {
     let parts = long["parts"].as_array().map_or(0, Vec::len);
     let whole = text.contains("Introduction.") && text.contains("first words") && !text.contains("second words");
     smoke.check("a long skill reads as introduction, first part and the list", whole && parts == 3);
-    smoke.check("and says it is shortened", text.contains("[Shortened. "));
+    smoke.check("and says it is shortened", text.contains("[Shortened at "));
     let same = smoke.json(&["read", "scroll"])?["text"].as_str().is_some_and(|text| !text.contains("[Shortened"));
     smoke.check("6,000 characters count as characters, not bytes", same);
     let wall = smoke.json(&["read", "wall"])?["text"].as_str().map_or(0, |text| text.chars().count());
     smoke.check("one long part is cut", (6000..6300).contains(&wall));
+    let rest = smoke.json(&["read", "wall", "--from", "6000"])?;
+    let rest = rest["text"].as_str().unwrap_or_default();
+    smoke.check("--from reads the rest", rest.chars().count() == 5999 && !rest.contains("[Shortened"));
+    let past = smoke.run(&["read", "wall", "--from", "12000"])?;
+    smoke.check("--from past the end is an error", !past.status.success());
+    let cut = text.split("from ").last().and_then(|from| from.strip_suffix(']')).unwrap_or("none");
+    let on = smoke.json(&["read", "long", "--from", cut])?;
+    let on = on["text"].as_str().is_some_and(|text| text.trim_start().starts_with("## Second"));
+    smoke.check("a shortened skill says where to read on", on);
     for (wanted, words) in [("quill", "see words"), ("Quill++", "plus words")] {
         let part = smoke.json(&["read", "scroll", "--part", wanted])?;
         let text = part["text"].as_str().unwrap_or_default();
@@ -481,12 +490,13 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
         return Err("the skills server has no pipes".to_string());
     };
-    let mut from = BufReader::new(from);
+    let (lines, answers) = std::sync::mpsc::channel();
+    std::thread::spawn(move || BufReader::new(from).lines().try_for_each(|line| lines.send(line)));
     let mut ask = |id: u32, method: &str, params: Value| -> Result<Value, String> {
         writeln!(to, "{}", json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
             .map_err(|error| error.to_string())?;
-        let mut line = String::new();
-        from.read_line(&mut line).map_err(|error| error.to_string())?;
+        let line = answers.recv_timeout(Duration::from_secs(20)).map_err(|error| format!("{method}: {error}"))?;
+        let line = line.map_err(|error| error.to_string())?;
         if id == 1 {
             writeln!(to, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
                 .map_err(|error| error.to_string())?;
@@ -510,10 +520,21 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     let unknown = call(6, "skill_read", json!({ "name": "long-one" }))?;
     let missing = call(7, "skill_read", json!({}))?;
     let added = skill(own, "kites", "Fly a kite", "Run into the wind.")?;
-    std::thread::sleep(Duration::from_millis(2500));
     let late = call(8, "skill_search", json!({ "words": "kite" }))?;
     remove_dir_all(added).map_err(|error| error.to_string())?;
-    let tools = ask(9, "tools/list", json!({}))?;
+    let wall = call(9, "skill_read", json!({ "name": "wall", "from": 6000 }))?;
+    let wrong = call(10, "skill_search", json!({ "query": "marmalade" }))?;
+    let within = call(11, "skill_search", json!({ "words": "third", "in": "long" }))?;
+    let stuck = call(12, "skill_search", json!({ "words": "marmalade", "in": "long" }))?;
+    let state = smoke.data.join("state.json");
+    let trusted = std::fs::read_to_string(&state).map_err(|error| error.to_string())?;
+    let held = call(13, "skill_search", json!({ "words": "kookaburra" }))?;
+    put(&state, r#"{"version":1,"projects":[],"trusted":[]}"#)?;
+    let revoked = call(14, "skill_search", json!({ "words": "kookaburra" }))?;
+    put(&state, &trusted)?;
+    write(smoke.data.join("skills.sqlite"), [0x5a; 8192]).map_err(|error| error.to_string())?;
+    let rebuilt = call(15, "skill_search", json!({ "words": "marmalade" }))?;
+    let tools = ask(16, "tools/list", json!({}))?;
     drop(to);
     let ended = child.wait().map_err(|error| error.to_string())?.success();
     let tools: Vec<(&str, &Value)> = tools["tools"]
@@ -531,9 +552,20 @@ fn served(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     smoke.check("the server puts a site's skill first there", placed.1.starts_with("tubes "));
     smoke.check("the server says when nothing is found", !nothing.0 && nothing.1.starts_with("nothing found"));
     smoke.check("the server reads one part", !part.0 && part.1.starts_with("## Third\n"));
-    smoke.check("the server fails an unknown name, naming a near one", unknown.0 && unknown.1.contains("long"));
+    smoke.check("the server fails an unknown name, naming a near one", {
+        unknown.0 && unknown.1.contains("near it: long")
+    });
     smoke.check("the server fails a call with no name", missing.0);
-    smoke.check("a skill added while it runs is found", late.1.starts_with("kites "));
+    smoke.check("a skill added while it runs is found at once", late.1.starts_with("kites "));
+    smoke.check("the server reads on from a number", !wall.0 && wall.1.starts_with("brick ") && wall.1.len() > 5000);
+    smoke.check("a search with no words is an error that names them", wrong.0 && wrong.1.contains("\"words\""));
+    smoke.check("a search in one skill offers its part", within.1.contains("Third") && within.1.contains("\"part\""));
+    smoke.check("and does not send the model away from it", stuck.1.starts_with("no part of long"));
+    smoke.check(
+        "trust taken back while it runs counts at once",
+        held.1.starts_with("local-build ") && { revoked.1.starts_with("nothing found") },
+    );
+    smoke.check("an index damaged while it runs is made again", rebuilt.1.starts_with("kitchen "));
     smoke.check("the server ends with its input", ended);
     Ok(())
 }

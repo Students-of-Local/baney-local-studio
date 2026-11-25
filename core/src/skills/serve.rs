@@ -1,6 +1,5 @@
 use std::future::Future;
-use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::path::PathBuf;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
@@ -10,7 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-use super::{lines, Query, Roots, Store};
+use super::{lines, plain, roots, Query, Store};
 
 pub const SERVER: &str = "local-studio-skills";
 const INSTRUCTIONS: &str = "Skills are how-to notes for websites, APIs, apps and jobs. Before a task, call skill_search with it. \
@@ -20,12 +19,17 @@ const CLOSEST: &str =
     "These are the closest, not always a fit. Read one only if it is about this task: skill_read {\"name\": ...}. \
      If none is, work without one.";
 
-struct Server(Mutex<Store>);
+struct Server {
+    data: PathBuf,
+    plugins: Option<PathBuf>,
+    project: PathBuf,
+}
 
 fn tool(name: &'static str, about: &'static str, wanted: &str, asks: &[(&str, &str)]) -> Tool {
+    let kind = |name: &str| if name == "from" { "integer" } else { "string" };
     let asks: Map<String, Value> = asks
         .iter()
-        .map(|(name, about)| ((*name).to_string(), json!({ "type": "string", "description": about })))
+        .map(|(name, about)| ((*name).to_string(), json!({ "type": kind(name), "description": about })))
         .collect();
     let mut schema = Map::new();
     schema.insert("type".to_string(), json!("object"));
@@ -51,7 +55,11 @@ fn tools() -> Vec<Tool> {
         "Read one skill listed by skill_search. A long one gives its first part and the names of the others. \
          Example: {\"name\":\"academic-research\"}",
         "name",
-        &[("name", "The skill's name"), ("part", "The heading of one part, to read only that")],
+        &[
+            ("name", "The skill's name"),
+            ("part", "The heading of one part, to read only that"),
+            ("from", "The number to read on from, when the answer before was shortened"),
+        ],
     );
     vec![search, read]
 }
@@ -59,19 +67,33 @@ fn tools() -> Vec<Tool> {
 impl Server {
     fn call(&self, tool: &str, given: &Map<String, Value>) -> Result<String, String> {
         let text = |key: &str| given.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty());
-        let mut store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let open = || Store::open(&self.data, roots(&self.data, self.plugins.as_deref(), Some(&self.project))?);
         match tool {
             "skill_search" => {
-                let words = text("words").unwrap_or_default();
-                let hits = store.search(&Query { text: words, place: text("for"), within: text("in"), limit: 5 })?;
-                Ok(match hits.as_slice() {
-                    [] => "nothing found. Work without a skill.".to_string(),
-                    hits => format!("{}\n{CLOSEST}", lines(hits)),
+                let (words, place, within) = (text("words"), text("for"), text("in"));
+                if words.or(place).is_none() {
+                    return Err("skill_search needs words: {\"words\": \"the task in plain words\"}".to_string());
+                }
+                let words = words.unwrap_or_default();
+                let hits = open()?.search(&Query { text: words, place, within, limit: 5 })?;
+                Ok(match (hits.as_slice(), within) {
+                    ([], Some(skill)) => format!("no part of {} says that", plain(skill)),
+                    ([], None) => "nothing found. Work without a skill.".to_string(),
+                    (hits, Some(_)) => {
+                        format!("{}\nRead one part: skill_read {{\"name\": ..., \"part\": ...}}", lines(hits))
+                    }
+                    (hits, None) => format!("{}\n{CLOSEST}", lines(hits)),
                 })
             }
             "skill_read" => {
-                let name = text("name").ok_or("skill_read needs a name")?;
-                store.read(name, text("part")).map(|reading| reading.shown())
+                let name = text("name").ok_or("skill_read needs a name: {\"name\": \"a skill's name\"}")?;
+                let from = match given.get("from") {
+                    None | Some(Value::Null) => Some(0),
+                    Some(Value::String(from)) => from.trim().parse().ok(),
+                    Some(from) => from.as_u64().and_then(|from| usize::try_from(from).ok()),
+                };
+                let from = from.ok_or("from is a number, such as 6000")?;
+                open()?.read(name, text("part"), from).map(|reading| reading.shown())
             }
             _ => Err(format!("no tool named {tool}")),
         }
@@ -107,8 +129,8 @@ impl ServerHandler for Server {
     }
 }
 
-pub fn serve(data: &Path, roots: Roots) -> Result<(), String> {
-    let server = Server(Mutex::new(Store::open(data, roots)?));
+pub fn serve(data: PathBuf, plugins: Option<PathBuf>, project: PathBuf) -> Result<(), String> {
+    let server = Server { data, plugins, project };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| error.to_string())?.block_on(async {
         let running = server.serve(rmcp::transport::stdio()).await.map_err(|error| error.to_string())?;
