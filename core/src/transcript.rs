@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use eukhe_types::ai::{
     AssistantContentBlock, AssistantMessage, StopReason, ToolCall, ToolResultMessage, UserContent, UserContentBlock,
 };
@@ -31,6 +33,7 @@ struct OpenTurn {
 #[derive(Debug, Default)]
 pub(crate) struct Transcript {
     items: Vec<Item>,
+    calls: HashSet<String>,
     next_id: u64,
     streaming: Option<usize>,
     run_answered: bool,
@@ -49,6 +52,7 @@ struct AssistantParts<'a> {
 impl Transcript {
     pub(crate) fn reset(&mut self, messages: &[AgentMessage], run_open: bool) -> TranscriptOp {
         self.items.clear();
+        self.calls.clear();
         self.streaming = None;
         self.run_answered = false;
         self.run_failure_shown = false;
@@ -491,32 +495,27 @@ impl Transcript {
     fn settle(&mut self) -> Vec<TranscriptOp> {
         let Some(open) = self.open.take() else { return Vec::new() };
         let turn = self.turn;
-        let in_turn = |item: &Item| item.turn == turn;
-        let tool_count =
-            self.items.iter().filter(|item| in_turn(item) && matches!(item.kind, ItemKind::Tool { .. })).count();
-        let last_tool = self.items.iter().rposition(|item| in_turn(item) && matches!(item.kind, ItemKind::Tool { .. }));
-        let answer = self
-            .items
+        let start = self.items.partition_point(|item| item.turn < turn);
+        let items = &self.items[start..];
+        let tool_count = items.iter().filter(|item| matches!(item.kind, ItemKind::Tool { .. })).count();
+        let last_tool = items.iter().rposition(|item| matches!(item.kind, ItemKind::Tool { .. }));
+        let after_tools = last_tool.map_or(0, |tool| tool + 1);
+        let answer = items[after_tools..]
             .iter()
-            .enumerate()
-            .rev()
-            .find(|(index, item)| {
-                in_turn(item)
-                    && last_tool.is_none_or(|tool| *index > tool)
-                    && matches!(&item.kind, ItemKind::Assistant { blocks, .. } if blocks.iter().any(|block| matches!(block, Block::Text { .. })))
+            .rposition(|item| {
+                matches!(&item.kind, ItemKind::Assistant { blocks, .. } if blocks.iter().any(|block| matches!(block, Block::Text { .. })))
             })
-            .map(|(index, _)| index);
+            .map(|index| start + after_tools + index);
         let mut ops = Vec::new();
         let mut target = answer.or_else(|| {
-            self.items.iter().rposition(|item| in_turn(item) && matches!(item.kind, ItemKind::Assistant { .. }))
+            items.iter().rposition(|item| matches!(item.kind, ItemKind::Assistant { .. })).map(|index| start + index)
         });
         if tool_count > 0 {
             let duration = match (open.started_at, open.last_at) {
                 (Some(start), Some(end)) => u64::try_from(end.saturating_sub(start)).unwrap_or(0),
                 _ => 0,
             };
-            let position = answer
-                .unwrap_or_else(|| self.items.iter().rposition(in_turn).map_or(self.items.len(), |index| index + 1));
+            let position = answer.unwrap_or(self.items.len());
             ops.push(self.insert(
                 position,
                 ItemKind::TurnSummary {
@@ -602,6 +601,9 @@ impl Transcript {
     }
 
     fn live_card(&self, call_id: &str) -> Option<usize> {
+        if !self.calls.contains(call_id) {
+            return None;
+        }
         self.items.iter().rposition(|item| {
             matches!(&item.kind, ItemKind::Tool { call_id: id, state, .. } if id == call_id && *state != ToolState::Aborted)
         })
@@ -629,6 +631,9 @@ impl Transcript {
 
     fn insert(&mut self, index: usize, kind: ItemKind, created_at: Option<i64>) -> TranscriptOp {
         self.next_id += 1;
+        if let ItemKind::Tool { call_id, .. } = &kind {
+            self.calls.insert(call_id.clone());
+        }
         let item = Item { id: self.next_id, turn: self.turn, created_at, kind };
         let index = index.min(self.items.len());
         self.items.insert(index, item.clone());

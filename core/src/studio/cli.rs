@@ -277,7 +277,7 @@ impl Actor {
         });
         self.cli_live(id, &history);
         if self.watched(id) {
-            self.emit_focus(id);
+            self.emit_focus(id, true);
         }
         self.dirty = true;
         self.cli_ask_trust(id);
@@ -485,7 +485,7 @@ impl Actor {
             self.mailbox.push(Update::ThreadStarted { draft, thread: id.to_string() });
         }
         if self.watched(id) {
-            self.emit_focus(id);
+            self.emit_focus(id, true);
         }
         self.dirty = true;
         for (from, event) in early {

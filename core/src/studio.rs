@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,6 +47,8 @@ const PROBED_WITHIN: Duration = Duration::from_secs(1);
 const PROBED_POLL: Duration = Duration::from_millis(20);
 const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
+const LEFT_KEPT: usize = 8;
+const REOPEN_AFTER: Duration = Duration::from_millis(250);
 const NEW_THREAD_TITLE: &str = "New thread";
 const BODY_LIMIT: usize = 140;
 const GRANTABLE_EFFECTS: [&str; 6] = ["read", "write", "exec", "net", "outside", "protected"];
@@ -727,6 +729,8 @@ impl Studio {
             by_active: HashMap::new(),
             focused: None,
             watchers: HashMap::new(),
+            left: VecDeque::new(),
+            reopen_at: None,
             heads: HashMap::new(),
             models: Vec::new(),
             models_waiting: Vec::new(),
@@ -1249,6 +1253,7 @@ struct Thread {
     path: Option<String>,
     cwd: Option<String>,
     live: Option<Live>,
+    left: Option<Live>,
     title: Option<String>,
     prompt: Option<String>,
     run_started_at: Option<i64>,
@@ -1290,6 +1295,8 @@ struct Actor {
     by_active: HashMap<String, String>,
     focused: Option<String>,
     watchers: HashMap<String, u32>,
+    left: VecDeque<String>,
+    reopen_at: Option<Instant>,
     heads: HashMap<String, GitHead>,
     models: Vec<ModelOption>,
     models_waiting: Vec<Option<(String, String)>>,
@@ -1474,6 +1481,12 @@ impl Actor {
                     self.cli_event(envelope).await;
                 },
                 () = wait_until(retry_at) => {}
+                () = wait_until(self.reopen_at) => {
+                    self.reopen_at = None;
+                    if let Some(id) = self.focused.clone() {
+                        self.open_focused(&id).await;
+                    }
+                }
                 _ = timer.tick() => self.on_timer(),
                 changed = self.settings.changed(), if settings_open => {
                     if changed.is_err() {
@@ -2133,6 +2146,9 @@ impl Actor {
             }
         }
         let previous = std::mem::replace(&mut self.focused, thread.clone());
+        if let Some(id) = thread.as_deref() {
+            self.emit_focus(id, true);
+        }
         if let Some(previous) = previous.filter(|previous| Some(previous) != thread.as_ref()) {
             self.release(&previous).await;
         }
@@ -2144,15 +2160,16 @@ impl Actor {
         });
         self.save();
         self.dirty = true;
-        if self.client.is_none() && self.harness(&id).is_none() {
-            return;
+        let kept = self.threads.get(&id).is_some_and(|thread| thread.left.is_some() && thread.live.is_none());
+        self.reopen_at = kept.then(|| Instant::now() + REOPEN_AFTER);
+        if !kept {
+            self.open_focused(&id).await;
         }
-        match self.ensure_open(&id).await {
-            Ok(_) => {
-                self.emit_focus(&id);
-                self.refresh_subagents(&id).await;
-            }
-            Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
+    }
+
+    async fn open_focused(&mut self, id: &str) {
+        if self.client.is_some() || self.harness(id).is_some() {
+            self.open_watched(id).await;
         }
     }
 
@@ -2168,6 +2185,7 @@ impl Actor {
 
     async fn watch(&mut self, id: &str) {
         *self.watchers.entry(id.to_string()).or_default() += 1;
+        self.emit_focus(id, true);
         if self.client.is_none() {
             return;
         }
@@ -2180,10 +2198,7 @@ impl Actor {
 
     async fn open_watched(&mut self, id: &str) {
         match self.ensure_open(id).await {
-            Ok(_) => {
-                self.emit_focus(id);
-                self.refresh_subagents(id).await;
-            }
+            Ok(_) => self.refresh_subagents(id).await,
             Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
         }
     }
@@ -2197,15 +2212,22 @@ impl Actor {
         }
     }
 
-    fn emit_focus(&self, id: &str) {
-        let Some(live) = self.threads.get(id).and_then(|thread| thread.live.as_ref()) else { return };
+    fn view(&self, id: &str) -> Option<&Live> {
+        let thread = self.threads.get(id)?;
+        thread.live.as_ref().or(thread.left.as_ref())
+    }
+
+    fn emit_focus(&self, id: &str, transcript: bool) {
+        let Some(view) = self.view(id) else { return };
         if let Some(info) = self.info(id) {
             self.mailbox.push(Update::Thread { thread: id.to_string(), info });
         }
-        self.mailbox.push(Update::Transcript {
-            thread: id.to_string(),
-            op: crate::model::TranscriptOp::Reset { items: live.transcript.items().to_vec() },
-        });
+        if transcript {
+            self.mailbox.push(Update::Transcript {
+                thread: id.to_string(),
+                op: crate::model::TranscriptOp::Reset { items: view.transcript.items().to_vec() },
+            });
+        }
         self.emit_approvals(id);
         self.emit_questions(id);
         self.emit_queue(id);
@@ -2242,7 +2264,7 @@ impl Actor {
 
     fn info(&self, id: &str) -> Option<ThreadInfo> {
         let thread = self.threads.get(id)?;
-        let live = thread.live.as_ref()?;
+        let live = self.view(id)?;
         let flags = self.store.flags(id);
         let mut info = live.state.info(id, self.title(id), flags.access.unwrap_or(AccessMode::FullAccess));
         info.project = threads::project_for(&live.state.cwd, &flags, &self.store.projects);
@@ -2262,12 +2284,11 @@ impl Actor {
         thread
             .and_then(|thread| thread.title.clone())
             .or_else(|| self.store.threads.get(id).and_then(|flags| flags.title.clone()))
-            .or_else(|| thread.and_then(|thread| thread.live.as_ref()).and_then(|live| live.state.name.clone()))
+            .or_else(|| thread?.live.as_ref()?.state.name.clone())
             .or_else(|| roster.and_then(|row| row.title.clone()))
             .or_else(|| self.saved.get(id).and_then(|row| row.title.clone()))
-            .or_else(|| {
-                thread.and_then(|thread| thread.live.as_ref()).and_then(|live| live.transcript.first_user_text())
-            })
+            .or_else(|| self.view(id)?.state.name.clone())
+            .or_else(|| self.view(id)?.transcript.first_user_text())
             .or_else(|| thread.and_then(|thread| thread.prompt.clone()))
             .map(|title| threads::clean_title(&title))
             .filter(|title| !title.is_empty())
@@ -2396,8 +2417,14 @@ impl Actor {
         }
         self.fetch_entries(id, false).await;
         self.settle_pending(id);
-        if self.watched(id) {
-            self.emit_focus(id);
+        if let Some(thread) = self.threads.get_mut(id) {
+            let left = thread.left.take();
+            self.left.retain(|left| left != id);
+            let shown = left.as_ref().map(|left| left.transcript.items())
+                == thread.live.as_ref().map(|live| live.transcript.items());
+            if self.watched(id) {
+                self.emit_focus(id, !shown);
+            }
         }
         self.dirty = true;
         Ok(())
@@ -2468,8 +2495,16 @@ impl Actor {
             self.mailbox.notice(NoticeLevel::Warning, error);
         }
         self.by_active.remove(&active);
-        if let Some(thread) = self.threads.get_mut(id) {
-            thread.live = None;
+        let Some(thread) = self.threads.get_mut(id) else { return };
+        thread.left = thread.live.take();
+        self.left.retain(|left| left != id);
+        self.left.push_back(id.to_string());
+        if self.left.len() > LEFT_KEPT {
+            let oldest = self.left.iter().position(|left| !self.watched(left));
+            let oldest = oldest.and_then(|oldest| self.left.remove(oldest));
+            if let Some(thread) = oldest.and_then(|oldest| self.threads.get_mut(&oldest)) {
+                thread.left = None;
+            }
         }
     }
 
