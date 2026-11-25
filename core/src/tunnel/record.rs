@@ -62,9 +62,16 @@ impl Tunnel {
     pub(super) fn on_relay(&self) -> Result<Option<Record>, String> {
         let ours = self.route()?.filter(|route| route.owner == "local-studio" && route.route == "cloudflare");
         let Some(route) = ours else { return Ok(None) };
-        match self.relay_record() {
-            Err(_) if self.dir.join(YML).exists() => Ok(None),
-            record => Ok(record?.filter(|record| record.host() == route.hostname)),
+        let record = self.relay_record();
+        if self.dir.join(YML).exists() && !matches!(&record, Ok(Some(record)) if record.host() == route.hostname) {
+            return Ok(None);
+        }
+        match record? {
+            Some(record) if record.host() != route.hostname => {
+                let (path, host) = (self.relay_path(), route.hostname);
+                Err(format!("{} isn't for {host}. Run {OFF}, then set the relay up again: {AGAIN}", path.display()))
+            }
+            record => Ok(record),
         }
     }
 
@@ -131,9 +138,8 @@ impl Tunnel {
         Ok(removed)
     }
 
-    pub(super) fn relay_off(&self, removed: &mut Vec<String>) -> Result<Option<String>, String> {
+    pub(super) fn relay_off(&self, taken: bool, removed: &mut Vec<String>) -> Result<Option<String>, String> {
         let record = self.relay_record();
-        let taken = self.relay_seen().is_some_and(|seen| seen.state == "replaced");
         if let Ok(Some(record)) = &record {
             serve_disallow(record.host());
         }

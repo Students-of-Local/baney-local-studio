@@ -1623,6 +1623,7 @@ impl Tunnel {
             ));
         }
         let mut removed = Vec::new();
+        let taken = self.relay_seen().is_some_and(|seen| seen.state == "replaced");
         match Manager::detect().await {
             Ok(manager) => {
                 if manager.remove(OWN).await.map_err(|error| fail("service_failed", error))? {
@@ -1659,8 +1660,8 @@ impl Tunnel {
                 serve_disallow(alias);
             }
         }
-        let on_relay = self.on_relay().is_ok_and(|record| record.is_some());
-        let worker = self.relay_off(&mut removed)?;
+        let on_relay = !matches!(self.on_relay(), Ok(None));
+        let worker = self.relay_off(taken, &mut removed)?;
         if fs::remove_file(self.dir.join(YML)).is_ok() {
             removed.push(YML.to_string());
         }
