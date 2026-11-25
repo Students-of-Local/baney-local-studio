@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 
 #[path = "support/mcp.rs"]
 mod mcp;
+#[path = "support/skill.rs"]
+mod skill;
 
 const ALLOWED: &str = "mcp__local-studio-skills__skill_search,mcp__local-studio-skills__skill_read";
 const SLOW: Duration = Duration::from_millis(1500);
@@ -120,7 +122,8 @@ fn run(
         );
         return;
     }
-    let mut reply = format!("reply to {text} at effort {effort} with {sources} settings");
+    let mut reply =
+        skill::reply(&text).unwrap_or_else(|| format!("reply to {text} at effort {effort} with {sources} settings"));
     if text.contains("look up") {
         let found = servers.and_then(|servers| mcp::skills(&servers["mcpServers"]["local-studio-skills"], &text));
         reply = format!("{reply}, found {}", found.as_deref().unwrap_or("no server"));

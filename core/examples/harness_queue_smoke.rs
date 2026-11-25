@@ -10,14 +10,17 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
     AccessMode, ApprovalAnswer, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel,
-    NotificationKind, PromptDraft, Settings, Studio, StudioConfig, StudioError, ThreadSettings, TranscriptOp, Update,
-    Waker, WorktreeChoice,
+    NotificationKind, PromptDraft, Settings, SkillDraft, SkillFile, Studio, StudioConfig, StudioError, ThreadSettings,
+    TranscriptOp, Update, Waker, WorktreeChoice,
 };
 use serde_json::{Map, Value};
 
 #[allow(dead_code)]
 #[path = "support/harness.rs"]
 mod harness;
+#[allow(dead_code)]
+#[path = "support/skill.rs"]
+mod skill;
 
 use harness::Signal;
 
@@ -49,9 +52,15 @@ struct Watch {
     settings: Option<Settings>,
     asked: BTreeMap<String, Vec<String>>,
     codex: bool,
+    done: Vec<String>,
+    drafts: BTreeMap<String, Option<SkillDraft>>,
 }
 
 impl Watch {
+    fn draft(&self) -> Option<&SkillDraft> {
+        self.drafts.get(self.thread.as_ref()?)?.as_ref()
+    }
+
     fn replied(&self, text: &str) -> Option<&String> {
         self.replies.values().find(|reply| reply.contains(text))
     }
@@ -132,6 +141,10 @@ fn apply(watch: &mut Watch, update: Update) {
             }
         }
         Update::Notification { thread, kind: NotificationKind::Failed, body, .. } => watch.failed.push((thread, body)),
+        Update::RequestDone { request, message } => watch.done.push(format!("{request}: {message}")),
+        Update::SkillDraft { thread, draft } => {
+            watch.drafts.insert(thread, draft);
+        }
         Update::RequestFailed { request, message } => {
             println!("     request failed: {message}");
             watch.refused.push(format!("{request}: {message}"));
@@ -194,6 +207,7 @@ impl Run {
 
     fn focus(&mut self, thread: &str) {
         self.watch.thread = Some(thread.to_string());
+        self.watch.drafts.remove(thread);
         self.watch.busy = false;
         self.watch.model = None;
         self.watch.replies.clear();
@@ -1157,15 +1171,248 @@ fn reopened(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> a
     Ok(())
 }
 
-fn models_at_open(config: &StudioConfig, when: &str, (wanted, shown): (usize, bool)) -> anyhow::Result<Watch> {
+fn opened(config: &StudioConfig, act: impl FnOnce(&mut Run) -> anyhow::Result<()>) -> anyhow::Result<Watch> {
     let signal = Arc::new(Signal::default());
     let studio = reopen(config, &signal)?;
     let mut run = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: 0 };
     let connected = run.setup("daemon connected", |watch| matches!(watch.connection, Some(Connection::Ready)));
-    run.until(Duration::from_secs(2), |watch| shown && watch.codex);
-    listed(&mut run, when, wanted, shown);
+    let outcome = connected.and_then(|()| act(&mut run));
     studio.shutdown();
-    connected.map(|()| run.watch)
+    outcome.map(|()| run.watch)
+}
+
+fn models_at_open(config: &StudioConfig, when: &str, (wanted, shown): (usize, bool)) -> anyhow::Result<Watch> {
+    opened(config, |run| {
+        run.until(Duration::from_secs(2), |watch| shown && watch.codex);
+        listed(run, when, wanted, shown);
+        Ok(())
+    })
+}
+
+fn made(rest: &str, replaces: bool) -> SkillDraft {
+    let name = rest.split_whitespace().next().unwrap_or_default().to_string();
+    let files = skill::FILES.map(|(path, text)| SkillFile { path: path.to_string(), text: text.to_string() });
+    SkillDraft {
+        id: String::new(),
+        folder: name.clone(),
+        name,
+        description: "Book a zorb".to_string(),
+        text: skill::text(rest),
+        files: files.to_vec(),
+        marked: vec![skill::MARKED.to_string()],
+        left: vec![skill::LEFT.to_string()],
+        replaces,
+    }
+}
+
+fn drafted(run: &mut Run, step: &str, rest: &str, replaces: bool) {
+    let wanted = made(rest, replaces);
+    run.check(&format!("{step}: the draft for {rest:?} arrives whole"), |watch| {
+        watch.draft().is_some_and(|draft| !draft.id.is_empty() && without_id(draft) == wanted)
+    });
+}
+
+fn without_id(draft: &SkillDraft) -> SkillDraft {
+    SkillDraft { id: String::new(), ..draft.clone() }
+}
+
+fn draft_id(run: &Run) -> String {
+    run.watch.draft().map(|draft| draft.id.clone()).unwrap_or_default()
+}
+
+fn refused_save(run: &mut Run, step: &str, draft: String, text: &str, reason: &str) -> anyhow::Result<()> {
+    run.sent += 1;
+    let refused = format!("refused-{}: {reason}", run.sent);
+    run.studio.save_skill(format!("refused-{}", run.sent), run.thread(), draft, text.to_string());
+    run.check(&format!("{step} is refused"), |watch| watch.refused.iter().any(|said| said.starts_with(&refused)));
+    ensure!(run.watch.draft().is_some(), "{step}: the refused save took the draft away");
+    Ok(())
+}
+
+fn ask_for(run: &mut Run, step: &str, rest: &str) {
+    run.send(format!("@create {rest}").trim());
+    let reply = format!("made of 1 with {rest:?}");
+    run.check(&format!("{step}: the CLI gets the block once, then {rest:?}"), |watch| watch.replied(&reply).is_some());
+}
+
+fn settled(run: &mut Run, thread: &str, step: &str) -> anyhow::Result<()> {
+    run.shown(step, thread)?;
+    run.until(Duration::from_secs(1), |_| false);
+    if let Some(draft) = run.watch.draft().map(|draft| draft.name.clone()) {
+        run.watch.miss(format!("{step}: a draft {draft:?} is offered"));
+    }
+    Ok(())
+}
+
+fn save_skill(run: &mut Run, step: &str, text: &str) {
+    run.sent += 1;
+    let request = format!("save-{}", run.sent);
+    let draft = draft_id(run);
+    run.studio.save_skill(request.clone(), run.thread(), draft.clone(), text.to_string());
+    run.studio.save_skill("twice".to_string(), run.thread(), draft, text.to_string());
+    let before = run.watch.refused.len();
+    run.check(&format!("{step}: the skill is saved once and its draft goes"), |watch| {
+        let done = watch.done.iter().any(|done| done.starts_with(&format!("{request}: Saved. Use @")));
+        done && watch.draft().is_none() && watch.refused[before..].iter().any(|refused| refused.starts_with("twice: "))
+    });
+}
+
+fn on_disk(run: &mut Run, folder: &Path, text: &str) -> anyhow::Result<()> {
+    let mut wanted: Vec<(PathBuf, String)> =
+        skill::FILES.iter().map(|(path, text)| (folder.join(path), (*text).to_string())).collect();
+    wanted.push((folder.join("SKILL.md"), text.to_string()));
+    wanted.sort();
+    let (mut found, mut dirs) = (Vec::new(), vec![folder.to_path_buf()]);
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).with_context(|| dir.display().to_string())? {
+            let path = entry?.path();
+            let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                ensure!(mode == 0o600, "{} has mode {mode:o}", path.display());
+                found.push((path.clone(), std::fs::read_to_string(&path)?));
+            }
+        }
+    }
+    found.sort();
+    let mode = std::fs::metadata(folder)?.permissions().mode() & 0o777;
+    if found == wanted && mode == 0o700 {
+        println!("ok   {} holds exactly the draft's files, private", folder.display());
+    } else {
+        run.watch.miss(format!("{} (mode {mode:o}) holds {found:?}", folder.display()));
+    }
+    Ok(())
+}
+
+const MAKERS: [(&str, (&str, &str)); 2] = [("zorb-claude", CLAUDE), ("zorb-codex", CODEX)];
+
+fn makes_skills(run: &mut Run, data: &Path, threads: &mut Vec<[String; 2]>) -> anyhow::Result<()> {
+    run.setup("projects listed", |watch| !watch.projects.is_empty())?;
+    let first = run.watch.projects.first().cloned().context("first project")?;
+    for (name, pick) in MAKERS {
+        let (one, two) = (format!("{name}-one"), format!("{name}-two"));
+        let thread = with_cli(run, pick, name, &first, WorktreeChoice::Local)?;
+        run.setup(&format!("{name}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
+        for text in ["please @create it", "@creates it"] {
+            run.send(text);
+            let reply = format!("reply to {text}");
+            run.check(&format!("{name}: {text:?} is sent as it is"), |watch| watch.replied(&reply).is_some());
+        }
+        let warned = run.watch.warnings.len();
+        run.send("@create slow");
+        run.setup(&format!("{name}: a slow reply is under way"), |watch| watch.busy)?;
+        run.until(Duration::from_millis(300), |_| false);
+        run.studio.abort(thread.clone());
+        run.setup(&format!("{name}: the stopped reply ends"), |watch| !watch.busy)?;
+        run.until(Duration::from_secs(1), |_| false);
+        let said = |watch: &Watch| {
+            let no_skill = |text: &&String| text.starts_with("The reply holds no skill. Send @create again. ");
+            watch.warnings[warned..].iter().filter(no_skill).count()
+        };
+        if said(&run.watch) > 0 {
+            run.watch.miss(format!("{name}: a stopped reply is said to hold no skill"));
+        }
+        ask_for(run, name, "");
+        run.check(&format!("{name}: a reply with no skill is said so"), |watch| said(watch) == 1);
+        run.send("hello again");
+        run.check(&format!("{name}: the next turn is answered"), |watch| {
+            watch.replied("reply to hello again").is_some()
+        });
+        run.until(Duration::from_secs(1), |_| false);
+        if said(&run.watch) != 1 || run.watch.draft().is_some() {
+            run.watch.miss(format!("{name}: a reply with no skill gave a draft or another notice"));
+        }
+        ask_for(run, name, &one);
+        drafted(run, name, &one, false);
+        run.send("@create");
+        run.check(&format!("{name}: a second reply with no skill is said so"), |watch| said(watch) == 2);
+        drafted(run, &format!("{name} after a reply with no skill"), &one, false);
+        run.send("also\n```where\nother\n```\nok");
+        run.check(&format!("{name}: a later turn is answered"), |watch| watch.replied("reply to also").is_some());
+        let label = format!("{name}-second");
+        let second = with_cli(run, pick, &label, &first, WorktreeChoice::Local)?;
+        run.setup(&format!("{label}: \"hello\" is answered"), |watch| watch.replied("reply to hello").is_some())?;
+        settled(run, &second, &label)?;
+        run.slow("slow tango")?;
+        ask_for(run, &label, &two);
+        drafted(run, &label, &two, false);
+        run.studio.discard_skill(second.clone(), "another".to_string());
+        run.until(Duration::from_millis(500), |_| false);
+        ensure!(run.watch.draft().is_some(), "{label}: discarding another draft took this one away");
+        run.studio.discard_skill(second.clone(), draft_id(run));
+        run.check(&format!("{label}: discard takes the draft away"), |watch| watch.draft().is_none());
+        run.shown(name, &thread)?;
+        drafted(run, name, &one, false);
+        settled(run, &second, &label)?;
+        for name in [&one, &two] {
+            ensure!(!data.join("skills").join(name).exists(), "{name} was written before Save");
+        }
+        threads.push([thread, second]);
+    }
+    Ok(())
+}
+
+fn saves_skills(run: &mut Run, data: &Path, threads: &[[String; 2]]) -> anyhow::Result<()> {
+    let skills = data.join("skills");
+    for ((name, _), [thread, _]) in MAKERS.iter().zip(threads) {
+        let one = format!("{name}-one");
+        run.shown(name, thread)?;
+        drafted(run, &format!("{name} after a restart"), &one, false);
+        let first = draft_id(run);
+        let nameless = "---\ndescription: x\n---\n";
+        refused_save(run, &format!("{name}: a text with no name"), first.clone(), nameless, "The skill needs a name")?;
+        let create = "---\nname: create\ndescription: x\n---\n";
+        refused_save(run, &format!("{name}: a skill named create"), first.clone(), create, "A skill's name can't")?;
+        ensure!(!skills.join(&one).exists(), "{name}: the refused text was saved");
+        save_skill(run, name, &skill::text(&one));
+        on_disk(run, &skills.join(&one), &skill::text(&one))?;
+        let again = format!("{one} again");
+        ask_for(run, name, &again);
+        drafted(run, name, &again, true);
+        let (step, text) = (format!("{name}: Save of the draft before"), skill::text(&one));
+        refused_save(run, &step, first, &text, "A newer reply holds another skill.")?;
+        save_skill(run, name, &skill::text(&again));
+        on_disk(run, &skills.join(&one), &skill::text(&again))?;
+        on_disk(run, &skills.join(format!(".replaced/{one}-1")), &skill::text(&one))?;
+    }
+    let mut edits = Vec::new();
+    for ((name, _), [_, second]) in MAKERS.iter().zip(threads) {
+        let two = format!("{name}-two");
+        run.shown(name, second)?;
+        settled(run, second, &format!("{name}: a discarded draft after a restart"))?;
+        ask_for(run, name, &two);
+        drafted(run, name, &two, false);
+        let (step, taken) = (format!("{name}: a name another skill has"), skill::text(&format!("{name}-one")));
+        refused_save(run, &step, draft_id(run), &taken, "You already have a skill named")?;
+        edits.push((name, second, draft_id(run), skill::text(&format!("{name}-other"))));
+    }
+    for (name, second, draft, edited) in &edits {
+        run.studio.save_skill((*name).to_string(), (*second).clone(), draft.clone(), edited.clone());
+    }
+    run.check("two threads save at the same time", |watch| {
+        let saved = |name: &str| watch.done.iter().any(|done| done.starts_with(&format!("{name}: Saved.")));
+        MAKERS.iter().all(|(name, _)| saved(name))
+    });
+    for (name, second, _, edited) in &edits {
+        on_disk(run, &skills.join(format!("{name}-other")), edited)?;
+        ensure!(!skills.join(format!("{name}-two")).exists(), "{name}: the edited text was not what was saved");
+        settled(run, second, name)?;
+    }
+    Ok(())
+}
+
+fn skill_scenarios(config: &StudioConfig, root: &Path) -> anyhow::Result<Vec<String>> {
+    let (data, mut threads) = (root.join("data"), Vec::new());
+    let mut misses = opened(config, |run| makes_skills(run, &data, &mut threads))?.misses;
+    misses.append(&mut opened(config, |run| saves_skills(run, &data, &threads))?.misses);
+    let after = opened(config, |run| {
+        MAKERS.iter().zip(&threads).try_for_each(|((name, _), made)| {
+            let step = format!("{name} after its skills were saved");
+            made.iter().try_for_each(|thread| settled(run, thread, &step))
+        })
+    })?;
+    Ok([misses, after.misses].concat())
 }
 
 fn listed(run: &mut Run, when: &str, wanted: usize, shown: bool) {
@@ -1309,7 +1556,7 @@ fn main() -> anyhow::Result<()> {
         if !watch.warnings.iter().any(|text| text.starts_with("Could not save the Codex model list")) {
             watch.miss("the list that could not be saved is not mentioned".to_string());
         }
-        misses.append(&mut watch.misses);
+        misses.extend(watch.misses.into_iter().chain(skill_scenarios(&config, &root)?));
         Ok(())
     });
     let stopped = stop_daemon(&socket);
