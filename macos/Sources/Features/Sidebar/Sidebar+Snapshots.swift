@@ -164,7 +164,7 @@ enum ShellFixtures {
         _ id: String, _ project: Int?, _ title: String, shelf: Shelf, status: ThreadStatus = .idle, minutes: Double,
         pinned: Bool = false, unread: Bool = false, branch: String? = nil, provider: String? = nil, model: String? = nil,
         diff: (UInt32, UInt32) = (0, 0), snoozeHours: Double? = nil, fanOut: String? = nil, pull: PullRequest? = nil,
-        machine: String? = nil
+        machine: String? = nil, browser: Bool = false
     ) -> ThreadRow {
         ThreadRow(
             id: id, project: project.map { projects[$0].id }, title: title, shelf: shelf, status: status,
@@ -172,7 +172,7 @@ enum ShellFixtures {
             snoozedUntil: snoozeHours.map { Int64((Date.now.timeIntervalSince1970 + $0 * 3_600) * 1_000) },
             pinned: pinned, unread: unread, branch: branch, worktree: nil, provider: provider, model: model,
             additions: diff.0, deletions: diff.1, note: nil, archived: false, autoSettle: true,
-            liveAgents: 0, fanOut: fanOut, pullRequest: pull, harness: .eukhe, machine: machine
+            liveAgents: 0, fanOut: fanOut, pullRequest: pull, harness: .eukhe, machine: machine, browser: browser
         )
     }
 
@@ -187,7 +187,7 @@ enum ShellFixtures {
         row("t-active-8", 2, "Watch the nightly deploy", shelf: .active, status: .monitoring, minutes: 55, provider: "anthropic"),
         row("t-active-4", 2, "Usage chart colours match dashboards", shelf: .active, status: .done, minutes: 41, unread: true, provider: "google"),
         row("t-active-5", 1, "Woke: review retry backoff", shelf: .active, status: .woke, minutes: 70),
-        row("t-active-6", nil, "Summarize the release notes", shelf: .active, minutes: 300),
+        row("t-active-6", nil, "Summarize the release notes", shelf: .active, minutes: 300, browser: true),
         row("t-snoozed-1", 0, "Revisit command palette paging", shelf: .snoozed, minutes: 900, snoozeHours: 2.5),
         row("t-snoozed-2", 1, "Check controller fleet keys", shelf: .snoozed, minutes: 2_000, snoozeHours: 40),
     ] + (1...13).map { index in

@@ -236,6 +236,7 @@ struct InboxRowView: View, Equatable {
         var parts = [row.title.isEmpty ? "Untitled thread" : row.title, projectName]
         if let machine { parts.append(machine.label) }
         if let glyph = StatusBadge.glyph(row.status) { parts.append(glyph.title) }
+        if row.browser { parts.append("Browser") }
         if row.pinned { parts.append("Pinned") }
         if row.unread { parts.append("Unread") }
         if row.shelf == .snoozed, let until = row.snoozedUntil { parts.append("Wakes in \(RelativeAge.countdown(millis: until, now: now))") }
@@ -254,6 +255,7 @@ struct InboxRowView: View, Equatable {
                     .foregroundStyle(Theme.secondaryText)
                     .lineLimit(1)
                 Spacer(minLength: 4)
+                if row.browser { browserMark }
                 if row.pinned {
                     Image(systemName: "pin.fill")
                         .icon(.inline, .secondary)
@@ -272,6 +274,13 @@ struct InboxRowView: View, Equatable {
         .frame(minHeight: hasMeta ? Theme.Metrics.cardRowHeight : 46, alignment: .leading)
     }
 
+    private var browserMark: some View {
+        Image(systemName: "globe")
+            .icon(.inline, .secondary)
+            .help("Browser")
+            .accessibilityHidden(true)
+    }
+
     private var slim: some View {
         HStack(spacing: 8) {
             ProjectTile(project: project, size: 14)
@@ -286,6 +295,7 @@ struct InboxRowView: View, Equatable {
                     .opacity(machine.reachable ? 1 : 0.6)
                     .accessibilityHidden(true)
             }
+            if row.browser { browserMark }
             if row.pinned {
                 Image(systemName: "pin.fill")
                     .icon(.inline, .secondary)

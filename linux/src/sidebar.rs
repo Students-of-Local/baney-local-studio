@@ -1019,6 +1019,9 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
             }
             line.append(&glyph);
         }
+        if row.browser {
+            line.append(&browser_mark());
+        }
         if row.pinned {
             line.append(&icons::image(icons::PIN));
         }
@@ -1052,6 +1055,9 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
         harness.add_css_class("ls-pill");
         harness.set_tooltip_text(Some(&format!("Runs in {name}")));
         top.append(&harness);
+    }
+    if row.browser {
+        top.append(&browser_mark());
     }
     if row.pinned {
         top.append(&icons::image(icons::PIN));
@@ -1142,6 +1148,13 @@ fn thread_widget(app: &Weak<App>, card: &Card) -> gtk::Widget {
         column.append(&bottom);
     }
     column.upcast()
+}
+
+fn browser_mark() -> gtk::Image {
+    let mark = icons::styled(icons::WEB, "ls-meta");
+    mark.set_tooltip_text(Some("Browser"));
+    mark.update_property(&[gtk::accessible::Property::Label("Browser")]);
+    mark
 }
 
 fn rename_entry(app: &Weak<App>, row: &ThreadRow) -> gtk::Widget {

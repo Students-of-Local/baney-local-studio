@@ -409,6 +409,7 @@ pub fn threads() -> Vec<ThreadRow> {
                 row.status = ThreadStatus::Monitoring;
                 row.fan_out = Some("compare-1".to_string());
             }
+            "t-failed" | "t-settled-1" => row.browser = true,
             "t-snooze-1" => row.snoozed_until = Some(now + 2 * 60 * MINUTE),
             "t-snooze-2" => row.snoozed_until = Some(now + 3 * 24 * 60 * MINUTE),
             _ => {}
