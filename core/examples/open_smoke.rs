@@ -289,6 +289,8 @@ fn changed_elsewhere(session: &mut Session, config: StudioConfig, away: &str) ->
 fn panel_chat(session: &mut Session, agent_dir: &Path, work: &Path, socket: &Path) -> anyhow::Result<()> {
     let sessions = agent_dir.join("sessions");
     ensure!(session.watch.threads.iter().all(|row| !row.browser), "a thread of the app is marked as a browser chat");
+    let settled = Instant::now() + Duration::from_secs(5);
+    session.pump("refreshes settled", |_| Instant::now() >= settled)?;
     browser_chat::write(&sessions, work, 1)?;
     let written = Instant::now();
     session.pump("the side panel's chat listed", |watch| {

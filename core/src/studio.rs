@@ -4590,14 +4590,16 @@ impl Actor {
                     self.utility = None;
                 }
                 let Some(id) = self.by_active.remove(&active_session_id) else { return };
+                let mut cut_off = false;
                 if let Some(thread) = self.threads.get_mut(&id) {
+                    cut_off = thread.pending_run || thread.run_started_at.is_some();
                     thread.live = None;
                     thread.pending_run = false;
                     thread.run_started_at = None;
                 }
                 if self.watched(&id) {
                     self.mailbox.push(Update::Approvals { thread: id.clone(), approvals: Vec::new() });
-                    if reason != "replaced" && !threads::from_browser(&id) {
+                    if reason != "replaced" && (cut_off || !threads::from_browser(&id)) {
                         self.mailbox.notice(NoticeLevel::Info, format!("The thread's session closed ({reason})."));
                     }
                 }
