@@ -97,7 +97,7 @@ impl Watch {
         self.misses.push(check);
     }
 
-    fn reply(&self, step: &str) -> anyhow::Result<String> {
+    pub fn reply(&self, step: &str) -> anyhow::Result<String> {
         if let Some(failure) = &self.failure {
             bail!("{step}: the reply ended with an error: {failure}");
         }
@@ -353,7 +353,7 @@ fn shell_prompt(command: &str) -> String {
     format!("Run exactly this shell command with your shell tool, unchanged, and do not ask me first: {command}")
 }
 
-fn approval_turn(
+pub fn approval_turn(
     studio: &Studio,
     signal: &Signal,
     watch: &mut Watch,

@@ -76,10 +76,16 @@ struct Process {
     kill: Option<oneshot::Sender<()>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
+enum Ask {
+    Item,
+    Legacy,
+    Tool { session: bool },
+}
+
 struct PendingApproval {
     id: Value,
-    legacy: bool,
+    ask: Ask,
 }
 
 #[derive(Default)]
@@ -91,6 +97,7 @@ struct Turns {
     held: VecDeque<Value>,
     thread: String,
     stop: bool,
+    open: bool,
 }
 
 impl Turns {
@@ -230,6 +237,20 @@ pub(crate) struct Codex {
     effort: Option<String>,
     cwd: String,
     kill: Option<oneshot::Sender<()>>,
+}
+
+fn asks_for_tool(params: &Value) -> bool {
+    params["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+        && params["mode"] == "form"
+        && params["requestedSchema"]["properties"].as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+fn tool_answer(accept: bool, session: bool) -> Value {
+    json!({
+        "action": if accept { "accept" } else { "decline" },
+        "content": accept.then(|| json!({})),
+        "_meta": session.then(|| json!({ "persist": "session" })),
+    })
 }
 
 fn approval_policy(access: AccessMode) -> Value {
@@ -534,7 +555,11 @@ impl Codex {
                 return Err(error);
             }
         };
-        turns.lock().unwrap_or_else(PoisonError::into_inner).thread.clone_from(&thread);
+        {
+            let mut turns = turns.lock().unwrap_or_else(PoisonError::into_inner);
+            turns.thread.clone_from(&thread);
+            turns.open = launch.access == AccessMode::FullAccess;
+        }
         let codex = Self {
             rpc: process.rpc.clone(),
             sink,
@@ -663,19 +688,24 @@ impl Codex {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(request)
             .ok_or_else(|| "That approval is no longer pending.".to_string())?;
-        let decision = match (answer, pending.legacy) {
-            (ApprovalAnswer::Approve, false) => "accept",
-            (ApprovalAnswer::AlwaysAllowSession, false) => "acceptForSession",
-            (ApprovalAnswer::Deny, false) => "decline",
-            (ApprovalAnswer::Approve, true) => "approved",
-            (ApprovalAnswer::AlwaysAllowSession, true) => "approved_for_session",
-            (ApprovalAnswer::Deny, true) => "denied",
+        let decision = match (answer, pending.ask) {
+            (_, Ask::Tool { session }) => {
+                let session = session && matches!(answer, ApprovalAnswer::AlwaysAllowSession);
+                return self.rpc.respond(&pending.id, &tool_answer(!matches!(answer, ApprovalAnswer::Deny), session));
+            }
+            (ApprovalAnswer::Approve, Ask::Item) => "accept",
+            (ApprovalAnswer::AlwaysAllowSession, Ask::Item) => "acceptForSession",
+            (ApprovalAnswer::Deny, Ask::Item) => "decline",
+            (ApprovalAnswer::Approve, Ask::Legacy) => "approved",
+            (ApprovalAnswer::AlwaysAllowSession, Ask::Legacy) => "approved_for_session",
+            (ApprovalAnswer::Deny, Ask::Legacy) => "denied",
         };
         self.rpc.respond(&pending.id, &json!({ "decision": decision }))
     }
 
     pub(crate) fn set_access(&mut self, access: AccessMode) {
         self.access = access;
+        self.turns.lock().unwrap_or_else(PoisonError::into_inner).open = access == AccessMode::FullAccess;
     }
 
     pub(crate) fn set_model(&mut self, model: &str) {
@@ -1005,7 +1035,7 @@ impl Translator {
 
     fn request(&mut self, id: &Value, method: &str, params: &Value) {
         let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
-        let (summary, effect, legacy) = match method {
+        let (summary, effect, ask) = match method {
             "item/commandExecution/requestApproval" => {
                 let command = params
                     .get("command")
@@ -1013,14 +1043,14 @@ impl Translator {
                     .map(str::to_string)
                     .or_else(|| self.commands.get(&text("itemId")).cloned())
                     .unwrap_or_default();
-                (format!("Run: {command}"), "exec", false)
+                (format!("Run: {command}"), "exec", Ask::Item)
             }
             "item/fileChange/requestApproval" => {
                 let reason = text("reason");
                 (
                     if reason.is_empty() { "Change files".to_string() } else { format!("Change files: {reason}") },
                     "write",
-                    false,
+                    Ask::Item,
                 )
             }
             "execCommandApproval" => {
@@ -1029,9 +1059,24 @@ impl Translator {
                     .and_then(Value::as_array)
                     .map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
                     .unwrap_or_default();
-                (format!("Run: {command}"), "exec", true)
+                (format!("Run: {command}"), "exec", Ask::Legacy)
             }
-            "applyPatchApproval" => ("Change files".to_string(), "write", true),
+            "applyPatchApproval" => ("Change files".to_string(), "write", Ask::Legacy),
+            "mcpServer/elicitation/request" if asks_for_tool(params) => {
+                let meta = &params["_meta"];
+                let open = self.turns.lock().unwrap_or_else(PoisonError::into_inner).open;
+                if open && meta["codex_requires_user_input"] != true {
+                    self.rpc.respond(id, &tool_answer(true, false)).ok();
+                    return;
+                }
+                let tool = meta["tool_name"].as_str().unwrap_or("a tool");
+                let input = meta.get("tool_params").map_or_else(String::new, |input| format!(" {input}"));
+                let session = match &meta["persist"] {
+                    Value::Array(kinds) => kinds.iter().any(|kind| kind == "session"),
+                    kind => kind == "session",
+                };
+                (format!("{}.{tool}:{input}\n{}", text("serverName"), text("message")), "exec", Ask::Tool { session })
+            }
             _ => {
                 self.rpc.refuse(id, "Local Studio does not handle this request.");
                 return;
@@ -1041,7 +1086,7 @@ impl Translator {
         self.approvals
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(request.clone(), PendingApproval { id: id.clone(), legacy });
+            .insert(request.clone(), PendingApproval { id: id.clone(), ask });
         self.sink.send(Event::Approval(Approval {
             request_id: request,
             step: 0,

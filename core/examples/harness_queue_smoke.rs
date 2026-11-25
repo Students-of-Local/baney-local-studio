@@ -446,6 +446,57 @@ fn codex_unexpected_approval(run: &mut Run) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn codex_tool_approval(run: &mut Run) -> anyhow::Result<()> {
+    let cases = [
+        ("romeo", AccessMode::Supervised, Some(ApprovalAnswer::Approve), "accept once"),
+        ("sierra", AccessMode::Supervised, Some(ApprovalAnswer::AlwaysAllowSession), "accept session"),
+        ("tango", AccessMode::Supervised, Some(ApprovalAnswer::Deny), "decline once"),
+        ("uniform", AccessMode::FullAccess, None, "accept once"),
+        ("victor always asks", AccessMode::FullAccess, Some(ApprovalAnswer::Deny), "decline once"),
+        ("whiskey with a form", AccessMode::FullAccess, None, "refusal"),
+        ("xray with a form", AccessMode::Supervised, None, "refusal"),
+    ];
+    for (index, (word, access, answer, expected)) in cases.into_iter().enumerate() {
+        run.start_with(&format!("codex-tool-{index}"), ("codex", "fake-mini"), None, access)?;
+        let thread = run.thread();
+        let mut watch = harness::Watch::default();
+        watch.thread = Some(thread.clone());
+        codex_tool_call(run, &mut watch, (word, access, answer, expected))?;
+        if word == "uniform" {
+            let supervised = AccessMode::Supervised;
+            run.studio.set_access_mode(thread, supervised);
+            codex_tool_call(run, &mut watch, ("yankee", supervised, Some(ApprovalAnswer::Deny), "decline once"))?;
+        }
+    }
+    Ok(())
+}
+
+fn codex_tool_call(
+    run: &mut Run,
+    watch: &mut harness::Watch,
+    (word, access, answer, expected): (&str, AccessMode, Option<ApprovalAnswer>, &str),
+) -> anyhow::Result<()> {
+    let thread = run.thread();
+    let prompt = format!("open a page {word}");
+    let asked = harness::approval_turn(
+        &run.studio,
+        &run.signal,
+        watch,
+        &thread,
+        (word, &prompt),
+        answer.unwrap_or(ApprovalAnswer::Deny),
+    )?;
+    let reply = watch.reply(word)?;
+    let cards: Vec<&str> = asked.iter().map(|approval| approval.command.as_str()).collect();
+    let shown = cards.iter().all(|card| card.contains("pages.open_page") && card.contains("https://example.com"));
+    if cards.len() == usize::from(answer.is_some()) && shown && reply.contains(&format!("after {expected}")) {
+        println!("ok   a Codex tool server's call in {access:?} with {answer:?}: cards {cards:?}, {reply}");
+    } else {
+        run.watch.miss(format!("a Codex tool server's call in {access:?}: cards {cards:?}, reply {reply}"));
+    }
+    Ok(())
+}
+
 fn codex_stall_keeps_others(run: &mut Run) -> anyhow::Result<()> {
     run.start("stall-claude", ("claude-code", "haiku"), Some("low"))?;
     let claude = run.thread();
@@ -751,6 +802,7 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
     codex_unexpected_approval(run)?;
+    codex_tool_approval(run)?;
     looks_up(run)?;
     claude_trust(run, root)?;
     codex_trust(run, root)?;
