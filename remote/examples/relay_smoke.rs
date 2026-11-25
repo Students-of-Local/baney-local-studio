@@ -412,6 +412,8 @@ impl Origin {
             tokio::spawn(async move { self.socket(request, &kind, tag).await });
             return Ok(response);
         }
+        let framing = ["content-length", "transfer-encoding", "expect"]
+            .map(|name| String::from_utf8_lossy(&value(name)).into_owned());
         let mut body = request.into_body();
         match kind {
             "cookies" => {
@@ -442,6 +444,11 @@ impl Origin {
             "echo" => {
                 let text = read(&mut body).await.unwrap_or_default();
                 sender.send(format!("{tag}:{}", String::from_utf8_lossy(&text)).into()).await.ok();
+            }
+            "framing" => {
+                let text = read(&mut body).await.unwrap_or_default();
+                let seen = format!("{}|{}", framing.join("|"), String::from_utf8_lossy(&text));
+                sender.send(seen.into()).await.ok();
             }
             "events" => {
                 tokio::spawn(async move {
@@ -480,6 +487,11 @@ impl Origin {
         if kind == "close" {
             let code = CloseCode::from(u16::try_from(size).unwrap_or_default());
             socket.close(Some(CloseFrame { code, reason: "origin".into() })).await.ok();
+        } else if kind == "bare" {
+            socket.close(None).await.ok();
+        } else if kind == "lost" {
+            self.sockets.fetch_sub(1, Ordering::AcqRel);
+            return;
         } else if kind == "send" {
             socket.send(Message::binary(vec![7; size])).await.ok();
         } else if kind == "stall" {
@@ -542,6 +554,20 @@ impl Smoke {
             origin,
             tls,
         })
+    }
+
+    async fn filled(&self, link: &Link) -> anyhow::Result<usize> {
+        let mut kernel = 0;
+        let deadline = Instant::now() + QUICK;
+        loop {
+            sleep(Duration::from_millis(300)).await;
+            let now = self.kernel_bytes(link)?;
+            if now > 0 && now == kernel {
+                return Ok(kernel);
+            }
+            ensure!(Instant::now() < deadline, "the link never filled: {kernel} then {now} bytes");
+            kernel = now;
+        }
     }
 
     fn kernel_bytes(&self, link: &Link) -> anyhow::Result<usize> {
@@ -871,17 +897,7 @@ async fn h5_queued(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
         link.req(id, "GET", "/mcp?block", false).await?;
         sleep(Duration::from_millis(15)).await;
     }
-    let mut kernel = 0;
-    let deadline = Instant::now() + QUICK;
-    loop {
-        sleep(Duration::from_millis(300)).await;
-        let now = smoke.kernel_bytes(link)?;
-        if now > 0 && now == kernel {
-            break;
-        }
-        ensure!(Instant::now() < deadline, "the link never filled: {kernel} then {now} bytes");
-        kernel = now;
-    }
+    let kernel = smoke.filled(link).await?;
     let all = ids.clone().count() * BLOCK as usize;
     ensure!(kernel + (2 << 20) < all, "{kernel} bytes fit in the kernel; the queue was never full");
     let before = link.count(|_| true);
@@ -997,12 +1013,16 @@ async fn h12_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
     let errors = || ids.map(|id| link.peek(id).errors);
     let mut sent = [0usize; 3];
     let block = vec![7; 64 << 10];
+    while sent[0] < 24 << 20 {
+        link.data(ids[0], &block).await?;
+        sent[0] += block.len();
+    }
     for round in 100.. {
         let total: usize = sent.iter().sum();
-        ensure!(total < 160 << 20, "{total} bytes were taken with no error");
-        for at in 0..48 {
-            link.data(ids[at % 3], &block).await?;
-            sent[at % 3] += block.len();
+        ensure!(total < 64 << 20, "{total} bytes were taken with no error");
+        for at in 0..16 {
+            link.data(ids[1 + at % 2], &block).await?;
+            sent[1 + at % 2] += block.len();
         }
         link.get(round, "GET", "/v1/health").await?.is(200, "ok serve")?;
         if errors().iter().sum::<usize>() > 0 {
@@ -1010,8 +1030,8 @@ async fn h12_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
         }
     }
     let total: usize = sent.iter().sum();
-    ensure!(total >= 64 << 20, "the error came after {total} bytes");
-    ensure!(errors().iter().sum::<usize>() == 1, "errors {:?}", errors());
+    ensure!(total >= 32 << 20, "the error came after {total} bytes");
+    ensure!(errors() == [1, 0, 0], "the stream with the most waiting did not end: errors {:?}", errors());
     smoke.origin.go.notify_waiters();
     for ((id, sent), errors) in ids.into_iter().zip(sent).zip(errors()) {
         if errors == 1 {
@@ -1022,6 +1042,112 @@ async fn h12_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
         }
     }
     println!("     one error after {total} bytes");
+    Ok(())
+}
+
+async fn h13_framing(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    let sized = ("Content-Length", "5");
+    let mut ids = 1..;
+    for (method, body, headers, wanted) in [
+        ("DELETE", false, &[][..], "|||"),
+        ("OPTIONS", false, &[("content-length", "0")], "|||"),
+        ("DELETE", false, &[("transfer-encoding", "chunked")], "|||"),
+        ("DELETE", true, &[], "|chunked||hello"),
+        ("OPTIONS", true, &[("transfer-encoding", "gzip, chunked")], "|chunked||hello"),
+        ("GET", true, &[], "|chunked||hello"),
+        ("POST", true, &[("expect", "100-continue")], "|chunked||hello"),
+        ("POST", true, &[sized, ("expect", "100-continue")], "5|||hello"),
+    ] {
+        let id = ids.next().unwrap_or_default();
+        let frame = json!({ "id": id, "method": method, "path": "/mcp?framing", "body": body });
+        link.open_stream(frame, headers).await?;
+        if body {
+            link.data(id, b"hello").await?;
+            link.end(id).await?;
+        }
+        let answer = link.answer(id).await?;
+        answer.is(200, wanted).with_context(|| format!("{method} {headers:?}"))?;
+    }
+    let dials = smoke.origin.dials.load(Ordering::Acquire);
+    for headers in [
+        &[sized, ("content-length", "5")][..],
+        &[sized, ("content-length", "6")],
+        &[sized, ("Transfer-Encoding", "chunked")],
+        &[("content-length", "5, 5")],
+        &[("content-length", "-1")],
+        &[("content-length", "")],
+        &[("content-length", "0000000000000005")],
+    ] {
+        for body in [false, true] {
+            let id = ids.next().unwrap_or_default();
+            link.open_stream(json!({ "id": id, "method": "POST", "path": "/mcp", "body": body }), headers).await?;
+            let answer = link.answer(id).await?;
+            answer.is(400, "Bad request.\n").with_context(|| format!("{headers:?}"))?;
+        }
+    }
+    ensure!(smoke.origin.dials.load(Ordering::Acquire) == dials, "bad framing dialed the origin");
+    Ok(())
+}
+
+async fn h14_lengths(smoke: &Smoke) -> anyhow::Result<()> {
+    let origin = TcpListener::bind("127.0.0.1:0").await?;
+    let ports = Ports { mcp: origin.local_addr()?.port(), ..smoke.ports };
+    let mut client = Client::start(&smoke.url, &smoke.key, ports, LONG_PING);
+    let link = Link::open(smoke, smoke.dial(QUICK).await?.stream, true).await?;
+    link.send(&hello(1)).await?;
+    client.connected().await?;
+    for (id, first, then) in [(1, "hello", Some(b"!")), (2, "hell", None)] {
+        let frame = json!({ "id": id, "method": "POST", "path": "/mcp", "body": true });
+        link.open_stream(frame, &[("content-length", "5")]).await?;
+        link.data(id, first.as_bytes()).await?;
+        let mut seen = Vec::new();
+        let mut stream = loop {
+            let (mut stream, _) = timeout(QUICK, origin.accept()).await??;
+            seen.resize(8 << 10, 0);
+            let read = timeout(QUICK, stream.read(&mut seen)).await??;
+            seen.truncate(read);
+            if seen.starts_with(b"POST /mcp ") {
+                break stream;
+            }
+        };
+        while !seen.ends_with(format!("\r\n\r\n{first}").as_bytes()) {
+            let read = timeout(QUICK, stream.read_buf(&mut seen)).await??;
+            ensure!(read > 0, "the origin saw {:?}", String::from_utf8_lossy(&seen));
+        }
+        match then {
+            Some(more) => link.data(id, more).await?,
+            None => link.end(id).await?,
+        }
+        let answer = link.answer(id).await?;
+        ensure!(answer.errors == 1 && answer.status == 0, "a wrong length got {}", answer.status);
+        let before = seen.len();
+        let rest = timeout(QUICK, stream.read_to_end(&mut seen)).await.context("the origin stayed connected")?;
+        ensure!(seen.len() == before, "{rest:?}: the origin saw {:?}", String::from_utf8_lossy(&seen));
+    }
+    Ok(())
+}
+
+async fn h15_sync(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
+    if !cfg!(target_os = "linux") {
+        println!("     skipped: the kernel's own buffers are measured on Linux only");
+        return Ok(());
+    }
+    link.paused.store(true, Ordering::Release);
+    for id in 1..=240 {
+        link.req(id, "GET", "/mcp?forever", false).await?;
+    }
+    let kernel = smoke.filled(link).await?;
+    let before = link.count(|_| true);
+    let sync = json!({ "id": 241, "method": "GET", "path": "/_relay/sync", "body": false, "ws": false });
+    link.open_stream(sync, &[]).await?;
+    sleep(Duration::from_millis(300)).await;
+    link.paused.store(false, Ordering::Release);
+    link.answer(241).await?.is(404, "No local route for this path.\n")?;
+    let is_end = |got: &Message| got.to_text().is_ok_and(|text| text.contains(r#""t":"end""#));
+    let frames = lock(&link.frames)[before..].to_vec();
+    let ahead: usize = frames.iter().take_while(|got| !is_end(got)).map(Message::len).sum();
+    println!("     {ahead} bytes came before the sync answer, {kernel} of them already sent");
+    ensure!(ahead < kernel + (3 << 19), "the sync answer waited for {ahead} bytes");
     Ok(())
 }
 
@@ -1041,10 +1167,19 @@ async fn w2_refused(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
 }
 
 async fn w3_close_codes(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
-    for (id, (code, wanted)) in (1..).zip([(1000, 1000), (1001, 1000), (4001, 4001)]) {
+    let carried = [1000, 1001, 1003, 1008, 1011, 1012, 1013, 4001];
+    for (id, code) in (1..).zip(carried) {
         link.socket(id, &format!("/v1/ws?close={code}")).await?;
-        link.ws_close(id, wanted, "origin").await?;
-        let id = id + 10;
+        link.ws_close(id, code, "origin").await?;
+    }
+    for (id, (kind, wanted, reason)) in
+        (21..).zip([("close=1002", 1011, "origin"), ("bare", 1000, ""), ("lost", 1011, "")])
+    {
+        link.socket(id, &format!("/v1/ws?{kind}")).await?;
+        link.ws_close(id, wanted, reason).await?;
+    }
+    let mapped = [(1005, 1000), (1002, 1011), (1006, 1011), (2000, 1011), (5000, 1011), (70000, 1011)];
+    for (id, (code, wanted)) in (41..).zip(carried.map(|code| (code.into(), code)).into_iter().chain(mapped)) {
         link.socket(id, "/v1/ws").await?;
         link.send(&json!({ "v": 1, "t": "ws_close", "id": id, "code": code, "reason": "public" })).await?;
         let seen = (wanted, "public".to_string());
@@ -1065,7 +1200,7 @@ async fn w4_large(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
         |got: &Message| got.len() == RELAY_TAKES && got.is_binary() && got.clone().into_data()[..5] == [3, 0, 0, 0, 2];
     link.until("32 MiB frame", |frames| frames.iter().any(whole).then_some(())).await?;
     link.socket(3, &format!("/v1/ws?send={}", most + 1)).await?;
-    link.ws_close(3, 1000, "").await?;
+    link.ws_close(3, 1009, "message too big").await?;
     link.echo(1, 2, b"still here").await
 }
 
@@ -1088,21 +1223,23 @@ async fn w6_paths(_smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
 }
 
 async fn w7_cap(smoke: &Smoke, link: &Link) -> anyhow::Result<()> {
-    let ids = [1u32, 2, 3, 4];
-    let block = noise(17 << 20);
-    for id in ids {
-        link.socket(id, "/v1/ws?stall").await?;
-    }
-    for id in ids {
-        ensure!(ids.iter().all(|id| link.peek(*id).errors == 0), "an error before message {id}");
-        link.message(id, 3, &block).await?;
-        link.get(10 + id, "GET", "/v1/health").await?.is(200, "ok serve")?;
-        sleep(Duration::from_millis(300)).await;
-    }
-    ensure!(ids.map(|id| link.peek(id).errors) == [0, 0, 0, 1], "a message the origin has not read was not counted");
-    smoke.origin.go.notify_waiters();
-    for id in &ids[..3] {
-        link.echoed(*id, 3, &block).await?;
+    let (large, small) = (noise(20 << 20), noise(17 << 20));
+    for (first, closing) in [(1, false), (3, true)] {
+        let second = first + 1;
+        for id in [first, second] {
+            link.socket(id, "/v1/ws?stall").await?;
+        }
+        link.message(first, 3, &large).await?;
+        if closing {
+            let close = json!({ "v": 1, "t": "ws_close", "id": first, "code": 1000, "reason": "" });
+            link.send(&close).await?;
+        }
+        link.message(second, 3, &small).await?;
+        link.get(10 + first, "GET", "/v1/health").await?.is(200, "ok serve")?;
+        let errors = [first, second].map(|id| link.peek(id).errors);
+        ensure!(errors == [usize::from(!closing), 0], "closing {closing}: errors {errors:?}");
+        smoke.origin.go.notify_waiters();
+        link.echoed(second, 3, &small).await?;
     }
     Ok(())
 }
@@ -1151,6 +1288,9 @@ async fn cases(smoke: &Smoke) -> anyhow::Result<()> {
     linked("H10 answers with no body", smoke, h10_no_body).await?;
     linked("H11 bad headers are 400", smoke, h11_bad_headers).await?;
     linked("H12 request bytes are capped", smoke, h12_cap).await?;
+    linked("H13 framing", smoke, h13_framing).await?;
+    step("H14 a body of another length", h14_lengths(smoke)).await?;
+    linked("H15 a full queue leaves room for a 404", smoke, h15_sync).await?;
     linked("W1 messages and the subprotocol", smoke, w1_echo).await?;
     linked("W2 a refused upgrade", smoke, w2_refused).await?;
     linked("W3 close codes both ways", smoke, w3_close_codes).await?;

@@ -10,7 +10,7 @@ use std::time::Duration;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::client::conn::http1;
-use hyper::header::{HeaderName, HeaderValue, CONTENT_LENGTH, TRANSFER_ENCODING};
+use hyper::header::{HeaderName, HeaderValue, CONTENT_LENGTH, EXPECT, TRANSFER_ENCODING};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
@@ -35,14 +35,16 @@ pub(super) const HEAD: usize = 5;
 const CHUNK: usize = 64 << 10;
 const SEND_ROOM: usize = 1 << 20;
 const LEAST_COST: usize = 64;
-const BODY_ROOM: usize = 64 << 20;
+const LENGTH_DIGITS: usize = 15;
+const BODY_ROOM: usize = 32 << 20;
 const OPEN: u8 = 0;
 const DONE: u8 = 1;
 const STOPPED: u8 = 2;
 const UNREACHABLE: &str = "the origin did not answer";
 pub(super) const BAD_ANSWER: &str = "the origin sent a bad answer";
 const BROKEN: &str = "the origin's answer broke off";
-const TOO_MUCH: &str = "too much of the request body is waiting for the origin";
+const TOO_MUCH: &str = "the origin reads too slowly";
+const TOO_LONG: &str = "the request body is longer than its content-length";
 const FAILED: &str = "the request failed";
 
 pub(super) struct Queued {
@@ -134,12 +136,15 @@ impl Out {
         self.last(self.control(json!({ "t": "end" }))).await;
     }
 
-    async fn plain(&self, status: u16, text: &str, method: &str) {
-        self.head(status, &[("content-type".into(), "text/plain; charset=utf-8".into())]).await;
+    fn plain(&self, status: u16, text: &str, method: &str) {
+        let headers = [["content-type", "text/plain; charset=utf-8"]];
+        self.push(self.control(json!({ "t": "res", "status": status, "headers": headers })), None);
         if method != "HEAD" {
-            self.send(self.data(DATA, text.as_bytes())).await;
+            self.push(self.data(DATA, text.as_bytes()), None);
         }
-        self.end().await;
+        if self.settle(DONE) {
+            self.push(self.control(json!({ "t": "end" })), None);
+        }
     }
 }
 
@@ -206,8 +211,23 @@ struct Open {
 }
 
 impl Open {
+    fn length(&self) -> Result<Option<u64>, ()> {
+        let named = |wanted: HeaderName| {
+            self.headers.iter().filter(move |(name, _)| name.eq_ignore_ascii_case(wanted.as_str()))
+        };
+        let mut lengths = named(CONTENT_LENGTH).map(|(_, value)| value);
+        let Some(length) = lengths.next() else { return Ok(None) };
+        let digits = (1..=LENGTH_DIGITS).contains(&length.len()) && length.bytes().all(|byte| byte.is_ascii_digit());
+        let alone = lengths.next().is_none() && named(TRANSFER_ENCODING).next().is_none();
+        if digits && alone {
+            Ok(length.parse().ok())
+        } else {
+            Err(())
+        }
+    }
+
     fn request(&self, body: Upload) -> Option<Request<Upload>> {
-        let framed = !body.is_end_stream();
+        let (framed, length) = (!body.is_end_stream(), self.length().ok()?);
         let mut request = Request::new(body);
         *request.method_mut() = Method::from_bytes(self.method.as_bytes()).ok()?;
         *request.uri_mut() = self.path.parse().ok()?;
@@ -216,7 +236,10 @@ impl Open {
             let name = HeaderName::from_bytes(&latin1(name)?).ok()?;
             headers.try_append(name, HeaderValue::from_bytes(&latin1(value)?).ok()?).ok()?;
         }
-        if framed && !headers.contains_key(CONTENT_LENGTH) {
+        headers.remove(EXPECT);
+        if !framed {
+            headers.remove(CONTENT_LENGTH);
+        } else if length.is_none() {
             headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
         }
         Some(request)
@@ -236,11 +259,27 @@ struct Entry {
     out: Out,
     feed: mpsc::UnboundedSender<Feed>,
     ws: bool,
+    left: Option<u64>,
     share: Share,
     task: AbortHandle,
 }
 
 impl Entry {
+    fn open(&self) -> bool {
+        self.out.state.load(Ordering::Acquire) == OPEN
+    }
+
+    fn held(&self) -> usize {
+        let share = self.share.lock().unwrap_or_else(PoisonError::into_inner);
+        share.as_ref().map_or(0, OwnedSemaphorePermit::num_permits)
+    }
+
+    fn stop(self, why: &str) {
+        self.task.abort();
+        self.out.fail(why);
+        self.share.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
+
     fn feed(&self, kind: u8, payload: &[u8], room: &Arc<Semaphore>) -> bool {
         let feed = match kind {
             DATA if !self.ws => Feed::Data,
@@ -250,14 +289,11 @@ impl Entry {
         };
         let cost = payload.len().max(LEAST_COST);
         let more = u32::try_from(cost).ok().and_then(|cost| Arc::clone(room).try_acquire_many_owned(cost).ok());
+        let Some(more) = more else { return false };
         let mut share = self.share.lock().unwrap_or_else(PoisonError::into_inner);
-        match (more, share.as_mut()) {
-            (Some(more), Some(share)) => share.merge(more),
-            (Some(more), None) => *share = Some(more),
-            (None, _) => {
-                share.take();
-                return false;
-            }
+        match share.as_mut() {
+            Some(share) => share.merge(more),
+            None => *share = Some(more),
         }
         drop(share);
         let held = Held { bytes: payload.to_vec(), cost, share: Arc::clone(&self.share) };
@@ -297,7 +333,7 @@ impl Streams {
             if entry.task.id() == done {
                 entry.out.fail(FAILED);
             }
-            entry.out.state.load(Ordering::Acquire) == OPEN || Arc::strong_count(&entry.out.state) > 1
+            entry.open() || Arc::strong_count(&entry.out.state) > 1
         });
     }
 
@@ -317,15 +353,15 @@ impl Streams {
                     entry.task.abort();
                 }
             }
-            "ws_close" if self.open.get(&id).is_some_and(|entry| entry.ws) => {
-                if let Some(entry) = self.open.remove(&id) {
-                    entry.out.state.store(STOPPED, Ordering::Release);
-                    entry.feed.send(Feed::close(frame)).ok();
-                    self.tasks.spawn(async move {
-                        sleep(WS_CLOSE).await;
-                        entry.task.abort();
-                    });
-                }
+            "ws_close" => {
+                let Some(entry) = self.open.get(&id).filter(|entry| entry.ws && entry.open()) else { return };
+                entry.out.state.store(STOPPED, Ordering::Release);
+                entry.feed.send(Feed::close(frame)).ok();
+                let task = entry.task.clone();
+                self.tasks.spawn(async move {
+                    sleep(WS_CLOSE).await;
+                    task.abort();
+                });
             }
             _ => {}
         }
@@ -335,17 +371,28 @@ impl Streams {
         let Some((head, payload)) = bytes.split_first_chunk::<HEAD>() else { return };
         let [kind, id @ ..] = *head;
         let id = u32::from_be_bytes(id);
-        if self.open.get(&id).is_none_or(|entry| entry.feed(kind, payload, &self.body_room)) {
-            return;
+        let Some(entry) = self.open.get_mut(&id).filter(|entry| entry.open()) else { return };
+        if let Some(left) = entry.left.as_mut().filter(|_| kind == DATA) {
+            let Some(less) = left.checked_sub(payload.len() as u64) else { return self.fail(id, TOO_LONG) };
+            *left = less;
         }
+        while self.open.get(&id).is_some_and(|entry| !entry.feed(kind, payload, &self.body_room)) {
+            let waits = |(other, entry): &(&u32, &Entry)| {
+                entry.held() + if **other == id { payload.len().max(LEAST_COST) } else { 0 }
+            };
+            let worst = self.open.iter().max_by_key(waits).map_or(id, |(worst, _)| *worst);
+            self.fail(worst, TOO_MUCH);
+        }
+    }
+
+    fn fail(&mut self, id: u32, why: &str) {
         if let Some(entry) = self.open.remove(&id) {
-            entry.task.abort();
-            entry.out.fail(TOO_MUCH);
+            entry.stop(why);
         }
     }
 
     fn start(&mut self, id: u32, frame: &Value) {
-        if self.open.get(&id).is_some_and(|entry| entry.out.state.load(Ordering::Acquire) == OPEN) {
+        if self.open.get(&id).is_some_and(Entry::open) {
             return;
         }
         let state = Arc::new(AtomicU8::new(OPEN));
@@ -353,22 +400,24 @@ impl Streams {
         let (feed, upload) = mpsc::unbounded_channel();
         let open = Open::deserialize(frame).ok();
         let ws = open.as_ref().is_some_and(|open| open.ws);
+        let sized = open.as_ref().filter(|open| open.body && !open.ws);
+        let left = sized.and_then(|open| open.length().ok()).flatten();
         let task = self.tasks.spawn(answer(out.clone(), open, upload, self.routes.clone()));
-        self.open.insert(id, Entry { out, feed, ws, share: Share::default(), task });
+        self.open.insert(id, Entry { out, feed, ws, left, share: Share::default(), task });
     }
 }
 
 async fn answer(out: Out, open: Option<Open>, feed: mpsc::UnboundedReceiver<Feed>, routes: Vec<(&'static str, u16)>) {
-    let Some(open) = open else { return out.plain(400, "Bad request.\n", "").await };
+    let Some(open) = open else { return out.plain(400, "Bad request.\n", "") };
     let path = open.path.split('?').next().unwrap_or_default();
     let route = routes.iter().find(|(public, _)| *public == path && (!open.ws || path == WS_PATH));
-    let Some((_, port)) = route else { return out.plain(404, "No local route for this path.\n", &open.method).await };
+    let Some((_, port)) = route else { return out.plain(404, "No local route for this path.\n", &open.method) };
     let (socket, feed) = if open.ws { (Some(Socket::new(feed)), None) } else { (None, open.body.then_some(feed)) };
     let request = open.request(Upload(feed)).and_then(|mut request| match &socket {
         Some(socket) => socket.ask(request.headers_mut()).map(|()| request),
         None => Some(request),
     });
-    let Some(request) = request else { return out.plain(400, "Bad request.\n", &open.method).await };
+    let Some(request) = request else { return out.plain(400, "Bad request.\n", &open.method) };
     if let Err(why) = forward(&out, request, *port, socket).await {
         out.error(why);
     }
