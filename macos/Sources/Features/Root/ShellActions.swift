@@ -198,6 +198,29 @@ extension StudioStore {
             if let local {
                 core.run { $0.runLocal(thread: thread, local: local) }
             }
+        case .studioLink(let link): core.run { $0.openStudioLink(link: link) }
+        }
+    }
+
+    func openStudioLink(_ url: String) {
+        guard let link = studioLink(url: url) else { return }
+        switch link {
+        case .settings(let section) where outsideLink(url: url) != nil:
+            if let pane = SettingsPane.allCases.first(where: { $0.linkName == section }) {
+                openSettings(pane)
+            }
+        case .thread(let id):
+            if inbox.thread(id) != nil {
+                open(id)
+            } else {
+                post(.info, "That thread is not in Local Studio on this computer.")
+            }
+        default:
+            if linkWords(link: link).confirm {
+                shell.confirmation = .studioLink(link)
+            } else {
+                core.run { $0.openStudioLink(link: link) }
+            }
         }
     }
 
