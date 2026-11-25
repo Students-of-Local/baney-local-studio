@@ -261,7 +261,7 @@ final class ConversationSmoke {
         print("ok   ⌘S parked the draft and the stash menu restored it")
         let kinds: [(String, Bool, ComposerTrigger.Kind?)] = [
             ("/mo", true, .command), ("$sk", true, .skill), ("@src", true, .mention), ("#12", true, .pullRequest),
-            ("#12", false, nil), ("say /mo", true, nil), ("$", false, .skill),
+            ("#12", false, nil), ("say /mo", true, nil), ("$", false, .skill), ("@", false, .mention),
         ]
         for (text, hasProject, expected) in kinds {
             let found = ComposerTrigger.detect(in: text, caret: (text as NSString).length, project: hasProject)?.kind

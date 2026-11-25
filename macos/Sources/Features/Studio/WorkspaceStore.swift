@@ -12,6 +12,7 @@ final class WorkspaceStore {
     private(set) var directories: [String: [FileEntry]] = [:]
     private(set) var fileContents: [String: FileContent] = [:]
     private(set) var searchResults: [String: [SearchHit]] = [:]
+    private(set) var mentions: [String: [Mention]] = [:]
     private(set) var pullRequests: [String: [PullRequest]] = [:]
     private(set) var pullRequestDetails: [String: PullRequestDetail] = [:]
     private(set) var devices: [String: [Device]] = [:]
@@ -75,6 +76,10 @@ final class WorkspaceStore {
 
     func setSearchResults(request: String, results: [SearchHit]) {
         searchResults[request] = results
+    }
+
+    func setMentions(request: String, items: [Mention]) {
+        mentions = [request: items]
     }
 
     func setPullRequestDetail(request: String, detail: PullRequestDetail) {

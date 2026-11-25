@@ -153,6 +153,16 @@ final class StudioStore {
         core.run { $0.answerConsent(request: consent.request, answer: answer) }
     }
 
+    func installPlugin(_ id: String) {
+        let request = requests.issue { [weak self] outcome in
+            switch outcome {
+            case .done(let message): self?.post(.info, message)
+            case .failed(let message): self?.post(.error, message)
+            }
+        }
+        core.run { $0.installPlugin(request: request, source: id) }
+    }
+
     func post(_ level: NoticeLevel, _ text: String) {
         notice = StudioNotice(level: level, text: text)
     }
@@ -260,8 +270,9 @@ final class StudioStore {
         case .searchResults(let request, let results):
             requests.settle(request)
             workspace.setSearchResults(request: request, results: results)
-        case .mentions:
-            break
+        case .mentions(let request, let items):
+            requests.settle(request)
+            workspace.setMentions(request: request, items: items)
         case .pullRequests(let request, let pulls):
             requests.settle(request)
             workspace.setPullRequests(request: request, pulls: pulls)
