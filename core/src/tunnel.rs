@@ -488,16 +488,23 @@ impl Tunnel {
             return Ok(status);
         }
         let (hostname, ports) = startable(&status)?;
-        serve_allow(&hostname);
-        self.going_live(&hostname, ports).await?;
+        let allowed = serve_allow(&hostname);
+        self.going_live_checks(&hostname, ports).await.map_err(|message| match &allowed {
+            Err(error) => fail("going_live", format!("{message} {error}")),
+            Ok(()) => fail("going_live", message),
+        })?;
         self.token_allowed()?;
         let cloudflared = self.cloudflared(consent, "local-studio tunnel up --yes").await?;
         let _ = fs::remove_file(self.token_path());
         self.fetch_and_write(&keys, &value, &hostname).await?;
-        let started = self.launch(&keys, &cloudflared, hostname, ports).await;
-        if started.is_err() {
-            self.stop();
-            let _ = fs::remove_file(self.token_path());
+        let mut started = self.launch(&keys, &cloudflared, hostname, ports).await;
+        match (&mut started, allowed) {
+            (Ok(status), Err(error)) => status.message = format!("{} {error}", status.message),
+            (Ok(_), Ok(())) => {}
+            (Err(_), _) => {
+                self.stop();
+                let _ = fs::remove_file(self.token_path());
+            }
         }
         started
     }
@@ -1139,17 +1146,18 @@ fn route_status(route: &Route) -> Status {
 }
 
 #[cfg(feature = "link")]
-fn serve_edit(hostname: &str, remove: bool) -> bool {
-    crate::data_dir(None).is_ok_and(|dir| crate::link::settings::edit_tunnel_host(&dir, hostname, remove).is_ok())
+fn serve_edit(hostname: &str, remove: bool) -> Result<(), String> {
+    let dir = crate::data_dir(None)?;
+    crate::link::settings::edit_tunnel_host(&dir, hostname, remove).map_err(|error| format!("{error:#}"))
 }
 
 #[cfg(not(feature = "link"))]
-fn serve_edit(_hostname: &str, _remove: bool) -> bool {
-    false
+fn serve_edit(_hostname: &str, _remove: bool) -> Result<(), String> {
+    Err("this local-studio was built without the link feature, so it doesn't change serve.json".into())
 }
 
-fn serve_allow(hostname: &str) -> bool {
-    serve_edit(hostname, false)
+fn serve_allow(hostname: &str) -> Result<(), String> {
+    serve_edit(hostname, false).map_err(|error| format!("{hostname} isn't allowed in serve.json yet: {error}."))
 }
 
 fn startable(status: &Status) -> Result<(String, Ports), Failure> {
@@ -1225,8 +1233,13 @@ struct UpLock(#[allow(dead_code)] fs::File);
 
 impl UpLock {
     fn take(dir: &Path, wait: bool) -> Result<Self, Failure> {
+        let busy = "Another local-studio tunnel up is already starting this tunnel.";
+        Self::named(dir, "up.lock", (!wait).then_some(busy))
+    }
+
+    fn named(dir: &Path, name: &str, busy: Option<&str>) -> Result<Self, Failure> {
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|error| error.to_string())?;
-        let path = dir.join("up.lock");
+        let path = dir.join(name);
         let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -1234,10 +1247,10 @@ impl UpLock {
             .mode(0o600)
             .open(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        if wait {
-            file.lock().map_err(|error| format!("{}: {error}", path.display()))?;
-        } else if file.try_lock().is_err() {
-            return Err(fail("busy", "Another local-studio tunnel up is already starting this tunnel."));
+        match busy {
+            None => file.lock().map_err(|error| format!("{}: {error}", path.display()))?,
+            Some(busy) if file.try_lock().is_err() => return Err(fail("busy", busy)),
+            Some(_) => {}
         }
         Ok(Self(file))
     }

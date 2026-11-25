@@ -10,7 +10,7 @@ use local_studio_core::tunnel::relay::{WORKER_CONFIG, WORKER_JS};
 use local_studio_core::tunnel::{SERVICE_LABEL, SERVICE_UNIT};
 use serde_json::{json, Value};
 
-use super::{ensure, head, header, mode, origin, read_json, text, Smoke, ACCOUNT};
+use super::{chmod, ensure, head, header, mode, origin, read_json, text, Smoke, ACCOUNT};
 
 const OTHER: &str = "fedcba9876543210fedcba9876543210";
 const HOST: &str = "smoke.person.workers.dev";
@@ -88,6 +88,7 @@ fn answer(mut stream: TcpStream, state: &Path, route: &Path) -> Result<(), Strin
     }
     let (code, more, body) = match path {
         "/_relay/health" => (200, "", json!({"ok":true,"connected":state.join("connected").exists()})),
+        "/v1/health" if state.join("strict").exists() => (403, "", json!({})),
         "/v1/health" => (200, "", json!({"ok":true})),
         "/mcp" => (401, "WWW-Authenticate: Bearer resource_metadata=\"x\"\r\n", json!({})),
         _ => (404, "", json!({})),
@@ -485,6 +486,26 @@ pub fn live(c: &mut Cases) -> Result<(), String> {
     Ok(())
 }
 
+fn unparsed(c: &mut Cases) -> Result<(), String> {
+    let serve = c.s.data.join("remote/serve.json");
+    let kept = fs::read(&serve).map_err(text)?;
+    let why = format!("{HOST} isn't allowed in serve.json yet: parse {}: EOF", serve.display());
+    fs::write(&serve, "{").map_err(text)?;
+    for (off, on) in [("strict", "never"), ("never", "strict")] {
+        c.set(off, true)?;
+        c.set(off, false)?;
+        c.set(on, true)?;
+        let value = c.setup(&["smoke", "--yes"])?;
+        ensure(
+            value["code"] == "going_live" && value["message"].as_str().is_some_and(|said| said.contains(&why)),
+            format!("going_live says why serve.json doesn't allow the host: {value}"),
+        )?;
+    }
+    c.set("strict", false)?;
+    c.set("never", true)?;
+    fs::write(&serve, kept).map_err(text)
+}
+
 pub fn status(c: &mut Cases) -> Result<(), String> {
     let again = "local-studio tunnel setup --relay";
     let dead = {
@@ -498,7 +519,7 @@ pub fn status(c: &mut Cases) -> Result<(), String> {
         ("connecting", me, "connecting", "waiting", "connecting to its relay"),
         ("disconnected", me, "disconnected", "waiting", "lost its relay"),
         ("replaced", me, "replaced", "needs_setup", again),
-        ("unauthorized", me, "unauthorized", "needs_setup", again),
+        ("unauthorized", me, "unauthorized", "needs_setup", "for over ten minutes"),
         ("outdated", me, "outdated", "needs_setup", "Update Local Studio"),
         ("bad_config", me, "bad_config", "needs_setup", again),
         ("stopped", me, "stopped", "needs_setup", again),
@@ -516,9 +537,28 @@ pub fn status(c: &mut Cases) -> Result<(), String> {
             format!("status when {state}: {value}"),
         )?;
     }
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(text)?.as_millis();
+    c.s.write("relay-state.json", &format!(r#"{{"state":"unauthorized","at":{at},"pid":{me}}}"#))?;
+    let value = c.ls(&["tunnel", "status"], |_| {})?;
+    ensure(
+        value["relay"]["state"] == "unauthorized"
+            && value["next"] == "waiting"
+            && value["nextCommand"] == "local-studio tunnel status --json",
+        format!("status when a new key is refused: {value}"),
+    )?;
     fs::remove_file(c.s.tunnel("relay-state.json")).map_err(text)?;
     let value = c.ls(&["tunnel", "status"], |_| {})?;
     ensure(value["relay"] == json!({"state":"stopped","since":null}), format!("status with no state file: {value}"))?;
+    chmod(&c.s.tunnel("relay.json"), 0o644)?;
+    let value = c.ls(&["tunnel", "status"], |_| {})?;
+    let next = format!("chmod 600 '{}'", c.s.tunnel("relay.json").display());
+    ensure(
+        value["relay"]["state"] == "bad_config" && value["nextCommand"] == next,
+        format!("status when others can read relay.json: {value}"),
+    )?;
+    let message = c.refused("a relay.json others can read", &["smoke"], "error")?;
+    ensure(message.contains(&next), format!("setup names the chmod: {message}"))?;
+    chmod(&c.s.tunnel("relay.json"), 0o600)?;
     println!("ok: S12 status");
     Ok(())
 }
@@ -549,6 +589,7 @@ pub fn others(c: &mut Cases) -> Result<(), String> {
     let message = value["message"].as_str().unwrap_or_default();
     ensure(value["code"] == "going_live", format!("S10 going_live: {value}"))?;
     ensure(message.contains("doesn't connect to it until setup runs again"), format!("S10 the Worker stays: {value}"))?;
+    unparsed(c)?;
     c.gone("S10")?;
     c.set("never", false)?;
     c.no_key("S10")?;
@@ -633,6 +674,7 @@ pub fn broken(c: &mut Cases) -> Result<(), String> {
 
 pub fn off(c: &mut Cases) -> Result<(), String> {
     c.s.write("relay-state.json", "{}")?;
+    chmod(&c.s.tunnel("relay.json"), 0o644)?;
     let value = c.ls(&["tunnel", "off"], |_| {})?;
     let message = value["message"].as_str().unwrap_or_default();
     ensure(
