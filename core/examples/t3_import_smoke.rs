@@ -217,8 +217,216 @@ fn build(scratch: &Path) -> Result<Fixture> {
             rusqlite::params![id, title, path, updated, deleted, archived],
         )?;
     }
+    build_threads(&database, &fixture)?;
     drop(database);
     Ok(fixture)
+}
+
+struct Conversation {
+    id: &'static str,
+    driver: &'static str,
+    instance: &'static str,
+    access: &'static str,
+    status: &'static str,
+    payload: Value,
+}
+
+fn conversations(worktree: &str) -> Vec<Conversation> {
+    let thread = |id, driver, instance, access, payload| Conversation {
+        id,
+        driver,
+        instance,
+        access,
+        status: "completed",
+        payload,
+    };
+    let claude = |id, payload| thread(id, "claudeAgent", "claudeAgent", "full-access", payload);
+    vec![
+        thread(
+            "t-tree",
+            "claudeAgent",
+            "claudeAgent_work",
+            "auto-accept-edits",
+            json!({
+                "worktreePath": worktree,
+                "notes": CANARY,
+                "modelSelection": {
+                    "instanceId": "claudeAgent_work", "model": "claude-opus-5-5",
+                    "options": [{ "id": "effort", "value": "high" }]
+                }
+            }),
+        ),
+        claude("t-settled", json!({ "settledAt": "2026-11-21T08:00:00.000Z" })),
+        claude("t-archived", json!({})),
+        thread(
+            "t-codex",
+            "codex",
+            "codex",
+            "approval-required",
+            json!({
+                "snoozedUntil": "2030-01-01T00:00:00.000Z",
+                "modelSelection": {
+                    "instanceId": "codex", "model": "gpt-6.1-sol",
+                    "options": [{ "id": "reasoningEffort", "value": "medium" }]
+                }
+            }),
+        ),
+        Conversation { status: "running", ..claude("t-running", json!({})) },
+        claude("t-gone", json!({})),
+        claude("t-child", json!({ "lineage": { "parentThreadId": "t-tree" } })),
+        claude("t-deleted", json!({})),
+        thread("t-cursor", "cursor", "cursor", "full-access", json!({})),
+        claude("t-never", json!({})),
+    ]
+}
+
+fn build_threads(database: &rusqlite::Connection, fixture: &Fixture) -> Result<()> {
+    database.execute_batch(
+        "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, \
+         runtime_mode TEXT, active_provider_thread_id TEXT, updated_at TEXT, archived_at TEXT, deleted_at TEXT, \
+         payload_json TEXT);
+         CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, \
+         provider_session_id TEXT, payload_json TEXT, driver TEXT, provider_instance_id TEXT);
+         CREATE TABLE orchestration_v2_projection_provider_sessions (provider_session_id TEXT PRIMARY KEY, \
+         payload_json TEXT);
+         CREATE TABLE orchestration_v2_projection_runs (thread_id TEXT, status TEXT, requested_at TEXT, completed_at TEXT);",
+    )?;
+    let tree = fixture.alpha.with_file_name("alpha-tree");
+    fs::create_dir_all(&tree)?;
+    let tree = path_text(&tree);
+    for known in conversations(&tree) {
+        let id = known.id;
+        let archived = (id == "t-archived").then_some("2026-11-05T00:00:00.000Z");
+        let deleted = (id == "t-deleted").then_some("2026-11-06T00:00:00.000Z");
+        let active = (id != "t-never").then(|| format!("provider-{id}"));
+        database.execute(
+            "INSERT INTO orchestration_v2_projection_threads VALUES \
+             (?1, 'p-alpha', ?1, ?2, ?3, '2026-11-20T00:00:00.000Z', ?4, ?5, ?6)",
+            rusqlite::params![id, known.access, active, archived, deleted, known.payload.to_string()],
+        )?;
+        let native = json!({ "nativeThreadRef": { "nativeId": format!("native-{id}") } }).to_string();
+        database.execute(
+            "INSERT INTO orchestration_v2_projection_provider_threads VALUES (?1, ?2, 'shared', ?3, ?4, ?5)",
+            rusqlite::params![format!("provider-{id}"), id, native, known.driver, known.instance],
+        )?;
+        let done = (known.status == "completed").then_some("2026-11-21T09:30:00.000Z");
+        for (status, at, completed) in [
+            ("completed", "2026-11-19T09:00:00.000Z", Some("2026-11-19T09:10:00.000Z")),
+            (known.status, "2026-11-21T09:00:00.000Z", done),
+        ] {
+            database.execute(
+                "INSERT INTO orchestration_v2_projection_runs VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, status, at, completed],
+            )?;
+        }
+        let folder = if id == "t-tree" { &tree } else { &path_text(&fixture.alpha) };
+        let escaped: String = folder.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let session = match (known.driver, id) {
+            (_, "t-gone") | ("cursor", _) => continue,
+            ("codex", _) => {
+                fixture.codex.join(format!("sessions/2026/11/21/rollout-2026-11-21T09-00-00-native-{id}.jsonl"))
+            }
+            (_, "t-tree") => fixture.work.join("projects").join(escaped).join(format!("native-{id}.jsonl")),
+            _ => fixture.personal.join("projects").join(escaped).join(format!("native-{id}.jsonl")),
+        };
+        fs::create_dir_all(session.parent().context("session folder")?)?;
+        fs::write(session, "{}\n")?;
+    }
+    database.execute(
+        "INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('shared', ?1)",
+        [json!({ "cwd": fixture.home }).to_string()],
+    )?;
+    Ok(())
+}
+
+fn threads_of(data: &Path) -> Result<BTreeMap<String, Value>> {
+    let state = read_json(&data.join("state.json"))?;
+    let threads = state["threads"].as_object().cloned().unwrap_or_default();
+    Ok(threads.into_iter().collect())
+}
+
+fn thread_of(data: &Path, title: &str) -> Result<Option<Value>> {
+    let mut found = threads_of(data)?.into_iter().filter(|(_, flags)| flags["title"] == title);
+    let Some((id, flags)) = found.next() else { return Ok(None) };
+    ensure!(found.next().is_none(), "{title} came over twice");
+    ensure!(
+        flags["harness"] == "codex" || flags["nativeSession"] == id.as_str(),
+        "{title} continues session {} and not one of its own",
+        flags["nativeSession"]
+    );
+    ensure!(flags["forkOf"] == format!("native-{title}"), "{title} is a copy of {}", flags["forkOf"]);
+    Ok(Some(flags))
+}
+
+fn check_threads(fixture: &Fixture, data: &Path, report: &T3Report) -> Result<()> {
+    let alpha = json!(path_text(&fixture.alpha));
+    let requested = json!(1_795_251_600_000_i64);
+    let expected = [
+        (
+            "t-tree",
+            json!({
+                "harness": "claudeCode", "account": path_text(&fixture.work), "model": "claude-opus-5-5",
+                "thinkingLevel": "high", "access": "autoAcceptEdits", "project": alpha, "activityAt": requested,
+                "cwd": path_text(&fixture.alpha.with_file_name("alpha-tree")),
+            }),
+        ),
+        (
+            "t-settled",
+            json!({ "account": null, "cwd": alpha, "access": "fullAccess", "settledAt": 1_795_248_000_000_i64 }),
+        ),
+        ("t-archived", json!({ "archived": true, "cwd": alpha })),
+        (
+            "t-codex",
+            json!({
+                "harness": "codex", "nativeSession": null, "cwd": alpha, "access": "supervised", "model": "gpt-6.1-sol",
+                "thinkingLevel": "medium", "snoozedUntil": 1_893_456_000_000_i64,
+            }),
+        ),
+    ];
+    for (title, fields) in &expected {
+        expect_state(report, &format!("thread:{title}"), T3ItemState::Import)?;
+        let flags = thread_of(data, title)?.with_context(|| format!("{title} did not come over"))?;
+        for (key, want) in fields.as_object().into_iter().flatten() {
+            let found = flags.get(key).unwrap_or(&Value::Null);
+            ensure!(found == want, "{title}: {key} is {found}, expected {want}");
+        }
+    }
+    ensure!(threads_of(data)?.len() == expected.len(), "threads are {:?}", threads_of(data)?);
+    for (title, words) in
+        [("t-running", "Running in T3 Code"), ("t-gone", "not on this machine"), ("t-cursor", "Not supported yet")]
+    {
+        expect_state(report, &format!("thread:{title}"), T3ItemState::Unsupported)?;
+        let detail = item_detail(report, &format!("thread:{title}"));
+        ensure!(detail.contains(words), "{title}: {detail}");
+    }
+    for title in ["t-child", "t-deleted", "t-never"] {
+        let found = state_of(report, &format!("thread:{title}"));
+        ensure!(found.is_none(), "{title} is listed as {found:?}");
+    }
+    println!("threads: {} came over with their account, folder, model, access and shelf", expected.len());
+    Ok(())
+}
+
+fn thread_stage(binary: &Path, fixture: &Fixture, data: &Path) -> Result<()> {
+    edit(&data.join("state.json"), |state| {
+        if let Some(threads) = state["threads"].as_object_mut() {
+            threads.retain(|_, flags| flags["title"] != "t-settled");
+        }
+    })?;
+    let database = rusqlite::Connection::open(fixture.t3.join("statev2.sqlite"))?;
+    database.execute(
+        "UPDATE orchestration_v2_projection_runs SET status = 'completed', completed_at = '2026-11-21T10:00:00.000Z' \
+         WHERE thread_id = 't-running'",
+        [],
+    )?;
+    drop(database);
+    let next = report(&cli(binary, fixture, data, &["--json"])?)?;
+    expect_state(&next, "thread:t-running", T3ItemState::Import)?;
+    ensure!(thread_of(data, "t-running")?.is_some(), "a thread that stopped in T3 Code did not come over");
+    expect_state(&next, "thread:t-settled", T3ItemState::Kept)?;
+    ensure!(thread_of(data, "t-settled")?.is_none(), "a thread deleted in Local Studio came back");
+    println!("threads: a stopped one came over, a deleted one stayed away");
+    Ok(())
 }
 
 type ProjectRow<'a> = (&'a str, &'a str, String, &'a str, Option<&'a str>, Option<&'a str>);
@@ -406,6 +614,7 @@ fn check_first(fixture: &Fixture, data: &Path, first: &T3Report) -> Result<()> {
     ensure!(keys["usage.open"] == "cmd+option+u", "usage.open is {}", keys["usage.open"]);
     ensure!(keys.get("sidebar.toggle").is_none(), "a T3 binding equal to the default was written as an override");
     check_lists(fixture, data)?;
+    check_threads(fixture, data, first)?;
     for (key, word) in
         [("account:cursor", "API key set in T3 Code"), ("account:opencode", "server password set in T3 Code")]
     {
@@ -555,7 +764,7 @@ fn cli_stages(binary: &Path, fixture: &Fixture, scratch: &Path) -> Result<()> {
     ensure!(keys["chat.new"] == "cmd+shift+y", "a shortcut changed in Local Studio was overwritten");
     let state = read_json(&data.join("state.json"))?;
     let text = state.to_string();
-    ensure!(!text.contains("gpt-6.1-sol"), "a favorite removed in Local Studio came back");
+    ensure!(!state["favorites"].to_string().contains("gpt-6.1-sol"), "a favorite removed in Local Studio came back");
     ensure!(!text.contains("/beta"), "a project removed in Local Studio came back");
     expect_state(&third, "setting.chatWidth", T3ItemState::Kept)?;
     expect_state(&third, "keybinding:chat.new", T3ItemState::Kept)?;
@@ -572,6 +781,7 @@ fn cli_stages(binary: &Path, fixture: &Fixture, scratch: &Path) -> Result<()> {
     for (before, dir) in config_before.into_iter().zip([&fixture.personal, &fixture.work, &fixture.codex]) {
         ensure!(before? == tree(dir)?, "the import changed {}", dir.display());
     }
+    thread_stage(binary, fixture, &data)?;
     no_canary(&data)
 }
 

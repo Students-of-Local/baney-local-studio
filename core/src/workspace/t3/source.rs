@@ -7,6 +7,8 @@ use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::threads::{self, Conversation};
+
 const STATE_DIRS: [&str; 2] = ["userdata", "dev"];
 const MARKERS: [&str; 3] = ["settings.json", "client-settings.json", "keybindings.json"];
 const DATABASES: [&str; 2] = ["statev2.sqlite", "server-owner.sqlite"];
@@ -214,6 +216,7 @@ pub(crate) struct T3Data {
     pub(crate) project_models: BTreeMap<String, Selection>,
     pub(crate) projects: Vec<Project>,
     pub(crate) projects_read: bool,
+    pub(super) conversations: Vec<Conversation>,
     pub(crate) bindings: Vec<Binding>,
     pub(crate) client: serde_json::Map<String, Value>,
     pub(crate) appearance: Option<String>,
@@ -364,15 +367,16 @@ pub(crate) fn read(dir: &Path) -> T3Data {
     }
     let theme = non_empty(settings.default_theme);
     let themes = read_themes(dir, &mut problems);
-    let (projects, projects_read) = match read_projects(dir) {
-        Ok(Some(projects)) => (projects, true),
-        Ok(None) => (Vec::new(), false),
-        Err(error) => {
-            problems.push(error);
-            (Vec::new(), false)
-        }
-    };
-    T3Data {
+    let mut database = None;
+    let projects = open_database(dir).and_then(|opened| {
+        database = opened;
+        database.as_ref().map(read_projects).transpose()
+    });
+    let projects = projects.map_err(|error| problems.push(error)).ok().flatten();
+    let conversations = database.as_ref().map(threads::read).transpose();
+    let conversations = conversations.map_err(|error| problems.push(error)).ok().flatten();
+    let (projects_read, projects) = (projects.is_some(), projects.unwrap_or_default());
+    let mut data = T3Data {
         dir: dir.to_path_buf(),
         instances,
         default_model: settings.default_model_selection,
@@ -388,6 +392,7 @@ pub(crate) fn read(dir: &Path) -> T3Data {
             .collect(),
         projects,
         projects_read,
+        conversations: conversations.unwrap_or_default(),
         bindings: bindings
             .into_iter()
             .filter(|binding| !binding.key.trim().is_empty() && !binding.command.trim().is_empty())
@@ -399,10 +404,39 @@ pub(crate) fn read(dir: &Path) -> T3Data {
         themes,
         add_project_base: non_empty(settings.add_project_base_directory),
         problems,
+    };
+    threads::place(&mut data);
+    data
+}
+
+pub(super) struct Database {
+    connection: rusqlite::Connection,
+    path: PathBuf,
+}
+
+impl Database {
+    fn failed(&self, error: &rusqlite::Error) -> String {
+        format!("{} could not be read: {error}", self.path.display())
+    }
+
+    pub(super) fn has(&self, table: &str) -> Result<bool, String> {
+        let query = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)";
+        self.connection.query_row(query, [table], |row| row.get(0)).map_err(|error| self.failed(&error))
+    }
+
+    pub(super) fn rows<T>(
+        &self,
+        query: &str,
+        read: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, String> {
+        self.connection
+            .prepare(query)
+            .and_then(|mut statement| statement.query_map([], read)?.collect())
+            .map_err(|error| self.failed(&error))
     }
 }
 
-fn read_projects(dir: &Path) -> Result<Option<Vec<Project>>, String> {
+fn open_database(dir: &Path) -> Result<Option<Database>, String> {
     use rusqlite::{Connection, OpenFlags};
     for name in DATABASES {
         let path = dir.join(name);
@@ -416,49 +450,34 @@ fn read_projects(dir: &Path) -> Result<Option<Vec<Project>>, String> {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|error| format!("{} could not be opened: {error}", path.display()))?;
-        let has_table: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_projects')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-        if !has_table {
-            continue;
+        let database = Database { connection, path };
+        if database.has("projection_projects")? {
+            return Ok(Some(database));
         }
-        let columns: Vec<String> = connection
-            .prepare("SELECT name FROM pragma_table_info('projection_projects')")
-            .and_then(|mut statement| {
-                statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-        let has = |column: &str| columns.iter().any(|known| known == column);
-        let archived = if has("archived_at") { "archived_at IS NOT NULL" } else { "0" };
-        let model = if has("default_model_selection_json") { "default_model_selection_json" } else { "NULL" };
-        let query = format!(
-            "SELECT project_id, title, workspace_root, {archived}, {model} FROM projection_projects \
-             WHERE deleted_at IS NULL ORDER BY updated_at DESC"
-        );
-        let projects = connection
-            .prepare(&query)
-            .and_then(|mut statement| {
-                statement
-                    .query_map([], |row| {
-                        let model: Option<String> = row.get(4)?;
-                        Ok(Project {
-                            id: row.get(0)?,
-                            title: row.get(1)?,
-                            path: row.get(2)?,
-                            archived: row.get(3)?,
-                            model: model.and_then(|text| serde_json::from_str::<Selection>(&text).ok()),
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-        return Ok(Some(projects));
     }
     Ok(None)
+}
+
+fn read_projects(database: &Database) -> Result<Vec<Project>, String> {
+    let columns =
+        database.rows("SELECT name FROM pragma_table_info('projection_projects')", |row| row.get::<_, String>(0))?;
+    let has = |column: &str| columns.iter().any(|known| known == column);
+    let archived = if has("archived_at") { "archived_at IS NOT NULL" } else { "0" };
+    let model = if has("default_model_selection_json") { "default_model_selection_json" } else { "NULL" };
+    let query = format!(
+        "SELECT project_id, title, workspace_root, {archived}, {model} FROM projection_projects \
+         WHERE deleted_at IS NULL ORDER BY updated_at DESC"
+    );
+    database.rows(&query, |row| {
+        let model: Option<String> = row.get(4)?;
+        Ok(Project {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            path: row.get(2)?,
+            archived: row.get(3)?,
+            model: model.and_then(|text| serde_json::from_str::<Selection>(&text).ok()),
+        })
+    })
 }
 
 fn uri_path(path: &Path) -> String {

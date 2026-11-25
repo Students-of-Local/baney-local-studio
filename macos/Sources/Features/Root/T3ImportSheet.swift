@@ -225,7 +225,7 @@ enum T3Summary {
         let kept = count(group, .kept)
         if kept > 0 { parts.append("\(kept) changed here, kept") }
         let unsupported = count(group, .unsupported)
-        if unsupported > 0 { parts.append("\(unsupported) not supported yet") }
+        if unsupported > 0 { parts.append("\(unsupported) not brought over") }
         return parts.joined(separator: " · ")
     }
 
@@ -234,7 +234,7 @@ enum T3Summary {
         case .import: "to bring over"
         case .synced: "in sync"
         case .kept: "changed in Local Studio, kept"
-        case .unsupported: "not supported yet"
+        case .unsupported: "not brought over"
         }
     }
 
@@ -242,6 +242,7 @@ enum T3Summary {
         switch kind {
         case .accounts: choices.accounts
         case .projects: choices.projects
+        case .threads: choices.threads
         case .models: choices.models
         case .keybindings: choices.keybindings
         case .appearance: choices.appearance
@@ -253,6 +254,7 @@ enum T3Summary {
         switch kind {
         case .accounts: choices.accounts = value
         case .projects: choices.projects = value
+        case .threads: choices.threads = value
         case .models: choices.models = value
         case .keybindings: choices.keybindings = value
         case .appearance: choices.appearance = value
