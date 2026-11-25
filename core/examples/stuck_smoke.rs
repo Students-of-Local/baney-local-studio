@@ -6,8 +6,8 @@ use anyhow::{bail, Context};
 use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
-    AccessMode, Connection, DaemonLaunch, ItemKind, PromptDraft, Studio, StudioConfig, ThreadRow, ThreadStatus,
-    ToolState, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
+    AccessMode, Connection, DaemonLaunch, Delivery, ItemKind, PromptDraft, Studio, StudioConfig, ThreadRow,
+    ThreadStatus, ToolState, TranscriptOp, Update, UsagePeriod, UsageReport, Waker, WorktreeChoice,
 };
 use serde_json::{Map, Value};
 
@@ -16,6 +16,7 @@ mod real_model;
 
 const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const STOP_BOUND: Duration = Duration::from_secs(20);
+const STOP_CHECK: Duration = Duration::from_secs(8);
 const CRASH_BOUND: Duration = Duration::from_secs(45);
 const DELETE_BOUND: Duration = Duration::from_secs(20);
 const ROSTER_BOUND: Duration = Duration::from_secs(20);
@@ -60,6 +61,7 @@ struct Watch {
     busy: Option<bool>,
     usage: Option<UsageReport>,
     drops: u32,
+    killed: bool,
 }
 
 impl Watch {
@@ -102,7 +104,10 @@ fn apply(watch: &mut Watch, update: Update) {
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
         Update::Threads { threads } => watch.threads = threads,
         Update::ThreadStarted { thread, .. } => watch.started.push(thread),
-        Update::Notice { level, text } => println!("     notice {level:?}: {text}"),
+        Update::Notice { level, text } => {
+            println!("     notice {level:?}: {text}");
+            watch.killed |= text.contains("did not stop within");
+        }
         _ => {}
     }
 }
@@ -296,6 +301,39 @@ fn delete(studio: &Studio, signal: &Signal, watch: &mut Watch, thread: &str, ste
     Ok(())
 }
 
+fn sent_after_stop(
+    studio: &Studio,
+    signal: &Signal,
+    watch: &mut Watch,
+    socket: &Path,
+    thread: &str,
+) -> anyhow::Result<()> {
+    let sent = Instant::now();
+    watch.tool_running = false;
+    studio.send(
+        "after-stop".to_string(),
+        thread.to_string(),
+        PromptDraft { text: PROMPT.to_string(), images: Vec::new(), files: Vec::new() },
+        Delivery::Default,
+    );
+    pump(studio, signal, watch, "a message sent right after Stop starts a run", STEP_TIMEOUT, |watch| {
+        watch.busy == Some(true)
+    })?;
+    let (worker, _) = daemon_view(socket, thread)?;
+    pump(studio, signal, watch, "the Stop before it has had its check", STEP_TIMEOUT, |watch| {
+        watch.killed || sent.elapsed() > STOP_CHECK
+    })?;
+    if watch.killed || daemon_view(socket, thread)?.0 != worker {
+        bail!("the Stop before it ended the run");
+    }
+    println!("     its run {}", if watch.busy == Some(true) { "goes on" } else { "had ended by itself" });
+    studio.abort(thread.to_string());
+    pump(studio, signal, watch, "Stop again: the thread reports not busy", STOP_BOUND, |watch| {
+        watch.busy == Some(false)
+    })?;
+    Ok(())
+}
+
 fn drive(config: StudioConfig, work: &Path, socket: &Path) -> anyhow::Result<()> {
     let signal = Arc::new(Signal::default());
     let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
@@ -336,6 +374,7 @@ fn drive(config: StudioConfig, work: &Path, socket: &Path) -> anyhow::Result<()>
             bail!("the daemon still runs the thread after Stop");
         }
         println!("ok   the daemon agrees the thread stopped");
+        sent_after_stop(&studio, &signal, &mut watch, socket, &stopped)?;
         delete(&studio, &signal, &mut watch, &stopped, "Delete after Stop removes the thread")?;
 
         let crashed = start_long_turn(&studio, &signal, &mut watch, "draft-crash")?;
