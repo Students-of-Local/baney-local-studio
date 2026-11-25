@@ -250,6 +250,38 @@ impl Store {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedThread {
+    pub id: String,
+    pub title: String,
+    pub project: String,
+    pub harness: &'static str,
+    pub modified: i64,
+}
+
+pub fn harness_threads(data_dir: &Path) -> Result<Vec<ListedThread>, String> {
+    let store = Store::open(data_dir).map_err(|error| format!("{error:#}"))?;
+    let mut listed: Vec<ListedThread> = store
+        .threads
+        .into_iter()
+        .filter(|(_, flags)| flags.harness != Harness::Eukhe && !flags.archived && flags.local_only.is_none())
+        .map(|(id, flags)| ListedThread {
+            title: flags
+                .title
+                .map(|title| crate::threads::clean_title(&title))
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| crate::threads::NEW_THREAD_TITLE.to_string()),
+            project: flags.project.or(flags.cwd).unwrap_or_default(),
+            harness: crate::harness::provider_of(flags.harness),
+            modified: flags.activity_at.unwrap_or_default(),
+            id,
+        })
+        .collect();
+    listed.sort_by(|left, right| right.modified.cmp(&left.modified).then_with(|| left.id.cmp(&right.id)));
+    Ok(listed)
+}
+
 fn write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let directory = path.parent().context("the state file has no directory")?;
     std::fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
