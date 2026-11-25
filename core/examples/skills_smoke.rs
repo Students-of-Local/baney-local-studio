@@ -168,8 +168,8 @@ fn places(smoke: &mut Smoke) -> Result<(), String> {
         smoke.check(&format!("{place} is {skill}"), smoke.first(&["--for", place])? == skill);
     }
     let sites = smoke.json(&["search", "--for", "notes.test"])?[0]["places"].clone();
-    let sites_only = sites == serde_json::json!(["[fd00::1]", "bold.test", "localhost", "notes.test", "pages.test"]);
-    smoke.check("a note beside a site is not a place", sites_only);
+    let sites_only = sites == serde_json::json!(["notes.test", "[fd00::1]", "bold.test", "localhost", "pages.test"]);
+    smoke.check("the site asked for is listed first, and a note beside a site is not a place", sites_only);
     let shown = smoke.run(&["search", "beacon"])?.stdout;
     smoke.check("a place prints no control character", !shown.is_empty() && !shown.contains(&27));
     let unrelated = smoke.json(&["search", "--for", "docs.forms.test", "marmalade"])?;
