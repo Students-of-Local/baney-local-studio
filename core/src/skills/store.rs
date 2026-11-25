@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, Tran
 use serde::Serialize;
 
 use super::text;
-use crate::{frontmatter, harness::trust, plugins};
+use crate::plugins::{self, Plugin};
+use crate::{frontmatter, harness::trust};
 
 const FILE: &str = "skills.sqlite";
 pub(super) const SKILL: &str = "SKILL.md";
@@ -33,6 +34,7 @@ pub struct Roots {
     list: Vec<Root>,
     trusted: BTreeSet<String>,
     here: Option<PathBuf>,
+    plugins: Vec<Plugin>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,10 +44,20 @@ pub struct Listed {
     pub source: String,
     pub path: PathBuf,
     pub problem: Option<String>,
+    #[serde(skip)]
+    real: PathBuf,
+}
+
+impl Listed {
+    pub(super) fn unmoved(&self) -> bool {
+        let small = |meta: std::fs::Metadata| meta.is_file() && meta.len() <= MAX_FILE;
+        self.path.canonicalize().is_ok_and(|real| real == self.real && std::fs::metadata(real).is_ok_and(small))
+    }
 }
 
 struct Found {
     path: PathBuf,
+    real: PathBuf,
     source: String,
     owner: String,
     links: bool,
@@ -88,6 +100,7 @@ impl Root {
             source: self.source.clone(),
             path: path.to_path_buf(),
             problem: Some(problem),
+            real: PathBuf::new(),
         }
     }
 }
@@ -113,15 +126,16 @@ pub fn roots(data: &Path, plugins: Option<&Path>, project: Option<&Path>) -> Res
     let others =
         [".agents", ".claude", ".codex"].into_iter().filter_map(|dir| Some(home.as_ref()?.join(dir).join("skills")));
     list.extend(agent.into_iter().chain(others).map(|dir| Root::yours(&dir, "personal")));
-    let plugins = plugins.map(plugins::scan).unwrap_or_default().plugins;
-    list.extend(plugins.into_iter().filter(|plugin| !plugin.local_only).map(|plugin| Root {
+    let mut plugins = plugins.map(plugins::scan).unwrap_or_default().plugins;
+    plugins.retain(|plugin| !plugin.local_only);
+    list.extend(plugins.iter().map(|plugin| Root {
         source: format!("plugin {}", plugin.id),
         owner: String::new(),
         links: false,
-        files: Some(plugin.skills.into_iter().map(|skill| skill.path).collect()),
-        dir: plugin.dir,
+        files: Some(plugin.skills.iter().map(|skill| skill.path.clone()).collect()),
+        dir: plugin.dir.clone(),
     }));
-    Ok(Roots { list, trusted, here })
+    Ok(Roots { list, trusted, here, plugins })
 }
 
 impl Store {
@@ -138,6 +152,10 @@ impl Store {
             listed.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
             Ok(listed)
         })
+    }
+
+    pub(super) fn plugin(&self, name: &str) -> Option<Plugin> {
+        self.roots.plugins.iter().find(|plugin| plugin.id == name || plugin.name == name).cloned()
     }
 
     pub(super) fn sound<T>(&mut self, step: impl Fn(&mut Self) -> rusqlite::Result<T>) -> Result<T, String> {
@@ -191,9 +209,9 @@ impl Store {
         }
         self.seen.clear();
         let mut names: HashMap<String, PathBuf> = HashMap::new();
-        for Found { path, source, .. } in found {
+        for Found { path, real, source, .. } in found {
             let Some(Row { id, name, description, problem, .. }) = stored.remove(&path) else { continue };
-            let mut listed = Listed { name, description, source, path, problem };
+            let mut listed = Listed { name, description, source, path, problem, real };
             if listed.problem.is_none() {
                 let name = listed.name.to_lowercase();
                 if let Some(used) = names.get(&name) {
@@ -276,7 +294,7 @@ fn walk(root: &Root, files: &mut HashSet<PathBuf>, hidden: &mut Vec<Listed>) -> 
             hidden.push(root.hides(&path, format!("more than {MAX_SKILLS} skills in one folder")));
             break;
         }
-        files.insert(real);
+        files.insert(real.clone());
         if size > MAX_FILE {
             hidden.push(root.hides(&path, format!("larger than {} KB", MAX_FILE / 1024)));
             continue;
@@ -287,7 +305,7 @@ fn walk(root: &Root, files: &mut HashSet<PathBuf>, hidden: &mut Vec<Listed>) -> 
             stamp.push_str(&beside.map(|(_, stamp)| stamp).unwrap_or_default());
         }
         let (source, owner) = (root.source.clone(), root.owner.clone());
-        found.push(Found { path, source, owner, links: root.links, stamp });
+        found.push(Found { path, real, source, owner, links: root.links, stamp });
     }
     found
 }

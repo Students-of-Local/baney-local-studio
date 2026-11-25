@@ -16,6 +16,7 @@ pub(crate) const TOOLS: [&str; 2] = ["skill_search", "skill_read"];
 const CLI: &str = if cfg!(windows) { "local-studio-cli.exe" } else { "local-studio-cli" };
 const INSTRUCTIONS: &str = "Skills are how-to notes for websites, APIs, apps and jobs. Before a task, call skill_search with it. \
      If one of the skills it lists is about the task, call skill_read for that one and follow it; if none is, work without one. \
+     When the message names a skill or a plugin as @name, call skill_read with that name. \
      Search again when a step does not work.";
 const CLOSEST: &str =
     "These are the closest, not always a fit. Read one only if it is about this task: skill_read {\"name\": ...}. \
@@ -58,7 +59,7 @@ fn tools() -> Vec<Tool> {
          Example: {\"name\":\"academic-research\"}",
         "name",
         &[
-            ("name", "The skill's name"),
+            ("name", "The skill's name, or a plugin's"),
             ("part", "The heading of one part, to read only that"),
             ("from", "The number to read on from, when the answer before was shortened"),
         ],
@@ -95,7 +96,16 @@ impl Server {
                     Some(from) => from.as_u64().and_then(|from| usize::try_from(from).ok()),
                 };
                 let from = from.ok_or("from is a number, such as 6000")?;
-                open()?.read(name, text("part"), from).map(|reading| reading.shown())
+                let mut store = open()?;
+                let part = text("part");
+                store.read(name, part, from).map(|reading| reading.shown()).or_else(|error| {
+                    let plugin = store.plugin(name).ok_or_else(|| error.clone())?;
+                    match plugin.skills.as_slice() {
+                        [only] if only.name == name => Err(error),
+                        [only] => store.read(&only.name, part, from).map(|reading| reading.shown()),
+                        _ => Ok(super::plugin_block(&plugin, "Read one with skill_read and its name.")),
+                    }
+                })
             }
             _ => Err(format!("no tool named {tool}")),
         }

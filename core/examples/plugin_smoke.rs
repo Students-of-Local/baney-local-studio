@@ -295,6 +295,10 @@ fn main() -> anyhow::Result<()> {
         let [_, daemon, root] = args.as_slice() else { bail!(LOCAL_USAGE) };
         return local_only::run(daemon, root);
     }
+    if args.first().is_some_and(|arg| arg.as_os_str() == "--mentions") {
+        let [_, daemon, root] = args.as_slice() else { bail!("usage: plugin_smoke --mentions <eukhe> <scratch dir>") };
+        return local_only::mentions(daemon, root);
+    }
     if args.first().is_some_and(|arg| arg.as_os_str() == "--hub") {
         let [_, root] = args.as_slice() else { bail!(hub::USAGE) };
         return hub::run(root);
@@ -474,9 +478,6 @@ fn check_part(work: &Path) -> anyhow::Result<()> {
 }
 
 fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
-    if !socket.exists() {
-        return Ok(());
-    }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let (client, _events) = DaemonClient::connect(socket).await?;
@@ -1346,6 +1347,159 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             hits.load(Ordering::SeqCst)
         );
         Ok(failed)
+    }
+
+    fn put(path: &Path, text: &str) -> anyhow::Result<()> {
+        std::fs::create_dir_all(path.parent().context("parent")?)?;
+        Ok(std::fs::write(path, text)?)
+    }
+
+    fn skill(path: &Path, name: &str, body: &str) -> anyhow::Result<()> {
+        put(&path.join(name).join("SKILL.md"), &format!("---\nname: {name}\ndescription: About {name}\n---\n{body}\n"))
+    }
+
+    fn manifest(dir: &Path, name: &str, more: &str) -> anyhow::Result<()> {
+        let id = dir.file_name().and_then(|id| id.to_str()).context("id")?;
+        let head = format!("id = {id:?}\nname = {name:?}\nversion = \"0.1.0\"\ndescription = \"All of {id}\"\n");
+        put(&dir.join("plugin.toml"), &format!("{head}{more}"))
+    }
+
+    pub(super) fn mentions(daemon: &Path, root: &Path) -> anyhow::Result<()> {
+        let ((port, hits), (local, _)) = (listen()?, listen()?);
+        let base = format!("http://127.0.0.1:{local}/v1");
+        ensure!(LOCAL_MODEL.set((MID.to_string(), base.clone())).is_ok(), "a model was picked already");
+        let agent = agent(root, port, &base, root)?;
+        put_server(&agent, "web-search", None)?;
+        let (data, work) = (root.join("data"), root.join("work"));
+        let plugins = data.join("plugins");
+        plugin(&plugins)?;
+        for (id, name, skills) in [("solo", "Solo Tools", &["alone"][..]), ("kit", "Solo", &["hammer", "saw"])] {
+            let command =
+                "capabilities = []\n[[commands]]\nname = \"build\"\ndescription = \"Build it\"\nskill = \"saw\"\n";
+            manifest(&plugins.join(id), name, if id == "kit" { command } else { "capabilities = []\n" })?;
+            skills
+                .iter()
+                .try_for_each(|name| skill(&plugins.join(id).join("skills"), name, &format!("{name} steps")))?;
+        }
+        skill(&data.join("skills"), "marmalade", "orange steps")?;
+        skill(&data.join("skills"), "marmalade-pot", "pot steps")?;
+        skill(&data.join("skills"), "ledger", "your own ledger")?;
+        for id in ["alpha", "beta"] {
+            manifest(&plugins.join(id), &id.to_uppercase(), "capabilities = []\n")?;
+            skill(&plugins.join(id).join("skills"), "setup", &format!("{id} steps"))?;
+        }
+        put(&work.join("marmalade 2026.csv"), "a,b\n")?;
+        let cold = root.join("cold");
+        for (dir, name) in [(&work, "marmot"), (&root.join("plain"), "badger"), (&cold, "otter")] {
+            skill(&dir.join(".agents/skills"), name, &format!("{name} steps"))?;
+            Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(dir).status()?;
+        }
+        std::fs::create_dir_all(root.join("plain/marmalade"))?;
+        let trusted = [work.canonicalize()?, cold.canonicalize()?];
+        put(&data.join("state.json"), &json!({ "version": 1, "projects": [], "trusted": trusted }).to_string())?;
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
+        std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
+        let socket = root.join("d.sock");
+        let config = StudioConfig {
+            socket_path: Some(socket.to_string_lossy().into_owned()),
+            session_dir: Some(agent.join("sessions").to_string_lossy().into_owned()),
+            data_dir: None,
+            controller_main: None,
+            launch: Some(DaemonLaunch { program: daemon.to_string_lossy().into_owned() }),
+            take_over_serve: false,
+        };
+        let signal = Arc::new(Signal::default());
+        let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+        let mut harness = Harness { studio, signal, view: View::default(), step: STEP };
+        let outcome = sends(&mut harness, root, &hits);
+        harness.studio.shutdown();
+        let stopped = stop_daemon(&socket);
+        outcome?;
+        stopped?;
+        println!("PASS plugin smoke: mentions");
+        Ok(())
+    }
+
+    fn add(harness: &mut Harness, dir: &Path) -> anyhow::Result<String> {
+        let path = dir.canonicalize()?.to_string_lossy().into_owned();
+        harness.studio.add_project(path.clone());
+        harness.pump_until("project added", STEP, |view| view.projects.iter().any(|project| project.id == path))?;
+        if path.ends_with("cold") {
+            return Ok(path);
+        }
+        harness.studio.mentions(path.clone(), Some(path.clone()), "m".to_string(), 30);
+        let seen = format!("Mentions {{ request: {path:?}");
+        harness.pump_until("its @ list", STEP, |view| view.other.iter().any(|update| update.starts_with(&seen)))?;
+        Ok(path)
+    }
+
+    fn sent(harness: &mut Harness, key: &str, project: &str, text: &str) -> anyhow::Result<String> {
+        let studio = Arc::clone(&harness.studio);
+        studio.start_thread(key.to_string(), Some(project.to_string()), prompt(text), settings(LOCAL, mid()));
+        harness.pump_until(&format!("{key} started"), STEP, |view| view.thread(key).is_some())?;
+        let thread = harness.view.thread(key).context("thread")?;
+        studio.select_thread(Some(thread.clone()));
+        harness.pump_until(&format!("{key} sent"), STEP, |view| !user_text(view.items(&thread)).is_empty())?;
+        studio.abort(thread.clone());
+        let found = user_text(harness.view.items(&thread));
+        found.into_iter().next().context("user text")
+    }
+
+    fn sends(harness: &mut Harness, root: &Path, hits: &AtomicUsize) -> anyhow::Result<()> {
+        harness.pump_until("daemon connected", STEP, |view| matches!(view.connection, Some(Connection::Ready)))?;
+        let [work, plain, cold] = ["work", "plain", "cold"].map(|name| add(harness, &root.join(name)));
+        let (work, plain, cold) = (work?, plain?, cold?);
+        let lock = std::fs::File::open(root.join("data/skills.lock"))?;
+        for (key, project, text, blocks) in [
+            ("skill", &work, "@marmalade make some", &["orange steps"][..]),
+            ("twice", &work, "(@marmalade) and @marmalade.", &["orange steps"]),
+            ("longest", &work, "in @marmalade-pot", &["pot steps"]),
+            ("project", &work, "@marmot", &["marmot steps"]),
+            ("untrusted", &plain, "@badger", &[]),
+            ("folder", &plain, "@marmalade make some", &[]),
+            ("mail", &work, "mail a@marmalade, a@marmalade.com or @marmalade.com", &[]),
+            ("other", &work, "@marmalade-x @marmalade/x @Marmalade @hammers", &[]),
+            ("solo", &work, "@solo then @Solo Tools, $alone, @alone", &["alone steps"]),
+            (
+                "kit",
+                &work,
+                "@kit and @Solo",
+                &["All of kit", "- skill hammer: About hammer (", "- command /build: Build it"],
+            ),
+            ("absent", &work, "@gantrel", &[]),
+            ("spaced", &work, "@marmalade 2026.csv please", &[]),
+            ("cold", &cold, "@otter", &["otter steps"]),
+        ] {
+            if key == "skill" {
+                lock.lock()?;
+            }
+            let got = sent(harness, key, project, text)?;
+            lock.unlock()?;
+            let once = blocks.iter().all(|block| got.matches(block).count() == 1);
+            let tail = if blocks.is_empty() { got == text } else { got.ends_with(&format!("\n\n{text}")) };
+            let shown: usize = ["<skill name=", "<plugin name="].iter().map(|tag| got.matches(tag).count()).sum();
+            ensure!(once && tail && shown == usize::from(!blocks.is_empty()), "{key}: {text:?} was sent as {got:?}");
+            println!("ok   {key}: {text:?} sent with {blocks:?}");
+        }
+        ensure!(!root.join("data/plugins/gantrel").exists(), "a name in a message installed its plugin");
+        let got = sent(harness, "both", &work, "@alpha then @beta")?;
+        ensure!(["alpha steps", "beta steps"].iter().all(|steps| got.contains(steps)), "both: sent as {got:?}");
+        let marmot = root.join("work/.agents/skills/marmot/SKILL.md");
+        put(&root.join("elsewhere.md"), "---\nname: marmot\ndescription: About marmot\n---\nelsewhere\n")?;
+        std::fs::remove_file(&marmot)?;
+        std::os::unix::fs::symlink(root.join("elsewhere.md"), &marmot)?;
+        lock.lock()?;
+        let got = sent(harness, "swapped", &work, "@marmot")?;
+        lock.unlock()?;
+        ensure!(got == "@marmot", "a project's skill swapped for a link was sent as {got:?}");
+        harness.studio.remove_project(plain);
+        harness.studio.remove_project(cold);
+        harness.pump_until("projects removed", STEP, |view| view.projects.len() == 1)?;
+        for (key, text) in [("gate", "File it with @ledger"), ("slash", "/review the @Ledger entries")] {
+            naming(refused(harness, key, text, settings(CLOUD, CLOUD_MODEL), hits), "runs only on local models")?;
+        }
+        Ok(())
     }
 }
 

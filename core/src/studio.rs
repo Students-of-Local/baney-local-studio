@@ -30,7 +30,7 @@ use crate::model::{
 use crate::oneshot::{resolved_provider, TextGen};
 use crate::plugins::{self, Plugin};
 use crate::session::{self, LiveState};
-use crate::skills::{Expansion, Resources};
+use crate::skills::{self, At, Expansion, Resources};
 use crate::store::{self, Store, StoredProject};
 use crate::threads::{self, ChildRow, Facts, GitHead, InboxPrefs, RosterRow, SavedRow, SearchDoc};
 use crate::transcript::Transcript;
@@ -45,6 +45,7 @@ const TAKEOVER_WAIT: Duration = Duration::from_secs(15);
 const TAKEOVER_POLL: Duration = Duration::from_millis(100);
 const PROBED_WITHIN: Duration = Duration::from_secs(1);
 const PROBED_POLL: Duration = Duration::from_millis(20);
+const AT_WAIT: Duration = Duration::from_secs(1);
 const TIMER_PERIOD: Duration = Duration::from_secs(15);
 const EVENT_BURST: usize = 512;
 const LEFT_KEPT: usize = 8;
@@ -682,6 +683,7 @@ impl Studio {
             controller_main,
             text.clone(),
         );
+        workspace.find_skills(plugins_dir.clone(), None);
         workspace.start_kernel(daemon::kernel_program(config.launch.as_ref()));
         let codex_models = harness::saved_codex_models(&data_dir);
         let settings = workspace.settings();
@@ -2153,6 +2155,10 @@ impl Actor {
             self.release(&previous).await;
         }
         let Some(id) = thread else { return };
+        let cwd = Some(self.facts(&id, now_ms()).cwd).filter(|cwd| !cwd.is_empty());
+        if !self.workspace.has_skills(cwd.as_ref()) {
+            self.workspace.find_skills(self.plugins_dir.clone(), cwd);
+        }
         self.store.update(&id, |flags| {
             flags.unread = false;
             flags.done_at = None;
@@ -2829,6 +2835,7 @@ impl Actor {
         if message.trim().is_empty() && prompt.images.is_empty() {
             return Err("Write a message first.".to_string());
         }
+        let at = self.at(id, &message).await;
         let cli = self.harness(id).is_some();
         let active = if cli {
             self.threads.entry(id.to_string()).or_default();
@@ -2841,12 +2848,13 @@ impl Actor {
         if !again && self.hold_behind(id, &prompt, delivery, request.clone()) {
             return Ok(Gate::Held);
         }
-        let expansion = if !(message.starts_with('/') || message.contains('$')) {
+        let snapshot = message.starts_with('/') || message.contains('$');
+        let expansion = if !snapshot && skills::mentions(&message).next().is_none() {
             Expansion { text: message.clone(), plugins: Vec::new() }
-        } else if cli {
-            Resources::default().with_plugins(self.plugins()).expand(&message)
+        } else if cli || !snapshot {
+            Resources::default().with_plugins(self.plugins()).expand(&message, &at)
         } else {
-            self.resources(id, &active).await.expand(&message)
+            self.resources(id, &active).await.expand(&message, &at)
         };
         let gate =
             self.local_only_gate(id, &active, &expansion.plugins, &prompt, delivery, request.clone(), again).await?;
@@ -2953,6 +2961,17 @@ impl Actor {
         let active = self.ensure_open(id).await?;
         self.thread_refuses(id, &active).await?;
         Ok(active)
+    }
+
+    async fn at(&self, id: &str, message: &str) -> At {
+        if skills::mentions(message).next().is_none() {
+            return At::default();
+        }
+        let cwd = Some(self.facts(id, now_ms()).cwd).filter(|cwd| !cwd.is_empty());
+        let listing = self.workspace.find_skills(self.plugins_dir.clone(), cwd.clone());
+        tokio::time::timeout(AT_WAIT, listing).await.ok();
+        let skills = self.workspace.skills(&[cwd.clone(), self.thread_project(id), None]);
+        At { skills, here: cwd.map(PathBuf::from) }
     }
 
     fn thread_project(&self, id: &str) -> Option<String> {
