@@ -357,7 +357,7 @@ mod route {
                     self.on_machine(&thread, "Saving a skill", Some(request));
                     None
                 }
-                Command::DiscardSkill { thread } if remote(&thread) => {
+                Command::DiscardSkill { thread, .. } if remote(&thread) => {
                     self.on_machine(&thread, "Discarding a skill", None);
                     None
                 }

@@ -506,6 +506,7 @@ enum Command {
     },
     DiscardSkill {
         thread: String,
+        draft: String,
     },
     ListArchived {
         request: String,
@@ -1016,8 +1017,8 @@ impl Studio {
         self.send_command(Command::SaveSkill { request, thread, draft, text });
     }
 
-    pub fn discard_skill(&self, thread: String) {
-        self.send_command(Command::DiscardSkill { thread });
+    pub fn discard_skill(&self, thread: String, draft: String) {
+        self.send_command(Command::DiscardSkill { thread, draft });
     }
 
     pub fn list_archived(&self, request: String) {
@@ -1981,7 +1982,7 @@ impl Actor {
             Command::SkillSaved { request, thread, draft, outcome } => {
                 self.skill_saved(request, &thread, draft, outcome);
             }
-            Command::DiscardSkill { thread } => self.discard_skill(&thread),
+            Command::DiscardSkill { thread, draft } => self.discard_skill(&thread, draft),
             Command::ListArchived { request } => {
                 let threads = self.rows(true);
                 self.mailbox.push(Update::ArchivedThreads { request, threads });
