@@ -251,3 +251,56 @@ test("a word added, removed and added again offline is present once after a snap
 	}
 	assert.equal(stateBytes(replicas[2]), stateBytes(replicas[0]));
 });
+
+test("a deleted setting stays deleted while an older write to it waits in the log behind a sequence gap", () => {
+	let b = createReplica("dv-b", members);
+	b = localOp(b, registry, { category: "settings-spaces", kind: "set", key: "theme", value: "dark" }, T).replica;
+	const theme = b.log["dv-b:1"];
+	b = localOp(b, registry, { category: "settings-spaces", kind: "set", key: "layout", value: "old" }, T + 1).replica;
+	const older = b.log["dv-b:2"];
+	let c = createReplica("dv-c", members);
+	c = localOp(c, registry, { category: "settings-spaces", kind: "del", key: "layout" }, T + 10).replica;
+	let a = createReplica("dv-a", members);
+	a = receiveOps(a, registry, [older, c.log["dv-c:1"]], T + 11);
+	assert.deepEqual({ ...a.vv }, { "dv-c": 1 }, "dv-b:1 is missing, so dv-b:2 waits in the log");
+	let now = T + 20;
+	a = recordAck(a, "dv-b", { "dv-c": 1 }, now);
+	a = recordAck(a, "dv-c", { "dv-c": 1 }, now);
+	a = compact(a, registry, now);
+	assert.deepEqual(Object.keys(a.log), ["dv-b:2"]);
+	now += 91 * DAY_MS;
+	a = compact(a, registry, now);
+	assert.equal(a.snapshot.states["settings-spaces"].layout?.del, true, "the delete is kept while dv-b:2 is in the log");
+	assert.deepEqual(plainView(a)["settings-spaces"], {}, "the deleted setting does not come back");
+	a = receiveOps(a, registry, [theme], now);
+	a = recordAck(a, "dv-b", a.vv, now);
+	a = recordAck(a, "dv-c", a.vv, now);
+	a = compact(a, registry, now);
+	assert.deepEqual(Object.keys(a.log), []);
+	assert.deepEqual({ ...a.snapshot.states["settings-spaces"] }.layout, undefined, "dropped once the older write folded");
+	assert.deepEqual(plainView(a)["settings-spaces"], { theme: "dark" });
+});
+
+test("adopting a snapshot that lacks ops this replica already folded keeps them", () => {
+	const day91 = T + 91 * DAY_MS;
+	let a = createReplica("dv-a", members);
+	a = localOp(a, registry, { category: "settings-spaces", kind: "set", key: "layout", value: "a-edit" }, T).replica;
+	a = recordAck(a, "dv-b", a.vv, day91);
+	a = compact(a, registry, day91);
+	assert.deepEqual(Object.keys(a.log), [], "dv-c is absent, so dv-a folds its edit with dv-b's ack alone");
+	let c = createReplica("dv-c", members);
+	c = localOp(c, registry, { category: "dictionary", kind: "add", key: "gamma", value: 1 }, T).replica;
+	c = recordAck(c, "dv-b", c.vv, day91);
+	c = compact(c, registry, day91);
+	assert.deepEqual(Object.keys(c.log), []);
+
+	const toA = delta(c, a.vv);
+	assert.equal(toA.kind, "snapshot");
+	a = adoptSnapshot(a, registry, toA.snapshot, day91 + 1).replica;
+	assert.deepEqual(plainView(a)["settings-spaces"], { layout: "a-edit" }, "the folded edit survives");
+	assert.deepEqual(plainView(a).dictionary, { gamma: 1 });
+	const toC = delta(a, c.vv);
+	assert.equal(toC.kind, "snapshot");
+	c = adoptSnapshot(c, registry, toC.snapshot, day91 + 2).replica;
+	assert.equal(stateBytes(c), stateBytes(a));
+});

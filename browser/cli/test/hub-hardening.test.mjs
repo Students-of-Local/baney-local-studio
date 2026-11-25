@@ -4,6 +4,7 @@
 // credential) or a fake hub (a WebSocket server a real `link run` dials) where the test must
 // control exactly what the other side says.
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { transformSync } from "esbuild";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -468,4 +469,23 @@ test("a device narrows the caller's scopes to what the hub says", async () => {
 	const skillsOnly = ["devices", "skill_read", "skill_search"];
 	assert.deepEqual(await toolsWith({ "x-local-studio-hub-scopes": "skills.read", "x-local-studio-hub-caller": "a-hub" }), skillsOnly);
 	assert.ok((await toolsWith({})).length > skillsOnly.length, "with no scopes header the link token's whole cap applies, which is why the hub always sends it");
+});
+
+test("a device header Node can't send fails that request with a 502, and the hub keeps serving", async () => {
+	const hub = await hubFor("header-hub");
+	let bad = true;
+	await fakeDevice(hub, "snowman", {
+		onReq: (frame, ws) => {
+			if (frame.method !== "POST") return;
+			const type = bad ? "application/json; charset=\u2603" : "application/json";
+			bad = false;
+			ws.send(JSON.stringify({ t: "head", id: frame.id, status: 200, headers: { "content-type": type, "mcp-session-id": randomUUID() } }));
+			ws.send(JSON.stringify({ t: "chunk", id: frame.id, data: JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }) }));
+			ws.send(JSON.stringify({ t: "end", id: frame.id }));
+		},
+	});
+	const secret = createToken(hub, "caller", "skills.read");
+	assert.equal((await rpc(`${hub.url}/mcp`, secret, INITIALIZE)).status, 502);
+	await alive(hub);
+	assert.equal((await rpc(`${hub.url}/mcp`, secret, INITIALIZE)).status, 200, "the next request through the same link works");
 });

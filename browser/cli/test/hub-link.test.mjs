@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
@@ -291,6 +291,35 @@ test("/link/code is for manager devices only", async () => {
 	assert.equal(approval.url, `${hub.url}/mcp`);
 });
 
+test("/link/code from a manager removed while its request body arrives mints nothing", async () => {
+	const hub = await hubFor("late-manage-hub");
+	const codes = () => ["hub-codes.json", "oauth-codes.json"].flatMap((f) => (existsSync(hub.file(f)) ? readJson(hub.file(f)).codes : []));
+	for (const kind of ["approval", "connect"]) {
+		const name = `late-${kind}`;
+		const link = readJson((await deviceFor(hub, name, { manage: true })).file("link.json"));
+		const body = JSON.stringify({ kind });
+		const req = httpRequest(`${hub.url}/link/code`, { method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), authorization: `Bearer ${link.deviceId}.${link.secret}` } });
+		const answered = new Promise((resolve, reject) => {
+			req.on("response", (res) => {
+				let text = "";
+				res.on("data", (d) => {
+					text += d;
+				});
+				res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+			});
+			req.on("error", reject);
+		});
+		req.write(body.slice(0, 3));
+		await sleep(300);
+		assert.equal(hub.run(["hub", "remove", name]).code, 0);
+		req.end(body.slice(3));
+		const { status, body: answer } = await answered;
+		assert.equal(status, 401, JSON.stringify(answer));
+		assert.equal(answer.error, "invalid_token");
+		assert.deepEqual(codes(), [], `no ${kind} code was written for a removed device`);
+	}
+});
+
 async function consentFor(hub) {
 	const reg = await fetch(`${hub.url}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "Claude", redirect_uris: ["http://localhost:4567/cb"] }) });
 	const { client_id } = await reg.json();
@@ -332,6 +361,47 @@ test("an approval code approves a connector once and counts toward the passcode 
 	assert.equal((await approve(fresh.code)).status, 429, "a valid code is refused during the lockout, like the passcode");
 	// The passcode path shares the counter: a wrong passcode is a failure too.
 	assert.equal((await approve("not-a-code")).status, 429);
+});
+
+/**
+ * What a browser posts when a person presses Enter in the field `fieldId` (HTML implicit submission): the field's form,
+ * submitted by its default button, the first submit button in tree order whose form owner is that form.
+ */
+function enterIn(html, fieldId, typed) {
+	const attr = (attrs, name) => new RegExp(`\\b${name}="([^"]*)"`).exec(attrs)?.[1];
+	const forms = [...html.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/g)].map((m) => ({ id: attr(m[1], "id"), start: m.index, end: m.index + m[0].length, body: m[2] }));
+	const form = forms.find((f) => f.body.includes(`id="${fieldId}"`));
+	const ownerOf = (m) => {
+		const named = attr(m[1], "form");
+		return named !== undefined ? forms.find((f) => f.id === named) : forms.find((f) => m.index > f.start && m.index < f.end);
+	};
+	const submit = [...html.matchAll(/<button\b([^>]*)>/g)].find((m) => (attr(m[1], "type") ?? "submit") === "submit" && ownerOf(m) === form);
+	const data = new URLSearchParams();
+	for (const [, attrs] of form.body.matchAll(/<input\b([^>]*)>/g)) {
+		const name = attr(attrs, "name");
+		if (!name) continue;
+		if (attr(attrs, "id") === fieldId) data.append(name, typed);
+		else if (attr(attrs, "type") === "hidden" || (attr(attrs, "type") === "checkbox" && /\schecked\b/.test(attrs))) data.append(name, attr(attrs, "value") ?? "on");
+	}
+	if (attr(submit[1], "name")) data.append(attr(submit[1], "name"), attr(submit[1], "value") ?? "");
+	return data;
+}
+
+test("pressing Enter in the code field approves, and Deny still denies", async () => {
+	const hub = await hubFor("enter-hub");
+	const { html } = await consentFor(hub);
+	const post = (body) => fetch(`${hub.url}/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+	const code = hub.json(["token", "approval-code", "--json"]).code;
+	const entered = enterIn(html, "passcode", code);
+	assert.equal(entered.get("decision"), "allow", "the form's default button is Allow");
+	const ok = await post(entered);
+	assert.equal(ok.status, 302);
+	assert.match(ok.headers.get("location"), /^http:\/\/localhost:4567\/cb\?code=tka_/);
+	const deny = /<form id="deny"[^>]*>([\s\S]*?)<\/form>/.exec(html);
+	assert.ok(/<button\b[^>]*form="deny"[^>]*value="deny"/.test(html), "Deny submits its own form");
+	const denied = await post(new URLSearchParams([["request", /name="request" value="([^"]+)"/.exec(deny[1])[1]], ["decision", "deny"]]));
+	assert.equal(denied.status, 302);
+	assert.match(denied.headers.get("location"), /error=access_denied/);
 });
 
 test("an expired approval code is refused", async () => {

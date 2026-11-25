@@ -107,6 +107,23 @@ export function authenticateDevice(credential: string | undefined): DeviceRecord
 	return device && matches ? device : undefined;
 }
 
+/**
+ * Run `fn` holding the devices lock while `credential` still belongs to a manager device, so a removal lands wholly before or
+ * after it. Callers that hold a code file's lock take this one inside it, the order `redeemConnectCode` uses.
+ */
+export function asManager<T>(credential: string | undefined, fn: () => T, lockMs?: number): T {
+	return withFileLock(
+		devicesFile(),
+		() => {
+			const device = authenticateDevice(credential);
+			if (!device) throw new HubStateError(401, "This device's credential is not valid.");
+			if (!device.manage) throw new HubStateError(403, `This device is not a manager. Link it with a code from ${COMMAND_NAME} hub code --manage.`);
+			return fn();
+		},
+		lockMs,
+	);
+}
+
 /** Add a device. Fails when the name is taken. The credential is returned once. */
 function addDevice(name: string, manage: boolean): { record: DeviceRecord; credential: string } {
 	const data = loadDevicesForUpdate();
@@ -212,8 +229,8 @@ export function liveConnectCodes(): number {
 	return liveCodes(loadConnectCodes(), Date.now()).length;
 }
 
-/** A new connect code, shown once. `lockMs` is how long to wait for the lock (a request handler passes a short one). */
-export function mintConnectCode(options: { name?: string; manage?: boolean }, time = Date.now(), lockMs?: number): { code: string; expiresAt: number } {
+/** A new connect code, shown once. `lockMs` is how long to wait for the lock (a request handler passes a short one); `within` wraps the write. */
+export function mintConnectCode(options: { name?: string; manage?: boolean }, time = Date.now(), lockMs?: number, within: <T>(fn: () => T) => T = (fn) => fn()): { code: string; expiresAt: number } {
 	if (options.name !== undefined && !validDeviceName(options.name)) throw new HubStateError(400, "Device name: letters, digits, dot, dash, underscore or space, up to 40.");
 	return withFileLock(
 		codesFile(),
@@ -222,7 +239,7 @@ export function mintConnectCode(options: { name?: string; manage?: boolean }, ti
 			if (live.length >= MAX_LIVE_CONNECT_CODES) throw new CodeLimitError(`${MAX_LIVE_CONNECT_CODES} connect codes are already waiting. Use or wait out one first.`);
 			const code = newCode();
 			const expiresAt = time + CODE_TTL_MS;
-			writeJsonPrivate(codesFile(), { codes: [...live, { sha256: hashCode(code), expiresAt, createdAt: time, ...(options.name ? { name: options.name } : {}), manage: Boolean(options.manage) }] });
+			within(() => writeJsonPrivate(codesFile(), { codes: [...live, { sha256: hashCode(code), expiresAt, createdAt: time, ...(options.name ? { name: options.name } : {}), manage: Boolean(options.manage) }] }));
 			return { code, expiresAt };
 		},
 		lockMs,

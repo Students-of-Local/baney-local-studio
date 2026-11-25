@@ -58,7 +58,7 @@ test("no workers.dev subdomain: setup names the onboarding page for the account 
 	const report = r.json();
 	assert.equal(report.code, "workers_subdomain");
 	assert.deepEqual(report.next, { kind: "open_page", url: `https://dash.cloudflare.com/${ACCOUNT}/workers/onboarding` });
-	assert.ok(m.wrangler().some((l) => / deploy --tag local-studio-browser-[0-9a-f]{12} --name local-studio-browser-relay account=/.test(l) && l.includes(`account=${ACCOUNT} `)));
+	assert.ok(m.wrangler().some((l) => / deploy --tag lsb-[0-9a-f]{12} --name local-studio-browser-relay account=/.test(l) && l.includes(`account=${ACCOUNT} `)));
 	assert.equal(m.secret(), undefined, "no key is set");
 	assert.equal(m.remoteJson(), undefined);
 });
@@ -73,7 +73,7 @@ test("a sign-in with two accounts needs --account, and --account picks the one w
 	assert.ok(!m.wrangler().some((l) => l.includes(" deploy ")));
 	const picked = await m.run(["remote", "setup", "--json", "--relay", "my-relay", "--account", OTHER]);
 	assert.equal(picked.json().code, "workers_subdomain");
-	assert.ok(m.wrangler().some((l) => / deploy --tag local-studio-browser-[0-9a-f]{12} --name my-relay account=/.test(l) && l.includes(`account=${OTHER} `)), m.wrangler().join("\n"));
+	assert.ok(m.wrangler().some((l) => / deploy --tag lsb-[0-9a-f]{12} --name my-relay account=/.test(l) && l.includes(`account=${OTHER} `)), m.wrangler().join("\n"));
 	const unknown = await m.run(["remote", "setup", "--relay", "--json", "--account", "a".repeat(32)]);
 	assert.equal(unknown.json().code, "cloudflare_account");
 });

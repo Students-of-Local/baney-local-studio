@@ -311,8 +311,8 @@ function loadApprovalCodes(): CodeRecord[] {
 	}
 }
 
-/** A new approval code, returned once. `lockMs` is how long to wait for the lock (a request handler passes a short one). */
-export function mintApprovalCode(lockMs?: number): { code: string; expiresAt: number } {
+/** A new approval code, returned once. `lockMs` is how long to wait for the lock (a request handler passes a short one); `within` wraps the write. */
+export function mintApprovalCode(lockMs?: number, within: <T>(fn: () => T) => T = (fn) => fn()): { code: string; expiresAt: number } {
 	return withFileLock(
 		approvalFile(),
 		() => {
@@ -321,7 +321,7 @@ export function mintApprovalCode(lockMs?: number): { code: string; expiresAt: nu
 			if (live.length >= MAX_LIVE_APPROVAL_CODES) throw new CodeLimitError(`${MAX_LIVE_APPROVAL_CODES} approval codes are already waiting. Use or wait out one first.`);
 			const code = newCode();
 			const expiresAt = time + CODE_TTL_MS;
-			writeJsonPrivate(approvalFile(), { codes: [...live, { sha256: hashCode(code), expiresAt, createdAt: time }] });
+			within(() => writeJsonPrivate(approvalFile(), { codes: [...live, { sha256: hashCode(code), expiresAt, createdAt: time }] }));
 			return { code, expiresAt };
 		},
 		lockMs,
@@ -899,7 +899,8 @@ ${error ? `<p class="error">${escape(error)}</p>` : ""}${d.passcodeSet || d.newC
 <form method="post" action="/authorize"><input type="hidden" name="request" value="${escape(d.signed)}">
 <fieldset><legend>Permissions</legend>${boxes}</fieldset>
 <label for="passcode">${d.newClient ? "One-time connect code" : "Passcode or connect code"}</label><input id="passcode" name="passcode" type="text" class="secret" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore required autofocus>
-<div class="row"><button type="submit" name="decision" value="deny" formnovalidate>Deny</button><button class="primary" type="submit" name="decision" value="allow">Allow</button></div></form></main></body></html>`;
+<div class="row"><button type="submit" form="deny" name="decision" value="deny">Deny</button><button class="primary" type="submit" name="decision" value="allow">Allow</button></div></form>
+<form id="deny" method="post" action="/authorize"><input type="hidden" name="request" value="${escape(d.signed)}"></form></main></body></html>`;
 	return {
 		html,
 		headers: {

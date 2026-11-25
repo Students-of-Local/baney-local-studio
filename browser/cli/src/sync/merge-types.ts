@@ -33,6 +33,8 @@ export interface MergeType<S> {
 	tombstones(state: S): string[];
 	/** The state without the named tombstones. */
 	dropTombstones(state: S, ids: ReadonlySet<string>): S;
+	/** Whether applying `op` could bring back what tombstone `id` removed, once the tombstone is gone. */
+	revives(id: string, op: SyncOp): boolean;
 }
 
 // ---------- lww ----------
@@ -91,6 +93,7 @@ export const lww: MergeType<LwwState> = {
 		for (const key of Object.keys(state)) if (!(state[key].del && ids.has(key))) out[key] = state[key];
 		return out;
 	},
+	revives: (id, op) => op.key === id,
 };
 
 // ---------- awset ----------
@@ -164,6 +167,7 @@ export const awset: MergeType<AwSetState> & { tagsOf(state: AwSetState, key: str
 		for (const id of Object.keys(state.tombs)) if (!ids.has(id)) tombs[id] = true;
 		return { tags: state.tags, tombs };
 	},
+	revives: (id, op) => op.kind === "add" && `${op.author}:${op.seq}` === id,
 };
 
 // ---------- log ----------
@@ -286,6 +290,7 @@ export const log: MergeType<LogState> = {
 		}
 		return out;
 	},
+	revives: (id, op) => op.kind === "append" && logTombId(op.key, `${op.author}:${op.seq}`) === id,
 };
 
 export type AnyMergeType = MergeType<any>;

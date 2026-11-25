@@ -376,6 +376,8 @@ export function compact(replica: Replica, registry: Registry, now: number): Repl
 		delete log[opId(op)];
 	}
 	const snapVv = vvMerge(replica.snapshot.vv, frontier);
+	// Ops rebuild still applies over the snapshot: a tombstone stays while one of them would bring back what it removed.
+	const retained = [...Object.values(log), ...Object.values(kept), ...Object.values(replica.held)];
 
 	// Tombstones: note when each was first folded and what must be folded before it may go.
 	const current = currentMembers(replica, now);
@@ -396,7 +398,8 @@ export function compact(replica: Replica, registry: Registry, now: number): Repl
 			const record = get(replica.folded, key) ?? { at: now, need };
 			const ready =
 				now - record.at >= TOMBSTONE_TTL_MS &&
-				Object.keys(record.need).every((id) => vvCovers(snapVv, id, record.need[id]));
+				Object.keys(record.need).every((id) => vvCovers(snapVv, id, record.need[id])) &&
+				!retained.some((op) => op.category === name && type.revives(tomb, op));
 			if (ready) drop.add(tomb);
 			else folded[key] = record;
 		}
@@ -407,6 +410,30 @@ export function compact(replica: Replica, registry: Registry, now: number): Repl
 }
 
 // ---------- rejoin ----------
+
+/**
+ * The snapshot a rejoin adopts. Narrow-only state is never adopted as folded state (older code or a forged snapshot may
+ * send it): those categories are rebuilt from kept ops through registry.decide for this device. When this replica folded
+ * ops the peer does not hold at all, they are gone from its log, so its folded state is joined with the peer's rather
+ * than replaced by it.
+ */
+function adoptedSnapshot(replica: Replica, registry: Registry, message: SnapshotMessage): Snapshot {
+	const incoming: Snapshot = {
+		vv: copyRec(message.snapshot.vv),
+		states: dropNarrow(registry, message.snapshot.states),
+		kept: copyRec(message.snapshot.kept),
+	};
+	const mine = replica.snapshot;
+	if (Object.keys(mine.vv).every((author) => vvCovers(message.vv, author, mine.vv[author]))) return incoming;
+	const states = copyRec(incoming.states);
+	for (const [name, state] of Object.entries(dropNarrow(registry, mine.states))) {
+		const type = registry.typeOf(name);
+		states[name] = has(states, name) && type ? type.merge(states[name], state) : (get(states, name) ?? state);
+	}
+	const kept = copyRec(incoming.kept);
+	for (const id of Object.keys(mine.kept)) kept[id] ??= mine.kept[id];
+	return { vv: vvMerge(incoming.vv, mine.vv), states, kept };
+}
 
 /** Kinds replayed with a fresh clock on rejoin: edits whose outcome depends on their time. */
 function replayable(op: SyncOp, registry: Registry): boolean {
@@ -431,10 +458,11 @@ export function adoptSnapshot(
 	now: number,
 ): { replica: Replica; replayed: SyncOp[] } {
 	const extra = sortedOps(replica.log).filter((op) => !vvCovers(message.vv, op.author, op.seq));
+	const snapshot = adoptedSnapshot(replica, registry, message);
 	const log = rec<SyncOp>();
 	const held = copyRec(replica.held);
 	for (const op of message.ops) {
-		if (opProblem(op) !== null) continue;
+		if (opProblem(op) !== null || vvCovers(snapshot.vv, op.author, op.seq)) continue;
 		if (isTooFarAhead(op.at, now)) held[opId(op)] = op;
 		else log[opId(op)] = op;
 	}
@@ -445,26 +473,8 @@ export function adoptSnapshot(
 	for (const op of [...Object.values(log), ...Object.values(held), ...Object.values(message.snapshot.kept)])
 		if (op.author === replica.device) seq = Math.max(seq, op.seq);
 	const authors = new Set(Object.keys(log).map((id) => id.slice(0, id.lastIndexOf(":"))));
-	const vv = advanceVv(message.snapshot.vv, log, authors);
-	let next = rebuild(
-		{
-			...replica,
-			clock,
-			seq,
-			vv,
-			log,
-			held,
-			// Narrow-only state is never adopted as folded state (older code or a forged snapshot may send it): those
-			// categories are rebuilt from kept ops through registry.decide for this device.
-			snapshot: {
-				vv: copyRec(message.snapshot.vv),
-				states: dropNarrow(registry, message.snapshot.states),
-				kept: copyRec(message.snapshot.kept),
-			},
-			folded: rec<FoldRecord>(),
-		},
-		registry,
-	);
+	const vv = advanceVv(snapshot.vv, log, authors);
+	let next = rebuild({ ...replica, clock, seq, vv, log, held, snapshot, folded: rec<FoldRecord>() }, registry);
 	// Replay only offline edits that still stand: an add whose tag is live after the rebuild (a later remove or re-add
 	// of ours kills it), and the last register edit of ours per key (a later set or del of ours supersedes it).
 	const adopted = next.states;

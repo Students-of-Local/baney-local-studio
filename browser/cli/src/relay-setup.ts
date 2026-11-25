@@ -193,11 +193,11 @@ function computerTag(): string {
 	const file = join(relayFolder(), "computer");
 	try {
 		const tag = readFileSync(file, "utf8");
-		if (/^local-studio-browser-[0-9a-f]{12}$/.test(tag)) return tag;
+		if (/^lsb-[0-9a-f]{12}$/.test(tag)) return tag;
 	} catch {
 		// Nothing deployed from here yet.
 	}
-	const tag = `local-studio-browser-${randomBytes(6).toString("hex")}`;
+	const tag = `lsb-${randomBytes(6).toString("hex")}`;
 	writeAtomic(file, tag, 0o600);
 	return tag;
 }
@@ -225,7 +225,7 @@ async function replaces(name: string, accountId: string | undefined, seam: Relay
 	const versions = listed(asked) as { annotations?: Record<string, unknown> }[] | undefined;
 	if (!versions) return unknown("versions", asked);
 	// Oldest first.
-	const tags = versions.map((v) => v?.annotations?.["workers/tag"]).filter((t) => typeof t === "string" && t.startsWith("local-studio-browser-"));
+	const tags = versions.map((v) => v?.annotations?.["workers/tag"]).filter((t) => typeof t === "string" && t.startsWith("lsb-"));
 	if (tags.length) return { kind: tags.at(-1) === computerTag() ? "mine" : "relay" };
 	const asked2 = await ask(["secret", "list"]);
 	const secrets = listed(asked2) as { name?: unknown }[] | undefined;

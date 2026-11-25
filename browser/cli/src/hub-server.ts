@@ -20,6 +20,7 @@ import { CodeLimitError, REQUEST_LOCK_MS } from "./codes.ts";
 import { HANDS_COMMAND, handsHowTo } from "./computer.ts";
 import { LockTimeoutError } from "./files.ts";
 import {
+	asManager,
 	authenticateDevice,
 	type DeviceRecord,
 	devicesReadable,
@@ -453,8 +454,14 @@ export async function startHub(options: HubOptions): Promise<HubHandle> {
 					out["x-accel-buffering"] = "no";
 					out["cache-control"] ??= "no-cache";
 				}
-				p.res.writeHead(status, out);
-				p.res.flushHeaders();
+				try {
+					p.res.writeHead(status, out);
+					p.res.flushHeaders();
+				} catch {
+					// Node refuses a header value outside Latin-1: that fails this request, never the hub.
+					p.headSent = false;
+					failPending(link, frame.id, 502, "The device answered with a header the hub can't send.");
+				}
 			}
 			return;
 		}
@@ -980,7 +987,8 @@ export async function startHub(options: HubOptions): Promise<HubHandle> {
 		if (req.method !== "POST") return sendJson(res, 405, { error: "method_not_allowed" });
 		// A valid credential is never refused by anyone else's failures: check it first, throttle only failures.
 		const source = requestSource(req);
-		const device = authenticateDevice(bearer(req.headers.authorization));
+		const credential = bearer(req.headers.authorization);
+		const device = authenticateDevice(credential);
 		if (!device) {
 			if (authLimit.blocked(source)) return sendJson(res, 429, { error: "temporarily_unavailable", error_description: "Too many failed attempts from this address. Wait 15 minutes." });
 			authLimit.fail(source);
@@ -990,17 +998,19 @@ export async function startHub(options: HubOptions): Promise<HubHandle> {
 		if (!device.manage) return sendJson(res, 403, { error: "forbidden", error_description: `This device is not a manager. Link it with a code from ${COMMAND_NAME} hub code --manage.` });
 		const body = await readJsonBody(req, res);
 		if (!body) return;
+		// The device may have been removed while the body arrived: the code is written only while it is still a manager.
+		const within = <T>(fn: () => T) => asManager(credential, fn, REQUEST_LOCK_MS);
 		try {
 			if (body.kind === "approval") {
-				const { code, expiresAt } = mintApprovalCode(REQUEST_LOCK_MS);
+				const { code, expiresAt } = mintApprovalCode(REQUEST_LOCK_MS, within);
 				return sendJson(res, 200, { kind: "approval", code, expiresAt, url: `${options.publicUrl}/mcp` });
 			}
 			if (body.kind === "connect") {
-				const { code, expiresAt } = mintConnectCode({ name: typeof body.name === "string" && body.name ? body.name : undefined, manage: body.manage === true }, Date.now(), REQUEST_LOCK_MS);
+				const { code, expiresAt } = mintConnectCode({ name: typeof body.name === "string" && body.name ? body.name : undefined, manage: body.manage === true }, Date.now(), REQUEST_LOCK_MS, within);
 				return sendJson(res, 200, { kind: "connect", code, expiresAt, hubUrl: hubOrigin(options.publicUrl) });
 			}
 		} catch (err) {
-			if (err instanceof HubStateError) return sendJson(res, err.status, { error: "invalid_request", error_description: err.message });
+			if (err instanceof HubStateError) return sendJson(res, err.status, { error: err.status === 401 ? "invalid_token" : err.status === 403 ? "forbidden" : "invalid_request", error_description: err.message });
 			// Only the "codes already waiting" limit is a limit. A held lock is busy; anything else is a fault, logged and answered 500 by the caller.
 			if (err instanceof CodeLimitError) return sendJson(res, 429, { error: "temporarily_unavailable", error_description: err.message });
 			if (err instanceof LockTimeoutError) return sendJson(res, 503, { error: "temporarily_unavailable", error_description: "The hub is busy. Try again in a moment." });

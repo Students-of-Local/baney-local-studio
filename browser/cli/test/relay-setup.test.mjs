@@ -57,6 +57,7 @@ function cloudflare(there = {}, deploys = () => ({ code: 0, out: "Deployed", std
 		}
 		const held = (there[args.at(-1)] ??= { secrets: [], tags: [] });
 		if (args[0] === "deploy") {
+			if (args[2].length > 25) return { code: 1, out: "Tag must be at most 25 characters", stdout: "" };
 			const result = deploys();
 			if (result.code === 0) writeFileSync(options.env.WRANGLER_OUTPUT_FILE_PATH, `{"type":"deploy","targets":["${ADDRESS}"]}\n`);
 			held.tags.push(args[2]);
@@ -74,8 +75,8 @@ test("deploy stages the kit 0600 in a folder of its own and reads the address fr
 		mkdirSync(join(dir, "relay"), { mode: 0o755 });
 		const cf = cloudflare();
 		assert.deepEqual(await mod.deploy("local-studio-browser-relay", ACCOUNT, {}, cf), { ok: true, url: ADDRESS });
-		assert.deepEqual(cf.calls[1].args.filter((a) => !a.startsWith("local-studio-browser-") || a === "local-studio-browser-relay"), ["deploy", "--tag", "--name", "local-studio-browser-relay"]);
-		assert.match(cf.calls[1].args[2], /^local-studio-browser-[0-9a-f]{12}$/);
+		assert.deepEqual(cf.calls[1].args.filter((a) => !/^lsb-/.test(a)), ["deploy", "--tag", "--name", "local-studio-browser-relay"]);
+		assert.match(cf.calls[1].args[2], /^lsb-[0-9a-f]{12}$/);
 		assert.equal(cf.calls[1].options.accountId, ACCOUNT);
 		assert.equal(cf.calls[1].options.cwd, join(dir, "relay"));
 		if (process.platform !== "win32") {
