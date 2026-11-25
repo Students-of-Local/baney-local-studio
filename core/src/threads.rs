@@ -139,6 +139,12 @@ pub(crate) struct Facts {
     pub(crate) harness: Harness,
 }
 
+pub(crate) const BROWSER_PREFIX: &str = "browser-";
+
+pub(crate) fn from_browser(id: &str) -> bool {
+    id.starts_with(BROWSER_PREFIX)
+}
+
 pub(crate) fn saved_rows(data: &Value) -> Vec<SavedRow> {
     let Some(rows) = data.get("sessions").and_then(Value::as_array) else { return Vec::new() };
     rows.iter()
@@ -360,6 +366,7 @@ pub(crate) fn row(
     let project = project_for(&facts.cwd, flags, projects);
     (
         ThreadRow {
+            browser: from_browser(&facts.id),
             id: facts.id,
             project,
             title: facts.title,

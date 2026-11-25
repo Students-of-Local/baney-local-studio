@@ -364,6 +364,7 @@ fn row(id: &str, project: &str, title: &str, shelf: Shelf, status: ThreadStatus,
         pull_request: None,
         harness: Harness::Eukhe,
         machine: None,
+        browser: false,
     }
 }
 
