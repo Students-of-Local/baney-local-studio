@@ -472,7 +472,28 @@ fn creating(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
     let one = smoke.first(&["grow ferns"])? == "fern care" && !smoke.json(&["list"])?.to_string().contains("Fern Care");
     let old = own.join(".replaced/fern-care-1/asks.txt").exists() && !own.join("fern-care/asks.txt").exists();
     smoke.check("the same name replaces it, and the old one is kept aside", again && one && old);
-    refusing(smoke, own)
+    refusing(smoke, own)?;
+    sharing(smoke, own)
+}
+
+fn sharing(smoke: &mut Smoke, own: &Path) -> Result<(), String> {
+    let big = format!("---\nname: Release\ndescription: Release it\n---\n{}", "word ".repeat(60_000));
+    put(&own.join("plum/SKILL.md"), &big)?;
+    let (beside, shown) = save(smoke, &block("plum", "jam"))?;
+    let alone = read(own.join("plum/SKILL.md")).is_ok_and(|text| text.len() == big.len());
+    smoke.check("a skill too large to read is not replaced by its folder's name", beside && alone);
+    smoke.check("a new name hides nothing", own.join("plum-2/SKILL.md").exists() && !shown.contains("instead of"));
+    skill(&smoke.home.join(".claude/skills"), "sewing", "Sew a hem", "theirs")?;
+    let (hidden, shown) = save(smoke, &block("Sewing", "yours"))?;
+    let path = smoke.home.join(".claude/skills/sewing/SKILL.md");
+    let named = shown.contains("instead of") && shown.contains(&*path.to_string_lossy());
+    smoke.check("the skill a new one hides is named", hidden && named);
+    let (_, shown) = save(smoke, &block("sewing", "yours again"))?;
+    smoke.check("and only the first time", !shown.contains("instead of") && shown.contains("is now in"));
+    for dir in [own.join("plum"), smoke.home.join(".claude/skills/sewing")] {
+        remove_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn refusing(smoke: &mut Smoke, own: &Path) -> Result<(), String> {

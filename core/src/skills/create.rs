@@ -50,6 +50,7 @@ pub struct Draft {
 pub struct Saved {
     pub path: PathBuf,
     pub kept: Vec<PathBuf>,
+    pub hides: Vec<PathBuf>,
 }
 
 impl Draft {
@@ -108,10 +109,17 @@ impl Store {
     pub fn save(&mut self, draft: &Draft) -> Result<Saved, String> {
         let skills = self.own()?;
         self.checked = None;
-        let mut old = Vec::new();
+        let (mut old, mut hides) = (Vec::new(), Vec::new());
         for skill in self.list()? {
-            let same = skill.source == "yours" && skill.name.to_lowercase() == draft.name.to_lowercase();
-            let Some(folder) = skill.path.parent().filter(|_| same) else { continue };
+            let read = !skill.description.is_empty();
+            if !read || skill.name.to_lowercase() != draft.name.to_lowercase() {
+                continue;
+            }
+            if skill.source != "yours" {
+                hides.extend(skill.problem.is_none().then_some(skill.path));
+                continue;
+            }
+            let Some(folder) = skill.path.parent() else { continue };
             if folder.parent() != Some(skills.as_path()) {
                 return Err(format!("{} already has this name. Move or rename it first.", skill.path.display()));
             }
@@ -139,7 +147,7 @@ impl Store {
             let _ = remove_dir_all(&staged);
         }
         self.checked = None;
-        outcome.map(|kept| Saved { path: target, kept })
+        outcome.map(|kept| Saved { path: target, kept, hides })
     }
 }
 

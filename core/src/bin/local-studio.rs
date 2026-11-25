@@ -254,9 +254,12 @@ fn create(
     });
     let kept: Vec<_> = saved.iter().flat_map(|saved| &saved.kept).map(|path| path.to_string_lossy()).collect();
     text.extend(kept.iter().map(|path| format!("the one it replaces is now in {}", plain(path))));
+    let hides: Vec<_> = saved.iter().flat_map(|saved| &saved.hides).map(|path| path.to_string_lossy()).collect();
+    text.extend(hides.iter().map(|path| format!("it is used instead of the one with its name in {}", plain(path))));
     let value = serde_json::to_value(&draft).map(|mut value| {
         value["saved"] = serde_json::json!(saved.as_ref().map(|saved| saved.path.to_string_lossy()));
         value["kept"] = serde_json::json!(kept);
+        value["hides"] = serde_json::json!(hides);
         value
     });
     Ok((value, text.join("\n")))
