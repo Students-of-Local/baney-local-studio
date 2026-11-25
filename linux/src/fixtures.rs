@@ -250,6 +250,7 @@ pub fn teardown(app: &Rc<App>) {
     crate::scenes_pickers::reset(app);
     app.branches.reset();
     app.timeline.clear();
+    app.unsent.borrow_mut().clear();
     *app.state.borrow_mut() = State::default();
     app.render_pending();
     crate::theme::color_scheme(ColorScheme::System);

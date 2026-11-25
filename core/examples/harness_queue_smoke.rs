@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,8 +11,8 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
     AccessMode, ApprovalAnswer, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel,
-    NotificationKind, PromptDraft, Settings, SkillDraft, SkillFile, Studio, StudioConfig, StudioError, ThreadSettings,
-    TranscriptOp, Update, Waker, WorktreeChoice,
+    NotificationKind, PromptDraft, Settings, SkillDraft, SkillFile, Studio, StudioConfig, ThreadSettings, TranscriptOp,
+    Update, Waker, WorktreeChoice,
 };
 use serde_json::{Map, Value};
 
@@ -29,6 +30,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(12);
 const PROMPT: Duration = Duration::from_secs(2);
 const RESUME_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_RESUME_MS";
 const START_DELAY: &str = "LOCAL_STUDIO_FAKE_CODEX_START_MS";
+const REOPENS: u32 = 10;
 const OPEN_LATER: [&str; 2] = ["draft-stall-codex", "draft-codex-failed-stop"];
 
 #[derive(Default)]
@@ -1177,7 +1179,7 @@ fn reopened(run: &mut Run, started: &BTreeMap<String, String>, root: &Path) -> a
 
 fn opened(config: &StudioConfig, act: impl FnOnce(&mut Run) -> anyhow::Result<()>) -> anyhow::Result<Watch> {
     let signal = Arc::new(Signal::default());
-    let studio = reopen(config, &signal)?;
+    let studio = Studio::new(config.clone(), Arc::clone(&signal) as Arc<dyn Waker>)?;
     let mut run = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: 0 };
     let connected = run.setup("daemon connected", |watch| matches!(watch.connection, Some(Connection::Ready)));
     let outcome = connected.and_then(|()| act(&mut run));
@@ -1466,16 +1468,29 @@ fn scratch_repo(work: &Path) -> anyhow::Result<()> {
     git(work, &["-c", "user.name=smoke", "-c", "user.email=smoke@localhost", "commit", "-q", "-m", "init"])
 }
 
-fn reopen(config: &StudioConfig, signal: &Arc<Signal>) -> anyhow::Result<Arc<Studio>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match Studio::new(config.clone(), Arc::clone(signal) as Arc<dyn Waker>) {
-            Err(StudioError::Owned { .. }) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            opened => return Ok(opened?),
+fn reopens_while_programs_start(config: &StudioConfig) -> anyhow::Result<()> {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = Command::new("true").status();
+                }
+            });
         }
-    }
+        let mut closed = Vec::new();
+        let outcome = (1..=REOPENS).try_for_each(|time| {
+            let studio = Studio::new(config.clone(), Arc::new(Signal::default()) as Arc<dyn Waker>)
+                .with_context(|| format!("reopen {time} of {REOPENS} on the same data dir"))?;
+            studio.shutdown();
+            closed.push(studio);
+            anyhow::Ok(())
+        });
+        stop.store(true, Ordering::Relaxed);
+        outcome
+    })?;
+    println!("ok   {REOPENS} reopens on the same data dir while programs start");
+    Ok(())
 }
 
 fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
@@ -1561,14 +1576,14 @@ fn main() -> anyhow::Result<()> {
         println!("     restart Studio on the same data dir");
         let started = std::mem::take(&mut run.watch.started);
         let signal = Arc::new(Signal::default());
-        let studio = reopen(&config, &signal)?;
+        let studio = Studio::new(config.clone(), Arc::clone(&signal) as Arc<dyn Waker>)?;
         let mut again = Run { studio: Arc::clone(&studio), signal, watch: Watch::default(), sent: run.sent };
         let outcome = reopened(&mut again, &started, &root);
         studio.shutdown();
         misses.append(&mut again.watch.misses);
         outcome
     });
-    let outcome = outcome.and_then(|()| {
+    let outcome = outcome.and_then(|()| reopens_while_programs_start(&config)).and_then(|()| {
         let saved = root.join("data/harness/codex-models.json");
         std::env::set_var(fakes[1].0, root.join("no-codex"));
         misses.append(&mut models_at_open(&config, "with Codex gone", (2, false))?.misses);

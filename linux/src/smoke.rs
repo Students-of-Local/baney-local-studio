@@ -5,9 +5,13 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
-use local_studio_core::{ApprovalAnswer, Block, Connection, ItemKind, KernelState, ModelKey, ToolState};
+use local_studio_core::{
+    ApprovalAnswer, Block, Connection, ItemKind, KernelState, ModelKey, PromptDraft, QueuedMessage, ToolState, Update,
+};
 
 use crate::app::App;
+use crate::composer::TAKE_BACK;
+use crate::state::PendingSend;
 
 const PROMPT: &str = "Use the bash tool to run exactly this command once: `echo smoke-ok > smoke.txt && cat smoke.txt`. Then reply with only the word done.";
 const MARK: &str = "smoke-ok";
@@ -180,6 +184,112 @@ fn send_kernel_prompt(app: &Rc<App>, phase: &Rc<Cell<Phase>>) {
     }
     app.composer.set_text(KERNEL_PROMPT);
     app.composer.submit(app);
+}
+
+fn keeps_unsent(app: &Rc<App>, thread: Option<String>) -> bool {
+    let holds = |text: &str| app.composer.text() == text;
+    app.composer.set_text(KEPT);
+    app.composer.extras.restore(vec![], vec!["smoke.txt".to_string()]);
+    app.open_page(crate::state::Page::Usage);
+    app.select_thread(thread.clone());
+    let page = holds(KEPT);
+    app.new_thread(None);
+    let empty = holds("") && !app.composer.extras.has_attachments();
+    app.composer.set_text(REJECTED);
+    app.select_thread(thread.clone());
+    let (_, files, _) = app.composer.extras.take();
+    let back = holds(KEPT) && files == ["smoke.txt"];
+    app.composer.set_text("");
+    app.new_thread(None);
+    let new = holds(REJECTED);
+    app.composer.set_text("");
+    page && empty && back && new && hands_back(app, thread)
+}
+
+fn hands_back(app: &Rc<App>, thread: Option<String>) -> bool {
+    let Some(id) = thread.clone() else { return false };
+    let holds = |text: &str| app.composer.text() == text;
+    let draft =
+        |file: &str| PromptDraft { text: format!("returned {file}"), images: vec![], files: vec![file.to_string()] };
+    let returned = |file: &str| {
+        app.apply(vec![Update::ComposerDraft { thread: id.clone(), draft: draft(file) }]);
+    };
+    let started = |draft: &str| {
+        app.apply(vec![Update::ThreadStarted { draft: draft.to_string(), thread: id.clone() }]);
+    };
+    app.state.borrow_mut().pending.push(PendingSend {
+        request: MISSING.to_string(),
+        thread: id.clone(),
+        text: draft("a.txt").text,
+        draft: draft("a.txt"),
+        queued: false,
+        baseline: 0,
+        queue_baseline: 0,
+    });
+    app.apply(vec![Update::RequestFailed { request: MISSING.to_string(), message: REJECTED.to_string() }]);
+    returned("b.txt");
+    let away = holds("");
+    app.select_thread(thread);
+    let both = holds("returned b.txt\n\nreturned a.txt");
+    app.composer.set_text(KEPT);
+    returned("c.txt");
+    let before = holds(&format!("returned c.txt\n\n{KEPT}"));
+    let queued = QueuedMessage { id: MISSING.to_string(), text: REJECTED.to_string(), steering: false, sending: false };
+    app.apply(vec![Update::Queue { thread: id.clone(), queued: vec![queued] }]);
+    let pressed = press(app.composer.root.upcast_ref(), TAKE_BACK) && holds(&format!("returned c.txt\n\n{KEPT}"));
+    app.apply(vec![
+        Update::Queue { thread: id.clone(), queued: vec![] },
+        Update::ComposerText { thread: id.clone(), text: REJECTED.to_string() },
+    ]);
+    let taken = pressed && holds(&format!("{REJECTED}\n\nreturned c.txt\n\n{KEPT}"));
+    let (_, mut files, _) = app.composer.extras.take();
+    files.sort();
+    app.composer.set_text("");
+    app.new_thread(None);
+    app.state.borrow_mut().draft = Some("gtk-draft-smoke".to_string());
+    app.new_thread(None);
+    app.composer.set_text(REJECTED);
+    started("gtk-draft-smoke");
+    let stayed = app.state.borrow().selected.is_none() && holds(REJECTED);
+    started("fork:smoke");
+    let forked = app.state.borrow().selected.as_deref() == Some(id.as_str()) && holds("");
+    app.new_thread(None);
+    let still = holds(REJECTED);
+    app.state.borrow_mut().draft = Some("gtk-draft-smoke".to_string());
+    started("gtk-draft-smoke");
+    let followed = holds(REJECTED);
+    app.composer.set_text("");
+    app.new_thread(None);
+    app.state.borrow_mut().draft = Some("gtk-draft-smoke".to_string());
+    app.composer.set_text(REJECTED);
+    app.select_thread(Some(id.clone()));
+    app.apply(vec![Update::ThreadStarted { draft: "gtk-draft-smoke".to_string(), thread: MISSING.to_string() }]);
+    let parted = holds("") && app.state.borrow().selected.as_deref() == Some(id.as_str());
+    app.new_thread(None);
+    let waits = parted && holds(REJECTED);
+    app.composer.set_text("");
+    app.select_thread(Some(id.clone()));
+    let merged = away && both && before && files == ["a.txt", "b.txt", "c.txt"];
+    println!("     handed back {merged}, taken back {taken}, left a start {stayed} {waits}");
+    println!("     forked {forked} {still}, followed {followed}");
+    merged && taken && stayed && waits && forked && still && followed
+}
+
+fn press(widget: &gtk::Widget, tooltip: &str) -> bool {
+    if let Some(button) =
+        widget.downcast_ref::<gtk::Button>().filter(|_| widget.tooltip_text().as_deref() == Some(tooltip))
+    {
+        button.emit_clicked();
+        return true;
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if press(&current, tooltip) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
 }
 
 fn turn_done(app: &Rc<App>) -> Option<Vec<local_studio_core::Item>> {
@@ -456,7 +566,12 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
             println!("ok   a second one, with the composer taken, is in the stash");
             app.composer.set_text("");
             let thread = app.state.borrow().threads.first().map(|row| row.id.clone());
-            app.select_thread(thread);
+            app.select_thread(thread.clone());
+            if !keeps_unsent(app, thread) {
+                finish(app, phase, failed, false, "unsent text did not stay with its thread");
+                return;
+            }
+            println!("ok   unsent text and files stay with their thread and come back with it");
             if let Err(error) = write_mentioned(std::path::Path::new(project)) {
                 finish(app, phase, failed, false, &format!("write what @ lists: {error}"));
                 return;

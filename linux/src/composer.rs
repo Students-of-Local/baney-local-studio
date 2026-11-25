@@ -3,7 +3,7 @@ use std::rc::Weak;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use local_studio_core::{AccessMode, ApprovalAnswer, Connection, ModelKey, PromptDraft, SendShortcut};
+use local_studio_core::{AccessMode, ApprovalAnswer, Connection, ImageAttachment, ModelKey, PromptDraft, SendShortcut};
 
 use crate::app::{App, Dirty};
 use crate::extras::Extras;
@@ -13,7 +13,42 @@ use crate::picker::{Picker, Row, Spec};
 use crate::state::State;
 
 const PLACEHOLDER: &str = "Ask anything, @tag files/folders, or / for commands";
+pub const TAKE_BACK: &str = "Cancel and Return to the Composer";
 const ADD_PROVIDER: &str = "\u{1}add-provider";
+
+#[derive(Default)]
+pub struct Unsent {
+    pub text: String,
+    pub files: Vec<String>,
+    pub project: Option<String>,
+    images: Vec<ImageAttachment>,
+    contexts: Vec<(String, String)>,
+}
+
+impl From<PromptDraft> for Unsent {
+    fn from(draft: PromptDraft) -> Self {
+        Self { text: draft.text, images: draft.images, files: draft.files, ..Self::default() }
+    }
+}
+
+impl Unsent {
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() && self.contexts.is_empty()
+    }
+
+    pub fn then(mut self, later: Self) -> Self {
+        if self.text.trim().is_empty() {
+            self.text = later.text;
+        } else if !later.text.trim().is_empty() {
+            self.text = format!("{}\n\n{}", self.text, later.text);
+        }
+        self.images.extend(later.images.into_iter().filter(|image| !self.images.contains(image)).collect::<Vec<_>>());
+        self.files.extend(later.files.into_iter().filter(|file| !self.files.contains(file)).collect::<Vec<_>>());
+        self.contexts.extend(later.contexts);
+        self.project = later.project.or(self.project);
+        self
+    }
+}
 
 pub struct Composer {
     pub root: adw::Clamp,
@@ -204,9 +239,15 @@ impl Composer {
             }
             view.stop_signal_emission_by_name("paste-clipboard");
             let weak = weak.clone();
+            let thread = weak.upgrade().and_then(|app| app.state.borrow().selected.clone());
             clipboard.read_texture_async(None::<&gtk::gio::Cancellable>, move |result| {
-                if let (Some(app), Ok(Some(texture))) = (weak.upgrade(), result) {
+                let (Some(app), Ok(Some(texture))) = (weak.upgrade(), result) else { return };
+                if app.state.borrow().selected == thread {
                     app.composer.extras.attach_texture(&texture);
+                } else {
+                    let images = vec![crate::extras::png(&texture)];
+                    let pasted = PromptDraft { text: String::new(), images, files: Vec::new() };
+                    app.park(thread.clone(), pasted.into());
                 }
             });
         });
@@ -399,6 +440,22 @@ impl Composer {
             self.set_draft(draft.clone());
         }
         free
+    }
+
+    pub fn leave(&self) -> Option<Unsent> {
+        let text = self.text();
+        let (images, files, contexts) = self.extras.take();
+        self.reset();
+        Some(Unsent { text, images, files, contexts, project: None }).filter(|unsent| !unsent.is_empty())
+    }
+
+    pub fn bring(&self, unsent: Unsent) {
+        self.set_text(&unsent.text);
+        self.extras.restore(unsent.images, unsent.files);
+        for (label, text) in unsent.contexts {
+            self.extras.add_context(&label, &text);
+        }
+        self.extras.close();
     }
 
     pub fn view(&self) -> gtk::TextView {
@@ -726,14 +783,11 @@ fn queued_row(app: &Weak<App>, state: &State, id: &str, text: &str, sending: boo
     status.add_css_class("ls-meta");
     row.append(&status);
     let thread = state.selected.clone().unwrap_or_default();
-    for (icon, tooltip, now) in
-        [(icons::UP, "Send Now", true), (icons::CLOSE, "Cancel and Return to the Composer", false)]
-    {
+    for (icon, tooltip, now) in [(icons::UP, "Send Now", true), (icons::CLOSE, TAKE_BACK, false)] {
         let button = icons::flat(icon, tooltip);
         button.add_css_class("circular");
         let thread = thread.clone();
         let id = id.to_string();
-        let text = text.to_string();
         let weak = app.clone();
         button.connect_clicked(move |_| {
             let Some(app) = weak.upgrade() else { return };
@@ -742,7 +796,6 @@ fn queued_row(app: &Weak<App>, state: &State, id: &str, text: &str, sending: boo
                 app.core.run(|studio| studio.send_queued_now(thread, id));
             } else {
                 app.core.run(|studio| studio.remove_queued(thread, id));
-                app.composer.set_text(&text);
             }
         });
         row.append(&button);

@@ -1096,7 +1096,8 @@ fn lock_data_dir(data_dir: &Path, take_over_serve: bool) -> Result<std::fs::File
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) => {
                 let holder = std::fs::read_to_string(&path).unwrap_or_default().trim().to_string();
-                let gone = holder.parse::<u32>().map_or(true, |pid| serve::executable(pid).is_none());
+                let ours = |pid: u32| pid == std::process::id();
+                let gone = holder.parse().map_or(true, |pid| ours(pid) || serve::executable(pid).is_none());
                 if asked.is_none() && gone && since.elapsed() < PROBED_WITHIN {
                     std::thread::sleep(PROBED_POLL);
                     continue;

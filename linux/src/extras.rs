@@ -63,6 +63,11 @@ pub struct Extras {
     app: Weak<App>,
 }
 
+pub fn png(texture: &gdk::Texture) -> ImageAttachment {
+    let data = texture.save_to_png_bytes().to_vec();
+    ImageAttachment { mime_type: "image/png".to_string(), data }
+}
+
 impl Extras {
     pub fn new(app: Weak<App>) -> Self {
         let list = gtk::ListBox::new();
@@ -379,7 +384,7 @@ impl Extras {
         self.menu.set_visible(true);
     }
 
-    fn close(&self) {
+    pub fn close(&self) {
         self.trigger.replace(None);
         self.items.borrow_mut().clear();
         self.menu.set_visible(false);
@@ -518,8 +523,7 @@ impl Extras {
     }
 
     pub fn attach_texture(&self, texture: &gdk::Texture) {
-        let data = texture.save_to_png_bytes().to_vec();
-        self.images.borrow_mut().push(ImageAttachment { mime_type: "image/png".to_string(), data });
+        self.images.borrow_mut().push(png(texture));
         self.render_chips();
     }
 
