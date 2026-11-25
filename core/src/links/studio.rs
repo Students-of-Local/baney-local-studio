@@ -2,6 +2,7 @@ use super::hidden;
 
 const NAME_LIMIT: usize = 100;
 const PATH_LIMIT: usize = 1024;
+const SHOWN_LIMIT: usize = 60;
 
 pub(super) const APP_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
@@ -145,8 +146,8 @@ pub fn link_words(link: StudioLink) -> LinkWords {
         StudioLink::Browser { page } => (format!("Open the browser's {} page", title_in(PAGES, &page)), page),
         StudioLink::System { pane } => (format!("Open {} settings on this computer", title_in(PANES, &pane)), pane),
         StudioLink::App { name } => (format!("Open {name}"), name),
-        StudioLink::Reveal { path } => (format!("Show {} in {manager}", file_name(&path)), path),
-        StudioLink::File { path } => (format!("Open {}", file_name(&path)), path),
+        StudioLink::Reveal { path } => (format!("Show {} in {manager}", shown(file_name(&path))), path),
+        StudioLink::File { path } => (format!("Open {}", shown(file_name(&path))), path),
         StudioLink::Shortcut { name } => (format!("Run the shortcut \u{201C}{name}\u{201D}"), name),
     };
     LinkWords { title, detail, confirm }
@@ -164,13 +165,27 @@ pub(super) fn file_name(path: &str) -> &str {
     path.rsplit('/').find(|segment| !segment.is_empty()).unwrap_or(path)
 }
 
+fn shown(name: &str) -> String {
+    let words: Vec<char> = name.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
+    if words.is_empty() {
+        return "a folder or file with a blank name".to_string();
+    }
+    if words.len() <= SHOWN_LIMIT {
+        return words.into_iter().collect();
+    }
+    let half = SHOWN_LIMIT / 2;
+    let start = words[..half].iter();
+    let end = words[words.len() - half + 1..].iter();
+    start.chain(&['\u{2026}']).chain(end).collect()
+}
+
 fn one_of(table: &[(&str, &str)], given: &str) -> Option<String> {
     table.iter().find(|(id, _)| id.eq_ignore_ascii_case(given)).map(|(id, _)| (*id).to_string())
 }
 
 fn thread(tail: &str) -> Option<String> {
     let id = decode(tail.strip_prefix('/')?, plain)?;
-    let fits = (1..=NAME_LIMIT).contains(&id.len());
+    let fits = (1..=NAME_LIMIT).contains(&id.len()) && !id.starts_with('-');
     (fits && id.chars().all(|char| char.is_ascii_alphanumeric() || matches!(char, '_' | '-'))).then_some(id)
 }
 
