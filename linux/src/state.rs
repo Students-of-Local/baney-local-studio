@@ -148,6 +148,10 @@ impl State {
             .or_else(|| self.projects.first().map(|project| project.id.clone()))
     }
 
+    pub fn composer_key(&self) -> String {
+        self.selected.clone().unwrap_or_else(|| format!("new:{}", self.current_project().unwrap_or_default()))
+    }
+
     pub fn workspace_dir(&self) -> Option<String> {
         if self.selected.is_some() {
             if let Some(info) = &self.info {

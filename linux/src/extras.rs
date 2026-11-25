@@ -379,7 +379,7 @@ impl Extras {
         self.menu.set_visible(true);
     }
 
-    fn close(&self) {
+    pub fn close(&self) {
         self.trigger.replace(None);
         self.items.borrow_mut().clear();
         self.menu.set_visible(false);

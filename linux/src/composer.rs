@@ -3,7 +3,7 @@ use std::rc::Weak;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use local_studio_core::{AccessMode, ApprovalAnswer, Connection, ModelKey, PromptDraft, SendShortcut};
+use local_studio_core::{AccessMode, ApprovalAnswer, Connection, ImageAttachment, ModelKey, PromptDraft, SendShortcut};
 
 use crate::app::{App, Dirty};
 use crate::extras::Extras;
@@ -14,6 +14,19 @@ use crate::state::State;
 
 const PLACEHOLDER: &str = "Ask anything, @tag files/folders, or / for commands";
 const ADD_PROVIDER: &str = "\u{1}add-provider";
+
+pub struct Unsent {
+    text: String,
+    images: Vec<ImageAttachment>,
+    files: Vec<String>,
+    contexts: Vec<(String, String)>,
+}
+
+impl From<PromptDraft> for Unsent {
+    fn from(draft: PromptDraft) -> Self {
+        Self { text: draft.text, images: draft.images, files: draft.files, contexts: Vec::new() }
+    }
+}
 
 pub struct Composer {
     pub root: adw::Clamp,
@@ -399,6 +412,23 @@ impl Composer {
             self.set_draft(draft.clone());
         }
         free
+    }
+
+    pub fn leave(&self) -> Option<Unsent> {
+        let text = self.text();
+        let typed = !text.trim().is_empty() || self.extras.has_attachments();
+        let (images, files, contexts) = self.extras.take();
+        self.reset();
+        typed.then_some(Unsent { text, images, files, contexts })
+    }
+
+    pub fn bring(&self, unsent: Unsent) {
+        self.set_text(&unsent.text);
+        self.extras.restore(unsent.images, unsent.files);
+        for (label, text) in unsent.contexts {
+            self.extras.add_context(&label, &text);
+        }
+        self.extras.close();
     }
 
     pub fn view(&self) -> gtk::TextView {

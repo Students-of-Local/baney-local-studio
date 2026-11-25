@@ -11,7 +11,7 @@ use local_studio_core::{
 use webkit::prelude::*;
 
 use crate::branches::BranchBar;
-use crate::composer::Composer;
+use crate::composer::{Composer, Unsent};
 use crate::core::{Core, Opened};
 use crate::dashboard::LocalPage;
 use crate::drawer::Drawer;
@@ -103,6 +103,7 @@ pub struct App {
     pub editors: Editors,
     pub saved_accels: RefCell<Option<SavedAccels>>,
     pub history: RefCell<(Vec<String>, usize)>,
+    pub unsent: RefCell<HashMap<String, Unsent>>,
     pub navigating: Cell<bool>,
     pub interactive: Cell<bool>,
     pub force_steer: Cell<bool>,
@@ -264,6 +265,7 @@ impl App {
                 editors,
                 saved_accels: RefCell::new(None),
                 history: RefCell::new((Vec::new(), 0)),
+                unsent: RefCell::new(HashMap::new()),
                 navigating: Cell::new(false),
                 interactive: Cell::new(false),
                 force_steer: Cell::new(false),
@@ -417,6 +419,10 @@ impl App {
                     ours
                 };
                 if ours {
+                    let here = self.state.borrow().selected.is_none();
+                    if let Some(unsent) = here.then(|| self.composer.leave()).flatten() {
+                        self.unsent.borrow_mut().insert(thread.clone(), unsent);
+                    }
                     self.select_thread(Some(thread));
                 }
             }
@@ -495,11 +501,15 @@ impl App {
             Update::ComposerText { thread, text } => {
                 if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
                     self.composer.set_text(&text);
+                } else {
+                    self.park(thread, PromptDraft { text, images: Vec::new(), files: Vec::new() });
                 }
             }
             Update::ComposerDraft { thread, draft } => {
                 if self.state.borrow().selected.as_deref() == Some(thread.as_str()) {
                     self.composer.set_draft(draft);
+                } else {
+                    self.park(thread, draft);
                 }
             }
             Update::Models { models, favorites, hidden } => {
@@ -863,11 +873,12 @@ impl App {
             }
             history.1 = history.0.len() - 1;
         }
+        if self.state.borrow().selected == thread && self.state.borrow().page == Page::Thread {
+            return;
+        }
+        self.keep_unsent();
         {
             let mut state = self.state.borrow_mut();
-            if state.selected == thread && state.page == Page::Thread {
-                return;
-            }
             if let Some(thread) = &thread {
                 state.draft_project = state.row(thread).and_then(|row| row.project.clone());
             }
@@ -879,7 +890,7 @@ impl App {
         }
         self.timeline.clear();
         self.render_pending();
-        self.composer.reset();
+        self.bring_unsent();
         self.core.run(|studio| studio.select_thread(thread.clone()));
         let running = thread.as_deref().map_or(0, |id| {
             self.state
@@ -896,7 +907,32 @@ impl App {
         }
     }
 
+    fn park(&self, thread: String, draft: PromptDraft) {
+        let taken = self.unsent.borrow().contains_key(&thread);
+        if taken {
+            self.composer.tools.keep(&draft.text);
+        } else {
+            self.unsent.borrow_mut().insert(thread, draft.into());
+        }
+    }
+
+    fn keep_unsent(&self) {
+        let key = self.state.borrow().composer_key();
+        if let Some(unsent) = self.composer.leave() {
+            self.unsent.borrow_mut().insert(key, unsent);
+        }
+    }
+
+    fn bring_unsent(&self) {
+        let key = self.state.borrow().composer_key();
+        let unsent = self.unsent.borrow_mut().remove(&key);
+        if let Some(unsent) = unsent {
+            self.composer.bring(unsent);
+        }
+    }
+
     pub fn new_thread(self: &Rc<Self>, project: Option<String>) {
+        self.keep_unsent();
         {
             let mut state = self.state.borrow_mut();
             let project = project.or_else(|| state.current_project());
@@ -907,6 +943,7 @@ impl App {
             state.draft_project = project;
             state.page = Page::Thread;
         }
+        self.bring_unsent();
         self.timeline.clear();
         self.branches.reset();
         self.core.run(|studio| studio.select_thread(None));

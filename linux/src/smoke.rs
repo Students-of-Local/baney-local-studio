@@ -182,6 +182,27 @@ fn send_kernel_prompt(app: &Rc<App>, phase: &Rc<Cell<Phase>>) {
     app.composer.submit(app);
 }
 
+fn keeps_unsent(app: &Rc<App>, thread: Option<String>) -> bool {
+    let holds = |text: &str| app.composer.text() == text;
+    app.composer.set_text(KEPT);
+    app.composer.extras.restore(vec![], vec!["smoke.txt".to_string()]);
+    app.open_page(crate::state::Page::Usage);
+    app.select_thread(thread.clone());
+    let page = holds(KEPT);
+    app.new_thread(None);
+    let empty = holds("") && !app.composer.extras.has_attachments();
+    app.composer.set_text(REJECTED);
+    app.select_thread(thread.clone());
+    let (_, files, _) = app.composer.extras.take();
+    let back = holds(KEPT) && files == ["smoke.txt"];
+    app.composer.set_text("");
+    app.new_thread(None);
+    let new = holds(REJECTED);
+    app.composer.set_text("");
+    app.select_thread(thread);
+    page && empty && back && new && holds("")
+}
+
 fn turn_done(app: &Rc<App>) -> Option<Vec<local_studio_core::Item>> {
     let pending = {
         let state = app.state.borrow();
@@ -456,7 +477,12 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
             println!("ok   a second one, with the composer taken, is in the stash");
             app.composer.set_text("");
             let thread = app.state.borrow().threads.first().map(|row| row.id.clone());
-            app.select_thread(thread);
+            app.select_thread(thread.clone());
+            if !keeps_unsent(app, thread) {
+                finish(app, phase, failed, false, "unsent text did not stay with its thread");
+                return;
+            }
+            println!("ok   unsent text and files stay with their thread and come back with it");
             if let Err(error) = write_mentioned(std::path::Path::new(project)) {
                 finish(app, phase, failed, false, &format!("write what @ lists: {error}"));
                 return;
