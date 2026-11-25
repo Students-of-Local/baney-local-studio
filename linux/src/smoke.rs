@@ -19,6 +19,7 @@ const STUB_KEY: &str = "smoke-key";
 const STUB_NAME: &str = "Smoke Stub";
 const FOLLOW_UP: &str = "Smoke follow-up: without using any tools, reply with only the word again.";
 const REJECTED: &str = "smoke rejected send";
+const KEPT: &str = "smoke: kept in the stash";
 const MISSING: &str = "smoke-missing-thread";
 const KERNEL_PROMPT: &str =
     "List the files here and count them with Python: use the python tool once, then reply with only the count.";
@@ -421,6 +422,9 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
             );
             app.state.borrow_mut().selected = Some(MISSING.to_string());
             app.composer.set_text(REJECTED);
+            app.composer.extras.restore(vec![], vec!["smoke.txt".to_string()]);
+            app.composer.submit(app);
+            app.composer.set_text(KEPT);
             app.composer.submit(app);
             if !app.timeline.local_texts().iter().any(|text| text == REJECTED) {
                 finish(app, phase, failed, false, "the rejected send was not drawn when it was sent");
@@ -432,12 +436,14 @@ fn follow_up(app: &Rc<App>, phase: &Rc<Cell<Phase>>, failed: &Rc<Cell<bool>>, pr
             if !app.state.borrow().pending.is_empty() {
                 return;
             }
+            let (_, files, _) = app.composer.extras.take();
             let restored = app.composer.text() == REJECTED && app.timeline.local_texts().is_empty();
-            if !restored {
+            if !restored || files != ["smoke.txt"] || app.composer.tools.kept() != [KEPT] {
                 finish(app, phase, failed, false, "a rejected send did not remove its bubble and restore the composer");
                 return;
             }
-            println!("ok   a rejected send removed its bubble and returned the text to the composer");
+            println!("ok   a rejected send removed its bubble and returned its text and file to the composer");
+            println!("ok   a second one, with the composer taken, is in the stash");
             app.composer.set_text("");
             let thread = app.state.borrow().threads.first().map(|row| row.id.clone());
             app.select_thread(thread);

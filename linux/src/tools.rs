@@ -144,10 +144,20 @@ impl Tools {
             self.stash.popup();
             return;
         }
-        self.entries.borrow_mut().insert(0, text.trim().replace(SEPARATOR, " "));
-        self.save();
+        self.keep(&text);
         app.composer.set_text("");
         app.toast("Prompt stashed. Restore it from the stash menu.");
+    }
+
+    pub fn keep(&self, text: &str) {
+        if !text.trim().is_empty() {
+            self.entries.borrow_mut().insert(0, text.trim().replace(SEPARATOR, " "));
+            self.save();
+        }
+    }
+
+    pub fn kept(&self) -> Vec<String> {
+        self.entries.borrow().clone()
     }
 
     fn restore(&self, app: &Rc<App>, index: usize) {

@@ -389,6 +389,14 @@ impl Composer {
         self.extras.restore(draft.images, draft.files);
     }
 
+    pub fn restore(&self, draft: &PromptDraft) -> bool {
+        let free = self.text().trim().is_empty() && !self.extras.has_attachments();
+        if free {
+            self.set_draft(draft.clone());
+        }
+        free
+    }
+
     pub fn view(&self) -> gtk::TextView {
         self.view.clone()
     }
@@ -444,7 +452,7 @@ impl Composer {
         if !text.is_empty() {
             prompt.push(text.clone());
         }
-        app.send(PromptDraft { text: prompt.join("\n\n"), images, files }, text);
+        app.send(PromptDraft { text: prompt.join("\n\n"), images, files });
     }
 
     #[allow(clippy::too_many_lines)]

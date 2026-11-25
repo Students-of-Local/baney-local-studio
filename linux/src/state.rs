@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use local_studio_core::{
     AccessMode, AppUpdateState, Approval, ChannelInstall, Connection, DaemonMismatch, GitStatus, KernelState,
     Keybinding, LocalDashboard, LocalEngine, LocalSnapshot, Machine, ModelKey, ModelOption, PairedDevice, Project,
-    ProjectScript, ProjectSettings, ProviderStatus, QueuedMessage, Settings, SetupStage, Subagent, ThreadInfo,
-    ThreadRow, UsagePeriod, UsageReport,
+    ProjectScript, ProjectSettings, PromptDraft, ProviderStatus, QueuedMessage, Settings, SetupStage, Subagent,
+    ThreadInfo, ThreadRow, UsagePeriod, UsageReport,
 };
 
 #[derive(Clone, Default)]
@@ -44,9 +44,8 @@ pub struct PendingSend {
     pub request: String,
     pub thread: String,
     pub text: String,
-    pub draft: String,
+    pub draft: PromptDraft,
     pub queued: bool,
-    pub images: u32,
     pub baseline: usize,
     pub queue_baseline: usize,
 }
