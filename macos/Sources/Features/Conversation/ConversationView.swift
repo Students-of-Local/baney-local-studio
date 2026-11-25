@@ -182,6 +182,7 @@ private struct ConversationColumn: View {
                     }
                     ApprovalCard(store: store)
                     QuestionCard(store: store)
+                    SkillDraftCard(store: store)
                     ComposerView(store: store)
                         .focusRegionFrame(.composer, in: store.shell)
                     ThreadContextStrip(store: store)
