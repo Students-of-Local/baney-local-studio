@@ -39,6 +39,7 @@ pub(crate) struct Transcript {
     streaming: Option<usize>,
     run_answered: bool,
     run_failure_shown: bool,
+    failure: Option<String>,
     turn: u64,
     open: Option<OpenTurn>,
     settled: Vec<SettledTurn>,
@@ -57,6 +58,7 @@ impl Transcript {
         self.streaming = None;
         self.run_answered = false;
         self.run_failure_shown = false;
+        self.failure = None;
         self.turn = 0;
         self.open = None;
         let ordered = ordered_for_display(messages);
@@ -69,6 +71,7 @@ impl Transcript {
                     let at = millis(assistant.timestamp);
                     self.touch(at);
                     self.touch(answered_at(assistant));
+                    self.failure = failure_of(assistant);
                     let parts = assistant_parts(assistant);
                     if !parts.blocks.is_empty() || parts.error.is_some() {
                         self.push(
@@ -137,6 +140,10 @@ impl Transcript {
             | ItemKind::Notice { .. }
             | ItemKind::Compaction { .. } => None,
         })
+    }
+
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.failure.clone()
     }
 
     pub(crate) fn last_answer(&self) -> Option<String> {
@@ -333,6 +340,7 @@ impl Transcript {
 
     fn user(&mut self, content: &UserContent, at: i64) -> Vec<TranscriptOp> {
         let mut ops = self.settle();
+        self.failure = None;
         self.turn += 1;
         self.open = Some(OpenTurn { started_at: Some(at), last_at: Some(at), ..OpenTurn::default() });
         let (sent, images) = user_parts(content);
@@ -443,6 +451,7 @@ impl Transcript {
         let at = millis(assistant.timestamp);
         self.touch(at);
         self.touch(answered_at(assistant));
+        self.failure = failure_of(assistant);
         let parts = assistant_parts(assistant);
         if parts.blocks.iter().any(|block| matches!(block, Block::Text { .. })) || !parts.calls.is_empty() {
             self.run_answered = true;
@@ -803,6 +812,11 @@ fn timestamp(message: &AgentMessage) -> u64 {
         AgentMessage::BranchSummary(summary) => summary.timestamp,
         AgentMessage::CompactionSummary(summary) => summary.timestamp,
     }
+}
+
+fn failure_of(assistant: &AssistantMessage) -> Option<String> {
+    matches!(assistant.stop_reason, StopReason::Error)
+        .then(|| assistant.error_message.clone().unwrap_or_else(|| "Unknown error".to_string()))
 }
 
 fn assistant_parts(assistant: &AssistantMessage) -> AssistantParts<'_> {

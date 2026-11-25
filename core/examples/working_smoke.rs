@@ -20,6 +20,8 @@ const MARK: &str = "step-done";
 const PROMPT: &str = "Say one short sentence about what you will do, then use the bash tool to run exactly this command once: `sleep 3 && echo step-done`. After it finishes, reply with only the word done.";
 const QUICK: &str = "Reply with only the word done.";
 const QUICK_TURNS: u32 = 8;
+const MISSING: &str = "no-such-model";
+const SETTLE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Signal {
@@ -68,6 +70,7 @@ struct Watch {
     progress: Progress,
     usage: Option<UsageReport>,
     done: u32,
+    failures: Vec<String>,
 }
 
 impl Watch {
@@ -78,6 +81,10 @@ impl Watch {
 
     fn working(&self) -> bool {
         self.row().is_some_and(|row| matches!(row.status, ThreadStatus::Working))
+    }
+
+    fn failed(&self) -> bool {
+        self.row().is_some_and(|row| matches!(row.status, ThreadStatus::Failed))
     }
 }
 
@@ -103,9 +110,15 @@ fn observe(watch: &mut Watch, item: &Item) {
     }
 }
 
-fn count_done(watch: &mut Watch, update: &Update) {
-    if let Update::Notification { thread, kind: NotificationKind::TurnDone, .. } = update {
-        watch.done += u32::from(watch.thread.as_ref() == Some(thread));
+fn count_ends(watch: &mut Watch, update: &Update) {
+    let Update::Notification { thread, kind, body, .. } = update else { return };
+    if watch.thread.as_ref() != Some(thread) {
+        return;
+    }
+    if matches!(kind, NotificationKind::TurnDone) {
+        watch.done += 1;
+    } else if matches!(kind, NotificationKind::Failed) {
+        watch.failures.push(body.clone());
     }
 }
 
@@ -221,7 +234,7 @@ fn pump(
     let deadline = Instant::now() + STEP_TIMEOUT;
     loop {
         for update in studio.tick() {
-            count_done(watch, &update);
+            count_ends(watch, &update);
             apply(watch, update);
         }
         if done(watch) {
@@ -321,6 +334,62 @@ fn finishes(config: StudioConfig) -> anyhow::Result<()> {
     outcome
 }
 
+fn list_missing(agent_dir: &Path) -> anyhow::Result<()> {
+    let path = agent_dir.join("models.json");
+    let mut catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let models = catalog["providers"][real_model::provider()]["models"].as_array_mut().context("models")?;
+    let mut missing = models.first().context("a model")?.clone();
+    missing["id"] = MISSING.into();
+    missing["name"] = MISSING.into();
+    models.push(missing);
+    std::fs::write(&path, serde_json::to_vec_pretty(&catalog)?)?;
+    Ok(())
+}
+
+fn fails(config: StudioConfig, work: &Path) -> anyhow::Result<()> {
+    let signal = Arc::new(Signal::default());
+    let studio = Studio::new(config, Arc::clone(&signal) as Arc<dyn Waker>)?;
+    let mut watch = Watch::default();
+    let outcome = (|| {
+        pump(&studio, &signal, &mut watch, "daemon connected first", |watch| {
+            matches!(watch.connection, Some(Connection::Ready))
+        })?;
+        studio.add_project(work.to_string_lossy().into_owned());
+        pump(&studio, &signal, &mut watch, "project listed", |watch| watch.projects.len() == 1)?;
+        let prompt = || PromptDraft { text: QUICK.to_string(), images: Vec::new(), files: Vec::new() };
+        let mut settings = real_model::thread_settings(AccessMode::FullAccess, WorktreeChoice::Local);
+        settings.model = Some(MISSING.to_string());
+        studio.start_thread("draft-missing".to_string(), Some(watch.projects[0].clone()), prompt(), settings);
+        for turn in 1..=2 {
+            let step = format!("turn {turn} on a model the server lacks ended");
+            pump(&studio, &signal, &mut watch, &step, |watch| {
+                (watch.failures.len() >= turn || watch.done > 0) && !watch.working()
+            })?;
+            let until = Instant::now() + SETTLE;
+            pump(&studio, &signal, &mut watch, "no second report followed", |_| Instant::now() >= until)?;
+            if watch.done > 0 || watch.failures.len() != turn || !watch.failed() {
+                bail!(
+                    "turn {turn} must be reported failed once: {} done, failures {:?}, row {:?}",
+                    watch.done,
+                    watch.failures,
+                    watch.row().map(|row| &row.status)
+                );
+            }
+            if watch.failures.iter().any(|body| !body.contains(MISSING)) {
+                bail!("the report must carry the server's error: {:?}", watch.failures);
+            }
+            if turn == 1 {
+                let thread = watch.thread.clone().context("thread id")?;
+                studio.send("send-missing".to_string(), thread, prompt(), Delivery::Queue);
+            }
+        }
+        println!("ok   both failures were reported once each");
+        Ok(())
+    })();
+    studio.shutdown();
+    outcome
+}
+
 fn main() -> anyhow::Result<()> {
     let usage = "usage: working_smoke <eukhe> <scratch dir>";
     let mut args = std::env::args_os().skip(1);
@@ -330,6 +399,7 @@ fn main() -> anyhow::Result<()> {
     let work = root.join("work");
     std::fs::create_dir_all(&work)?;
     real_model::install(&agent_dir)?;
+    list_missing(&agent_dir)?;
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent_dir);
     let socket = root.join("d.sock");
@@ -341,7 +411,7 @@ fn main() -> anyhow::Result<()> {
         take_over_serve: false,
         launch: Some(DaemonLaunch { program: daemon.to_string_lossy().into_owned() }),
     };
-    let outcome = drive(config(), &work).and_then(|()| finishes(config()));
+    let outcome = fails(config(), &work).and_then(|()| drive(config(), &work)).and_then(|()| finishes(config()));
     let stopped = stop_daemon(&socket);
     outcome?;
     stopped?;
