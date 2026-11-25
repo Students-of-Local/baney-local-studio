@@ -63,6 +63,8 @@ pub struct State {
     pub info: Option<ThreadInfo>,
     pub approvals: Vec<Approval>,
     pub questions: HashMap<String, Vec<crate::question::Pending>>,
+    pub skill_drafts: HashMap<String, local_studio_core::SkillDraft>,
+    pub skill_saving: HashMap<String, String>,
     pub queue: Vec<QueuedMessage>,
     pub models: Vec<ModelOption>,
     pub favorites: Vec<ModelKey>,

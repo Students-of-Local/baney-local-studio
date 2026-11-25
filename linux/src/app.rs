@@ -59,6 +59,7 @@ pub enum Target {
     Provider,
     Plugin,
     Pairing,
+    Skill,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -705,6 +706,10 @@ impl App {
             Update::RequestDone { request, message } => match self.take_request(&request) {
                 Some(Target::Provider) => crate::providers::done(self, &request, &message),
                 Some(Target::Plugin) => crate::plugins::done(self, &request, &message),
+                Some(Target::Skill) => {
+                    crate::skill_draft::done(self, &request, &message);
+                    dirty.composer = true;
+                }
                 _ => self.toast(&message),
             },
             Update::RequestFailed { request, message } => {
@@ -726,13 +731,20 @@ impl App {
                     Some(Target::Provider) => crate::providers::failed(self, &request, &message),
                     Some(Target::Plugin) => crate::plugins::failed(self, &request, &message),
                     Some(Target::Pairing) => crate::machines::pairing_failed(self, &request, &message),
+                    Some(Target::Skill) => {
+                        crate::skill_draft::failed(self, &request, &message);
+                        dirty.composer = true;
+                    }
                     _ => self.toast(&message),
                 }
             }
             Update::LocalOnly { thread, message, local, .. } => {
                 crate::actions::local_only(self, thread, &message, local.as_ref());
             }
-            Update::SkillDraft { .. } => {}
+            Update::SkillDraft { thread, draft } => {
+                crate::skill_draft::set(self, thread, draft);
+                dirty.composer = true;
+            }
             Update::Notice { level, text } => match level {
                 local_studio_core::NoticeLevel::Error | local_studio_core::NoticeLevel::Warning => {
                     self.show_notice(&text);
