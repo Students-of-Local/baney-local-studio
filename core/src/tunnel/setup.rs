@@ -71,15 +71,15 @@ pub fn byo(platform: &str) -> Value {
     json!({
         "state": "byo",
         "next": "byo",
-        "command": "local-studio tunnel setup --relay --yes",
+        "command": "local-studio tunnel setup --relay",
         "template": "local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes",
         "url": CLOUDFLARE_SIGNUP,
         "agentPrompt": AGENT_PROMPT,
         "message": format!("Every Local Studio tunnel runs on your own free Cloudflare account, or on your tailnet. The simplest is a relay of your own, a small Worker on Cloudflare's free plan, with no domain. Do it yourself with the steps below, or tell a coding agent (Claude Code, Codex): \"{AGENT_PROMPT}\" The agent runs the steps and hands you the Cloudflare sign-in."),
         "plan": [
-            "Relay, no domain needed. Run: local-studio tunnel setup --relay --yes. It needs Node.js 22 or later (needs_node has the link). The first time it answers needs_signin with a wrangler login command.".to_string(),
+            "Relay, no domain needed. Run: local-studio tunnel setup --relay. It needs Node.js 22 or later (needs_node has the link). The first time it answers needs_signin with a wrangler login command.".to_string(),
             format!("Run that login command and sign in to Cloudflare, or make a free account ({CLOUDFLARE_SIGNUP}), in the browser it opens. An agent hands the person this command and waits until they say they signed in."),
-            "Run the setup command again. It may answer needs_account (run its nextCommand with the account the person picks) or needs_subdomain (the person opens its link and picks a name), then run setup again. It deploys the Worker, starts a login service, checks the public address, and answers ready with your MCP and phone addresses.".to_string(),
+            "Run the setup command again. It may answer needs_account (run its template with the id of the account the person picks), confirm (that account has a Worker of this name already; the person says whether to replace it) or needs_subdomain (the person opens its link and picks a name), then run setup again. It deploys the Worker, starts a login service, checks the public address, and answers ready with your MCP and phone addresses.".to_string(),
             format!("Own a domain? A tunnel on it instead: add the domain to your Cloudflare account ({CLOUDFLARE_ADD_DOMAIN}). Cloudflare must run its DNS. Only the person can do this. An agent asks the person which domain it is and uses it in place of YOUR-DOMAIN."),
             "Run: local-studio tunnel setup --cloudflare studio.YOUR-DOMAIN --yes, with your domain in place of YOUR-DOMAIN. It downloads the pinned cloudflared and answers needs_signin with a cloudflared tunnel login command. Run that command, sign in and pick your domain, the same way as above.".to_string(),
             "Run the setup command again. It creates the tunnel local-studio-<this machine>, its DNS record and a login service, checks the public address, and answers ready with your MCP and phone addresses.".to_string(),
