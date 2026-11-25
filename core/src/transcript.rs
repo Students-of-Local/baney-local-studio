@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::images;
 use crate::model::{Block, FileChange, ImageThumbnail, Item, ItemKind, NoticeLevel, ToolKind, ToolState, TranscriptOp};
+use crate::skills;
 
 const NO_REPLY: &str = "The turn ended without a reply.";
 const ABORTED: &str = "Operation aborted";
@@ -162,8 +163,7 @@ impl Transcript {
             .collect();
         let mut ops = Vec::new();
         for (index, (entry, text)) in users.into_iter().rev().zip(entries.iter().rev()) {
-            let matches =
-                matches!(&self.items[index].kind, ItemKind::User { text: shown, .. } if shown.trim() == text.trim());
+            let matches = matches!(&self.items[index].kind, ItemKind::User { text: shown, .. } if shown.trim() == skills::typed(text).trim());
             if !matches {
                 break;
             }
@@ -335,7 +335,8 @@ impl Transcript {
         let mut ops = self.settle();
         self.turn += 1;
         self.open = Some(OpenTurn { started_at: Some(at), last_at: Some(at), ..OpenTurn::default() });
-        let (text, images) = user_parts(content);
+        let (sent, images) = user_parts(content);
+        let text = skills::typed(&sent);
         let thumbnails = user_thumbnails(content);
         ops.push(self.push(ItemKind::User { text, images, entry: None, thumbnails }, Some(at)));
         ops

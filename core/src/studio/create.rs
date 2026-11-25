@@ -27,8 +27,7 @@ pub(super) fn answering(items: &[Item]) -> bool {
 }
 
 fn asks(item: &Item) -> bool {
-    let first = CREATE.lines().next().unwrap_or(CREATE);
-    matches!(&item.kind, ItemKind::User { text, .. } if text.starts_with(first))
+    matches!(&item.kind, ItemKind::User { text, .. } if skills::asked(text))
 }
 
 fn answers(items: &[Item]) -> impl Iterator<Item = &[Item]> {

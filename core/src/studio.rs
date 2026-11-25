@@ -3371,7 +3371,7 @@ impl Actor {
             Ok(data) if data.get("status").and_then(Value::as_str) == Some("rejected") => {
                 self.mailbox.notice(NoticeLevel::Info, "The queue changed; try again.");
             }
-            Ok(_) => self.mailbox.push(Update::ComposerText { thread: id.to_string(), text }),
+            Ok(_) => self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: skills::typed(&text) }),
             Err(error) => self.mailbox.notice(NoticeLevel::Error, error),
         }
     }
@@ -3560,7 +3560,7 @@ impl Actor {
         let data = self.call(command).await?;
         self.reload_messages(id).await;
         if let Some(text) = data.get("editorText").and_then(Value::as_str) {
-            self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: text.to_string() });
+            self.mailbox.push(Update::ComposerText { thread: id.to_string(), text: skills::typed(text) });
         }
         Ok(())
     }

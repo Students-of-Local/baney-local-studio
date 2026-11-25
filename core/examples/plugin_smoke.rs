@@ -1455,7 +1455,18 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(path)
     }
 
-    fn sent(harness: &mut Harness, key: &str, project: &str, text: &str) -> anyhow::Result<String> {
+    fn kept(root: &Path, thread: &str) -> Option<String> {
+        let file = std::fs::read_to_string(root.join("agent/sessions").join(thread).join("main.jsonl")).ok()?;
+        let lines = file.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok());
+        let entry = |line: Value| {
+            let writes = line["writes"].as_array()?.clone();
+            writes.into_iter().find(|write| write["value"]["kind"] == "pi.user")
+        };
+        let user = lines.into_iter().find_map(entry)?;
+        user["value"]["model"][0]["content"][0]["text"].as_str().map(str::to_string)
+    }
+
+    fn sent(harness: &mut Harness, root: &Path, key: &str, project: &str, text: &str) -> anyhow::Result<String> {
         let studio = Arc::clone(&harness.studio);
         studio.start_thread(key.to_string(), Some(project.to_string()), prompt(text), settings(LOCAL, mid()));
         harness.pump_until(&format!("{key} started"), STEP, |view| view.thread(key).is_some())?;
@@ -1463,8 +1474,10 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         studio.select_thread(Some(thread.clone()));
         harness.pump_until(&format!("{key} sent"), STEP, |view| !user_text(view.items(&thread)).is_empty())?;
         studio.abort(thread.clone());
-        let found = user_text(harness.view.items(&thread));
-        found.into_iter().next().context("user text")
+        let shown = user_text(harness.view.items(&thread));
+        ensure!(shown == [text], "{key}: {text:?} is shown as {shown:?}");
+        harness.pump_until(&format!("{key} kept"), STEP, |_| kept(root, &thread).is_some())?;
+        kept(root, &thread).context("the session's user text")
     }
 
     fn sends(harness: &mut Harness, root: &Path, hits: &AtomicUsize) -> anyhow::Result<()> {
@@ -1496,7 +1509,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             if key == "skill" {
                 lock.lock()?;
             }
-            let got = sent(harness, key, project, text)?;
+            let got = sent(harness, root, key, project, text)?;
             lock.unlock()?;
             let once = blocks.iter().all(|block| got.matches(block).count() == 1);
             let tail = if blocks.is_empty() { got == text } else { got.ends_with(&format!("\n\n{text}")) };
@@ -1504,20 +1517,20 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             ensure!(once && tail && shown == usize::from(!blocks.is_empty()), "{key}: {text:?} was sent as {got:?}");
             println!("ok   {key}: {text:?} sent with {blocks:?}");
         }
-        let got = sent(harness, "create", &work, "@create from @marmalade")?;
+        let got = sent(harness, root, "create", &work, "@create from @marmalade")?;
         let block = got.starts_with("Turn what you did") && got.ends_with("\n\nfrom @marmalade");
         let named = got.contains("orange steps") && !got.contains("carpentry steps");
         ensure!(block && named, "@create was sent as {got:?}");
         println!("ok   a first word @create is the command, never a skill of that name");
         ensure!(!root.join("data/plugins/gantrel").exists(), "a name in a message installed its plugin");
-        let got = sent(harness, "both", &work, "@alpha then @beta")?;
+        let got = sent(harness, root, "both", &work, "@alpha then @beta")?;
         ensure!(["alpha steps", "beta steps"].iter().all(|steps| got.contains(steps)), "both: sent as {got:?}");
         let marmot = root.join("work/.agents/skills/marmot/SKILL.md");
         put(&root.join("elsewhere.md"), "---\nname: marmot\ndescription: About marmot\n---\nelsewhere\n")?;
         std::fs::remove_file(&marmot)?;
         std::os::unix::fs::symlink(root.join("elsewhere.md"), &marmot)?;
         lock.lock()?;
-        let got = sent(harness, "swapped", &work, "@marmot")?;
+        let got = sent(harness, root, "swapped", &work, "@marmot")?;
         lock.unlock()?;
         ensure!(got == "@marmot", "a project's skill swapped for a link was sent as {got:?}");
         harness.studio.remove_project(plain);
@@ -1558,7 +1571,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             view.other.iter().any(|update| update.starts_with("RequestFailed running"))
         })?;
         let work = harness.view.projects[0].id.clone();
-        let text = sent(harness, "after-failure", &work, "@gantrel")?;
+        let text = sent(harness, root, "after-failure", &work, "@gantrel")?;
         ensure!(text == "@gantrel", "after a failed install the message became {text:?}");
         studio.install_plugin("sheet".to_string(), root.join("gantrel").to_string_lossy().into_owned());
         harness.pump_until("its sheet is open", STEP, |view| {
@@ -1566,7 +1579,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         })?;
         waits(harness, "while-it-asks")?;
         studio.answer_consent("sheet".to_string(), ConsentAnswer::Cancel);
-        let text = sent(harness, "after-cancel", &work, "@gantrel")?;
+        let text = sent(harness, root, "after-cancel", &work, "@gantrel")?;
         ensure!(text == "@gantrel", "after a declined install the message became {text:?}");
         Ok(())
     }
