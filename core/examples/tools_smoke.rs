@@ -207,6 +207,7 @@ fn drive(run: &mut Run, work: &Path, bin: &Path) -> anyhow::Result<()> {
     ensure!(!settings.browser_use && !settings.computer_use, "browser or computer use is on by default");
     run.note(&project, "willow")?;
     run.expect("willow", None)?;
+    run.studio.select_thread(run.view.started.get(DRAFT).cloned());
     ensure!(lines(&run.ours).is_empty(), "the program started while both were off");
     for (word, browser, computer, tools) in [
         ("copper", true, false, "browser"),
