@@ -35,7 +35,7 @@ on a Mac), engine and version, model and quant, the exact launch command, and:
 
 | Number | How |
 | --- | --- |
-| Decode tokens/s, one request | stream exactly 256 tokens (`ignore_eos`, or llama.cpp `n_predict`); output tokens / streaming time after the opening chunk |
+| Decode tokens/s, one request | stream exactly 256 tokens (`ignore_eos: true`, plus `n_predict: 256` on llama.cpp); output tokens / streaming time after the opening chunk |
 | Time to first token (TTFT), cold | a long prompt (8k tokens or the user's real size) whose start is unique each run (a nonce on line one), or the cache reset between runs (vLLM `/reset_prefix_cache`, SGLang `/flush_cache`); latency to the opening content chunk |
 | TTFT, warm | the same prompt sent twice; the second latency. Judge prefix caching by this one |
 | Throughput at real concurrency | 1 for one person, 4 to 16 for agents working in parallel |
@@ -85,7 +85,8 @@ Try the ones that match the limit, cheapest to most involved.
   native FP8 (NVIDIA Ada, Hopper, Blackwell). Below Q4, check quality
   before keeping it.
 - **Flash attention.** llama.cpp `-fa`, Ollama `OLLAMA_FLASH_ATTENTION=1`. Its
-  own run, before KV quantization, which needs it.
+  own run, before KV quantization, which needs it: keep it on when KV
+  quantization follows, even if it gains nothing alone.
 - **KV cache precision.** vLLM `--kv-cache-dtype fp8`; llama.cpp
   `-ctk q8_0 -ctv q8_0`; Ollama `OLLAMA_KV_CACHE_TYPE=q8_0`. Roughly doubles
   the context that fits.
