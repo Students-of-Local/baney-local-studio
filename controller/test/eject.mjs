@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -135,6 +135,10 @@ try {
   const eject = (id) => call(port, `/api/hardware/gpus/${id}/eject`, {});
   const cancel = async (id) => (await call(port, `/api/hardware/gpus/${id}/eject/cancel`, {})).json();
   const dryRun = () => call(port, "/api/recipes/plain/run", { dryRun: true, gpus: [1] });
+  const cli = (...args) => {
+    const r = spawnSync(process.env.LOCAL_STUDIO_CLI, ["hardware", "eject", ...args], { encoding: "utf8", timeout: 200_000, env: { ...process.env, HOME: join(root, "cli-home"), LOCAL_STUDIO_DATA_DIR: join(root, "cli-data"), LOCAL_STUDIO_CONTROLLER_URL: `http://127.0.0.1:${port}`, LOCAL_STUDIO_CONTROLLER_HOME: join(root, "linux") } });
+    return { code: r.status, out: r.stdout };
+  };
   const gpu = async (i) => (await snapshot(port)).hardware.gpus.find((g) => g.index === i);
 
   const internal = await gpu(0);
@@ -178,6 +182,13 @@ try {
   assert.equal(shown.eject.state, "busy");
   assert.equal(shown.eject.draining, true);
   assert.equal(shown.busy, true);
+  if (process.env.LOCAL_STUDIO_CLI) {
+    const c = cli("1");
+    assert.equal(c.code, 1, c.out);
+    assert.match(c.out, /^busy: /);
+    assert.match(c.out, new RegExp(`^  pid ${foreign.pid} sleep, 512 MiB$`, "m"));
+    console.log(`CLI busy: ${JSON.stringify(c.out)}`);
+  }
   console.log(`foreign process: busy with pid ${foreign.pid} (sleep, 512 MiB), process alive, GPU draining`);
 
   const blocked = await dryRun();
@@ -227,6 +238,19 @@ try {
   assert.equal(r.draining, true);
   assert.equal(readFileSync(remove, "utf8"), "");
   assert.equal((await dryRun()).status, 409, "still draining after needs_root");
+  if (process.env.LOCAL_STUDIO_CLI) {
+    const c = cli("1");
+    assert.equal(c.code, 1, c.out);
+    assert.match(c.out, /^needs_root: /);
+    assert(c.out.includes(`\n  echo 1 | sudo tee ${remove}\n`), c.out);
+    const j = cli("1", "--json");
+    assert.equal(JSON.parse(j.out).state, "needs_root");
+    const off = cli("--cancel", "1");
+    assert.equal(off.code, 0, off.out);
+    assert.equal(off.out, "NVIDIA GeForce RTX 3090 can load models again.\n");
+    assert.equal((await gpu(1)).eject.draining, false);
+    console.log(`CLI needs_root and --cancel: ${JSON.stringify(c.out)}`);
+  } else console.log("CLI stage skipped: set LOCAL_STUDIO_CLI to the built local-studio binary");
   console.log(`sysfs not writable: needs_root with "${r.command}", GPU stays draining`);
   await cancel(1);
 

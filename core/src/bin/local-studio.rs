@@ -39,13 +39,15 @@ const USAGE: &str = "usage: local-studio --version
        local-studio fleet share [--active <watts|off>] [--away <watts|max>] [--json]
        local-studio fleet stop-sharing [--json]
        local-studio fleet power-helper [--yes]
+       local-studio hardware eject [--cancel] <gpu id> [--json]
        local-studio update check | download | status
        local-studio update apply [--target <path>] [--no-relaunch]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let json = matches!(args.first(), Some(&("tunnel" | "fleet" | "skills" | "threads"))) && args.contains(&"--json");
+    let json = matches!(args.first(), Some(&("tunnel" | "fleet" | "skills" | "threads" | "hardware")))
+        && args.contains(&"--json");
     if json {
         args.retain(|arg| *arg != "--json");
     }
@@ -109,6 +111,8 @@ fn main() -> ExitCode {
         ["fleet", "stop-sharing"] => fleet_set(&serde_json::json!({ "lend": "never" }), json),
         ["fleet", "power-helper"] => power_helper(false),
         ["fleet", "power-helper", "--yes"] => power_helper(true),
+        ["hardware", "eject", "--cancel", gpu] => hardware_eject(gpu, true, json),
+        ["hardware", "eject", gpu] if !gpu.starts_with('-') => hardware_eject(gpu, false, json),
         ["update", "check"] => update_check(),
         ["update", "download"] => update_download(),
         ["update", "status"] => update_status(),
@@ -899,13 +903,17 @@ fn fleet_call(body: Option<&Value>) -> Result<Value, String> {
 }
 
 fn controller_call(path: &str, body: Option<&Value>) -> Result<Value, String> {
+    controller_request(path, body, 30)
+}
+
+fn controller_request(path: &str, body: Option<&Value>, timeout: u64) -> Result<Value, String> {
     let fleet = fleet_open()?;
     let runtime =
         tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
     runtime.block_on(async {
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(3))
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(timeout))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
@@ -1080,6 +1088,43 @@ fn fleet_join(_link: &str, _as_json: bool) -> Result<(), String> {
 #[cfg(not(feature = "link"))]
 fn fleet_invite(_url: Option<String>, _as_json: bool) -> Result<(), String> {
     Err("This local-studio was built without desktop links (the core's link feature), so it cannot mint a fleet pairing. Use `local-studio-serve pair --fleet`.".to_string())
+}
+
+fn hardware_eject(gpu: &str, cancel: bool, as_json: bool) -> Result<(), String> {
+    if gpu.is_empty() || !gpu.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_:.".contains(&byte)) {
+        return Err(fleet_failed(
+            format!("{gpu} is not a GPU id: use its index, UUID or PCI bus id from the hardware list"),
+            as_json,
+        ));
+    }
+    let path = format!("/api/hardware/gpus/{gpu}/eject{}", if cancel { "/cancel" } else { "" });
+    let value = controller_request(&path, Some(&serde_json::json!({})), 180)
+        .map_err(|message| fleet_failed(message, as_json))?;
+    let state = json_text(&value, "state");
+    if as_json {
+        println!("{value}");
+    } else if cancel {
+        println!("{} can load models again.", json_text(&value, "name").unwrap_or_else(|| format!("GPU {gpu}")));
+    } else {
+        println!("{}: {}", state.as_deref().unwrap_or("unknown"), json_text(&value, "message").unwrap_or_default());
+        for process in value.get("processes").and_then(Value::as_array).into_iter().flatten() {
+            let mib =
+                process.get("usedMiB").and_then(Value::as_f64).map_or_else(String::new, |mib| format!(", {mib} MiB"));
+            println!(
+                "  pid {} {}{mib}",
+                process.get("pid").and_then(Value::as_u64).unwrap_or_default(),
+                json_text(process, "name").unwrap_or_default()
+            );
+        }
+        if let Some(command) = json_text(&value, "command") {
+            println!("  {command}");
+        }
+    }
+    if cancel || state.as_deref() == Some("removed") {
+        Ok(())
+    } else {
+        Err(String::new())
+    }
 }
 
 fn fleet_status(as_json: bool) -> Result<(), String> {
