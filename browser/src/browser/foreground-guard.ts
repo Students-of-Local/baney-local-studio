@@ -32,18 +32,20 @@ async function onNewTab(tabId: number, sourceTabId: number, via: string): Promis
 
 	// Restore whatever the user had active in that window before this tab appeared, but only
 	// when the agent opened it from a hidden tab. If the user is looking at the opener (they
-	// clicked a link on a shared tab themselves), the new tab is theirs to see.
-	const now = activeTab.get(tab.windowId);
-	const userWasOn = now === tabId ? previousActiveTab.get(tab.windowId) : now;
+	// clicked a link on a shared tab themselves), the new tab is theirs to see. When the tab
+	// before it is unknown, nothing is restored: any guess could take the user somewhere else.
+	// A tab that opened in the background took nothing from the user: no need to read what they saw.
+	const seen = tab.active ? await seenTabs() : undefined;
+	const now = seen?.active[tab.windowId];
+	const userWasOn = now === tabId ? seen?.previous[tab.windowId] : now;
 	let restored = false;
-	if (tab.active && userWasOn !== sourceTabId) {
+	if (seen && userWasOn !== undefined && userWasOn !== sourceTabId) {
 		const previous = await chrome.tabs.query({ windowId: tab.windowId });
 		// The tab active right before the popup is what the user was looking at; lastActive is
 		// the fallback (it can already point at the popup, which is not owned when activated).
-		const restore =
+		const target =
 			previous.find((t) => t.id !== tabId && t.id === userWasOn) ??
-			previous.find((t) => t.id !== tabId && t.id === lastActive.get(tab.windowId));
-		const target = restore ?? previous.find((t) => t.id !== tabId && !owned.has(t.id ?? -1));
+			previous.find((t) => t.id !== tabId && t.id === seen.last[tab.windowId]);
 		if (target?.id !== undefined) {
 			await chrome.tabs.update(target.id, { active: true }).catch(() => undefined);
 			restored = true;
@@ -73,15 +75,55 @@ export function startForegroundGuard(): void {
 
 	// Remember the user's active tab per window so the guard can restore it.
 	chrome.tabs.onActivated.addListener(async (info) => {
-		const before = activeTab.get(info.windowId);
-		if (before !== undefined && before !== info.tabId) previousActiveTab.set(info.windowId, before);
-		activeTab.set(info.windowId, info.tabId);
+		await editSeen((s) => {
+			const before = s.active[info.windowId];
+			if (before !== undefined && before !== info.tabId) s.previous[info.windowId] = before;
+			s.active[info.windowId] = info.tabId;
+		});
 		const owned = await allOwnedTabIds();
-		if (!owned.has(info.tabId)) lastActive.set(info.windowId, info.tabId);
+		if (!owned.has(info.tabId))
+			await editSeen((s) => {
+				s.last[info.windowId] = info.tabId;
+			});
 	});
 }
 
-const lastActive = new Map<number, number>();
-/** Active tab per window (any tab) and the one before it, to tell who opened a new tab. */
-const activeTab = new Map<number, number>();
-const previousActiveTab = new Map<number, number>();
+/**
+ * Per window: the active tab (any tab), the one before it, and the last one no session owns, to tell
+ * who opened a new tab. Kept in chrome.storage.session: the worker idles out between events, and a
+ * popup that wakes it must still find the tab the user was on.
+ */
+interface SeenTabs {
+	active: Record<number, number>;
+	previous: Record<number, number>;
+	last: Record<number, number>;
+}
+const SEEN_KEY = "foreground_guard_tabs";
+let seen: Promise<SeenTabs> | undefined;
+/** Edits run one at a time, each on the state the one before left. */
+let seenEdits: Promise<unknown> = Promise.resolve();
+
+function loadSeen(): Promise<SeenTabs> {
+	seen ??= chrome.storage.session
+		.get(SEEN_KEY)
+		.then((d) => d[SEEN_KEY] as SeenTabs | undefined)
+		.catch(() => undefined)
+		.then((v) => ({ active: { ...v?.active }, previous: { ...v?.previous }, last: { ...v?.last } }));
+	return seen;
+}
+
+/** The state after every activation already reported. */
+async function seenTabs(): Promise<SeenTabs> {
+	await seenEdits;
+	return loadSeen();
+}
+
+function editSeen(change: (s: SeenTabs) => void): Promise<void> {
+	const next = seenEdits.then(async () => {
+		const s = await loadSeen();
+		change(s);
+		await chrome.storage.session.set({ [SEEN_KEY]: s }).catch(() => undefined);
+	});
+	seenEdits = next.catch(() => undefined);
+	return next;
+}

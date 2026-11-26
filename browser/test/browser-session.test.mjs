@@ -258,6 +258,46 @@ test("the foreground guard adopting a popup during the first-save rename lands i
 	assert.equal(bad, 0, `${bad}/20 runs recreated the old record or lost the popup`);
 });
 
+test("after a worker restart the foreground guard still knows the user's tab, and never jumps to an unrelated one", async () => {
+	const fire = (ev, ...args) => {
+		for (const fn of ev.listeners) fn(...args);
+	};
+	const restart = async () => {
+		// A restarted worker: none of the old listeners or in-memory state, the same chrome.storage.session.
+		for (const ev of [chrome.tabs.onCreated, chrome.tabs.onActivated, chrome.webNavigation.onCreatedNavigationTarget])
+			ev.listeners.length = 0;
+		const guard = await import(`../src/browser/foreground-guard.ts?ctx=${Math.random()}`);
+		guard.startForegroundGuard();
+	};
+	const adopted = async (fake, id, popup) => {
+		for (let i = 0; i < 200 && !fake.table()[id]?.tabIds.includes(popup); i++) await new Promise((r) => setTimeout(r, 5));
+		await new Promise((r) => setTimeout(r, 30));
+		assert.ok(fake.table()[id]?.tabIds.includes(popup), "the guard adopted the popup");
+	};
+	for (const userSawOpener of [true, false]) {
+		const fake = installFakeChrome();
+		const panel = await load("panel");
+		const other = fake.addTab({ url: "https://unrelated.example/" });
+		const shared = fake.addTab({ url: "https://shared.example/", active: true });
+		const p = await panel.BrowserSession.open(`tab-${shared}`, "chat", 1);
+		await p.setHomeTab(shared);
+		await p.adopt(shared, true);
+		await restart();
+		// The user was looking at the shared tab before the worker went idle (or nothing was ever seen).
+		if (userSawOpener) fire(chrome.tabs.onActivated, { tabId: shared, windowId: 1 });
+		await new Promise((r) => setTimeout(r, 30));
+		await restart();
+		// The user clicks a target=_blank link on it: Chrome activates the new tab, then names its source.
+		await chrome.tabs.update(shared, { active: false });
+		const popup = fake.addTab({ url: "https://shared.example/new", active: true });
+		fire(chrome.tabs.onActivated, { tabId: popup, windowId: 1 });
+		fire(chrome.webNavigation.onCreatedNavigationTarget, { tabId: popup, sourceTabId: shared });
+		await adopted(fake, `tab-${shared}`, popup);
+		assert.equal((await chrome.tabs.get(other)).active, false, `the user was moved to an unrelated tab (seen: ${userSawOpener})`);
+		assert.equal((await chrome.tabs.get(popup)).active, true);
+	}
+});
+
 test("a new chat reusing a renamed id never follows the old rename into the saved chat", async () => {
 	const fake = installFakeChrome();
 	const { BrowserSession } = await load("panel");
