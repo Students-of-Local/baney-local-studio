@@ -60,13 +60,37 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 3).trim
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 
 /** A URL as host and path: its query and fragment can carry a token (an OAuth code, a reset link), so they never go in the log. */
-function urlShape(url: string): string {
+export function urlShape(url: string): string {
 	try {
 		const u = new URL(url);
 		return `${u.host}${u.pathname === "/" ? "" : u.pathname}` || u.protocol;
 	} catch {
 		return oneLine(url).replace(/[?#].*$/, "");
 	}
+}
+
+/** A quoted value as changes.ts writes it (JSON, maybe cut short with "..."), and the length of its text. */
+const QUOTED = String.raw`"(?:[^"\\\n]|\\.)*(?:"|\.\.\.)`;
+const quotedLength = (s: string): string => {
+	try {
+		return `${(JSON.parse(s) as string).length}`;
+	} catch {
+		return `${s.length - 4}+`;
+	}
+};
+
+/**
+ * Text for the log with no URL query and no field value: every URL becomes its host and path, and a control's value
+ * in a change line (`value="..."`, `value "..." -> "..."`) becomes its length, since it can be a code the agent typed.
+ */
+function scrub(text: string): string {
+	return text
+		.replace(/\b[a-z][\w+.-]*:\/\/[^\s"'<>]+/gi, (u) => urlShape(u))
+		.replace(
+			new RegExp(`value([ =])(${QUOTED})(?: -> (${QUOTED}))?`, "g"),
+			(_, sep: string, a: string, b?: string) =>
+				`value${sep}${quotedLength(a)}${b === undefined ? "" : ` -> ${quotedLength(b)}`} characters`,
+		);
 }
 
 /**
@@ -90,15 +114,15 @@ export function stepTarget(params: Record<string, unknown> | undefined, tabId?: 
 /** Keys that hold images or page dumps: never copied into the log. */
 const BULKY = new Set(["data", "image", "screenshot", "base64", "html", "text", "content", "snapshot", "tree"]);
 
-/** The change report a step returned, if any: its `changes` or `effect`, cut to REPORT_MAX. */
+/** The change report a step returned, if any: its `changes` or `effect`, scrubbed (scrub) and cut to REPORT_MAX. */
 export function stepReport(result: unknown): string | undefined {
 	if (typeof result !== "object" || result === null) return undefined;
 	const r = result as Record<string, unknown>;
 	const line = (x: unknown) => (typeof x === "string" ? x : JSON.stringify(x));
 	for (const key of ["changes", "effect", "report"]) {
 		const v = r[key];
-		if (typeof v === "string" && v.trim()) return clip(v.trim(), REPORT_MAX);
-		if (Array.isArray(v) && v.length) return clip(v.map(line).join("\n"), REPORT_MAX);
+		if (typeof v === "string" && v.trim()) return clip(scrub(v.trim()), REPORT_MAX);
+		if (Array.isArray(v) && v.length) return clip(scrub(v.map(line).join("\n")), REPORT_MAX);
 		if (typeof v === "object" && v !== null) {
 			// The bridge's change report: { page: "...", new: [...], gone: [...] }.
 			const lines = Object.entries(v as Record<string, unknown>)
@@ -106,19 +130,19 @@ export function stepReport(result: unknown): string | undefined {
 				.map(([k, x]) =>
 					Array.isArray(x) ? `${k}:\n${x.map((i) => `  ${line(i)}`).join("\n")}` : `${k}: ${line(x)}`,
 				);
-			if (lines.length) return clip(lines.join("\n"), REPORT_MAX);
+			if (lines.length) return clip(scrub(lines.join("\n")), REPORT_MAX);
 		}
 	}
 	return undefined;
 }
 
-/** One line on what a step returned: its error, else its url and title, else its small fields. */
+/** One line on what a step returned: its error, else its url and title, else its small fields, scrubbed (scrub). */
 export function stepResult(result: unknown, error?: string): string {
-	if (error) return clip(oneLine(error), 160);
+	if (error) return clip(scrub(oneLine(error)), 160);
 	if (result === undefined || result === null) return "ok";
 	if (typeof result !== "object") return clip(oneLine(String(result)), 160);
 	const r = result as Record<string, unknown>;
-	if (typeof r.title === "string" && r.title) return clip(oneLine(r.title), 160);
+	if (typeof r.title === "string" && r.title) return clip(scrub(oneLine(r.title)), 160);
 	if (typeof r.url === "string") return clip(urlShape(r.url), 160);
 	const small = Object.entries(r)
 		.filter(
@@ -128,7 +152,7 @@ export function stepResult(result: unknown, error?: string): string {
 		)
 		.slice(0, 4)
 		.map(([k, v]) => `${k}: ${v}`);
-	return small.length ? clip(small.join(", "), 160) : "ok";
+	return small.length ? clip(scrub(small.join(", ")), 160) : "ok";
 }
 
 function withRun(log: RunsLog, id: string, now: number, make: () => Run, edit: (run: Run) => void): RunsLog {

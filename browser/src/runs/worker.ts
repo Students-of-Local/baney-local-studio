@@ -17,6 +17,7 @@ import {
 	renameRun,
 	type StepInput,
 	setWaiting,
+	urlShape,
 } from "./log.js";
 
 const SESSIONS_KEY = "browser_sessions";
@@ -63,11 +64,11 @@ function edit(change: (l: RunsLog, now: number) => RunsLog | Promise<RunsLog>): 
 		.catch(() => undefined);
 }
 
-/** The tab's title, for the run's line; none for a tab that is gone. */
+/** The tab's title, for the run's line, else its URL's host and path; none for a tab that is gone. */
 async function titleOf(tabId: number | undefined): Promise<string | undefined> {
 	if (tabId === undefined) return undefined;
 	const tab = await chrome.tabs.get(tabId).catch(() => undefined);
-	return tab?.title || tab?.url || undefined;
+	return tab?.title || (tab?.url ? urlShape(tab.url) : undefined);
 }
 
 /** One step of a run, after it answered. */
