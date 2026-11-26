@@ -213,11 +213,13 @@ fn keys_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
     }
     for provider in builtins {
         let pending = state.provider_pending.contains(&provider.id);
-        let subtitle = if provider.model_count > 0 {
-            format!("{} · {}", credential_text(provider), models_text(provider.model_count))
-        } else {
-            credential_text(provider)
-        };
+        let mut subtitle = credential_text(provider);
+        if provider.model_count > 0 {
+            subtitle = format!("{subtitle} · {}", models_text(provider.model_count));
+        }
+        if let Some(quota) = &provider.quota {
+            subtitle = format!("{subtitle} · {quota}");
+        }
         let row = adw::PasswordEntryRow::builder()
             .title(format!("{} — {}", provider.name, subtitle))
             .show_apply_button(true)

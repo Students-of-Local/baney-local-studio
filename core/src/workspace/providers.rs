@@ -28,6 +28,10 @@ const EXCERPT: usize = 200;
 const SERVER_TIMEOUT: Duration = Duration::from_millis(1500);
 const SERVER_BYTES: usize = 1 << 20;
 const ANTHROPIC: &str = "anthropic";
+const SYNTHETIC: &str = "synthetic";
+const SYNTHETIC_ENV: &str = "SYNTHETIC_API_KEY";
+const SYNTHETIC_ORIGIN: &str = "https://api.synthetic.new";
+const QUOTA_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const CLAUDE_SIGN_IN: &str = "Eukhe's Claude models are hidden: its Claude subscription sign-in identifies as Claude Code and can get the Anthropic account restricted. Use Claude Code (your claude CLI sign-in) for Claude, or save an Anthropic API key.";
 
 struct BuiltIn {
@@ -36,7 +40,7 @@ struct BuiltIn {
     env: &'static str,
 }
 
-const BUILT_INS: [BuiltIn; 16] = [
+const BUILT_INS: [BuiltIn; 17] = [
     BuiltIn { id: "openai", name: "OpenAI", env: "OPENAI_API_KEY" },
     BuiltIn { id: "anthropic", name: "Anthropic", env: "ANTHROPIC_API_KEY" },
     BuiltIn { id: "google", name: "Google Gemini", env: "GEMINI_API_KEY" },
@@ -53,6 +57,7 @@ const BUILT_INS: [BuiltIn; 16] = [
     BuiltIn { id: "zai", name: "Z.ai", env: "ZAI_API_KEY" },
     BuiltIn { id: "minimax", name: "MiniMax", env: "MINIMAX_API_KEY" },
     BuiltIn { id: "vercel-ai-gateway", name: "Vercel AI Gateway", env: "AI_GATEWAY_API_KEY" },
+    BuiltIn { id: SYNTHETIC, name: "Synthetic", env: SYNTHETIC_ENV },
 ];
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -137,6 +142,8 @@ pub(super) struct ProviderState {
     errors: Vec<String>,
     fleet: Vec<LocalController>,
     servers: Vec<Server>,
+    synthetic_error: Option<String>,
+    synthetic_quota: Option<String>,
 }
 
 #[derive(Clone)]
@@ -306,7 +313,8 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
                 env_var: Some(built_in.env.to_string()),
                 base_url: None,
                 api: None,
-                models: Vec::new(),
+                models: files.providers.get(built_in.id).map(models_of).unwrap_or_default(),
+                quota: state.synthetic_quota.clone().filter(|_| built_in.id == SYNTHETIC),
             }
         })
         .collect();
@@ -332,6 +340,7 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
                 base_url: text(entry, "baseUrl").map(str::to_string),
                 api: text(entry, "api").and_then(api_of),
                 models: models_of(entry),
+                quota: None,
             }
         })
         .collect();
@@ -352,6 +361,7 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
             base_url: None,
             api: None,
             models: Vec::new(),
+            quota: None,
         })
         .collect();
     others.sort_by(|left, right| left.name.cmp(&right.name));
@@ -810,6 +820,48 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + 
     tokio::task::spawn_blocking(work).await.map_err(|error| error.to_string())?
 }
 
+fn synthetic_origin() -> String {
+    std::env::var("LOCAL_STUDIO_SYNTHETIC_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| SYNTHETIC_ORIGIN.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn synthetic_key(auth: &Map<String, Value>) -> Option<String> {
+    stored_key(auth, SYNTHETIC).or_else(|| std::env::var(SYNTHETIC_ENV).ok().filter(|key| !key.trim().is_empty()))
+}
+
+fn synthetic_entry(existing: Option<&Value>, base_url: &str, models: &[ProviderModel]) -> Value {
+    let mut entry = provider_entry(existing, "Synthetic", base_url, ProviderApi::OpenAiCompatible, models);
+    entry["apiKey"] = json!(SYNTHETIC_ENV);
+    entry
+}
+
+fn quota_line(value: &Value) -> Option<String> {
+    let number = |object: &Value, key: &str| object.get(key).and_then(Value::as_f64);
+    let mut parts = Vec::new();
+    let rolling = value.get("rollingFiveHourLimit").and_then(|limit| Some((number(limit, "remaining")?, number(limit, "max")?)));
+    let subscription = value.get("subscription").and_then(|limit| Some((number(limit, "limit")?, number(limit, "requests")?)));
+    if let Some((left, max)) = rolling {
+        parts.push(format!("{left:.0} of {max:.0} requests left in the rolling 5 hours"));
+    } else if let Some((limit, used)) = subscription {
+        parts.push(format!("{:.0} of {limit:.0} requests left", (limit - used).max(0.0)));
+    }
+    if let Some(percent) = value.get("weeklyTokenLimit").and_then(|limit| number(limit, "percentRemaining")) {
+        parts.push(format!("{percent:.0}% of weekly tokens left"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+async fn synthetic_quota(origin: &str, key: &str) -> Option<String> {
+    let client = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(QUOTA_TIMEOUT).build().ok()?;
+    let response = client.get(format!("{origin}/v2/quotas")).bearer_auth(key).send().await.ok()?;
+    let value: Value = response.error_for_status().ok()?.json().await.ok()?;
+    quota_line(&value)
+}
+
 fn chosen_key(key: &ProviderKey) -> Option<String> {
     match key {
         ProviderKey::Set { key } => Some(key.trim().to_string()).filter(|key| !key.is_empty()),
@@ -884,7 +936,7 @@ impl Workspace {
         let update = {
             let state = self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
             let mut errors = state.errors.clone();
-            for error in &files.errors {
+            for error in files.errors.iter().chain(&state.synthetic_error) {
                 if !errors.contains(error) {
                     errors.push(error.clone());
                 }
@@ -905,6 +957,74 @@ impl Workspace {
             let fleet = workspace.inner.local.fleet(&workspace.current_settings()).await;
             workspace.fleet_seen(fleet);
         });
+        let workspace = self.clone();
+        self.inner.runtime.spawn(async move {
+            match workspace.sync_synthetic().await {
+                Ok(true) => workspace.reload_catalog(),
+                Ok(false) | Err(_) => workspace.publish_providers(),
+            }
+        });
+    }
+
+    fn reload_catalog(&self) {
+        let reloader = self.inner.models_reloader.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        match reloader {
+            Some(reloader) => reloader(None),
+            None => self.publish_providers(),
+        }
+    }
+
+    async fn sync_synthetic(&self) -> Result<bool, String> {
+        let outcome = self.list_synthetic().await;
+        let error = outcome.as_ref().err().map(|error| format!("Synthetic: {error}"));
+        self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_error = error;
+        outcome
+    }
+
+    async fn list_synthetic(&self) -> Result<bool, String> {
+        let agent = self.agent()?;
+        let auth = {
+            let agent = agent.clone();
+            blocking(move || read_object(&agent.join("auth.json"))).await?
+        };
+        let key = synthetic_key(&auth);
+        let origin = synthetic_origin();
+        let base_url = format!("{origin}/openai/v1");
+        self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_quota = None;
+        let models = match &key {
+            Some(key) => Some(discover(&base_url, ProviderApi::OpenAiCompatible, Some(key)).await?.1),
+            None => None,
+        };
+        if let Some(key) = key {
+            let workspace = self.clone();
+            let origin = origin.clone();
+            self.inner.runtime.spawn(async move {
+                let quota = synthetic_quota(&origin, &key).await;
+                workspace.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_quota = quota;
+                workspace.publish_providers();
+            });
+        }
+        let _guard = self.inner.providers_lock.lock().await;
+        blocking(move || {
+            let existing = configured_providers(&agent).remove(SYNTHETIC);
+            let ours = existing.as_ref().is_none_or(|entry| text(entry, "apiKey") == Some(SYNTHETIC_ENV));
+            let wanted = match models {
+                Some(models) => Some(synthetic_entry(existing.as_ref(), &base_url, &models)),
+                None if ours => None,
+                None => existing.clone(),
+            };
+            if existing == wanted {
+                return Ok(false);
+            }
+            edit_models(&agent, |providers| {
+                match wanted {
+                    Some(entry) => providers.insert(SYNTHETIC.to_string(), entry),
+                    None => providers.remove(SYNTHETIC),
+                };
+                Ok(true)
+            })
+        })
+        .await
     }
 
     pub(crate) fn find_local_servers(&self, presets: Vec<EndpointPreset>) {
@@ -1122,8 +1242,17 @@ impl Workspace {
             } else {
                 format!("Removed the {} key.", display_name(&provider))
             };
-            let _guard = workspace.inner.providers_lock.lock().await;
-            blocking(move || store_key(&agent, &provider, key.as_deref())).await?;
+            {
+                let _guard = workspace.inner.providers_lock.lock().await;
+                let provider = provider.clone();
+                blocking(move || store_key(&agent, &provider, key.as_deref())).await?;
+            }
+            if provider == SYNTHETIC {
+                if let Err(error) = workspace.sync_synthetic().await {
+                    workspace.reload_catalog();
+                    return Err(format!("{message} {error}"));
+                }
+            }
             workspace.reload_models(reply, message);
             Ok(Vec::new())
         });
