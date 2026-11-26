@@ -11,7 +11,7 @@ import { RECORDER_MESSAGE } from "../offscreen/recorder-message.js";
 import { type CaptureBackend, CaptureError, CaptureManager, type CaptureOutput, type Run } from "./capture.js";
 import { cdpSend, ensureAttached, networkCapturing, screencastOwner, startScreencast, stopScreencast } from "./cdp.js";
 import { HAR_SIZE_CAP, HarBuilder } from "./har.js";
-import { BrowserSession } from "./session.js";
+import { BrowserSession, SESSIONS_KEY } from "./session.js";
 
 const VIDEO_MAX_BYTES = 32 * 1024 * 1024;
 const VIDEO_MAX_MS = 10 * 60 * 1000;
@@ -77,6 +77,10 @@ function listen(): void {
 		}
 	});
 	chrome.tabs.onRemoved.addListener((tabId) => captures.tabClosed(tabId));
+	// A tab released, adopted or moved to another session ends its capture now, not at the next sweep.
+	chrome.storage.onChanged.addListener((changes, area) => {
+		if (area === "local" && SESSIONS_KEY in changes) void captures.ownersChanged().catch(() => undefined);
+	});
 }
 
 function creator() {

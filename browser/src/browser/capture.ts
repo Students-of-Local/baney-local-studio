@@ -8,9 +8,10 @@
  * - A capture belongs to the session that started it. Only that session sees it in `status`, stops
  *   it, saves it or cancels it; another session's id is "not found", the same as an id that never existed.
  * - A capture starts only on a tab the session owns, and ends, keeping what it has, the moment
- *   that stops being true (the tab closed, was given away, or the debugger left it). If that happens
- *   while the browser is still starting it, the start finishes by stopping what it started and
- *   reporting the capture as cancelled: nothing runs without an owner.
+ *   that stops being true (the tab closed, was given away, or the debugger left it; `ownersChanged`
+ *   checks every capture whenever the sessions change). If that happens while the browser is still
+ *   starting it, the start finishes by stopping what it started and reporting the capture as
+ *   cancelled: nothing runs without an owner. A start that finishes asks the backend again.
  * - Nothing runs for long: 10 minutes for network and recordings, 30 for a flight recorder. An ended
  *   capture stays in memory for 30 minutes so its owner can still save it.
  * - Starting never reads the file's content back to the agent: results carry the file itself for
@@ -157,6 +158,8 @@ export interface CaptureManagerOptions {
 	newId?: () => string;
 }
 
+const NOT_OWNED = "the tab is no longer one of the session's";
+
 let counter = 0;
 const defaultId = (): string =>
 	`cap-${Date.now().toString(36)}${(counter++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -273,9 +276,12 @@ export class CaptureManager {
 			}
 			throw err;
 		}
-		// The owner may have gone while the browser was starting it (the tab was released or closed,
-		// the debugger left, or the capture was cancelled). `ended` had no run to halt then, so the run
-		// that just came back would collect with nobody to stop it: stop it now and say so.
+		// The owner may have gone while the browser was starting it (the tab was released, closed or
+		// moved to another session, the debugger left, or the capture was cancelled). `ended` had no run
+		// to halt then, so the run that just came back would collect with nobody to stop it: stop it now
+		// and say so. The session's record decides, not the tab list the call came with.
+		if (capture.state === "starting" && !(await this.backend.owns(session.id, tabId).catch(() => false)))
+			this.ended(capture, NOT_OWNED);
 		if (capture.state !== "starting" || this.captures.get(capture.id) !== capture) {
 			const why = capture.endedBy ?? "it was cancelled";
 			if (this.captures.get(capture.id) === capture) {
@@ -457,6 +463,19 @@ export class CaptureManager {
 		for (const c of this.captures.values()) if (c.tabId === tabId) this.ended(c, why);
 	}
 
+	/**
+	 * The sessions changed (a tab released, adopted or given to another session): end, keeping what it
+	 * has, every capture whose session no longer owns its tab, without waiting for the next sweep.
+	 */
+	async ownersChanged(): Promise<void> {
+		const live = [...this.captures.values()].filter((c) => c.state !== "ended");
+		await Promise.all(
+			live.map(async (c) => {
+				if (!(await this.backend.owns(c.sessionId, c.tabId).catch(() => false))) this.ended(c, NOT_OWNED);
+			}),
+		);
+	}
+
 	/** Enforce the time limits and the ownership rule; call it every couple of seconds while `onActive(true)`. */
 	async sweep(): Promise<void> {
 		const now = this.now();
@@ -473,8 +492,7 @@ export class CaptureManager {
 					c,
 					`it reached its ${Math.round((c.kind === "flight" ? MAX_FLIGHT_MS : MAX_CAPTURE_MS) / 60000)} minute limit`,
 				);
-			else if (!(await this.backend.owns(c.sessionId, c.tabId).catch(() => false)))
-				this.ended(c, "the tab is no longer one of the session's");
+			else if (!(await this.backend.owns(c.sessionId, c.tabId).catch(() => false))) this.ended(c, NOT_OWNED);
 		}
 	}
 
