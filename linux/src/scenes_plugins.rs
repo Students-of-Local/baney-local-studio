@@ -149,8 +149,8 @@ fn catalog(installed: bool) -> Vec<CatalogPlugin> {
         ("gantrel", "Gantrel", "Design 3D printable parts with a local model, then slice, upload and watch them on your printers", "5cdd089", None),
         ("hildegard", "Hildegard", "Make images, video, speech, designed voices and cleaned audio on your own GPU, each one checked before you see it", "504d949", Some("0.1.17")),
         ("smoothstone", "Smoothstone", "Make 3D printable parts with the stone CLI and its tested parametric recipes", "715e0ac", None),
-        ("browser-use", "Local Studio browser use", "Work in Chromium tabs in the background through the Local Studio extension", "398a921", None),
-        ("computer-use", "Local Studio computer use", "Read and operate desktop apps through accessibility APIs, with the Local Studio extension's helper", "398a921", None),
+        ("browser-use", "Local Studio browser use", "Work in Chromium tabs in the background through the Local Studio extension", "f5d7a0a", None),
+        ("computer-use", "Local Studio computer use", "Read and operate desktop apps through accessibility APIs, with the Local Studio extension's helper", "f5d7a0a", None),
     ]
     .into_iter()
     .map(|(id, name, description, revision, version)| CatalogPlugin {
