@@ -4,7 +4,7 @@
 //   node scripts/compile.mjs --arch arm64|x64 --out <file> [--os linux|darwin|windows] [--work <dir>]
 // --os cross-builds for another system (the release builds all three on one Linux runner); the default is this one.
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,11 @@ if (!["arm64", "x64"].includes(arch) || !out) {
 	process.exit(2);
 }
 const work = arg("--work") ?? mkdtempSync(join(tmpdir(), "local-studio-compile-"));
+// build.mjs empties its out dir first, so a --work that already holds files would be deleted with them.
+if (arg("--work") && existsSync(work) && readdirSync(work).length > 0) {
+	console.error(`compile: --work ${work} is not empty; give a new or empty folder`);
+	process.exit(2);
+}
 const run = (cmd, args, env = {}) => {
 	const r = spawnSync(cmd, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...env } });
 	if (r.status !== 0) {
