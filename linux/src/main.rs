@@ -57,6 +57,7 @@ mod scenes_updates;
 mod scenes_workflow;
 mod search;
 mod settings;
+mod settings_shell;
 mod setup;
 mod sidebar;
 mod skill_draft;
