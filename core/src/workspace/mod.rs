@@ -293,7 +293,7 @@ impl Workspace {
                 return;
             }
             let settings = self.current_settings();
-            if settings.git_fetch_interval_seconds == 0 {
+            if settings.git_fetch_interval_seconds == 0 || !self.watched() {
                 continue;
             }
             let projects = self.inner.projects.lock().unwrap_or_else(PoisonError::into_inner).clone();

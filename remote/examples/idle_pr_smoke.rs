@@ -94,6 +94,10 @@ fn pr_calls(scratch: &Path) -> usize {
     lines(scratch, "gh").iter().filter(|line| line.starts_with("pr ")).count()
 }
 
+fn fetch_calls(scratch: &Path) -> usize {
+    lines(scratch, "git").iter().filter(|line| line.split(' ').any(|word| word == "fetch")).count()
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git").args(args).current_dir(dir).status().with_context(|| format!("git {args:?}"))?;
     ensure!(status.success(), "git {args:?} failed in {}", dir.display());
@@ -181,6 +185,8 @@ async fn run(serve_bin: &Path, scratch: &Path, idle: Duration) -> Result<()> {
     );
     ensure!(idle_calls == 0, "serve made PR-status gh calls with no client: {:?}", lines(&scratch, "gh"));
     println!("ok   idle serve with no client made no PR-status gh call");
+    ensure!(fetch_calls(&scratch) == 0, "serve ran git fetch with no client: {:?}", lines(&scratch, "git"));
+    println!("ok   idle serve with no client ran no git fetch");
 
     let url = format!("ws://127.0.0.1:{port}/v1/ws");
     let minted = command(serve_bin, &scratch, &path)
@@ -190,6 +196,7 @@ async fn run(serve_bin: &Path, scratch: &Path, idle: Duration) -> Result<()> {
     let minted: Value = serde_json::from_slice(&minted.stdout)?;
     let link = minted["link"].as_str().context("pair printed no link")?;
     let threads = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let attached = Instant::now();
     let _phone = pair_phone(port, link, Arc::clone(&threads)).await?;
     let chips = || -> Vec<String> {
         let rows = threads.lock().unwrap_or_else(PoisonError::into_inner);
@@ -226,6 +233,12 @@ async fn run(serve_bin: &Path, scratch: &Path, idle: Duration) -> Result<()> {
     tokio::time::sleep(ASKED_AGAIN).await;
     ensure!(pr_calls(&scratch) == 1, "within 120 s of the first call gh ran {} times", pr_calls(&scratch));
     println!("ok   no second call within {} s while the phone stays attached", ASKED_AGAIN.as_secs());
+    let deadline = attached + Duration::from_secs(45);
+    while fetch_calls(&scratch) == 0 {
+        ensure!(Instant::now() < deadline, "serve ran no git fetch in 45 s with a phone attached");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    println!("ok   with a phone attached the project fetch runs again");
     Ok(())
 }
 

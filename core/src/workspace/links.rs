@@ -95,6 +95,10 @@ impl Workspace {
         self.inner.links.set_remote_clients(count);
     }
 
+    pub(crate) fn watched(&self) -> bool {
+        self.inner.links.watched()
+    }
+
     pub(crate) fn thread_pull_request(&self, dir: &str, branch: &str) -> Option<PullRequest> {
         if branch.trim().is_empty() || process::which("gh").is_none() {
             return None;
