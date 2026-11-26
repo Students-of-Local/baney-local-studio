@@ -467,6 +467,7 @@ fn drive(
     };
     discovery(harness, port)?;
     local_servers(harness, agent, port)?;
+    server_windows(harness, agent)?;
     add_and_chat(harness, agent, port, &project)?;
     edit_and_keys(harness, agent, port)?;
     synthetic(harness, agent, port, &project)?;
@@ -582,6 +583,113 @@ fn canned(answer: Option<String>, counted: fn(&str) -> bool) -> anyhow::Result<(
         }
     });
     Ok((port, hits))
+}
+
+fn engine_like(routes: Vec<(&'static str, String)>) -> anyhow::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(&stream);
+            let mut first = String::new();
+            let mut length = 0;
+            let mut line = String::new();
+            if reader.read_line(&mut first).is_err() {
+                continue;
+            }
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut body = vec![0; length];
+            if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
+                continue;
+            }
+            let route = first.split(' ').take(2).collect::<Vec<_>>().join(" ");
+            let model =
+                serde_json::from_slice::<Value>(&body).ok().and_then(|body| body["model"].as_str().map(str::to_string));
+            let named = model.map(|model| format!("{route} {model}"));
+            let answer = routes
+                .iter()
+                .find(|(known, _)| Some(*known) == named.as_deref())
+                .or_else(|| routes.iter().find(|(known, _)| *known == route))
+                .map(|(_, body)| body.as_str());
+            let (head, body) = answer.map_or(("404 Not Found", "{}"), |body| ("200 OK", body));
+            let reply = format!("HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    Ok(port)
+}
+
+fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
+    let list = |ids: &[&str]| {
+        json!({ "object": "list", "data": ids.iter().map(|id| json!({ "id": id, "object": "model" })).collect::<Vec<_>>() }).to_string()
+    };
+    let set = json!({
+        "parameters": "num_ctx                        16384\nstop                           \"<|im_end|>\"",
+        "model_info": { "lfm3.context_length": 262_144 },
+    })
+    .to_string();
+    let card =
+        json!({ "parameters": "stop \"<|im_end|>\"", "model_info": { "lfm3.context_length": 262_144 } }).to_string();
+    let ollama = engine_like(vec![
+        ("GET /v1/models", list(&["tiny:latest", "card:latest"])),
+        ("GET /api/ps", r#"{"models":[]}"#.to_string()),
+        ("POST /api/show tiny:latest", set),
+        ("POST /api/show card:latest", card),
+    ])?;
+    let llama = engine_like(vec![
+        ("GET /v1/models", list(&["tiny:latest"])),
+        ("GET /props", r#"{"default_generation_settings":{"n_ctx":8192}}"#.to_string()),
+    ])?;
+    let studio = json!({ "data": [
+        { "id": "warm", "loaded_context_length": 4096, "max_context_length": 131_072 },
+        { "id": "cold", "max_context_length": 131_072 },
+    ] })
+    .to_string();
+    let lm = engine_like(vec![("GET /v1/models", list(&["warm", "cold"])), ("GET /api/v0/models", studio)])?;
+    let cases = [
+        (ollama, vec![("tiny:latest", Some(16_384)), ("card:latest", None)]),
+        (llama, vec![("tiny:latest", Some(8_192))]),
+        (lm, vec![("warm", Some(4_096)), ("cold", None)]),
+    ];
+    for (port, windows) in cases {
+        let base = format!("http://127.0.0.1:{port}/v1");
+        harness.studio.find_local_servers(vec![found_here(base.clone())]);
+        let listed = base.clone();
+        harness.pump_until("an engine whose model list has no context size is found", move |view| {
+            view.engines.iter().any(|engine| engine.id == listed)
+        })?;
+        let request = harness.request();
+        harness.studio.use_local_engine(request.clone(), base.clone());
+        harness.answer("that engine is used", &request)?;
+        let providers = read_json(&agent.join("models.json"))?["providers"].clone();
+        let (id, entry) = providers
+            .as_object()
+            .and_then(|providers| providers.iter().find(|(_, entry)| entry["baseUrl"] == base.as_str()))
+            .context("the used engine is in models.json")?;
+        for (model, window) in windows {
+            let written = entry["models"]
+                .as_array()
+                .and_then(|models| models.iter().find(|written| written["id"] == model))
+                .with_context(|| format!("{base}: {model} is in models.json: {entry}"))?;
+            ensure!(written["contextWindow"].as_u64() == window, "{base}: {model}: {written}");
+            match window {
+                Some(window) => {
+                    println!("ok   {base} {model} is added with the context size the engine runs ({window})");
+                }
+                None => println!("ok   {base} {model} is added with no context size, not its card's maximum"),
+            }
+        }
+        let request = harness.request();
+        harness.studio.remove_custom_provider(request.clone(), id.clone());
+        harness.answer("that engine is removed", &request)?;
+    }
+    harness.studio.find_local_servers(Vec::new());
+    harness.pump_until("those engines leave the list", |view| view.engines.is_empty())
 }
 
 fn found_here(base_url: String) -> EndpointPreset {

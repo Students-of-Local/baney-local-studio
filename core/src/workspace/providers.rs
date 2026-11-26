@@ -27,6 +27,7 @@ const ENDPOINT_HEADER: &str = "x-local-studio-endpoint";
 const EXCERPT: usize = 200;
 const SERVER_TIMEOUT: Duration = Duration::from_millis(1500);
 const SERVER_BYTES: usize = 1 << 20;
+const SHOWN: usize = 24;
 const ANTHROPIC: &str = "anthropic";
 const SYNTHETIC: &str = "synthetic";
 const SYNTHETIC_ENV: &str = "SYNTHETIC_API_KEY";
@@ -786,9 +787,8 @@ fn server_at(preset: EndpointPreset) -> Option<Server> {
     Some(Server { name: preset.name, base_url, port: url.port_or_known_default()?, models: Vec::new() })
 }
 
-async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Server> {
-    let asked = client.get(format!("{}/models", server.base_url)).send().await;
-    let mut response = asked.ok().filter(|response| response.status().is_success())?;
+async fn read_server(request: reqwest::RequestBuilder) -> Option<Value> {
+    let mut response = request.send().await.ok().filter(|response| response.status().is_success())?;
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
         if body.len() + chunk.len() > SERVER_BYTES {
@@ -796,9 +796,72 @@ async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Serve
         }
         body.extend_from_slice(&chunk);
     }
-    server.models = parse_models(&serde_json::from_slice(&body).ok()?);
+    serde_json::from_slice(&body).ok()
+}
+
+async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Server> {
+    server.models = parse_models(&read_server(client.get(format!("{}/models", server.base_url))).await?);
     server.models.retain(|model| !model.id.to_lowercase().contains("embed"));
-    (!server.models.is_empty()).then_some(server)
+    if server.models.is_empty() {
+        return None;
+    }
+    context_windows(&client, &mut server).await;
+    Some(server)
+}
+
+fn size(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64).filter(|size| *size > 0)
+}
+
+fn without_window(server: &mut Server) -> impl Iterator<Item = &mut ProviderModel> {
+    server.models.iter_mut().filter(|model| model.context_window == 0)
+}
+
+async fn context_windows(client: &reqwest::Client, server: &mut Server) {
+    let root = server.base_url.strip_suffix("/v1").unwrap_or(&server.base_url).to_string();
+    if without_window(server).next().is_none() {
+        return;
+    }
+    if let Some(props) = read_server(client.get(format!("{root}/props"))).await {
+        if let Some(n_ctx) =
+            size(props.pointer("/default_generation_settings/n_ctx")).or_else(|| size(props.get("n_ctx")))
+        {
+            without_window(server).for_each(|model| model.context_window = n_ctx);
+        }
+    }
+    if let Some(listed) = read_server(client.get(format!("{root}/api/v0/models"))).await {
+        for entry in listed.get("data").and_then(Value::as_array).into_iter().flatten() {
+            let found = size(entry.get("loaded_context_length"));
+            if let (Some(found), Some(id)) = (found, text(entry, "id")) {
+                without_window(server).filter(|model| model.id == id).for_each(|model| model.context_window = found);
+            }
+        }
+    }
+    let Some(running) = read_server(client.get(format!("{root}/api/ps"))).await else { return };
+    let running = running.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
+    for model in without_window(server).take(SHOWN) {
+        let loaded = running.iter().find(|entry| {
+            text(entry, "name") == Some(model.id.as_str()) || text(entry, "model") == Some(model.id.as_str())
+        });
+        if let Some(found) = loaded.and_then(|entry| size(entry.get("context_length"))) {
+            model.context_window = found;
+            continue;
+        }
+        let Some(shown) =
+            read_server(client.post(format!("{root}/api/show")).json(&json!({ "model": model.id }))).await
+        else {
+            continue;
+        };
+        let set = text(&shown, "parameters").and_then(|parameters| {
+            parameters.lines().find_map(|line| match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["num_ctx", value] => value.parse::<u64>().ok().filter(|size| *size > 0),
+                _ => None,
+            })
+        });
+        if let Some(found) = set {
+            model.context_window = found;
+        }
+    }
 }
 
 fn server_client() -> Result<reqwest::Client, String> {
