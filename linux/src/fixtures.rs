@@ -34,7 +34,7 @@ pub fn scenes() -> Vec<&'static str> {
     all
 }
 
-pub const SCENES: [&str; 62] = [
+pub const SCENES: [&str; 63] = [
     "01-empty",
     "02-new-thread",
     "03-conversation",
@@ -45,6 +45,7 @@ pub const SCENES: [&str; 62] = [
     "08-diff-panel",
     "09-terminal-drawer",
     "10-settings-general",
+    "10-settings-search",
     "11-settings-keybindings",
     "12-local",
     "13-usage",
@@ -201,6 +202,14 @@ pub fn stage(app: &Rc<App>, scene: &str) {
             conversation(app, false);
             app.open_settings(Some("general"));
             app.apply(vec![Update::Providers { providers: providers(), engines: Vec::new(), errors: Vec::new() }]);
+        }
+        "10-settings-search" => {
+            conversation(app, false);
+            app.open_settings(Some("general"));
+            app.apply(vec![Update::Providers { providers: providers(), engines: Vec::new(), errors: Vec::new() }]);
+            if let Some(settings) = app.settings.borrow().as_ref() {
+                settings.search("worktree");
+            }
         }
         "11-settings-keybindings" => {
             conversation(app, false);
