@@ -42,6 +42,8 @@ pub struct CatalogEntry {
     pub tree: String,
     #[serde(default)]
     pub exclude: Vec<String>,
+    #[serde(default)]
+    pub replaces: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +324,17 @@ impl Catalog {
             if let Some(name) = entry.capabilities.iter().find(|name| Capability::parse(name).is_none()) {
                 return Err(format!("catalog {}: unknown capability {name}", entry.id));
             }
+            for old in &entry.replaces {
+                if !valid_id(old) {
+                    return Err(format!("catalog {}: bad replaced id {old:?}", entry.id));
+                }
+                if catalog.entry(old).is_some() {
+                    return Err(format!("catalog {}: it replaces {old}, which is still a catalog entry", entry.id));
+                }
+                if catalog.plugins.iter().filter(|other| other.replaces.contains(old)).count() > 1 {
+                    return Err(format!("catalog: more than one entry replaces {old}"));
+                }
+            }
         }
         Ok(catalog)
     }
@@ -333,6 +346,11 @@ impl Catalog {
     #[must_use]
     pub fn entry(&self, id: &str) -> Option<&CatalogEntry> {
         self.plugins.iter().find(|entry| entry.id == id)
+    }
+
+    #[must_use]
+    pub fn replacing(&self, old: &str) -> Option<&CatalogEntry> {
+        self.plugins.iter().find(|entry| entry.replaces.iter().any(|id| id == old))
     }
 }
 
@@ -378,6 +396,7 @@ pub struct Staged {
     pin: Option<String>,
     record: Box<Origin>,
     translated: bool,
+    pub(super) replaces: Option<String>,
 }
 
 pub fn stage(root: &Path, source: &Source, catalog: &Catalog) -> Result<Staged, Vec<String>> {
@@ -537,6 +556,7 @@ fn place(
         pin: expected.map(str::to_string),
         record: Box::default(),
         translated: foreign,
+        replaces: None,
     })
 }
 
@@ -614,7 +634,7 @@ impl Staged {
         root: &Path,
         sheet: Option<(&[Capability], &[Capability])>,
     ) -> Result<Installed, Vec<String>> {
-        let _lock = Grants::lock(root).map_err(|error| vec![error])?;
+        let lock = Grants::lock(root).map_err(|error| vec![error])?;
         let id = &self.plugin.id;
         let staged = self.staging.0.join(id);
         self.verify(&staged)?;
@@ -660,6 +680,15 @@ impl Staged {
             }
         })?;
         let consent = grants.consent(&plugin);
+        drop(lock);
+        let note = match self.replaces.as_ref().filter(|old| std::fs::symlink_metadata(root.join(old)).is_ok()) {
+            Some(old) => {
+                let retired =
+                    super::hub::retire(root, old, &plugin).unwrap_or_else(|error| format!("{old} stays: {error}"));
+                Some(note.map_or_else(|| retired.clone(), |note| format!("{note}; {retired}")))
+            }
+            None => note,
+        };
         Ok(Installed { plugin, replaced, consent, files: self.files, tree: self.tree, source: self.origin, note })
     }
 }

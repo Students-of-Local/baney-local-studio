@@ -29,21 +29,23 @@ subdir = "local-studio/hildegard"
 tree = "sha256:76b07693b90c1dd5f6223db97d8ade0a950c036cac61191647f1166847e6bc59"
 
 [[plugin]]
-id = "tychicus-browser"
-name = "Browser use"
+id = "browser-use"
+name = "Local Studio browser use"
 description = "Work in Chromium tabs in the background through the Local Studio extension"
 capabilities = []
-git = "https://github.com/baney75/tychicus"
-rev = "fa6fcbe4aa8ef245dd9df25f5c0c35dd5bf7b7f7"
-subdir = "plugins/tychicus-browser"
-tree = "sha256:6517d70f3ad016a838dc9d669cc2dc3c4691fc5a1c370675409b1e45364902c5"
+replaces = ["tychicus-browser"]
+git = "https://github.com/Students-of-Local/baney-local-studio"
+rev = "f5d7a0a7c63f454b227f07b190d044163e2f040e"
+subdir = "browser/plugins/browser-use"
+tree = "sha256:b63d7b0a54710e1d139a68d8894c1f5615ba771f2ed972aa5ecdbf057d4a7efe"
 
 [[plugin]]
-id = "tychicus-computer"
-name = "Computer use"
-description = "Read and operate desktop apps through accessibility APIs"
+id = "computer-use"
+name = "Local Studio computer use"
+description = "Read and operate desktop apps through accessibility APIs, with the Local Studio extension's helper"
 capabilities = []
-git = "https://github.com/baney75/tychicus"
-rev = "fa6fcbe4aa8ef245dd9df25f5c0c35dd5bf7b7f7"
-subdir = "plugins/tychicus-computer"
-tree = "sha256:757adcfc83aaec5298fabe7b23ca2df374372eb467b19ab5f4d5d1811339eb0a"
+replaces = ["tychicus-computer"]
+git = "https://github.com/Students-of-Local/baney-local-studio"
+rev = "f5d7a0a7c63f454b227f07b190d044163e2f040e"
+subdir = "browser/plugins/computer-use"
+tree = "sha256:a0c79c7002a85c10e32fdb283ab1a7a401a4b130546aa37f918883daa00d5039"
