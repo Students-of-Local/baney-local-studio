@@ -58,6 +58,7 @@ pub const PLUGIN: &str = "application-x-addon-symbolic";
 pub const UNREACHABLE: &str = "network-error-symbolic";
 pub const KEYBOARD: &str = "input-keyboard-symbolic";
 pub const PROVIDERS: &str = "application-x-addon-symbolic";
+pub const KEYS: &str = "dialog-password-symbolic";
 pub const APPEARANCE: &str = "preferences-desktop-appearance-symbolic";
 pub const STORAGE: &str = "drive-harddisk-symbolic";
 pub const STARRED: &str = "starred-symbolic";
@@ -93,6 +94,8 @@ const CSS: &str = r"
 .ls-picker-icon { min-width: 16px; }
 .ls-shelf image { color: var(--sidebar-fg-color); }
 .ls-summary image { color: var(--window-fg-color); }
+.ls-settings preferencesgroup box.header label.heading { font-size: 1.15em; }
+.ls-settings-trail { margin-start: 6px; }
 ";
 
 const HIGH_CONTRAST: &str = r"

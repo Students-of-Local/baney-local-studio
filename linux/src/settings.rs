@@ -74,7 +74,7 @@ impl SettingsDialog {
         dialog.add(&appearance_page(&weak));
         let keys_page = page("keybindings", "Keybindings", icons::KEYBOARD);
         dialog.add(&keys_page);
-        let providers_page = page("providers", "Providers", icons::PROVIDERS);
+        let providers_page = page("providers", "Providers", icons::KEYS);
         dialog.add(&providers_page);
         let plugins_page = page("plugins", "Plugins", icons::PLUGIN);
         dialog.add(&plugins_page);

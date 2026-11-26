@@ -47,23 +47,25 @@ impl Shell {
         dialog.add_css_class("preferences");
         dialog.add_css_class("ls-settings");
         let stack = adw::ViewStack::builder().vhomogeneous(false).build();
-        let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search settings")
-            .margin_start(12)
-            .margin_end(12)
-            .margin_top(2)
-            .margin_bottom(8)
-            .build();
+        let search = gtk::SearchEntry::builder().placeholder_text("Search settings").hexpand(true).build();
         let switcher = adw::ViewSwitcherSidebar::builder().stack(&stack).vexpand(true).build();
-        let side = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        side.append(&search);
-        side.append(&switcher);
         let side_view = adw::ToolbarView::new();
-        side_view.add_top_bar(&adw::HeaderBar::builder().show_end_title_buttons(false).build());
-        side_view.set_content(Some(&side));
-        let title = adw::WindowTitle::new("", "");
+        side_view.add_top_bar(&adw::HeaderBar::builder().title_widget(&search).show_end_title_buttons(false).build());
+        side_view.set_content(Some(&switcher));
+        let title = gtk::Label::new(None);
+        let trail = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        trail.add_css_class("ls-settings-trail");
+        let root = gtk::Label::new(Some("Settings"));
+        root.add_css_class("dim-label");
+        let slash = gtk::Label::new(Some("/"));
+        slash.add_css_class("dim-label");
+        trail.append(&root);
+        trail.append(&slash);
+        trail.append(&title);
+        let content_bar = adw::HeaderBar::builder().show_title(false).build();
+        content_bar.pack_start(&trail);
         let content_view = adw::ToolbarView::new();
-        content_view.add_top_bar(&adw::HeaderBar::builder().title_widget(&title).build());
+        content_view.add_top_bar(&content_bar);
         content_view.set_content(Some(&stack));
         let split = adw::NavigationSplitView::builder()
             .sidebar(&adw::NavigationPage::builder().title("Settings").child(&side_view).build())
@@ -84,7 +86,7 @@ impl Shell {
         let shown = split.clone();
         stack.connect_visible_child_notify(move |stack| {
             let name = stack.visible_child().map(|child| stack.page(&child).title().unwrap_or_default().to_string());
-            title.set_title(name.as_deref().unwrap_or_default());
+            title.set_label(name.as_deref().unwrap_or_default());
             shown.set_show_content(true);
         });
         let shell = Self { dialog, stack, search: search.clone(), pages: Rc::new(RefCell::new(Vec::new())) };
