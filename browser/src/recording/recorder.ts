@@ -88,10 +88,33 @@ function injectedRecorder() {
 		return parts.join(" > ");
 	};
 
+	// Clicks and submits the browser adds to the user's one action: a label forwards its click to its
+	// control, and a submit control's click (Enter in a field makes one too) submits its form. Both
+	// follow in the same task, and replaying the first does them again.
+	let forwardedTo: Element | null = null;
+	let submitting: Element | null = null;
+	const isSubmitControl = (el: Element): boolean => {
+		const type = (el as HTMLInputElement).type;
+		return (
+			(el.tagName === "BUTTON" && type === "submit") ||
+			(el.tagName === "INPUT" && (type === "submit" || type === "image"))
+		);
+	};
+
 	const onClick = (e: Event) => {
 		const target = e.target as Element | null;
 		if (!target) return;
+		if (forwardedTo && target === forwardedTo) {
+			forwardedTo = null;
+			return;
+		}
 		const el = (target.closest("a,button,input,select,textarea,[role=button],[onclick],label") as Element) || target;
+		forwardedTo = el.tagName === "LABEL" ? (el as HTMLLabelElement).control : null;
+		submitting = isSubmitControl(el) ? (el as HTMLButtonElement).form : null;
+		setTimeout(() => {
+			forwardedTo = null;
+			submitting = null;
+		}, 0);
 		send({
 			type: "click",
 			selector: cssPath(el),
@@ -120,6 +143,10 @@ function injectedRecorder() {
 	const onSubmit = (e: Event) => {
 		const el = e.target as Element | null;
 		if (!el) return;
+		if (el === submitting) {
+			submitting = null;
+			return;
+		}
 		send({ type: "submit", selector: cssPath(el), tag: "form", timestamp: Date.now() });
 	};
 
@@ -285,6 +312,10 @@ window.${jsName} = {
   steps: ${stepsJson},
   async replay() {
     const results = [];
+    // Forms a replayed click on their submit control already sent: their submit step must not send them again.
+    const submitted = new Set();
+    const submits = (el) =>
+      !!el.form && ((el.tagName === "BUTTON" && el.type === "submit") || (el.tagName === "INPUT" && (el.type === "submit" || el.type === "image")));
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     // The value setter of the element's own class (input, textarea or select): another class's throws.
     const setNativeValue = (el, value) => {
@@ -307,6 +338,7 @@ window.${jsName} = {
         }
         if (step.type === "click") {
           el.click();
+          if (submits(el)) submitted.add(el.form);
           results.push({ step, status: "clicked" });
         } else if (step.type === "input") {
           el.focus();
@@ -315,6 +347,10 @@ window.${jsName} = {
           el.dispatchEvent(new Event("change", { bubbles: true }));
           results.push({ step, status: "typed" });
         } else if (step.type === "submit") {
+          if (submitted.delete(el)) {
+            results.push({ step, status: "already-submitted" });
+            continue;
+          }
           if (typeof el.requestSubmit === "function") el.requestSubmit();
           else if (typeof el.submit === "function") el.submit();
           results.push({ step, status: "submitted" });

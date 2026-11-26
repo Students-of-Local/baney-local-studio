@@ -104,3 +104,33 @@ test("replay picks an option in a select, and stops at a step that fails instead
 	assert.deepEqual(stopped.map((r) => r.status), ["error"]);
 	assert.equal(seen.submits, 1);
 });
+
+test("one step per user action: a label's forwarded click and a submit button's submit add none, and replay sends once", async () => {
+	const html = `<form id="f"><label for="agree">I agree</label><input type="checkbox" id="agree"><button id="pay">Pay</button></form>`;
+	const win = page(html);
+	countSubmits(win);
+	// Clicking the label also clicks the checkbox; clicking the button (or Enter in a field) also submits the form.
+	const { rec } = await record(win, (d) => {
+		d.querySelector("label").click();
+		d.getElementById("pay").click();
+	});
+	const acts = rec.steps.filter((s) => s.type !== "input");
+	assert.deepEqual(
+		acts.map((s) => [s.type, s.tag]),
+		[
+			["click", "label"],
+			["click", "button"],
+		],
+	);
+	const fresh = page(html);
+	const seen = countSubmits(fresh);
+	await replayer(fresh, rec).replay();
+	assert.equal(fresh.document.getElementById("agree").checked, true, "the box was toggled twice");
+	assert.equal(seen.submits, 1);
+	// A recording made before this holds the submit as well: replay still sends the form once.
+	const again = page(html);
+	const seenAgain = countSubmits(again);
+	const steps = [step("click", "#pay", { tag: "button", text: "Pay" }), step("submit", "#f", { tag: "form" })];
+	await replayer(again, { hostname: "shop.example", startUrl: "", steps, screenshots: [] }).replay();
+	assert.equal(seenAgain.submits, 1);
+});
