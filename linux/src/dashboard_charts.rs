@@ -54,13 +54,22 @@ impl Sparkline {
         if self.values.borrow().as_slice() != values {
             self.values.replace(values.to_vec());
         }
-        self.area.set_visible(!values.is_empty());
         self.area.queue_draw();
     }
 }
 
 fn draw_sparkline(area: &gtk::DrawingArea, cr: &cairo::Context, width: f64, height: f64, values: &[f64]) {
     if values.is_empty() {
+        let color = area.color();
+        source(cr, &color, 0.12);
+        cr.set_line_width(1.0);
+        cr.set_dash(&[3.0, 4.0], 0.0);
+        for step in 1..=3 {
+            let y = (height * f64::from(step) / 3.0 - 0.5).round() + 0.5;
+            cr.move_to(0.0, y);
+            cr.line_to(width, y);
+        }
+        cr.stroke().ok();
         return;
     }
     let peak = values.iter().copied().fold(0.0_f64, f64::max);
