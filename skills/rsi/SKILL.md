@@ -51,10 +51,10 @@ Only the user edits this file.
 2. **Pick one lesson:** the one that cost most time or would have caused a wrong result. Write it as a rule: "When X, do Y, because Z." If a note
    already said it and it recurred, move the rule into the skill or check the agent has
    open when it acts.
-3. **Pick the target skill.** `skill_search` the lesson's task and choose the skill the lesson
-   belongs in. A skill `local-studio skills list` doesn't show: change it in its own repo by pull
-   request. If none fits and the task recurs, write a new one: a `skill` block (frontmatter with
-   `name` and a `description` that ends "Use when ..."; then the sections this one has), five or more
+3. **Pick the target skill.** `skill_search` the lesson's task; pick its skill.
+   A skill not in `local-studio skills list`: fix it in its repo by pull request. If none fits
+   a recurring task, write a new one: a `skill` block (frontmatter with `name` and a `description`
+   that ends "Use when ..."; then When to use, Steps, When something goes wrong, Done when, one example), five or more
    ways to ask for it in `asks`, its sites' bare hostnames in `where`. A lesson about a project's code: a failing test there.
 4. **Write the smallest edit.** Start from the exact SKILL.md at the path
    `local-studio skills list` gives. In a new empty folder write a reply file with that text whole
