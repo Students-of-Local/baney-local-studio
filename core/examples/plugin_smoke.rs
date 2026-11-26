@@ -507,7 +507,7 @@ mod local_only {
     const LOCAL: &str = "ollama-local";
     const DRIFT: &str = "drift-stub";
     const LEDGER_ENV: &str = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT";
-    const CASES: [(&str, &str, bool); 12] = [
+    const CASES: [(&str, &str, bool); 13] = [
         ("case-v6-loopback", "http://[::1]:11434/v1", true),
         ("case-v6-mapped", "http://[::ffff:127.0.0.1]:11434/v1", true),
         ("case-v6-ula", "http://[fd00::1]:11434/v1", true),
@@ -518,6 +518,7 @@ mod local_only {
         ("case-100-128", "http://100.128.0.1:11434/v1", false),
         ("case-localhost-dot", "http://localhost.:11434/v1", false),
         ("openai", "http://127.0.0.1:11434/v1", false),
+        ("synthetic", "http://127.0.0.1:11434/v1", false),
         ("case-ftp", "ftp://127.0.0.1:11434/v1", false),
         ("case-no-base-url", "", false),
     ];

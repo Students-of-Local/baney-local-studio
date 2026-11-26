@@ -448,6 +448,9 @@ pub struct ProviderStatus {
     pub base_url: Option<String>,
     pub api: Option<ProviderApi>,
     pub models: Vec<ProviderModel>,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub quota: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

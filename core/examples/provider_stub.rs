@@ -1,10 +1,15 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Context;
 use serde_json::{json, Value};
 
 const MODELS: [&str; 2] = ["stub-1", "stub-2"];
+const SYNTHETIC_MODELS: [(&str, u64); 2] = [("hf:zai-org/GLM-5.3", 202_752), ("hf:moonshotai/Kimi-K2.6", 262_144)];
+
+static QUOTA_ERROR: AtomicBool = AtomicBool::new(false);
+static QUOTA_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 struct Request {
     method: String,
@@ -74,7 +79,39 @@ fn serve(stream: &TcpStream, key: &str) -> anyhow::Result<()> {
                 .collect();
             respond(stream, "200 OK", "application/json", &json!({ "object": "list", "data": data }).to_string())
         }
-        ("POST", "/v1/chat/completions") => {
+        ("GET", "/openai/v1/models") => {
+            if auth != "key ok" {
+                return respond(stream, "401 Unauthorized", "application/json", r#"{"error":{"message":"bad key"}}"#);
+            }
+            let data: Vec<Value> = SYNTHETIC_MODELS
+                .iter()
+                .map(|(id, context)| json!({ "id": id, "object": "model", "owned_by": "stub", "context_length": context }))
+                .collect();
+            respond(stream, "200 OK", "application/json", &json!({ "object": "list", "data": data }).to_string())
+        }
+        ("GET", "/v2/quotas") => {
+            if QUOTA_ERROR.load(Ordering::SeqCst) {
+                QUOTA_FAILURES.fetch_add(1, Ordering::SeqCst);
+                return respond(stream, "500 Internal Server Error", "application/json", r#"{"error":"down"}"#);
+            }
+            if auth != "key ok" {
+                return respond(stream, "401 Unauthorized", "application/json", r#"{"error":"bad key"}"#);
+            }
+            let quota = json!({
+                "subscription": { "limit": 600, "requests": 188, "renewsAt": "2026-12-01T00:00:00.000Z" },
+                "weeklyTokenLimit": { "nextRegenAt": "2026-11-27T00:00:00.000Z", "percentRemaining": 87 },
+                "rollingFiveHourLimit": { "nextTickAt": "2026-11-26T12:00:00.000Z", "tickPercent": 0.05, "remaining": 412, "max": 600, "limited": false }
+            });
+            respond(stream, "200 OK", "application/json", &quota.to_string())
+        }
+        ("POST", "/stub/quota-error") => {
+            QUOTA_ERROR.store(true, Ordering::SeqCst);
+            respond(stream, "200 OK", "application/json", "{}")
+        }
+        ("GET", "/stub/quota-failures") => {
+            respond(stream, "200 OK", "text/plain", &QUOTA_FAILURES.load(Ordering::SeqCst).to_string())
+        }
+        ("POST", "/v1/chat/completions" | "/openai/v1/chat/completions") => {
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
             let model = body.get("model").and_then(Value::as_str).unwrap_or("unknown").to_string();
             let text = format!("Stub reply from {model} ({auth}).");

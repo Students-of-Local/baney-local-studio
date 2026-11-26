@@ -813,6 +813,7 @@ pub fn provider(
         base_url: None,
         api: None,
         models: Vec::new(),
+        quota: None,
     }
 }
 
@@ -822,6 +823,10 @@ pub fn providers() -> Vec<ProviderStatus> {
         provider("openai", "OpenAI", ProviderKind::BuiltIn, ProviderCredential::Environment, 14),
         provider("google", "Google", ProviderKind::BuiltIn, ProviderCredential::Missing, 6),
         provider("openrouter", "OpenRouter", ProviderKind::BuiltIn, ProviderCredential::Missing, 0),
+        ProviderStatus {
+            quota: Some("412 of 600 requests left in the rolling 5 hours · 87% of weekly tokens left".to_string()),
+            ..provider("synthetic", "Synthetic", ProviderKind::BuiltIn, ProviderCredential::StoredKey, 2)
+        },
     ]
 }
 

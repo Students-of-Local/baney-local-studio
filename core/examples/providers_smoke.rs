@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -26,6 +26,8 @@ const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const KEY: &str = "sk-stub-local-smoke-0001";
 const WRONG_KEY: &str = "sk-stub-wrong-0002";
 const OPENAI_KEY: &str = "sk-openai-smoke-not-real";
+const SYNTHETIC_MODELS: [(&str, u64); 2] = [("hf:zai-org/GLM-5.3", 202_752), ("hf:moonshotai/Kimi-K2.6", 262_144)];
+const SYNTHETIC_QUOTA: &str = "412 of 600 requests left in the rolling 5 hours · 87% of weekly tokens left";
 
 #[derive(Default)]
 struct Signal {
@@ -375,6 +377,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let daemon = PathBuf::from(args.next().context(usage)?);
     let base = args.next().map_or_else(|| PathBuf::from("/tmp/ls-providers"), PathBuf::from);
+    std::env::remove_var("SYNTHETIC_API_KEY");
     let root = base.join(format!("run-{}", std::process::id()));
     let real = root.join("real");
     real_model::install(&real.join("agent"))?;
@@ -419,6 +422,7 @@ fn run(daemon: &Path, root: &Path, stub: Option<u16>) -> anyhow::Result<()> {
             "modelsDir": root.join("models"),
         });
         std::fs::write(controller.join("config.json"), named.to_string())?;
+        std::env::set_var("LOCAL_STUDIO_SYNTHETIC_URL", format!("http://127.0.0.1:{port}"));
     }
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
@@ -465,6 +469,7 @@ fn drive(
     local_servers(harness, agent, port)?;
     add_and_chat(harness, agent, port, &project)?;
     edit_and_keys(harness, agent, port)?;
+    synthetic(harness, agent, port, &project)?;
     local_fleet(harness, port, &project)?;
     cleanup(harness, agent, original)
 }
@@ -816,6 +821,136 @@ fn edit_and_keys(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Resu
         view.provider("openai").is_some_and(|provider| provider.credential == ProviderCredential::Missing)
     })?;
     ensure!(read_json(&agent.join("auth.json"))?.get("openai").is_none(), "openai key left in auth.json");
+    Ok(())
+}
+
+fn stub_call(port: u16, method: &str, path: &str) -> anyhow::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer)?;
+    let (head, body) = answer.split_once("\r\n\r\n").context("stub answer")?;
+    ensure!(head.starts_with("HTTP/1.1 200"), "stub {path}: {head}");
+    Ok(body.to_string())
+}
+
+fn synthetic_ready(view: &View, quota: Option<&str>) -> bool {
+    view.provider("synthetic").is_some_and(|provider| {
+        provider.credential == ProviderCredential::StoredKey
+            && provider.configured
+            && provider.quota.as_deref() == quota
+            && provider.models.iter().map(|model| (model.id.as_str(), model.context_window)).eq(SYNTHETIC_MODELS)
+    }) && SYNTHETIC_MODELS.iter().all(|(id, _)| view.has_model("synthetic", id))
+}
+
+fn synthetic(harness: &mut Harness, agent: &Path, port: u16, project: &str) -> anyhow::Result<()> {
+    let studio = Arc::clone(&harness.studio);
+    let models_path = agent.join("models.json");
+    studio.load_providers();
+    harness.pump_until("Synthetic listed without a key, not ready, asking for one", |view| {
+        view.provider("synthetic").is_some_and(|provider| {
+            provider.kind == ProviderKind::BuiltIn
+                && provider.credential == ProviderCredential::Missing
+                && !provider.configured
+                && provider.env_var.as_deref() == Some("SYNTHETIC_API_KEY")
+                && provider.quota.is_none()
+        })
+    })?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "Synthetic written without a key");
+
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), Some(KEY.to_string()));
+    harness.answer("Synthetic key saved", &request)?;
+    harness.pump_until("Synthetic ready with both stub models, their context and the quota", |view| {
+        synthetic_ready(view, Some(SYNTHETIC_QUOTA))
+    })?;
+    ensure!(mode(&models_path)? == 0o600, "models.json is not 0600");
+    ensure!(!std::fs::read_to_string(&models_path)?.contains(KEY), "the Synthetic key landed in models.json");
+    let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
+    ensure!(
+        entry["apiKey"] == "SYNTHETIC_API_KEY"
+            && entry["api"] == "openai-completions"
+            && entry["baseUrl"] == format!("http://127.0.0.1:{port}/openai/v1"),
+        "Synthetic entry {entry}"
+    );
+    println!("ok   Synthetic lists {:?} and shows {SYNTHETIC_QUOTA:?}", SYNTHETIC_MODELS.map(|(id, _)| id));
+
+    let thread = harness.start("synthetic-draft", project, "ping", settings("synthetic", SYNTHETIC_MODELS[0].0))?;
+    let reply = format!("Stub reply from {} (key ok).", SYNTHETIC_MODELS[0].0);
+    harness.pump_until("a thread on a Synthetic model gets the stub's reply with the saved key", |view| {
+        view.answer(&thread).contains(&reply) && view.idle(&thread)
+    })?;
+
+    stub_call(port, "POST", "/stub/quota-error")?;
+    studio.load_providers();
+    harness
+        .pump_until("a failing quota leaves Synthetic ready with no quota line", |view| synthetic_ready(view, None))?;
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    while stub_call(port, "GET", "/stub/quota-failures")? == "0" {
+        ensure!(Instant::now() < deadline, "Synthetic never asked for its quota again");
+        harness.settle(Duration::from_millis(200))?;
+    }
+    harness.settle(Duration::from_secs(1))?;
+    ensure!(synthetic_ready(&harness.view, None), "after the quota 500: {:?}", harness.view.provider("synthetic"));
+    ensure!(harness.view.errors.is_empty(), "a quota 500 surfaced as an error: {:?}", harness.view.errors);
+    println!("ok   a quota 500 leaves Synthetic ready without a quota line");
+
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), None);
+    harness.answer("Synthetic key removed", &request)?;
+    harness.pump_until("Synthetic back to missing with its models gone", |view| {
+        view.provider("synthetic").is_some_and(|provider| {
+            provider.credential == ProviderCredential::Missing && !provider.configured && provider.models.is_empty()
+        }) && !view.models.iter().any(|model| model.provider == "synthetic")
+    })?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "Synthetic entry left in models.json");
+
+    let handwritten = json!({
+        "baseUrl": format!("http://127.0.0.1:{port}/proxy/v1"),
+        "api": "openai-completions",
+        "apiKey": "!cat /nonexistent/synthetic-key",
+        "models": [{ "id": "mine" }]
+    });
+    seed_synthetic(&models_path, &handwritten)?;
+    for key in [Some(KEY), None] {
+        let request = harness.request();
+        studio.set_provider_key(request.clone(), "synthetic".to_string(), key.map(str::to_string));
+        harness.answer("Synthetic key changed beside a hand-written entry", &request)?;
+        let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
+        ensure!(entry == handwritten, "the hand-written Synthetic entry was rewritten: {entry}");
+    }
+    println!("ok   a hand-written synthetic entry stays as written with and without a key");
+
+    let workaround = json!({
+        "name": "Synthetic",
+        "baseUrl": format!("http://127.0.0.1:{port}/openai/v1"),
+        "api": "openai-completions",
+        "apiKey": "none",
+        "models": [{ "id": SYNTHETIC_MODELS[0].0, "name": SYNTHETIC_MODELS[0].0 }]
+    });
+    seed_synthetic(&models_path, &workaround)?;
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), Some(KEY.to_string()));
+    harness.answer("Synthetic key saved beside an endpoint added by hand", &request)?;
+    harness.pump_until("the old Synthetic endpoint becomes the built-in with both models", |view| {
+        synthetic_ready(view, None)
+    })?;
+    ensure!(
+        read_json(&models_path)?["providers"]["synthetic"]["apiKey"] == "SYNTHETIC_API_KEY",
+        "the old Synthetic endpoint was not adopted"
+    );
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), None);
+    harness.answer("adopted Synthetic key removed", &request)?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "the adopted entry stayed");
+    println!("ok   an endpoint added by hand at Synthetic's origin becomes the built-in, and leaves with its key");
+    Ok(())
+}
+
+fn seed_synthetic(models_path: &Path, entry: &Value) -> anyhow::Result<()> {
+    let mut models = read_json(models_path)?;
+    models["providers"]["synthetic"] = entry.clone();
+    std::fs::write(models_path, serde_json::to_vec_pretty(&models)?)?;
     Ok(())
 }
 

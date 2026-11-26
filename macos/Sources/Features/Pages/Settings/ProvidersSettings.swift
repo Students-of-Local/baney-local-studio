@@ -286,7 +286,7 @@ private struct ProviderKeyRow: View {
                 StatusDot(on: provider.configured)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(provider.name)
-                    Text(provider.modelCount > 0 ? "\(provider.credentialText) · \(provider.modelsText)" : provider.credentialText)
+                    Text([provider.credentialText, provider.modelCount > 0 ? provider.modelsText : nil, provider.quota].compactMap(\.self).joined(separator: " · "))
                         .font(.system(size: 11.5))
                         .foregroundStyle(Theme.secondaryText)
                 }
