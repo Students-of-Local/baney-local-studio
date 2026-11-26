@@ -172,3 +172,15 @@ test("a recorded selector names only the element clicked, and replay stops on a 
 		assert.deepEqual(got, [], bad.selector);
 	}
 });
+
+test("a screenshot is kept only while the recorded tab is the one in front of its window", async () => {
+	// The user switches to another tab before stopping: the window now shows that tab, not the recorded one.
+	let front = true;
+	const switched = await record(page("<p>Order</p>"), () => (front = false), { active: () => front });
+	assert.equal(switched.rec.screenshots.length, 1, "only the shot taken at start");
+	assert.equal(switched.shots.length, 1, "another tab was captured");
+	// The switch lands while the shot is taken: that shot is dropped too.
+	const answers = [true, true, true, false];
+	const raced = await record(page("<p>Order</p>"), () => {}, { active: () => answers.shift() ?? false });
+	assert.equal(raced.rec.screenshots.length, 1);
+});

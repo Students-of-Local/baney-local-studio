@@ -207,7 +207,6 @@ function dedupe(steps: RecordedStep[]): RecordedStep[] {
 export class Recorder {
 	active = false;
 	private tabId?: number;
-	private windowId?: number;
 	hostname = "";
 	startUrl = "";
 	private steps: RecordedStep[] = [];
@@ -221,7 +220,6 @@ export class Recorder {
 			throw new Error("Cannot record this page");
 		}
 		this.tabId = tab.id;
-		this.windowId = tab.windowId;
 		this.startUrl = tab.url;
 		this.hostname = new URL(tab.url).hostname;
 		this.steps = [];
@@ -257,11 +255,22 @@ export class Recorder {
 		});
 	}
 
+	/** The window the recorded tab is in front of, if it is. */
+	private async frontWindow(): Promise<number | undefined> {
+		if (this.tabId == null) return undefined;
+		const tab = await chrome.tabs.get(this.tabId);
+		return tab.active ? tab.windowId : undefined;
+	}
+
 	private async snapshot(): Promise<void> {
-		if (this.windowId == null || this.screenshots.length >= 12) return;
+		if (this.screenshots.length >= 12) return;
 		try {
-			const dataUrl = await chrome.tabs.captureVisibleTab(this.windowId, { format: "jpeg", quality: 50 });
-			if (dataUrl) this.screenshots.push(dataUrl);
+			// captureVisibleTab shoots whatever tab the window shows: keep the shot only when that was the
+			// recorded tab right before and right after it.
+			const windowId = await this.frontWindow();
+			if (windowId === undefined) return;
+			const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 50 });
+			if (dataUrl && (await this.frontWindow()) === windowId) this.screenshots.push(dataUrl);
 		} catch {
 			/* capture can fail on protected pages; ignore */
 		}
