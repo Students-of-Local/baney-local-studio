@@ -305,6 +305,12 @@ impl ClusterView {
                 .flat_map(|hardware| &hardware.thunderbolt)
                 .map(|device| format!("authorize:{target}:{}", device.uuid))
                 .collect::<Vec<_>>(),
+            controller
+                .hardware
+                .iter()
+                .flat_map(|hardware| &hardware.gpus)
+                .flat_map(|gpu| [false, true].map(|cancel| format!("eject:{target}:{}:{cancel}", gpu.index)))
+                .collect(),
             vec![
                 format!("lending:{target}"),
                 format!("discovery:{target}"),
@@ -447,15 +453,21 @@ impl ClusterView {
         list: &gtk::Box,
         pending: &dyn Fn(&str) -> bool,
     ) {
-        let key = format!("eject:{}:{}", controller.target, gpu.index);
-        let busy = pending(&key);
+        let key = |cancel: bool| format!("eject:{}:{}:{cancel}", controller.target, gpu.index);
+        let (ejecting, cancelling) = (pending(&key(false)), pending(&key(true)));
+        let busy = ejecting || cancelling;
         let button = |caption: &str, tip: &str, cancel: bool| {
+            let caption = match (cancel, ejecting, cancelling) {
+                (false, true, _) => "Ejecting…",
+                (true, _, true) => "Cancelling…",
+                _ => caption,
+            };
             let button = parts::button(&gtk::Label::new(Some(caption)), true);
             button.set_valign(gtk::Align::Start);
             button.set_sensitive(!busy);
             button.set_tooltip_text(Some(tip));
             let weak = self.app.clone();
-            let (target, index, key) = (controller.target.clone(), gpu.index, key.clone());
+            let (target, index, key) = (controller.target.clone(), gpu.index, key(cancel));
             button.connect_clicked(move |_| {
                 act(&weak, LocalAction::EjectGpu { controller: target.clone(), gpu: index, cancel }, key.clone());
             });
@@ -464,7 +476,7 @@ impl ClusterView {
         if !eject.draining {
             if eject.state != LocalEjectState::Unsupported {
                 line.append(&button(
-                    if busy { "Ejecting…" } else { "Eject" },
+                    "Eject",
                     "Unload its models and take it off the bus so it can be unplugged",
                     false,
                 ));

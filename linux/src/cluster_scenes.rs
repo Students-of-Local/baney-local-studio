@@ -9,8 +9,9 @@ use local_studio_core::{
 
 use crate::app::App;
 
-pub const SCENES: [&str; 15] = [
+pub const SCENES: [&str; 16] = [
     "local-cluster-lending",
+    "local-cluster-ejecting",
     "local-cluster-reclaimed",
     "local-cluster-eject-busy",
     "local-cluster-eject-root",
@@ -395,5 +396,9 @@ pub fn stage(app: &Rc<App>, scene: &str) {
     let snapshot = LocalSnapshot { controllers: vec![shown], ..LocalSnapshot::default() };
     app.apply(vec![Update::Local { request: text("fixture"), snapshot }]);
     app.local.select(&url);
+    if scene == "local-cluster-ejecting" {
+        app.local.hold("eject::1:false".to_string());
+        app.local.render(&app.state.borrow());
+    }
     app.local.reveal_cluster();
 }

@@ -170,14 +170,14 @@ private struct GpuEjectButton: View {
     let help: String
     let cancel: Bool
 
-    private var pending: Bool { pages.isPending(.eject(controller.target, gpu.index)) }
+    private func pending(_ cancel: Bool) -> Bool { pages.isPending(.eject(controller.target, gpu.index, cancel)) }
 
     var body: some View {
-        Button(pending && !cancel ? "Ejecting…" : caption) {
-            pages.perform(.ejectGpu(controller: controller.target, gpu: gpu.index, cancel: cancel), pending: .eject(controller.target, gpu.index))
+        Button(pending(cancel) ? (cancel ? "Cancelling…" : "Ejecting…") : caption) {
+            pages.perform(.ejectGpu(controller: controller.target, gpu: gpu.index, cancel: cancel), pending: .eject(controller.target, gpu.index, cancel))
         }
         .buttonStyle(DashboardButtonStyle(bordered: true))
-        .disabled(pending)
+        .disabled(pending(false) || pending(true))
         .help(help)
     }
 }
