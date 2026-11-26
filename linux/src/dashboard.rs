@@ -199,7 +199,7 @@ fn header_detail(
 }
 
 fn decode_hint(dashboard: Option<&LocalDashboard>) -> String {
-    let Some(dashboard) = dashboard else { return " ".to_string() };
+    let Some(dashboard) = dashboard else { return "Waiting for the engine's first metrics".to_string() };
     if let Some(per_request) = dashboard.per_request_tps {
         return format!("{} per request", numbers::decimal(per_request));
     }
@@ -516,7 +516,7 @@ impl LocalPage {
         let dashboard = current
             .filter(|controller| controller.reachable && controller.has_controller)
             .map(|controller| state.dashboard.as_ref().filter(|dashboard| dashboard.controller == controller.target));
-        self.since.set_visible(dashboard.is_some());
+        self.since.set_visible(dashboard.flatten().is_some());
         self.since.set_label(&parts::since_text(dashboard.flatten().map(|dashboard| &dashboard.tokens)));
         match current {
             None => self.render_empty(state),
@@ -532,7 +532,9 @@ impl LocalPage {
                 });
                 self.view.fill(controller, dashboard, loading, unloading);
                 self.view.cluster.fill(controller, &|key| self.is_pending(key));
-                self.view.cluster_rule.set_visible(self.view.cluster.root.is_visible());
+                self.view
+                    .cluster_rule
+                    .set_visible(self.view.cluster.root.is_visible() && self.view.heatmap.root.is_visible());
                 self.stack.set_visible_child_name("dashboard");
             }
             Some(controller) => {
