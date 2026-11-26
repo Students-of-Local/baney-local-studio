@@ -337,3 +337,20 @@ test("a body that was read and ended leaves the page at once: no timer keeps it 
 	assert.deepEqual(Object.keys(tab.doc.globals.__localStudioFetched), []);
 	assert.equal(live.size, 0, "a timer still holds the body after the download ended");
 });
+
+test("second-S2: accept=\"*/*\" or \"*\" takes any file, here and in the page, where the check runs as source text", async () => {
+	const { acceptsFile } = await import("../src/bridge/file-util.ts");
+	const inPage = new Function(`return (${acceptsFile.toString()})`)();
+	for (const [accept, name, mime, want] of [
+		["*/*", "cv.pdf", "application/pdf", true],
+		["*", "cv.pdf", "application/pdf", true],
+		["*/*", "notes", "", true],
+		[" */* ", "a.bin", "application/octet-stream", true],
+		["image/*, */*", "cv.pdf", "application/pdf", true],
+		["image/*", "cv.pdf", "application/pdf", false],
+		["*/pdf", "cv.pdf", "application/pdf", false],
+	]) {
+		assert.equal(acceptsFile(accept, name, mime), want, `${accept} | ${name} | ${mime}`);
+		assert.equal(inPage(accept, name, mime), want, `in the page: ${accept} | ${name} | ${mime}`);
+	}
+});

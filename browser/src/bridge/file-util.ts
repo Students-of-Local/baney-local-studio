@@ -18,6 +18,8 @@ export function acceptsFile(accept: string, name: string, mime: string): boolean
 		.trim()
 		.toLowerCase();
 	return tokens.some((t) => {
+		// "*" and "*/*" take any file, as the browser's own picker does.
+		if (t === "*" || t === "*/*") return true;
 		if (t.startsWith(".")) return lowerName.endsWith(t);
 		if (t.endsWith("/*")) return type.startsWith(t.slice(0, -1));
 		return type === t;
