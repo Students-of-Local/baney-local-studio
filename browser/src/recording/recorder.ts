@@ -286,9 +286,11 @@ window.${jsName} = {
   async replay() {
     const results = [];
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    // The value setter of the element's own class (input, textarea or select): another class's throws.
     const setNativeValue = (el, value) => {
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value");
+      let proto = Object.getPrototypeOf(el);
+      let setter;
+      while (proto && !(setter = Object.getOwnPropertyDescriptor(proto, "value"))) proto = Object.getPrototypeOf(proto);
       if (setter && setter.set) setter.set.call(el, value);
       else el.value = value;
     };
@@ -319,7 +321,9 @@ window.${jsName} = {
         }
         await wait(300);
       } catch (e) {
+        // The page is not in the state the next steps expect: stop before one of them submits it.
         results.push({ step, status: "error", error: String(e) });
+        break;
       }
     }
     return results;
