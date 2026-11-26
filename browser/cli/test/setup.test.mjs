@@ -220,6 +220,21 @@ test("allow and status validate their input before touching the bridge", () => {
 	assert.match(out, /isn't connected/);
 });
 
+test("allow-all takes a person at a terminal, as claude-allow on does", () => {
+	for (const name of ["allow-all", "yolo"]) {
+		const { code, out } = run([name]);
+		assert.equal(code, 1);
+		assert.match(out, /takes a person/);
+	}
+	assert.match(run(["ask"]).out, /isn't connected/, "asking again takes nobody");
+});
+
+test("what follows -- is another program's: its --help is not ours", () => {
+	assert.match(run(["vm", "exec", "nosuchguest", "--help"]).out, /completion/, "before the dashes it is ours");
+	assert.doesNotMatch(run(["vm", "exec", "nosuchguest", "--", "git", "--help"]).out, /completion/);
+	assert.doesNotMatch(run(["vm", "exec", "nosuchguest", "--", "git", "-h"]).out, /completion/);
+});
+
 test("color only when asked for, and NO_COLOR wins", () => {
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes
 	const ansi = /\x1b\[/;

@@ -280,13 +280,15 @@ async function main(): Promise<void> {
 	// helper itself, with no launcher script between (install.ts).
 	if (argv[0]?.startsWith("chrome-extension://")) argv.unshift("host");
 	const [command] = argv;
-	const flag = (name: string) => argv.includes(name);
+	/** This command's own words: what follows `--` is another program's (`vm exec name -- git --help`). */
+	const own = argv.includes("--") ? argv.slice(0, argv.indexOf("--")) : argv;
+	const flag = (name: string) => own.includes(name);
 	/** `--name value` or `--name=value`. */
 	const option = (name: string): string | undefined => {
-		const eq = argv.find((a) => a.startsWith(`${name}=`));
+		const eq = own.find((a) => a.startsWith(`${name}=`));
 		if (eq) return eq.slice(name.length + 1);
-		const i = argv.indexOf(name);
-		return i >= 0 ? argv[i + 1] : undefined;
+		const i = own.indexOf(name);
+		return i >= 0 ? own[i + 1] : undefined;
 	};
 	if (command === "remote" && !argv.slice(1).some((a) => !a.startsWith("-"))) {
 		// Asked for, the guide is the answer (stdout, exit 0); `remote` alone is a usage error, so stdout stays empty for a --json reader.
@@ -525,6 +527,15 @@ async function main(): Promise<void> {
 		case "yolo": // old name, kept as a hidden alias
 		case "ask": {
 			const mode = command === "ask" ? "ask" : "allow_all";
+			if (mode === "allow_all") {
+				// As with `claude-allow on`: an agent's shell mustn't wave its own prompts away.
+				if (!process.stdin.isTTY || !process.stdout.isTTY) {
+					console.error("Turning this on takes a person: run it in a terminal.");
+					process.exitCode = 1;
+					return;
+				}
+				if (!(await confirm("Let agents open any site without asking?", { assumeYes: false, defaultYes: false }))) return;
+			}
 			await withBridge(command, (client) => client.call("permission.setMode", { mode }, 5000));
 			console.log(
 				mode === "ask"
