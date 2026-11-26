@@ -11,8 +11,11 @@ here has a benchmark before it and after it, and quality is one of the numbers.
 
 ## Rules
 
-- **Same bench every run:** same prompts, same output length, same machine,
-  nothing else on the GPU. Run each measurement 3 times and take the median.
+- **Same bench every run:** same prompts, same output length, same machine.
+  Run each measurement 3 times and take the median.
+- **A shared GPU:** list what else runs on it (`nvidia-smi`) in the notes. If
+  something else is using it, ask the user whether to pause it; if not, bench
+  anyway, mark the numbers contended, and rerun when that load changes.
 - **One flag per run.** Several flags at once can't tell you which one helped.
 - **Quality counts:** after any change to quantization, KV cache precision or
   speculative decoding, rerun a fixed check of 10 to 20 prompts with known
@@ -22,28 +25,29 @@ here has a benchmark before it and after it, and quality is one of the numbers.
   real numbers.
 - **Flags move between releases:** check each one against the installed
   engine's `--help` before you use it.
-- **Other people's work:** never stop an engine or GPU job you did not start.
-  Ask before restarting a running engine; other threads may be using it.
+- **Other people's work:** never stop or restart an engine or GPU job you did
+  not start without asking; other threads may be using it.
 
 ## 1. Baseline
 
-Write `bench/<model>-<engine>.md` with the machine (GPU, VRAM, unified memory
+Write `bench/<model>-<engine>.md` (a `/` in the model id becomes `-`) with the machine (GPU, VRAM, unified memory
 on a Mac), engine and version, model and quant, the exact launch command, and:
 
 | Number | How |
 | --- | --- |
-| Decode tokens/s, one request | stream 256 tokens; output tokens / streaming time after the opening chunk |
-| Time to first token (TTFT) | a long prompt (8k tokens or the user's real size); latency to the opening content chunk |
+| Decode tokens/s, one request | stream exactly 256 tokens (`ignore_eos`, or llama.cpp `n_predict`); output tokens / streaming time after the opening chunk |
+| Time to first token (TTFT), cold | a long prompt (8k tokens or the user's real size) whose start is unique each run (a nonce on line one), or the cache reset between runs (vLLM `/reset_prefix_cache`, SGLang `/flush_cache`); latency to the opening content chunk |
+| TTFT, warm | the same prompt sent twice; the second latency. Judge prefix caching by this one |
 | Throughput at real concurrency | 1 for one person, 4 to 16 for agents working in parallel |
-| Peak memory | `nvidia-smi`, `rocm-smi`, or Activity Monitor's memory pressure |
+| Memory | vLLM and SGLang reserve VRAM at startup, so record the KV cache size in tokens and max concurrency from the startup log, plus KV use from `/metrics`. llama.cpp, Ollama, MLX: peak from `nvidia-smi`, `rocm-smi` or Activity Monitor |
 
 Token counts come from the response's `usage`, not a word count. Engines also
-report live numbers: vLLM and SGLang at `/metrics` (`*:generation_tokens_total`,
-`*:time_to_first_token_seconds`, KV cache use), llama.cpp server with
-`--metrics`. Their own bench tools work too: `vllm bench serve`,
+report live numbers at `/metrics` (`*:generation_tokens_total`,
+`*:time_to_first_token_seconds`, KV cache use): vLLM always, SGLang with
+`--enable-metrics`, llama.cpp server with `--metrics`. Their own bench tools work too: `vllm bench serve`,
 `python -m sglang.bench_serving`, `llama-bench`.
 
-Done when the notes hold all four numbers and the command behind each.
+Done when the notes hold every row and the command behind each.
 
 ## 2. Find the limit
 
@@ -70,7 +74,9 @@ Done when you can name one limit and the number that shows it.
 Try the ones that match the limit, cheapest to most involved.
 
 - **Everything on the GPU.** Partial CPU offload often costs more than a
-  smaller quant. llama.cpp: `-ngl 999`. vLLM: `--gpu-memory-utilization`.
+  smaller quant. llama.cpp: `-ngl 999`. Ollama: `num_gpu`, checked with
+  `ollama ps`. vLLM: no `--cpu-offload-gb`, and `--gpu-memory-utilization` high
+  enough for the KV cache while leaving room for other processes on the card.
 - **Context length to fit the need.** Set `--max-model-len` (vLLM),
   `--context-length` (SGLang), `-c` (llama.cpp) or `num_ctx` (Ollama) to what
   the work uses, not the model's maximum. It frees KV memory for batching.
@@ -78,9 +84,10 @@ Try the ones that match the limit, cheapest to most involved.
   when memory allows. AWQ or GPTQ int4 for vLLM and SGLang. FP8 on cards with
   native FP8 (NVIDIA Ada, Hopper, Blackwell). Below Q4, check quality
   before keeping it.
+- **Flash attention.** llama.cpp `-fa`, Ollama `OLLAMA_FLASH_ATTENTION=1`. Its
+  own run, before KV quantization, which needs it.
 - **KV cache precision.** vLLM `--kv-cache-dtype fp8`; llama.cpp
-  `-ctk q8_0 -ctv q8_0` with flash attention on; Ollama
-  `OLLAMA_KV_CACHE_TYPE=q8_0` with `OLLAMA_FLASH_ATTENTION=1`. Roughly doubles
+  `-ctk q8_0 -ctv q8_0`; Ollama `OLLAMA_KV_CACHE_TYPE=q8_0`. Roughly doubles
   the context that fits.
 - **Prefix caching.** Agents resend a long system prompt every turn, so cache
   hits decide TTFT. vLLM `--enable-prefix-caching` (on by
@@ -103,7 +110,7 @@ Try the ones that match the limit, cheapest to most involved.
 
 ## 4. Judge each flag
 
-After each flag, rerun step 1 and the quality check. Keep it when the target
+After each flag, rerun step 1, and the quality check when the Rules call for it. Keep it when the target
 number beats the run-to-run spread and quality holds; otherwise revert. Add a
 line to the bench notes: change, before, after, kept or reverted.
 
