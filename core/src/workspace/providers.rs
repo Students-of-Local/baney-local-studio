@@ -1002,7 +1002,8 @@ impl Workspace {
         let (auth, existing) = {
             let agent = agent.clone();
             blocking(move || {
-                Ok((read_object(&agent.join("auth.json"))?, configured_providers(&agent).remove(SYNTHETIC)))
+                let path = agent.join("auth.json");
+                Ok((read_object(&path)?, configured_providers(&agent).remove(SYNTHETIC)))
             })
             .await?
         };
