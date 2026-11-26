@@ -463,6 +463,7 @@ fn drive(
     };
     discovery(harness, port)?;
     local_servers(harness, agent, port)?;
+    server_windows(harness, agent)?;
     add_and_chat(harness, agent, port, &project)?;
     edit_and_keys(harness, agent, port)?;
     local_fleet(harness, port, &project)?;
@@ -577,6 +578,79 @@ fn canned(answer: Option<String>, counted: fn(&str) -> bool) -> anyhow::Result<(
         }
     });
     Ok((port, hits))
+}
+
+fn engine_like(routes: Vec<(&'static str, String)>) -> anyhow::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(&stream);
+            let mut first = String::new();
+            let mut length = 0;
+            let mut line = String::new();
+            if reader.read_line(&mut first).is_err() {
+                continue;
+            }
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut body = vec![0; length];
+            if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
+                continue;
+            }
+            let route = first.split(' ').take(2).collect::<Vec<_>>().join(" ");
+            let answer = routes.iter().find(|(known, _)| *known == route).map(|(_, body)| body.as_str());
+            let (head, body) = answer.map_or(("404 Not Found", "{}"), |body| ("200 OK", body));
+            let reply = format!("HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    Ok(port)
+}
+
+fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
+    let list = r#"{"object":"list","data":[{"id":"tiny:latest","object":"model"}]}"#.to_string();
+    let show = json!({
+        "parameters": "num_ctx                        16384\nstop                           \"<|im_end|>\"",
+        "model_info": { "lfm3.context_length": 262_144 },
+    })
+    .to_string();
+    let ollama = engine_like(vec![
+        ("GET /v1/models", list.clone()),
+        ("GET /api/ps", r#"{"models":[]}"#.to_string()),
+        ("POST /api/show", show),
+    ])?;
+    let llama = engine_like(vec![
+        ("GET /v1/models", list),
+        ("GET /props", r#"{"default_generation_settings":{"n_ctx":8192}}"#.to_string()),
+    ])?;
+    for (port, window) in [(ollama, 16_384), (llama, 8_192)] {
+        let base = format!("http://127.0.0.1:{port}/v1");
+        harness.studio.find_local_servers(vec![found_here(base.clone())]);
+        let listed = base.clone();
+        harness.pump_until("an engine whose model list has no context size is found", move |view| {
+            view.engines.iter().any(|engine| engine.id == listed)
+        })?;
+        let request = harness.request();
+        harness.studio.use_local_engine(request.clone(), base.clone());
+        harness.answer("that engine is used", &request)?;
+        let providers = read_json(&agent.join("models.json"))?["providers"].clone();
+        let (id, entry) = providers
+            .as_object()
+            .and_then(|providers| providers.iter().find(|(_, entry)| entry["baseUrl"] == base.as_str()))
+            .context("the used engine is in models.json")?;
+        ensure!(entry["models"][0]["contextWindow"] == window, "{base}: {entry}");
+        println!("ok   {base} is added with the context size the engine runs ({window})");
+        let request = harness.request();
+        harness.studio.remove_custom_provider(request.clone(), id.clone());
+        harness.answer("that engine is removed", &request)?;
+    }
+    harness.studio.find_local_servers(Vec::new());
+    harness.pump_until("those engines leave the list", |view| view.engines.is_empty())
 }
 
 fn found_here(base_url: String) -> EndpointPreset {
