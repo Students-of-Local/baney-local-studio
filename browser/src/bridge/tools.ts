@@ -733,11 +733,22 @@ async function editSite(ctx: HandlerContext, raw: string): Promise<string> {
 	return host;
 }
 
+/** The edit `id`, on a site this agent may change (editSite), before an agent updates, turns off or removes it. */
+async function editToChange(ctx: HandlerContext, id: string): Promise<SiteEdit> {
+	const edit = (await loadEdits()).edits.find((e) => e.id === id);
+	if (!edit) throw new BridgeError(ERR.BAD_PARAMS, `No site edit ${id}.`);
+	await editSite(ctx, edit.host);
+	return edit;
+}
+
 /** Site edits for agents. Everything an agent adds says it was an agent; a script it adds stays off for the person. */
 const editHandlers: Record<string, Handler> = {
-	"edits.list": async (_ctx, params) => {
-		const state = await loadEdits();
+	"edits.list": async (ctx, params) => {
 		const host = str(params, "host");
+		// Every site's edits say where the person goes: a remote session sees one site's at a time.
+		if (!host && ctx.remote)
+			throw new BridgeError(ERR.PERMISSION_DENIED, "A remote session lists one site's edits: give host.");
+		const state = await loadEdits();
 		const only = host ? normalizeHost(host) : undefined;
 		return {
 			adBlock: state.adBlock,
@@ -783,9 +794,7 @@ const editHandlers: Record<string, Handler> = {
 	},
 	"edits.update": async (ctx, params) => {
 		const id = requireStr(params, "id");
-		const before = (await loadEdits()).edits.find((e) => e.id === id);
-		if (!before) throw new BridgeError(ERR.BAD_PARAMS, `No site edit ${id}.`);
-		await editSite(ctx, before.host);
+		const before = await editToChange(ctx, id);
 		const edit = await changedEdits((state) => {
 			const next = updatedEdit(state, id, requireStr(params, "value"), str(params, "note"));
 			return { state: next, result: next.edits.find((e) => e.id === id) as SiteEdit };
@@ -794,19 +803,24 @@ const editHandlers: Record<string, Handler> = {
 			await noteChange(edit, agentName(ctx), { value: before.value, note: before.note });
 		return { edit };
 	},
-	"edits.off": async (_ctx, params) => {
+	"edits.off": async (ctx, params) => {
 		const id = requireStr(params, "id");
+		await editToChange(ctx, id);
 		await changedEdits((state) => ({ state: switchedEdit(state, id, false, "agent"), result: undefined }));
 		await clearChanges([id]);
 		return { off: id };
 	},
-	"edits.remove": async (_ctx, params) => {
+	"edits.remove": async (ctx, params) => {
 		const id = requireStr(params, "id");
+		await editToChange(ctx, id);
 		await changedEdits((state) => ({ state: removedEdit(state, id), result: undefined }));
 		await clearChanges([id]);
 		return { removed: id };
 	},
-	"edits.adblock": async (_ctx, params) => {
+	"edits.adblock": async (ctx, params) => {
+		// Ad blocking is on every site at once, so no site's permission covers it.
+		if (ctx.remote)
+			throw new BridgeError(ERR.PERMISSION_DENIED, "A remote session can't turn ad blocking on or off.");
 		const on = params.on === true;
 		await changeEdits((state) => ({ state: { ...state, adBlock: on }, result: undefined }));
 		return { adBlock: on };

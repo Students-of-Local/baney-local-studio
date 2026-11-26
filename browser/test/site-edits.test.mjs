@@ -109,6 +109,44 @@ test("an agent can't edit a site it may not open: the same check as opening it r
 	assert.equal(r.edit.addedBy, "agent:claude");
 });
 
+test("first-F4: an agent turns off or removes the person's edit only where it may open the site, and a remote session can't list every site or touch ad blocking", async () => {
+	installFakeChrome();
+	globalThis.chrome.runtime = { ...(globalThis.chrome.runtime ?? {}), getManifest: () => ({ version: "0" }) };
+	const { handlers } = await import(`../src/bridge/tools.ts?ctx=${Math.random()}`);
+	const mine = await store.change((state) => {
+		const next = store.added(state, { host: "mybank.com", kind: "hide", value: ".promo", actor: "person", who: "" }, "p1", 1);
+		return { state: { ...next.state, adBlock: true }, result: next.edit };
+	});
+	const asked = [];
+	const ctx = {
+		session: { groupName: "claude" },
+		clientId: "c1",
+		isGuarded: () => false,
+		checkUrl: async (url) => {
+			asked.push(url);
+			throw new Error("Not allowed to open mybank.com");
+		},
+	};
+	for (const method of ["edits.off", "edits.remove"])
+		await assert.rejects(handlers[method](ctx, { id: mine.id }), /Not allowed/, method);
+	assert.deepEqual(asked, ["https://mybank.com/", "https://mybank.com/"]);
+	assert.deepEqual((await store.load()).edits, [mine], "the person's edit was changed");
+	await assert.rejects(handlers["edits.off"](ctx, { id: "nope" }), /No site edit nope/);
+	const remote = { ...ctx, remote: true };
+	await assert.rejects(handlers["edits.adblock"](remote, { on: false }), /remote session/);
+	assert.equal((await store.load()).adBlock, true, "a remote session turned ad blocking off");
+	await assert.rejects(handlers["edits.list"](remote, {}), /remote session/);
+	assert.deepEqual((await handlers["edits.list"](remote, { host: "mybank.com" })).edits, [mine]);
+	// The agent on the person's own computer, on a site it may open, still can.
+	const allowed = { ...ctx, checkUrl: async () => undefined };
+	assert.equal((await handlers["edits.list"](allowed, {})).edits.length, 1);
+	assert.deepEqual(await handlers["edits.off"](allowed, { id: mine.id }), { off: mine.id });
+	assert.equal((await store.load()).edits[0].on, false);
+	assert.deepEqual(await handlers["edits.remove"](allowed, { id: mine.id }), { removed: mine.id });
+	assert.deepEqual((await store.load()).edits, []);
+	assert.deepEqual(await handlers["edits.adblock"](allowed, { on: false }), { adBlock: false });
+});
+
 test("syncs never run side by side, so a script turned off can't come back", async () => {
 	installFakeChrome();
 	const scripts = new Map();
