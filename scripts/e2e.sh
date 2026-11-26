@@ -21,8 +21,9 @@ remote_ip=${E2E_REMOTE_IP:-}
 [ -n "$remote_ip" ] || { echo "no non-loopback IPv4 address for local_smoke's remote stub; set E2E_REMOTE_IP" >&2; exit 2; }
 context=local-studio/e2e
 repo=${REPO:-baney75/local-studio}
-examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke open_smoke stuck_smoke providers_smoke local_smoke plugin_smoke ask_smoke claude_signin_smoke harness_queue_smoke tunnel_setup_smoke relay_setup_smoke harness_claude_smoke harness_codex_smoke t3_import_smoke update_smoke usage_days_smoke skills_smoke)
+examples=(smoke workspace_smoke working_smoke durable_smoke order_smoke open_smoke stuck_smoke providers_smoke local_smoke plugin_smoke ask_smoke claude_signin_smoke harness_queue_smoke tunnel_setup_smoke relay_setup_smoke harness_claude_smoke t3_import_smoke update_smoke usage_days_smoke skills_smoke)
 helpers=(provider_stub fake_claude fake_codex consent_driver)
+manual=(harness_codex_smoke)
 post=
 [ "${1:-}" = --post ] && post=1 && shift
 commit=${1:-$(git rev-parse HEAD)}
@@ -33,7 +34,7 @@ root=$(pwd)
 
 for file in core/examples/*.rs; do
   name=$(basename "$file" .rs)
-  [[ " ${examples[*]} ${helpers[*]} " == *" $name "* ]] || grep -q -- "--example $name\b" .github/workflows/ci.yml || { echo "core/examples/$name.rs is run by neither scripts/e2e.sh nor CI; add it" >&2; exit 2; }
+  [[ " ${examples[*]} ${helpers[*]} ${manual[*]} " == *" $name "* ]] || grep -q -- "--example $name\b" .github/workflows/ci.yml || { echo "core/examples/$name.rs is run by neither scripts/e2e.sh nor CI; add it" >&2; exit 2; }
 done
 
 status() {
