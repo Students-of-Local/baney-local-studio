@@ -10,6 +10,7 @@ import { type Endpoint, listeners, makeScanner } from "./discovery.ts";
 import { autoModel, HOP_HEADER, inFlight, listModels, passthrough, routes } from "./gateway.ts";
 import { graphUsage, LINK_PORT, LINK_URL, makeGraph, makeUsage, normUrl } from "./graph.ts";
 import { authorize, hardware, type RawGpu, readGpuList, readGpus, readThunderbolt } from "./hardware.ts";
+import { makeEject } from "./eject.ts";
 import { makeJobs } from "./jobs.ts";
 import { browse, detect, download, type Library, loadLibrary, matchHardware, record } from "./library.ts";
 import { type Catalog, loadCatalog, matchCard, toLocalRecipe } from "./registry.ts";
@@ -35,7 +36,10 @@ const telemetry = makeTelemetry();
 
 const gpus = (): LocalGpu[] => {
   const reserved = jobs.reserved();
-  return rawGpus.map(({ uuid: _uuid, pids: _pids, stale: _stale, ...g }) => ({ ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) }));
+  return rawGpus.map((raw) => {
+    const { uuid: _uuid, pids: _pids, stale: _stale, ...g } = raw;
+    return { ...g, card: matchCard(catalog, g.name, g.memoryTotalMiB), busy: g.busy || reserved.has(g.index) || eject.draining(raw), ...(g.external ? { eject: eject.state(raw) } : {}) };
+  });
 };
 
 const byCard = (all: boolean): Map<string, number[]> => {
@@ -87,6 +91,37 @@ const cluster = makeCluster({
   port,
   takenPorts: () => Effect.map(listeners, (ls) => new Set([...(ls ?? []).map((l) => l.port), ...jobs.active().map((j) => j.port)])),
 });
+const eject = makeEject({
+  gpus: () => rawGpus,
+  ours: (g) => jobs.onGpu(g.uuid, g.index).length > 0 || cluster.poolsUsing(g.pids).length > 0,
+  unload: (g) =>
+    Effect.gen(function* () {
+      const stopped: string[] = [];
+      for (const j of jobs.onGpu(g.uuid, g.index)) {
+        yield* jobs.stop(j.id);
+        stopped.push(j.id);
+      }
+      for (const id of cluster.poolsUsing(g.pids)) {
+        yield* cluster.stopPool(id);
+        stopped.push(id);
+      }
+      yield* Effect.promise(() => cluster.gpuGone(g.uuid, `${g.name} is being ejected.`));
+      yield* tick;
+      return stopped;
+    }),
+});
+
+const drainingRefusal = (recipeId: string, req: LocalRunRequest): string | null => {
+  const held = rawGpus.filter((g) => eject.draining(g));
+  if (!held.length) return null;
+  const asked = held.find((g) => req.gpus?.includes(g.index));
+  if (asked) return `${asked.name} is being ejected, so nothing new loads on it. Cancel the eject to use it again.`;
+  const entry = catalog.recipes.get(recipeId);
+  if (req.gpus || !entry) return null;
+  const blocked = held.find((g) => matchCard(catalog, g.name, g.memoryTotalMiB) === entry.card);
+  return blocked && (freeGpus().get(entry.card)?.length ?? 0) < (entry.launch.cards ?? 1) ? `${blocked.name} is being ejected, so nothing new loads on it. Cancel the eject to use it again.` : null;
+};
+
 const gw = { config: () => config, local: localEndpoints, usage: () => usage.list(), graph: () => graph.get(), record: usage.record, cluster: () => cluster.node(), failoverMs: () => cluster.failoverMs(), refuse: (ep: Endpoint) => cluster.refuse(ep) };
 
 const excluded = (): Set<number> => {
@@ -123,6 +158,7 @@ const watchHardware = Effect.gen(function* () {
   for (const [uuid, g] of prev) {
     if (known.has(uuid)) continue;
     const why = `${g.name} was unplugged.`;
+    eject.gone(uuid);
     for (const j of jobs.onGpu(uuid, g.index)) yield* Effect.result(jobs.stop(j.id, why));
     yield* Effect.promise(() => cluster.gpuGone(uuid, why));
     note({ change: "removed", gpu: g.name, memoryTotalMiB: g.memoryTotalMiB, external: !!g.external, message: why, suggestions: [] });
@@ -191,6 +227,8 @@ const unload = (p: number) =>
 
 const load = (recipeId: string, req: LocalRunRequest) =>
   Effect.gen(function* () {
+    const drain = drainingRefusal(recipeId, req);
+    if (drain) return yield* fail(409, "DRAINING", drain);
     if (req.lend && clusterSettings(config).lend !== "never" && cluster.state() !== "lent") return yield* fail(409, "OWNER_ACTIVE", `${config.name} is not lending its GPU right now.`);
     if (req.replace && !req.dryRun) {
       for (const ep of scanner.current().filter((e) => e.live)) yield* unload(ep.port);
@@ -313,6 +351,11 @@ const handle = async (req: Request, peer: string | null): Promise<Response> => {
     graph.invalidate();
     return json(await cluster.view());
   }
+  const ejecting = match(/^\/api\/hardware\/gpus\/([\w:.-]+)\/eject$/);
+  if (ejecting) return json(await run(eject.eject(decodeURIComponent(ejecting))));
+  const cancelling = match(/^\/api\/hardware\/gpus\/([\w:.-]+)\/eject\/cancel$/);
+  if (cancelling) return json(await run(eject.cancel(decodeURIComponent(cancelling))));
+  if ((post && (p === "/api/cluster/rpc" || p === "/api/cluster/pool")) && eject.any()) return json({ error: { code: "DRAINING", message: "A GPU on this machine is being ejected, so nothing new loads until the eject ends or is cancelled." } }, 409);
   if (post && p === "/api/cluster/rpc") return json(await run(cluster.startRpc(await body(req, LocalRpcRequest), peer)));
   if (post && p === "/api/cluster/rpc/stop") return json(await run(cluster.stopRpcFor((await body(req, LocalRpcRequest)).id)));
   if (post && p === "/api/cluster/release") {

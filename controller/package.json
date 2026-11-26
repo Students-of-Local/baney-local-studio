@@ -7,7 +7,7 @@
   "scripts": {
     "start": "bun src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node test/e2e.mjs && node test/link_peers.mjs && node test/deploy.mjs",
+    "test": "node test/e2e.mjs && node test/link_peers.mjs && node test/deploy.mjs && node test/eject.mjs",
     "cluster-smoke": "node test/cluster_smoke.mjs"
   },
   "dependencies": {

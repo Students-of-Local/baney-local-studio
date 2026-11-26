@@ -9,7 +9,7 @@ export type RawGpu = Omit<LocalGpu, "card"> & { uuid: string; pids: number[]; st
 
 const QUERY = "index,uuid,name,memory.used,memory.total,power.draw,power.limit,temperature.gpu,utilization.gpu,pci.bus_id,pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max";
 const LANE_GBPS: Record<number, number> = { 1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563 };
-const sysfs = () => process.env.LOCAL_STUDIO_SYSFS ?? "/sys";
+export const sysfs = () => process.env.LOCAL_STUDIO_SYSFS ?? "/sys";
 
 const reading = (s: string | undefined): number | null => {
   const n = Number.parseFloat(s ?? "");
@@ -42,7 +42,7 @@ const list = (dir: string): string[] => {
 
 const PCI_DIR = /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/;
 
-const pciId = (busId: string): string | null => {
+export const pciId = (busId: string): string | null => {
   const m = /^([0-9a-f]+):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$/i.exec(busId.trim());
   return m ? `${(m[1] ?? "").slice(-4).padStart(4, "0")}:${m[2]}:${m[3]}.${m[4]}`.toLowerCase() : null;
 };
