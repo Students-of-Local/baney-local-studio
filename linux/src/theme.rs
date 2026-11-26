@@ -267,6 +267,13 @@ pub fn install() {
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_enable_animations(false);
     }
+    if crate::omarchy::present() {
+        crate::omarchy::watch(|| {
+            if let Some(settings) = SETTINGS.with(|last| last.borrow().clone()) {
+                self::apply(&settings);
+            }
+        });
+    }
 }
 
 pub fn color_scheme(scheme: local_studio_core::ColorScheme) {
@@ -333,11 +340,13 @@ pub fn apply(settings: &local_studio_core::Settings) {
         Some(theme) if !theme.adaptive() => theme.dark,
         _ => adw::StyleManager::default().is_dark(),
     };
-    let colors = crate::colors::resolve(settings.theme.as_deref(), dark);
+    let colors = crate::colors::resolve(theme.as_ref().map(|theme| theme.name.as_str()), dark);
     crate::colors::set_current(&colors);
     let mut css = settings_css(settings);
     match &theme {
-        Some(theme) if theme.adaptive() => css.push_str(&crate::colors::css(&colors)),
+        Some(theme) if theme.adaptive() || theme.name == crate::omarchy::NAME => {
+            css.push_str(&crate::colors::css(&colors));
+        }
         Some(theme) => css.push_str(&theme.css()),
         None => {}
     }

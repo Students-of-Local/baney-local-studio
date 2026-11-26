@@ -37,6 +37,7 @@ mod machines;
 mod markdown;
 mod markdown_scenes;
 mod numbers;
+mod omarchy;
 mod options;
 mod pages;
 mod palette;
