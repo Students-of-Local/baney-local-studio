@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -522,16 +522,21 @@ fn checks(rollup: &[Value]) -> String {
 }
 
 pub(crate) async fn list_pull_requests(project: &Path) -> Result<Vec<PullRequest>, String> {
-    let out =
-        run_ok("gh", ["pr", "list", "--state", "all", "--limit", "50", "--json", PR_FIELDS], project, SLOW).await?;
-    let pulls: Vec<GhPull> = serde_json::from_str(&out).map_err(|error| format!("unexpected gh output: {error}"))?;
-    Ok(pulls.into_iter().map(GhPull::into_pull).collect())
+    pull_list(project, "50").await
 }
 
-pub(crate) async fn branch_pull_request(project: &Path, branch: &str) -> Option<PullRequest> {
-    process::which("gh")?;
-    let out = run_ok("gh", ["pr", "view", branch, "--json", PR_FIELDS], project, QUICK).await.ok()?;
-    serde_json::from_str::<GhPull>(&out).ok().map(GhPull::into_pull)
+pub(crate) async fn repository_pull_requests(dir: &Path) -> Result<HashMap<String, PullRequest>, String> {
+    let mut by_head = HashMap::new();
+    for pull in pull_list(dir, "100").await? {
+        by_head.entry(pull.head.clone()).or_insert(pull);
+    }
+    Ok(by_head)
+}
+
+async fn pull_list(dir: &Path, limit: &str) -> Result<Vec<PullRequest>, String> {
+    let out = run_ok("gh", ["pr", "list", "--state", "all", "--limit", limit, "--json", PR_FIELDS], dir, SLOW).await?;
+    let pulls: Vec<GhPull> = serde_json::from_str(&out).map_err(|error| format!("unexpected gh output: {error}"))?;
+    Ok(pulls.into_iter().map(GhPull::into_pull).collect())
 }
 
 pub(crate) async fn create_pull_request(
@@ -653,18 +658,6 @@ pub(crate) async fn remove_worktree(project: &Path, worktree: &Path) -> Result<(
     git(project, &["worktree", "remove", "--force", "--", &path], SLOW).await?;
     let _ = git(project, &["worktree", "prune"], QUICK).await;
     Ok(())
-}
-
-pub(crate) async fn branch_pull_request_list(dir: &Path, branch: &str) -> Result<Option<PullRequest>, String> {
-    let out = run_ok(
-        "gh",
-        ["pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", PR_FIELDS],
-        dir,
-        SLOW,
-    )
-    .await?;
-    let pulls: Vec<GhPull> = serde_json::from_str(&out).map_err(|error| format!("unexpected gh output: {error}"))?;
-    Ok(pulls.into_iter().next().map(GhPull::into_pull))
 }
 
 pub(crate) async fn merge_pull_request(project: &Path, number: u64, method: MergeMethod) -> Result<String, String> {
