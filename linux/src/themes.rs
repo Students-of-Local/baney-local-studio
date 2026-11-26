@@ -75,11 +75,21 @@ impl Theme {
 fn custom(settings: &Settings) -> Vec<Theme> {
     serde_json::from_str::<serde_json::Value>(&settings.custom_themes)
         .ok()
-        .and_then(|value| value.as_array().map(|themes| themes.iter().filter_map(Theme::from_json).collect()))
+        .and_then(|value| {
+            value.as_array().map(|themes| themes.iter().filter_map(Theme::from_json).map(reserved).collect())
+        })
         .unwrap_or_default()
 }
 
+fn reserved(mut theme: Theme) -> Theme {
+    if theme.name == crate::omarchy::NAME {
+        theme.name = format!("{} (custom)", theme.name);
+    }
+    theme
+}
+
 pub fn store(settings: &mut Settings, theme: &Theme) {
+    let theme = &reserved(theme.clone());
     let mut themes = custom(settings);
     themes.retain(|known| known.name != theme.name);
     themes.push(theme.clone());
@@ -207,6 +217,8 @@ pub fn editor(app: &Rc<App>) {
         theme.name = "My Theme".to_string();
         theme
     });
+    let current =
+        if current.name == crate::omarchy::NAME { Theme { name: "My Theme".to_string(), ..current } } else { current };
     let dialog = adw::Dialog::builder().title("Theme Editor").content_width(420).build();
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::builder().description("Changes preview live. Save to keep the theme.").build();
