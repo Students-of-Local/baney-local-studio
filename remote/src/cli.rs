@@ -369,6 +369,7 @@ fn serve(mut args: Args) -> anyhow::Result<()> {
         Waiter { runtime: tokio::runtime::Builder::new_current_thread().enable_all().build()?, events: signals()? };
     loop {
         let Some((studio, notify)) = waiter.take_lock(&data_dir, &config)? else { return Ok(()) };
+        studio.set_owner_watching(false);
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         let reload = Arc::new(Notify::new());
         let launch = Launch {

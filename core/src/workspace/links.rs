@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -31,17 +32,46 @@ impl Repo {
 pub(crate) struct Links {
     repos: Mutex<HashMap<PathBuf, Repo>>,
     changed: watch::Sender<u64>,
+    owner_watching: AtomicBool,
+    remote_clients: AtomicUsize,
 }
 
 impl Default for Links {
     fn default() -> Self {
-        Self { repos: Mutex::new(HashMap::new()), changed: watch::Sender::new(0) }
+        Self {
+            repos: Mutex::new(HashMap::new()),
+            changed: watch::Sender::new(0),
+            owner_watching: AtomicBool::new(true),
+            remote_clients: AtomicUsize::new(0),
+        }
     }
 }
 
 impl Links {
     fn repos(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Repo>> {
         self.repos.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn watched(&self) -> bool {
+        self.owner_watching.load(Ordering::SeqCst) || self.remote_clients.load(Ordering::SeqCst) > 0
+    }
+
+    fn set_owner_watching(&self, watching: bool) {
+        let was = self.watched();
+        self.owner_watching.store(watching, Ordering::SeqCst);
+        self.ask_again_if_woken(was);
+    }
+
+    fn set_remote_clients(&self, count: usize) {
+        let was = self.watched();
+        self.remote_clients.store(count, Ordering::SeqCst);
+        self.ask_again_if_woken(was);
+    }
+
+    fn ask_again_if_woken(&self, was: bool) {
+        if !was && self.watched() {
+            self.changed.send_modify(|version| *version += 1);
+        }
     }
 
     pub(crate) fn forget(&self, dir: &Path) {
@@ -57,6 +87,14 @@ impl Workspace {
         self.inner.links.changed.subscribe()
     }
 
+    pub(crate) fn set_owner_watching(&self, watching: bool) {
+        self.inner.links.set_owner_watching(watching);
+    }
+
+    pub(crate) fn set_remote_clients(&self, count: usize) {
+        self.inner.links.set_remote_clients(count);
+    }
+
     pub(crate) fn thread_pull_request(&self, dir: &str, branch: &str) -> Option<PullRequest> {
         if branch.trim().is_empty() || process::which("gh").is_none() {
             return None;
@@ -65,7 +103,7 @@ impl Workspace {
         let (pull, ask) = {
             let mut repos = self.inner.links.repos();
             let entry = repos.entry(repo.clone()).or_default();
-            let ask = !entry.asked && entry.due();
+            let ask = !entry.asked && entry.due() && self.inner.links.watched();
             entry.asked |= ask;
             (entry.pulls.get(branch).cloned(), ask)
         };
@@ -77,10 +115,12 @@ impl Workspace {
         pull
     }
 
-    pub(crate) async fn branch_pull_request(&self, dir: &Path, branch: &str) -> Option<PullRequest> {
+    pub(crate) async fn branch_pull_request(&self, dir: &Path, branch: &str, unwatched: bool) -> Option<PullRequest> {
         process::which("gh")?;
         let repo = repository(dir)?;
-        self.refresh_repository(repo.clone(), dir).await;
+        if unwatched || self.inner.links.watched() {
+            self.refresh_repository(repo.clone(), dir).await;
+        }
         self.inner.links.repos().get(&repo)?.pulls.get(branch).cloned()
     }
 

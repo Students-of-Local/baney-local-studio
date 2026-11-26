@@ -1218,6 +1218,17 @@ fn host_caller() -> Option<plugins::Caller> {
 }
 
 impl Studio {
+    /// Whether the process that owns this Studio shows it to someone (a desktop window). `local-studio-serve`
+    /// turns it off; with it off and no remote client, pull request status makes no GitHub calls.
+    pub fn set_owner_watching(&self, watching: bool) {
+        self.workspace.set_owner_watching(watching);
+    }
+
+    /// The phones and desktop links connected to this Studio's server right now.
+    pub fn set_remote_clients(&self, count: usize) {
+        self.workspace.set_remote_clients(count);
+    }
+
     pub fn subscribe(&self, waker: Arc<dyn Waker>) -> Subscription {
         self.mailbox.subscribe(waker)
     }
