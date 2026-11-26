@@ -646,10 +646,10 @@ fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
     ] })
     .to_string();
     let lm = engine_like(vec![("GET /v1/models", list(&["warm", "cold"])), ("GET /api/v0/models", studio)])?;
-    let cases: [(u16, &[(&str, Option<u64>)]); 3] = [
-        (ollama, &[("tiny:latest", Some(16_384)), ("card:latest", None)]),
-        (llama, &[("tiny:latest", Some(8_192))]),
-        (lm, &[("warm", Some(4_096)), ("cold", None)]),
+    let cases = [
+        (ollama, vec![("tiny:latest", Some(16_384)), ("card:latest", None)]),
+        (llama, vec![("tiny:latest", Some(8_192))]),
+        (lm, vec![("warm", Some(4_096)), ("cold", None)]),
     ];
     for (port, windows) in cases {
         let base = format!("http://127.0.0.1:{port}/v1");
@@ -669,12 +669,12 @@ fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
         for (model, window) in windows {
             let written = entry["models"]
                 .as_array()
-                .and_then(|models| models.iter().find(|written| written["id"] == *model))
+                .and_then(|models| models.iter().find(|written| written["id"] == model))
                 .with_context(|| format!("{base}: {model} is in models.json: {entry}"))?;
-            ensure!(written["contextWindow"].as_u64() == *window, "{base}: {model}: {written}");
+            ensure!(written["contextWindow"].as_u64() == window, "{base}: {model}: {written}");
             match window {
                 Some(window) => {
-                    println!("ok   {base} {model} is added with the context size the engine runs ({window})")
+                    println!("ok   {base} {model} is added with the context size the engine runs ({window})");
                 }
                 None => println!("ok   {base} {model} is added with no context size, not its card's maximum"),
             }
