@@ -207,6 +207,31 @@ test("first-F3, sol-F1: when the client hangs up mid-request, its running batch 
 	assert.deepEqual(keys, ["c"]);
 });
 
+test("second-S3: turning the bridge off stops a batch in flight and what is queued, and answers open site questions no", async () => {
+	const { port, request, connect } = await startBridge();
+	connect("c1", "off");
+	await pageTab(request, "c1");
+	const keys = watchKeys();
+	port.deliver({ type: "request", clientId: "c1", id: 906, method: "actions", params: { steps: [{ wait: 300 }, { press: "a" }] } });
+	port.deliver({ type: "request", clientId: "c1", id: 907, method: "press", params: { key: "b" } });
+	// Another agent waits on a site question.
+	await chrome.storage.local.set({ bridge_permission_mode: "manual" });
+	connect("c2", "asks");
+	port.deliver({ type: "request", clientId: "c2", id: 908, method: "tabs.create", params: { url: "https://unasked.example/" } });
+	for (let i = 0; i < 400 && !port.sent.some((m) => m.event === "permission_request" && m.clientId === "c2"); i++)
+		await new Promise((r) => setTimeout(r, 5));
+	await new Promise((r) => setTimeout(r, 50));
+	await chrome.storage.local.set({ bridge_enabled: false });
+	await new Promise((r) => setTimeout(r, 700));
+	assert.deepEqual(keys, [], "the batch kept typing after the bridge was turned off");
+	const queued = port.sent.find((m) => m.type === "response" && m.id === 907);
+	assert.equal(queued?.error?.code, "bridge_disabled", JSON.stringify(queued));
+	const asked = port.sent.find((m) => m.type === "response" && m.id === 908);
+	assert.equal(asked?.error?.code, "permission_denied", `the site question stayed open: ${JSON.stringify(asked)}`);
+	assert.ok(!(await chrome.tabs.query({})).some((t) => t.url === "https://unasked.example/"));
+	await chrome.storage.local.set({ bridge_enabled: true });
+});
+
 test("a request refused during an update install is not_sent, so the client resends it later", async () => {
 	const { request, connect, native } = await startBridge();
 	connect("c1", "install");

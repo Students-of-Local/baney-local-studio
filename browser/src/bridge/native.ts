@@ -1457,6 +1457,21 @@ async function prune(reason: string): Promise<void> {
 
 let alarmTicks = 0;
 
+/**
+ * The person turned the bridge off in Settings > Agents: what runs stops now, not when it ends. Each client's running
+ * request sends no more input (one still queued is refused as disabled when it starts), every open site and upload
+ * question is a no, screencasts stop and transfers are dropped. ask_user's questions end in src/ask/bridge-worker.ts.
+ */
+function bridgeTurnedOff(): void {
+	for (const state of clients.values()) state.abort?.();
+	for (const [requestId, resolve] of pendingDecisions) {
+		pendingDecisions.delete(requestId);
+		resolve("deny");
+	}
+	dropAllTransfers();
+	void stopScreencastsOwnedBy(undefined).catch(() => undefined);
+}
+
 /** Wire the bridge into the service worker. Safe to call on every worker start. */
 export function startBridge(): void {
 	clearPendingRequests().catch(() => undefined);
@@ -1478,7 +1493,10 @@ export function startBridge(): void {
 		}
 	});
 	chrome.storage.onChanged.addListener((changes, area) => {
-		if (area === "local" && "bridge_enabled" in changes) connect();
+		if (area === "local" && "bridge_enabled" in changes) {
+			if (changes.bridge_enabled.newValue === false) bridgeTurnedOff();
+			connect();
+		}
 		if (area !== "session") return;
 		for (const key of Object.keys(changes)) {
 			if (!key.startsWith(DECISION_KEY_PREFIX)) continue;
