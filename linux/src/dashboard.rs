@@ -505,6 +505,10 @@ impl LocalPage {
         drop(state);
     }
 
+    pub fn hold(&self, key: String) {
+        self.pending.borrow_mut().insert(key.clone(), key);
+    }
+
     fn is_pending(&self, key: &str) -> bool {
         self.pending.borrow().values().any(|pending| pending == key)
     }

@@ -918,6 +918,7 @@ fn local_snapshot() -> LocalSnapshot {
                     busy: true,
                     external: false,
                     link: None,
+                    eject: None,
                 },
                 LocalGpu {
                     index: 1,
@@ -928,6 +929,7 @@ fn local_snapshot() -> LocalSnapshot {
                     busy: true,
                     external: false,
                     link: None,
+                    eject: None,
                 },
             ],
             memory_used_bytes: 43_400_000_000,

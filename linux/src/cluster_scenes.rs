@@ -1,16 +1,20 @@
 use std::rc::Rc;
 
 use local_studio_core::{
-    LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalClusterPower, LocalController, LocalGpu, LocalHardware,
-    LocalHotplug, LocalLendMode, LocalLendState, LocalLentServer, LocalMachineStatus, LocalPool, LocalPoolModel,
-    LocalPoolPhase, LocalPowerHelper, LocalPowerLever, LocalSnapshot, LocalThunderbolt, LocalThunderboltState, Update,
+    LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalClusterPower, LocalController, LocalEject,
+    LocalEjectProcess, LocalEjectState, LocalGpu, LocalHardware, LocalHotplug, LocalLendMode, LocalLendState,
+    LocalLentServer, LocalMachineStatus, LocalPool, LocalPoolModel, LocalPoolPhase, LocalPowerHelper, LocalPowerLever,
+    LocalSnapshot, LocalThunderbolt, LocalThunderboltState, Update,
 };
 
 use crate::app::App;
 
-pub const SCENES: [&str; 13] = [
+pub const SCENES: [&str; 16] = [
     "local-cluster-lending",
+    "local-cluster-ejecting",
     "local-cluster-reclaimed",
+    "local-cluster-eject-busy",
+    "local-cluster-eject-root",
     "local-cluster-apple-silicon",
     "local-cluster-power-in-use",
     "local-cluster-power-in-use-light",
@@ -29,6 +33,7 @@ const EGPU_LINK: &str = "PCIe 3.0 x4, about 3.9 GB/s over the cable. Loading a m
 const DEVICE: &str = "d5010000-0070-6418-2317-5c0a1a2b3c4d";
 const LAPTOP_RTX: &str = "NVIDIA GeForce RTX 4080 Laptop GPU";
 const SCOUT: &str = "Llama-4-Scout-17B-16E-Q4_K_M";
+const REMOVE: &str = "echo 1 | sudo tee /sys/bus/pci/devices/0000:0b:00.0/remove";
 
 fn text(value: &str) -> String {
     value.to_string()
@@ -60,7 +65,39 @@ fn gpu(index: u32, name: &str, used: u64, total: u64, external: bool, link: &str
         busy: used > 2048,
         external,
         link: Some(text(link)),
+        eject: external.then(|| LocalEject {
+            state: LocalEjectState::NeedsRoot,
+            draining: false,
+            blockers: Vec::new(),
+            command: Some(text(REMOVE)),
+            message: Some(text("Removing the GPU from the PCI bus needs an administrator password.")),
+        }),
     }
+}
+
+fn ejecting(state: LocalEjectState) -> LocalController {
+    let mut shown = parish(false);
+    let eject = if state == LocalEjectState::Busy {
+        LocalEject {
+            state,
+            draining: true,
+            blockers: vec![LocalEjectProcess { pid: 48_213, name: text("blender") }],
+            command: None,
+            message: Some(text("A program outside Local Studio is using NVIDIA GeForce RTX 5090. Quit it first.")),
+        }
+    } else {
+        LocalEject {
+            state,
+            draining: true,
+            blockers: Vec::new(),
+            command: Some(text(REMOVE)),
+            message: Some(text("Removing the GPU from the PCI bus needs an administrator password.")),
+        }
+    };
+    if let Some(gpu) = shown.hardware.as_mut().and_then(|hardware| hardware.gpus.iter_mut().find(|gpu| gpu.external)) {
+        gpu.eject = Some(eject);
+    }
+    shown
 }
 
 fn model(name: &str, gib: u64, fits_one: bool, fits_pool: bool) -> LocalPoolModel {
@@ -349,6 +386,8 @@ fn powered(scene: &str) -> LocalController {
 pub fn stage(app: &Rc<App>, scene: &str) {
     let shown = match scene {
         "local-cluster-reclaimed" => parish(true),
+        "local-cluster-eject-busy" => ejecting(LocalEjectState::Busy),
+        "local-cluster-eject-root" => ejecting(LocalEjectState::NeedsRoot),
         "local-cluster-apple-silicon" => apple(),
         _ if scene.starts_with("local-cluster-power-") => powered(scene),
         _ => parish(false),
@@ -357,5 +396,9 @@ pub fn stage(app: &Rc<App>, scene: &str) {
     let snapshot = LocalSnapshot { controllers: vec![shown], ..LocalSnapshot::default() };
     app.apply(vec![Update::Local { request: text("fixture"), snapshot }]);
     app.local.select(&url);
+    if scene == "local-cluster-ejecting" {
+        app.local.hold("eject::1:false".to_string());
+        app.local.render(&app.state.borrow());
+    }
     app.local.reveal_cluster();
 }
