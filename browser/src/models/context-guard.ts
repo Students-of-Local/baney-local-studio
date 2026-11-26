@@ -11,6 +11,7 @@ import {
 	createAssistantMessageEventStream,
 	type Model,
 } from "@mariozechner/pi-ai";
+import { LOCAL_STUDIO_PROVIDER } from "../eukhe/models.js";
 import {
 	type Budget,
 	budgetFor,
@@ -169,6 +170,9 @@ async function opening(
 /** Wrap a stream function so every request fits the model's window, with one harder retry on a size refusal. */
 export function guardContext<F extends Inner>(inner: F): F {
 	return (async (model: Model<any>, context: Context, options?: any) => {
+		// Eukhe sends its own instructions and tools and keeps the session's history, so the panel's measure of the fixed part
+		// says nothing about a Local Studio model, and cutting old turns would move the chat to a new session.
+		if (model.provider === LOCAL_STUDIO_PROVIDER) return inner(model, context, options);
 		const key = keyOf(model);
 		const state = stateOf(key);
 		const fixed = estimateFixedTokens(context);
