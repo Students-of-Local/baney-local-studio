@@ -4574,6 +4574,9 @@ impl Actor {
                     thread.run_started_at = None;
                 }
                 self.itself.send(Command::SendHeld { thread: id.clone() });
+                if self.ask_notes.contains_key(&id) {
+                    self.itself.send(Command::FlushAskNotes { thread: id.clone() });
+                }
             }
             if flipped {
                 self.emit_info(&id);
