@@ -85,6 +85,7 @@ impl Shim {
             pull(12, "thread-2", "OPEN", rollup("FAILURE", "COMPLETED")),
             pull(11, "thread-1", "OPEN", rollup("SUCCESS", "COMPLETED")),
             pull(3, "thread-1", "CLOSED", json!([])),
+            pull(9, "main", "OPEN", rollup("SUCCESS", "COMPLETED")),
         ]);
         std::fs::create_dir_all(&self.pulls)?;
         std::fs::write(self.pulls.join("all.json"), pulls.to_string())?;
@@ -139,12 +140,15 @@ fn repository(scratch: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
         worktrees.push(worktree);
     }
     git(&repo, &["remote", "add", "fork", "git@github.com:smoke/r.git"])?;
+    git(&repo, &["update-ref", "refs/remotes/fork/main", "HEAD"])?;
+    git(&repo, &["branch", "--quiet", "--set-upstream-to", "fork/main", "main"])?;
     Ok((repo, worktrees))
 }
 
 struct App {
     studio: Arc<Studio>,
     rows: BTreeMap<String, Option<PullRequest>>,
+    statuses_with_pull: usize,
 }
 
 impl App {
@@ -170,13 +174,21 @@ impl App {
             take_over_serve: false,
         };
         let studio = Studio::new(config, Arc::new(Nudge)).map_err(|error| anyhow::anyhow!("{error}"))?;
-        Ok(Self { studio, rows: BTreeMap::new() })
+        Ok(Self { studio, rows: BTreeMap::new(), statuses_with_pull: 0 })
     }
 
     fn pump(&mut self) {
         for update in self.studio.tick() {
-            if let Update::Threads { threads } = update {
-                self.rows = threads.into_iter().map(|row| (row.id, row.pull_request)).collect();
+            match update {
+                Update::Threads { threads } => {
+                    self.rows = threads.into_iter().map(|row| (row.id, row.pull_request)).collect();
+                }
+                Update::GitStatus { status, .. }
+                    if status.pull_request.as_ref().is_some_and(|pull| pull.number == 9) =>
+                {
+                    self.statuses_with_pull += 1;
+                }
+                _ => {}
             }
         }
     }
@@ -201,12 +213,14 @@ impl App {
 
     fn hold(&mut self, shim: &Shim, calls: usize, how_long: Duration, repo: &str, what: &str) -> Result<()> {
         let started = Instant::now();
+        let statuses = self.statuses_with_pull;
         while started.elapsed() < how_long {
             self.studio.git_status(repo.to_string());
             self.pump();
             ensure!(shim.count() == calls, "{what}: gh ran {} more times: {:?}", shim.count() - calls, shim.calls());
             std::thread::sleep(Duration::from_millis(50));
         }
+        ensure!(self.statuses_with_pull > statuses, "{what}: git status never reported main's PR #9");
         Ok(())
     }
 }
