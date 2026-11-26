@@ -214,6 +214,25 @@ export function hostOf(url: string): string {
 }
 
 /**
+ * The address a view-source:, blob: or filesystem: URL wraps, unwrapped until none is left
+ * ("view-source:blob:https://a.example/1" is "https://a.example/1"), or the URL itself. The page such
+ * a URL shows is that address's, so every check of a host reads this one.
+ */
+export function innerUrl(url: string): string {
+	let inner = url;
+	for (;;) {
+		let parsed: URL;
+		try {
+			parsed = new URL(inner);
+		} catch {
+			return inner;
+		}
+		if (!/^(?:view-source|blob|filesystem):$/.test(parsed.protocol)) return inner;
+		inner = parsed.href.slice(parsed.protocol.length);
+	}
+}
+
+/**
  * What a person typed for Allowed sites, as the hostname permissions compare (a port or path can't
  * narrow an entry; hostAllowed looks only at the hostname), or the reason it can't be one.
  */
@@ -250,6 +269,10 @@ export function isGuardedUrl(url: string, guardedHosts: readonly string[] | unde
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
+		// The page a view-source:, blob: or filesystem: URL shows is the wrapped address's, as innerUrl reads it. This
+		// can't call innerUrl: page.ts runs this function in the page, apart from the rest of this file.
+		while (/^(?:view-source|blob|filesystem):$/.test(parsed.protocol))
+			parsed = new URL(parsed.href.slice(parsed.protocol.length));
 	} catch {
 		return false;
 	}
@@ -274,9 +297,8 @@ export function isGuardedUrl(url: string, guardedHosts: readonly string[] | unde
  */
 export function isOwnExtensionUrl(url: string): boolean {
 	try {
-		let u = new URL(url);
 		// blob: and filesystem: URLs carry the origin that made them after the scheme; that document has the extension's rights.
-		if (u.protocol === "blob:" || u.protocol === "filesystem:") u = new URL(u.pathname);
+		const u = new URL(innerUrl(url));
 		return u.protocol === "chrome-extension:" && u.hostname.toLowerCase() === String(chrome.runtime.id).toLowerCase();
 	} catch {
 		return false;
@@ -292,10 +314,11 @@ export async function isUrlAllowed(url: string, tier?: ModelTier, remote?: boole
 	if (isOwnExtensionUrl(url)) return false;
 	const mode = modeFor(await getPermissionMode(), remote);
 	if (mode === "yolo") return true;
-	const host = hostOf(url);
-	if (host && hostAllowed(host, await getAllowedHosts())) return true;
 	// view-source:, blob: and filesystem: URLs carry the page's own address after the scheme.
-	if (opensAnySite(mode, tier)) return !sensitiveSite(url.replace(/^\s*(?:(?:view-source|blob|filesystem):)+/i, ""));
+	const inner = innerUrl(url);
+	const host = hostOf(inner);
+	if (host && hostAllowed(host, await getAllowedHosts())) return true;
+	if (opensAnySite(mode, tier)) return !sensitiveSite(inner);
 	return !host && url === "about:blank";
 }
 

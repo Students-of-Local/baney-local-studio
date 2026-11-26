@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { entersText, textLimit } from "../src/bridge/risk-rules.ts";
-import { allowHost, getPermissionMode, isRemoteClient, isUrlAllowed, LEGACY_MODE_KEY, MODE_KEY, modeFor, peekPermissionMode, recordDecision, setPermissionMode } from "../src/bridge/permissions.ts";
+import { allowHost, getPermissionMode, innerUrl, isGuardedUrl, isOwnExtensionUrl, isRemoteClient, isUrlAllowed, LEGACY_MODE_KEY, MODE_KEY, modeFor, peekPermissionMode, recordDecision, setPermissionMode } from "../src/bridge/permissions.ts";
 import { addStep } from "../src/runs/log.ts";
 import { installFakeChrome } from "./fake-chrome.mjs";
 
@@ -45,6 +45,36 @@ test("Auto: a frontier model opens an ordinary site, but mail, a bank or a passw
 	assert.equal(await isUrlAllowed("https://mail.google.com/mail/u/0", "frontier", true), false, "but a remote session in Yolo has Auto's asks");
 	await setPermissionMode("manual");
 	assert.equal(await isUrlAllowed("https://news.example.com/today", "frontier"), false);
+});
+
+test("first-F2: a view-source:, blob: or filesystem: URL is checked as the address it wraps, the approval host's included", async () => {
+	fresh();
+	const hosts = ["approve.example.com", "127.0.0.1:8787"];
+	for (const url of [
+		"view-source:https://approve.example.com/authorize?client_id=x",
+		"blob:https://approve.example.com/1f0c",
+		"view-source:blob:https://approve.example.com/1f0c",
+		"VIEW-SOURCE:http://127.0.0.1:8787/authorize",
+		"filesystem:https://approve.example.com/temporary/a.html",
+	]) {
+		assert.equal(isGuardedUrl(url, hosts), true, url);
+		// page.ts runs the guard in the page as source text, so it can't lean on anything outside itself.
+		const inPage = new Function(`return (${isGuardedUrl.toString()})(${JSON.stringify(url)}, ${JSON.stringify(hosts)})`)();
+		assert.equal(inPage, true, `${url}, in the page`);
+	}
+	assert.equal(isGuardedUrl("view-source:https://news.example.com/", hosts), false);
+	assert.equal(isGuardedUrl("view-source:http://127.0.0.1:3000/", hosts), false, "another local port stays open");
+	assert.equal(innerUrl("view-source:blob:https://a.example/1"), "https://a.example/1");
+	assert.equal(innerUrl("https://a.example/view-source:x"), "https://a.example/view-source:x");
+	const own = `chrome-extension://${chrome.runtime.id}/sidepanel.html`;
+	for (const url of [`view-source:${own}`, `blob:chrome-extension://${chrome.runtime.id}/1`, `view-source:blob:chrome-extension://${chrome.runtime.id}/1`])
+		assert.equal(isOwnExtensionUrl(url), true, url);
+	await setPermissionMode("yolo");
+	assert.equal(await isUrlAllowed(`view-source:${own}`, "frontier"), false, "Local Studio's own pages, in Yolo too");
+	await setPermissionMode("manual");
+	await allowHost("news.example.com");
+	assert.equal(await isUrlAllowed("view-source:https://news.example.com/", "unknown"), true, "an allowed site's source is that site");
+	assert.equal(await isUrlAllowed("view-source:https://other.example.com/", "unknown"), false);
 });
 
 test("a frontier model's sensitive site is put to the person, and a no says how to allow it", async () => {
