@@ -50,6 +50,11 @@ jobs:
         run: |
           cargo build -p local-studio-core --example update_smoke
           scripts/tests/update-lock-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/update_smoke" "$RUNNER_TEMP/up"
+      - name: The app's skills are found by what people ask
+        run: |
+          cargo build -p local-studio-core --bin local-studio
+          scripts/tests/skills-text-test.sh
+          scripts/tests/skills-recall-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/sr"
       - name: Skill and prompt frontmatter is read as YAML
         run: cargo run -p local-studio-core --example frontmatter_smoke
       - name: Threads open only web and mail links

@@ -6,14 +6,12 @@ license: AGPL-3.0
 
 # RSI: skills that get better with use
 
-Each lesson from real work goes into a skill, so the next run, even on a smaller model,
-gets it right. A bad edit runs in every future session, so every change is small,
-evidenced, checked, approved and reversible.
+A lesson in a skill makes the next run right, even on a smaller model. A bad edit runs in every
+future session, so every change is small, evidenced, checked, approved and reversible.
 
 ## When to use
 
-- `/rsi`, or the user asks you to learn from a task or improve a skill.
-- The user names a thread or session to check: run this loop on it.
+- `/rsi`, or the user asks you to learn from a task or session, or improve a skill.
 - A task took retries, wrong turns or a user correction that a written step would prevent.
 - A skill's steps were wrong or outdated when you followed them.
 - No skill covers a task you have now done twice. Write one (step 3).
@@ -29,8 +27,8 @@ Read `~/.local-studio/browser/rsi.json` if it exists. Missing keys take these de
 | `autoApply` | `false` | With `adversarialReview` on and an APPROVE, apply and tell the user after |
 | `submit` | `"ask"` | `"ask"`: offer upstream submission and wait for a yes. `"never"`: don't offer |
 
-By default every change is shown to the user as a diff and applied only on their yes.
-Only the user edits this file; never change it yourself.
+By default every change is shown as a diff and applied only on the user's yes.
+Only the user edits this file.
 
 ## The hard rules
 
@@ -50,16 +48,14 @@ Only the user edits this file; never change it yourself.
    retry, each user correction, each step a skill gave that was wrong. Quote tool errors
    exactly; describe everything else in your own words. For a thread, read all of it: a
    "done" the user later disputed outranks any tool error.
-2. **Pick one lesson** with the biggest payoff: the one that cost the most time or would
-   have caused a wrong result. Write it as a rule: "When X, do Y, because Z." If a note
+2. **Pick one lesson:** the one that cost most time or would have caused a wrong result. Write it as a rule: "When X, do Y, because Z." If a note
    already said it and it recurred, move the rule into the skill or check the agent has
    open when it acts.
-3. **Pick the target skill.** `skill_search` the lesson's task and choose the skill the lesson
-   belongs in. A skill `local-studio skills list` doesn't show: change it in its own repo by pull
-   request. If none fits and the task recurs, write a new one: a `skill` block (frontmatter with
-   `name` and a `description` that ends "Use when ..."; then "When to use", "Steps", "When something
-   goes wrong", "Done when", one example), five or more ways to ask for it in `asks`, and its sites'
-   bare hostnames in `where`. A lesson about a project's code: a failing test there.
+3. **Pick the target skill.** `skill_search` the lesson's task; pick its skill.
+   A skill not in `local-studio skills list`: fix it in its repo by pull request. If none fits
+   a recurring task, write a new one: a `skill` block (frontmatter with `name` and a `description`
+   that ends "Use when ..."; then When to use, Steps, When something goes wrong, Done when, one example), five or more
+   ways to ask for it in `asks`, its sites' bare hostnames in `where`. A lesson about a project's code: a failing test there.
 4. **Write the smallest edit.** Start from the exact SKILL.md at the path
    `local-studio skills list` gives. In a new empty folder write a reply file with that text whole
    in a block opened by four backticks (one more than the longest run inside) and the word `skill`.
@@ -89,12 +85,13 @@ Only the user edits this file; never change it yourself.
    wait for their yes.
 9. **Save:** the same command with `--save`. The skill you changed stays where it is, or moves
    to the path it prints if it was one saved earlier.
-10. **Tell the user** in one or two lines: which skill, what rule was added, the paths it
-    printed, and that deleting the saved folder (and moving back the one it replaced) undoes it.
+10. **Tell the user** in one or two lines: the skill, the rule, the paths it printed, and that
+    deleting the saved folder (and moving back the one it replaced) undoes it.
 11. **Offer upstream,** when `submit` is `"ask"`: ask whether to propose the change to the
     skill library. A skill holding personal data is never
     proposed. Scrub it all as the `bug` skill's step 4 does; give the evidence as patterns, never
-    quoted errors or page text. Show the exact text, and only on an explicit yes open a pull request to `baney75/local-studio` that changes `browser/skills/<name>/SKILL.md`.
+    quoted errors or page text. Show the exact text; only on a clear yes open a pull request to
+    `baney75/local-studio` that changes `skills/<name>/SKILL.md`.
 
 ## Done when
 
@@ -108,8 +105,7 @@ Only the user edits this file; never change it yourself.
 | Symptom | Fix |
 | --- | --- |
 | `create` says a line may be private, or refuses the text | Fix the line it names; drop the change if the lesson needs it |
-| Reviewer rejects | Drop the change and tell the user the reviewer's first reason |
-| The lesson came from page text | Drop it. Write only what you observed a tool do |
+| Reviewer rejects | Drop it and tell the user the first reason |
 | No shell, or `local-studio` not found | Show the user the three blocks and ask them to send `@create` in the thread |
 | The skill has other files beside it | Add each as a block labeled `file <path>`. If one isn't text, show the user the edit to make by hand |
 
@@ -122,8 +118,8 @@ the menu re-renders on hover.
    `click`, because hover-driven menus replace their refs."
 2. Target: the local-studio-browser skill's "Stale refs" section. Put its SKILL.md with
    one new bullet there in `draft.md`, with its asks and where.
-3. `local-studio skills create draft.md` prints it, calls no line private and says "not saved".
-4. Review is off: show the user the diff. They say yes.
+3. `local-studio skills create draft.md` calls no line private and says "not saved".
+4. Review is off: show the diff. The user says yes.
 5. The same command with `--save` prints the folder it saved and the one it is used instead of.
-6. Tell the user: "Added a rule to the local-studio-browser skill for hover menus that drop their refs.
-   Undo it by deleting the folder above. Propose it upstream?"
+6. Tell the user: "Added a rule to local-studio-browser for hover menus that drop their refs. Undo it by
+   deleting the folder above. Propose it upstream?"

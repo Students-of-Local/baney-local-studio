@@ -47,7 +47,7 @@ def main [--profile (-p): string = "debug"] {
     cp ($linux | path join "assets" "mark.svg") ($icons | path join "dev.localstudio.LocalStudio.svg")
     let shared = ($bundle | path join "share" "local-studio")
     mkdir $shared
-    cp -r ($repo | path join "browser" "skills") ($shared | path join "app-skills")
+    cp -r ($repo | path join "skills") ($shared | path join "app-skills")
     let controller = ($repo | path join "controller")
     if ($controller | path join "src" "main.ts" | path exists) {
         let target = ($shared | path join "controller")

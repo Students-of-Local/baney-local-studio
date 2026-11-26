@@ -1,6 +1,5 @@
-// Regression checks on what bundled skills tell an agent to do. The lint checks a skill's
-// safety and shape; these check that specific instructions stay correct after review found
-// them wrong: commands are run where the tool exists, and wording is pinned where it isn't.
+// Regression checks on what the app's skills (skills/ at the repo's root) tell an agent to do:
+// specific instructions stay correct after review found them wrong: commands are run where the tool exists, and wording is pinned where it isn't.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -12,7 +11,7 @@ import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
-const skill = (name) => readFileSync(join(repo, "skills", name, "SKILL.md"), "utf8");
+const skill = (name) => readFileSync(join(repo, "..", "skills", name, "SKILL.md"), "utf8");
 const root = mkdtempSync(join(tmpdir(), "tabkyra-skill-content-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 const has = (cmd) => spawnSync(cmd, ["-version"], { encoding: "utf8" }).status === 0;
