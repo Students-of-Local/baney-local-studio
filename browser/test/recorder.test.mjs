@@ -134,3 +134,41 @@ test("one step per user action: a label's forwarded click and a submit button's 
 	await replayer(again, { hostname: "shop.example", startUrl: "", steps, screenshots: [] }).replay();
 	assert.equal(seenAgain.submits, 1);
 });
+
+test("a recorded selector names only the element clicked, and replay stops on a selector that names more or another", async () => {
+	// Three cards, no ids, the button six levels under its card: the card's position must be in the selector.
+	const card = (n) =>
+		`<div class="card"><h3>Card ${n}</h3><div class="body"><div class="footer"><div class="actions"><div><span><button>
+  Delete this card
+</button></span></div></div></div></div></div>`;
+	const html = `<main>${card(1)}${card(2)}${card(3)}</main>`;
+	const win = page(html);
+	const { rec } = await record(win, (d) => d.querySelectorAll("button")[2].click());
+	const [click] = rec.steps;
+	const matches = win.document.querySelectorAll(click.selector);
+	assert.equal(matches.length, 1, click.selector);
+	assert.equal(matches[0], win.document.querySelectorAll("button")[2]);
+	const hitsOn = (w) => {
+		const hits = [];
+		w.document.querySelectorAll("button").forEach((b, i) => b.addEventListener("click", () => hits.push(i)));
+		return hits;
+	};
+	const fresh = page(html);
+	const hits = hitsOn(fresh);
+	assert.deepEqual((await replayer(fresh, rec).replay()).map((r) => r.status), ["clicked"]);
+	assert.deepEqual(hits, [2], "replay deleted another card");
+	// More than one match, another tag, or other text: nothing is clicked and the replay ends there.
+	const cases = [
+		step("click", ".actions button", { tag: "button", text: "Delete this card" }),
+		step("click", "main > div:nth-of-type(1) h3", { tag: "button", text: "Card 1" }),
+		step("click", "main > div:nth-of-type(1) button", { tag: "button", text: "Archive" }),
+	];
+	for (const [i, bad] of cases.entries()) {
+		const w = page(html);
+		const got = hitsOn(w);
+		const steps = [bad, step("click", "main > div:nth-of-type(2) button", { tag: "button", text: "Delete this card" })];
+		const results = await replayer(w, { hostname: "shop.example", startUrl: "", steps, screenshots: [] }, `c${i}`).replay();
+		assert.deepEqual(results.map((r) => r.status), ["ambiguous"], bad.selector);
+		assert.deepEqual(got, [], bad.selector);
+	}
+});

@@ -60,15 +60,29 @@ function injectedRecorder() {
 		}
 	};
 
+	/** Whether `sel` matches `el` and nothing else on the page. */
+	const names = (sel: string, el: Element): boolean => {
+		try {
+			const all = document.querySelectorAll(sel);
+			return all.length === 1 && all[0] === el;
+		} catch {
+			return false;
+		}
+	};
+
+	// A selector replay can trust: parts are added from the element up until it matches that element
+	// alone, up to the root if need be. A repeated row (or a duplicated id) adds its position.
 	const cssPath = (start: Element): string => {
 		if (!(start instanceof Element)) return "";
-		if (start.id) return `#${CSS.escape(start.id)}`;
 		const parts: string[] = [];
 		let node: Element | null = start;
-		while (node && node.nodeType === 1 && parts.length < 6) {
-			if (node.id) {
-				parts.unshift(`#${CSS.escape(node.id)}`);
-				break;
+		while (node && node.nodeType === 1) {
+			const id = node.id ? `#${CSS.escape(node.id)}` : "";
+			if (id && names(id, node)) {
+				parts.unshift(id);
+				if (names(parts.join(" > "), start)) break;
+				node = node.parentElement;
+				continue;
 			}
 			let sel = node.tagName.toLowerCase();
 			const cls = Array.from(node.classList)
@@ -83,6 +97,7 @@ function injectedRecorder() {
 				if (sameTag.length > 1) sel += `:nth-of-type(${sameTag.indexOf(node) + 1})`;
 			}
 			parts.unshift(sel);
+			if (names(parts.join(" > "), start)) break;
 			node = node.parentElement;
 		}
 		return parts.join(" > ");
@@ -331,10 +346,22 @@ window.${jsName} = {
           results.push({ step, status: "skipped-navigation", url: step.url });
           continue;
         }
-        const el = step.selector ? document.querySelector(step.selector) : null;
+        // Exactly one element, of the recorded tag and with the recorded text: acting on another
+        // (the first of several rows, a control that changed) would do the wrong thing and say it worked.
+        const all = step.selector ? document.querySelectorAll(step.selector) : [];
+        const el = all[0];
         if (!el) {
           results.push({ step, status: "not-found" });
-          continue;
+          break;
+        }
+        const text = (el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 80);
+        if (
+          all.length > 1 ||
+          (step.tag && el.tagName.toLowerCase() !== step.tag) ||
+          (step.type === "click" && step.text && text !== step.text)
+        ) {
+          results.push({ step, status: "ambiguous", matches: all.length });
+          break;
         }
         if (step.type === "click") {
           el.click();
