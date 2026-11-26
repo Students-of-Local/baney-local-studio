@@ -36,7 +36,7 @@ LIST
 }
 
 shipped() {
-  git ls-files -co --exclude-standard -- core remote macos linux ios kit controller scripts/install.sh |
+  git ls-files -co --exclude-standard -- core remote macos linux ios kit controller plugin scripts/install.sh |
     grep -vE '(^|/)(tests?|Tests|examples|fixtures|docs)/|/tests\.rs$|^ios/(tools|LocalStudioSmoke)/|\.(md|lock|png|icns|mp3|svg|pbxproj|car)$|/\.swiftlint\.yml$'
 }
 
