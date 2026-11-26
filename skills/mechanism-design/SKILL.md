@@ -8,7 +8,7 @@ license: AGPL-3.0
 
 A picture of a mechanism is not a design. A design is link lengths, joint types and a
 motion check that passed. Ghezelbash, Eskandari and Bidhendi (2024) fine-tuned Stable
-Diffusion on 8,994 mechanism sketches: its 3D sketches roughly matched the prompts, its 2D
+Diffusion on 8,994 mechanism sketches: its 3D sketches roughly matched, its 2D
 schematics were mostly incoherent, and it invented unrelated parts on some prompts. Their
 fine-tuned BLIP-2 captions were mostly wrong, and the paper reports no quantitative
 metrics. Use images for ideas only; verify kinematics by calculation or in CAD.
