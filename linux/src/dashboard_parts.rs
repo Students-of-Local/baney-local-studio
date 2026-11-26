@@ -206,7 +206,6 @@ pub struct TokenSummary {
     since: gtk::Label,
     total: gtk::Label,
     split: gtk::Label,
-    rows: gtk::Box,
     week: gtk::Label,
     busiest: gtk::Label,
     active: gtk::Label,
@@ -242,7 +241,7 @@ impl TokenSummary {
         root.append(&total);
         root.append(&split);
         root.append(&rows);
-        Self { root, since, total, split, rows, week, busiest, active, extra }
+        Self { root, since, total, split, week, busiest, active, extra }
     }
 
     pub fn move_since(&self) {
@@ -252,11 +251,10 @@ impl TokenSummary {
 
     pub fn set(&self, tokens: Option<&TokenHistory>, empty: &str) {
         self.since.set_label(&since_text(tokens));
-        self.total.set_visible(tokens.is_some());
-        self.rows.set_visible(tokens.is_some());
+        self.root.set_visible(tokens.is_some());
         self.total.set_label(&tokens.map_or_else(String::new, |tokens| numbers::compact(tokens.total)));
         self.split.set_label(&match tokens {
-            None => format!("No tokens counted yet. {empty}"),
+            None => String::new(),
             Some(tokens) if tokens.total == 0 => empty.to_string(),
             Some(tokens) => {
                 format!("{} read, {} written", numbers::compact(tokens.read), numbers::compact(tokens.written))
@@ -293,6 +291,7 @@ pub fn columns(left: &impl IsA<gtk::Widget>, summary: &TokenSummary) -> gtk::Box
     divider.set_margin_start(44);
     divider.set_margin_end(44);
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    summary.root.bind_property("visible", &divider, "visible").sync_create().build();
     top.append(left);
     top.append(&divider);
     top.append(&summary.root);

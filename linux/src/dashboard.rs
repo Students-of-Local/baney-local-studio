@@ -75,7 +75,7 @@ impl View {
             }
         });
         let stop = adw::ButtonContent::builder().icon_name(icons::STOP).label("Stop model…").build();
-        let stop_button = parts::button(&stop, false);
+        let stop_button = parts::button(&stop, true);
         let weak = app.clone();
         stop_button.connect_clicked(move |_| {
             if let Some(app) = weak.upgrade() {
