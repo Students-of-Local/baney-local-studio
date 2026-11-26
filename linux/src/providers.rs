@@ -217,9 +217,6 @@ fn keys_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
         if provider.model_count > 0 {
             subtitle = format!("{subtitle} · {}", models_text(provider.model_count));
         }
-        if let Some(quota) = &provider.quota {
-            subtitle = format!("{subtitle} · {quota}");
-        }
         let row = adw::PasswordEntryRow::builder()
             .title(format!("{} — {}", provider.name, subtitle))
             .show_apply_button(true)
@@ -252,6 +249,11 @@ fn keys_group(app: &Weak<App>, state: &State) -> adw::PreferencesGroup {
             row.add_suffix(&remove);
         }
         group.add(&row);
+        if let Some(quota) = &provider.quota {
+            let usage = adw::ActionRow::builder().title(format!("{} quota", provider.name)).subtitle(quota).build();
+            usage.add_css_class("property");
+            group.add(&usage);
+        }
     }
     group
 }
