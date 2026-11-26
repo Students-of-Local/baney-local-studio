@@ -187,6 +187,26 @@ test("a request whose host goes away before its handler starts never starts", as
 	native.setGateReady(Promise.resolve());
 });
 
+test("first-F3, sol-F1: when the client hangs up mid-request, its running batch and its queued requests send nothing more", async () => {
+	const { port, request, connect, disconnect } = await startBridge();
+	connect("c1", "gone");
+	await pageTab(request, "c1");
+	const keys = watchKeys();
+	// The host stays; only this client's socket closes.
+	port.deliver({ type: "request", clientId: "c1", id: 904, method: "actions", params: { steps: [{ wait: 300 }, { press: "a" }] } });
+	port.deliver({ type: "request", clientId: "c1", id: 905, method: "press", params: { key: "b" } });
+	await new Promise((r) => setTimeout(r, 100));
+	disconnect("c1");
+	await new Promise((r) => setTimeout(r, 700));
+	assert.deepEqual(keys, [], "a client that left kept typing");
+	// Another client on the same host is untouched.
+	connect("c2", "stays");
+	await pageTab(request, "c2");
+	const pressed = await request("c2", "press", { key: "c" });
+	assert.equal(pressed.error, undefined, JSON.stringify(pressed.error));
+	assert.deepEqual(keys, ["c"]);
+});
+
 test("a request refused during an update install is not_sent, so the client resends it later", async () => {
 	const { request, connect, native } = await startBridge();
 	connect("c1", "install");

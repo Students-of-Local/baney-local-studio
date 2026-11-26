@@ -136,7 +136,7 @@ interface ClientState {
 	/** Stops the running request from sending more input (a dialog opened, or the host went away). */
 	abort?: () => void;
 	/**
-	 * Set when the host this client came through went away. The host answered everything it had
+	 * Set when the client or the host it came through went away. The host answered everything it had
 	 * forwarded as interrupted, so nothing still queued for this client may start.
 	 */
 	closed?: boolean;
@@ -259,6 +259,12 @@ function assign(state: ClientState, key: string, name: string): void {
 
 async function onClientDisconnected(clientId: string): Promise<void> {
 	const state = clients.get(clientId);
+	// Nobody hears an answer now, and a client that comes back may repeat the call: its running handler sends no more
+	// input, and nothing still queued for it starts, as when the host goes.
+	if (state) {
+		state.closed = true;
+		state.abort?.();
+	}
 	clients.delete(clientId);
 	// A restarted harness can connect before its old process hangs up and get "<name>-2". If it
 	// has no tabs there yet (a first status call opens the session, empty), it gets the one it
