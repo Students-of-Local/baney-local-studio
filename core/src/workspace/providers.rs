@@ -1001,8 +1001,10 @@ impl Workspace {
         let agent = self.agent()?;
         let (auth, existing) = {
             let agent = agent.clone();
-            blocking(move || Ok((read_object(&agent.join("auth.json"))?, configured_providers(&agent).remove(SYNTHETIC))))
-                .await?
+            blocking(move || {
+                Ok((read_object(&agent.join("auth.json"))?, configured_providers(&agent).remove(SYNTHETIC)))
+            })
+            .await?
         };
         let key = synthetic_key(&auth);
         let origin = synthetic_origin();

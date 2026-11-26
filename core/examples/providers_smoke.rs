@@ -933,7 +933,7 @@ fn synthetic(harness: &mut Harness, agent: &Path, port: u16, project: &str) -> a
     studio.set_provider_key(request.clone(), "synthetic".to_string(), Some(KEY.to_string()));
     harness.answer("Synthetic key saved beside an endpoint added by hand", &request)?;
     harness.pump_until("the old Synthetic endpoint becomes the built-in with both models", |view| {
-        synthetic_ready(view, Some(SYNTHETIC_QUOTA))
+        synthetic_ready(view, None)
     })?;
     ensure!(
         read_json(&models_path)?["providers"]["synthetic"]["apiKey"] == "SYNTHETIC_API_KEY",
