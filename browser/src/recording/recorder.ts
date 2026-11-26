@@ -17,6 +17,8 @@ export interface RecordedStep {
 	tag?: string;
 	text?: string;
 	value?: string;
+	/** A credential or payment field: its value is never kept, and replay takes it as `replay({ [param]: value })`. */
+	param?: string;
 	url?: string;
 	timestamp: number;
 }
@@ -139,18 +141,35 @@ function injectedRecorder() {
 		});
 	};
 
+	// A password (shown or not), a one-time code, a token or a card's details: the saved skill names the
+	// field as a parameter and never holds what was typed. A false match only asks replay for the value.
+	const SECRET_AUTOCOMPLETE = /^(one-time-code|current-password|new-password|cc-.+)$/;
+	const SECRET_WORDS = /otp|one.?time|code|token|passw|pwd|secret|card|cvc|cvv|csc/i;
+	const paramFor = (el: HTMLInputElement): string | undefined => {
+		const type = (el.getAttribute("type") || "").toLowerCase();
+		const autocomplete = (el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/);
+		const words = [el.getAttribute("name"), el.id, el.getAttribute("aria-label"), el.getAttribute("placeholder")]
+			.concat(Array.from(el.labels ?? [], (l) => l.textContent))
+			.filter(Boolean)
+			.join(" ");
+		if (type !== "password" && !autocomplete.some((t) => SECRET_AUTOCOMPLETE.test(t)) && !SECRET_WORDS.test(words))
+			return undefined;
+		const base =
+			el.getAttribute("name") || el.id || autocomplete.find((t) => SECRET_AUTOCOMPLETE.test(t)) || "secret";
+		return base.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
+	};
+
 	const onChange = (e: Event) => {
 		const el = e.target as HTMLInputElement | null;
 		if (!el) return;
 		const tag = el.tagName.toLowerCase();
 		if (tag !== "input" && tag !== "textarea" && tag !== "select") return;
-		const type = (el.getAttribute("type") || "").toLowerCase();
-		const sensitive = type === "password";
+		const param = paramFor(el);
 		send({
 			type: "input",
 			selector: cssPath(el),
 			tag,
-			value: sensitive ? "" : (el.value || "").slice(0, 300),
+			...(param ? { param } : { value: (el.value || "").slice(0, 300) }),
 			timestamp: Date.now(),
 		});
 	};
@@ -318,6 +337,7 @@ function describeStep(step: RecordedStep, index: number): string {
 		case "click":
 			return `${n}. Click ${step.text ? `"${step.text}" ` : ""}\`${step.selector}\``;
 		case "input":
+			if (step.param) return `${n}. Type the \`${step.param}\` parameter into \`${step.selector}\``;
 			return `${n}. Type ${step.value ? `"${step.value}"` : "(value)"} into \`${step.selector}\``;
 		case "submit":
 			return `${n}. Submit form \`${step.selector}\``;
@@ -334,7 +354,7 @@ function generateReplayLibrary(jsName: string, steps: RecordedStep[]): string {
 // the REPL between replay() calls, following window.${jsName}.steps in order.
 window.${jsName} = {
   steps: ${stepsJson},
-  async replay() {
+  async replay(params = {}) {
     const results = [];
     // Forms a replayed click on their submit control already sent: their submit step must not send them again.
     const submitted = new Set();
@@ -377,8 +397,14 @@ window.${jsName} = {
           if (submits(el)) submitted.add(el.form);
           results.push({ step, status: "clicked" });
         } else if (step.type === "input") {
+          // A credential or payment field types only a value the caller gives; without one, stop here.
+          const given = step.param ? params[step.param] : step.value;
+          if (step.param && typeof given !== "string") {
+            results.push({ step, status: "needs-value", param: step.param });
+            break;
+          }
           el.focus();
-          setNativeValue(el, step.value || "");
+          setNativeValue(el, given || "");
           el.dispatchEvent(new Event("input", { bubbles: true }));
           el.dispatchEvent(new Event("change", { bubbles: true }));
           results.push({ step, status: "typed" });
@@ -412,6 +438,10 @@ export function buildSkillFromRecording(
 	const jsName = toJsIdentifier(name);
 	const domainPatterns = opts.domainPatterns?.length ? opts.domainPatterns : [rec.hostname];
 	const stepLines = rec.steps.map((s, i) => describeStep(s, i)).join("\n");
+	const params = [...new Set(rec.steps.flatMap((s) => (s.param ? [s.param] : [])))];
+	const paramNote = params.length
+		? ` Passwords, codes and card details were not saved: pass them as \`replay({ ${params.map((p) => `${p}: "..."`).join(", ")} })\`. Without one, replay stops at its field with status \`needs-value\`.`
+		: "";
 	const now = new Date().toISOString();
 
 	const description = `# ${name}
@@ -422,7 +452,7 @@ Recorded workflow on **${rec.hostname}**. Replayable via \`browserjs()\`.
 ${stepLines || "_(no steps captured)_"}
 
 ## Usage
-The library exposes \`window.${jsName}\`. Call \`window.${jsName}.replay()\` inside \`browserjs()\` to perform the DOM actions on the current page. For \`navigate\` steps, use the REPL \`navigate()\` between replays, following \`window.${jsName}.steps\`.`;
+The library exposes \`window.${jsName}\`. Call \`window.${jsName}.replay()\` inside \`browserjs()\` to perform the DOM actions on the current page. For \`navigate\` steps, use the REPL \`navigate()\` between replays, following \`window.${jsName}.steps\`.${paramNote}`;
 
 	const examples = `// Replay the recorded "${name}" workflow on the current page
 const report = await browserjs(async () => {

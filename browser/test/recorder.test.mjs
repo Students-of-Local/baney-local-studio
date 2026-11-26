@@ -184,3 +184,31 @@ test("a screenshot is kept only while the recorded tab is the one in front of it
 	const raced = await record(page("<p>Order</p>"), () => {}, { active: () => answers.shift() ?? false });
 	assert.equal(raced.rec.screenshots.length, 1);
 });
+
+test("a code, a shown password or a card number is saved as a parameter replay is given, never as its value", async () => {
+	const html = `<form id="f"><input id="otp" autocomplete="one-time-code"><input id="pw" type="text" autocomplete="current-password">
+		<input name="cardnumber"><label for="v">Verification code</label><input id="v"><input type="password" name="pass"><input name="city"></form>`;
+	const win = page(html);
+	const typed = { "#otp": "493021", "#pw": "hunter2-shown", "[name=cardnumber]": "4111111111111111", "#v": "777123", "[name=pass]": "pw-hidden" };
+	const { rec } = await record(win, (d) => {
+		for (const [sel, value] of Object.entries(typed)) type(win, d.querySelector(sel), value);
+		type(win, d.querySelector("[name=city]"), "Paris");
+	});
+	const saved = JSON.stringify(buildSkillFromRecording(rec, { name: "pay" }));
+	for (const secret of Object.values(typed)) assert.ok(!saved.includes(secret), `${secret} is in the saved skill`);
+	assert.ok(saved.includes("Paris"), "an ordinary field keeps its value");
+	const params = rec.steps.filter((s) => s.param).map((s) => s.param);
+	assert.equal(new Set(params).size, 5, JSON.stringify(rec.steps));
+	// Replay types the values it is given.
+	const fresh = page(html);
+	const values = Object.fromEntries(params.map((p, i) => [p, `given-${i}`]));
+	const filled = await replayer(fresh, rec).replay(values);
+	assert.ok(filled.every((r) => r.status === "typed"), JSON.stringify(filled));
+	assert.equal(fresh.document.getElementById("otp").value, "given-0");
+	assert.equal(fresh.document.querySelector("[name=city]").value, "Paris");
+	// Without them it stops at the first such field and types nothing there.
+	const bare = page(html);
+	const asked = await replayer(bare, rec).replay();
+	assert.deepEqual(asked.map((r) => [r.status, r.param]), [["needs-value", params[0]]]);
+	assert.equal(bare.document.getElementById("otp").value, "");
+});
