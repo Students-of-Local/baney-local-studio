@@ -816,7 +816,7 @@ async fn context_windows(client: &reqwest::Client, server: &mut Server) {
     }
     if let Some(listed) = read_server(client.get(format!("{root}/api/v0/models"))).await {
         for entry in listed.get("data").and_then(Value::as_array).into_iter().flatten() {
-            let found = size(entry.get("loaded_context_length")).or_else(|| size(entry.get("max_context_length")));
+            let found = size(entry.get("loaded_context_length"));
             if let (Some(found), Some(id)) = (found, text(entry, "id")) {
                 without_window(server).filter(|model| model.id == id).for_each(|model| model.context_window = found);
             }
@@ -843,10 +843,7 @@ async fn context_windows(client: &reqwest::Client, server: &mut Server) {
                 _ => None,
             })
         });
-        let native = shown.get("model_info").and_then(Value::as_object).and_then(|info| {
-            info.iter().find(|(key, _)| key.ends_with(".context_length")).and_then(|(_, value)| size(Some(value)))
-        });
-        if let Some(found) = set.or(native) {
+        if let Some(found) = set {
             model.context_window = found;
         }
     }

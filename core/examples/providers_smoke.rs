@@ -603,7 +603,14 @@ fn engine_like(routes: Vec<(&'static str, String)>) -> anyhow::Result<u16> {
                 continue;
             }
             let route = first.split(' ').take(2).collect::<Vec<_>>().join(" ");
-            let answer = routes.iter().find(|(known, _)| *known == route).map(|(_, body)| body.as_str());
+            let model =
+                serde_json::from_slice::<Value>(&body).ok().and_then(|body| body["model"].as_str().map(str::to_string));
+            let named = model.map(|model| format!("{route} {model}"));
+            let answer = routes
+                .iter()
+                .find(|(known, _)| Some(*known) == named.as_deref())
+                .or_else(|| routes.iter().find(|(known, _)| *known == route))
+                .map(|(_, body)| body.as_str());
             let (head, body) = answer.map_or(("404 Not Found", "{}"), |body| ("200 OK", body));
             let reply = format!("HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             let _ = stream.write_all(reply.as_bytes());
@@ -613,22 +620,38 @@ fn engine_like(routes: Vec<(&'static str, String)>) -> anyhow::Result<u16> {
 }
 
 fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
-    let list = r#"{"object":"list","data":[{"id":"tiny:latest","object":"model"}]}"#.to_string();
-    let show = json!({
+    let list = |ids: &[&str]| {
+        json!({ "object": "list", "data": ids.iter().map(|id| json!({ "id": id, "object": "model" })).collect::<Vec<_>>() }).to_string()
+    };
+    let set = json!({
         "parameters": "num_ctx                        16384\nstop                           \"<|im_end|>\"",
         "model_info": { "lfm3.context_length": 262_144 },
     })
     .to_string();
+    let card =
+        json!({ "parameters": "stop \"<|im_end|>\"", "model_info": { "lfm3.context_length": 262_144 } }).to_string();
     let ollama = engine_like(vec![
-        ("GET /v1/models", list.clone()),
+        ("GET /v1/models", list(&["tiny:latest", "card:latest"])),
         ("GET /api/ps", r#"{"models":[]}"#.to_string()),
-        ("POST /api/show", show),
+        ("POST /api/show tiny:latest", set),
+        ("POST /api/show card:latest", card),
     ])?;
     let llama = engine_like(vec![
-        ("GET /v1/models", list),
+        ("GET /v1/models", list(&["tiny:latest"])),
         ("GET /props", r#"{"default_generation_settings":{"n_ctx":8192}}"#.to_string()),
     ])?;
-    for (port, window) in [(ollama, 16_384), (llama, 8_192)] {
+    let studio = json!({ "data": [
+        { "id": "warm", "loaded_context_length": 4096, "max_context_length": 131_072 },
+        { "id": "cold", "max_context_length": 131_072 },
+    ] })
+    .to_string();
+    let lm = engine_like(vec![("GET /v1/models", list(&["warm", "cold"])), ("GET /api/v0/models", studio)])?;
+    let cases: [(u16, &[(&str, Option<u64>)]); 3] = [
+        (ollama, &[("tiny:latest", Some(16_384)), ("card:latest", None)]),
+        (llama, &[("tiny:latest", Some(8_192))]),
+        (lm, &[("warm", Some(4_096)), ("cold", None)]),
+    ];
+    for (port, windows) in cases {
         let base = format!("http://127.0.0.1:{port}/v1");
         harness.studio.find_local_servers(vec![found_here(base.clone())]);
         let listed = base.clone();
@@ -643,8 +666,19 @@ fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
             .as_object()
             .and_then(|providers| providers.iter().find(|(_, entry)| entry["baseUrl"] == base.as_str()))
             .context("the used engine is in models.json")?;
-        ensure!(entry["models"][0]["contextWindow"] == window, "{base}: {entry}");
-        println!("ok   {base} is added with the context size the engine runs ({window})");
+        for (model, window) in windows {
+            let written = entry["models"]
+                .as_array()
+                .and_then(|models| models.iter().find(|written| written["id"] == *model))
+                .with_context(|| format!("{base}: {model} is in models.json: {entry}"))?;
+            ensure!(written["contextWindow"].as_u64() == *window, "{base}: {model}: {written}");
+            match window {
+                Some(window) => {
+                    println!("ok   {base} {model} is added with the context size the engine runs ({window})")
+                }
+                None => println!("ok   {base} {model} is added with no context size, not its card's maximum"),
+            }
+        }
         let request = harness.request();
         harness.studio.remove_custom_provider(request.clone(), id.clone());
         harness.answer("that engine is removed", &request)?;
