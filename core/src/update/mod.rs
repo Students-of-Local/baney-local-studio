@@ -15,7 +15,7 @@ pub use self::apply::{apply, current_install, install_path, open_channel, relaun
 
 pub const NIGHTLY_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4QjIxNzIyMDY2NkJFNkMKUldSc3ZtWUdJaGV5ZU1zUnB3bi9heW1vdFlnMllXZG9LOTBnTGhNL0VLQ21OdGRsN1dHcEx5SWkK";
 pub const STABLE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1NkMxREQ1MDdBNzBDNzUKUldSMURLY0gxUjFzRlF0L0hnZEdRanI0WHpYTmlzWml4VlB4cCtKY1JDNU5RZ241M0k4Um9RM3MK";
-pub const REPO: &str = "baney75/local-studio";
+pub const REPO: &str = "Students-of-Local/baney-local-studio";
 pub const CHANNELS: [&str; 3] = ["stable", "nightly", "dev"];
 pub const CHECK_EVERY: Duration = Duration::from_hours(6);
 
