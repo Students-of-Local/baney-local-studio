@@ -101,14 +101,17 @@ function parts(path: string, platform: string): string[] {
 
 /** File and folder names that hold secrets, whatever folder they are in. */
 const NAME_RULES: Array<[RegExp, string]> = [
-	[/^\.env(\..*)?$/, ".env file"],
+	[/^\.env(rc|[._-].*)?$/, ".env file"],
 	[/\.env$/, ".env file"],
-	[/\.(pem|key|p12|pfx|kdbx|ppk)$/, "key or password store"],
+	[/\.(pem|key|p12|pfx|kdbx|ppk|jks|keystore)$/, "key or password store"],
 	[/^id_(rsa|ed25519|ecdsa|dsa)/, "SSH key"],
 	[/\.keychain/, "keychain"],
-	[/^(\.netrc|_netrc|\.npmrc|\.pypirc|\.pgpass|\.git-credentials)$/, "sign-in file"],
+	[/^(\.netrc|_netrc|\.npmrc|\.pypirc|\.pgpass|\.git-credentials|\.htpasswd)$/, "sign-in file"],
 	[/^(known_hosts|authorized_keys)$/, "SSH file"],
-	[/^(credentials|tokens\.json)$/, "credentials file"],
+	[/^\.?credentials?(\.(json|ya?ml|toml|ini|xml|db))?$/, "credentials file"],
+	[/^tokens?\.json$/, "credentials file"],
+	[/^client_secret.*\.json$/, "OAuth file"],
+	[/service[-_]?account.*\.json$/, "service account key"],
 	[/^oauth.*\.json$/, "OAuth file"],
 	// A browser profile kept somewhere unusual still has these names.
 	[/^(cookies|login data|web data|local state|key[34]\.db|logins\.json|cookies\.sqlite)(-journal|-wal|-shm)?$/, "browser profile file"],

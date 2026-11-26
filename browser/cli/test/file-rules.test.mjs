@@ -91,6 +91,18 @@ test("credential-like names are refused in any folder, even the agent's own", ()
 		"tokens.json",
 		"oauth.json",
 		"oauth_client_secret.json",
+		// Names Google's and other SDKs' quickstarts write into the working folder.
+		"credentials.json",
+		".credentials.json",
+		"credential.yaml",
+		"token.json",
+		".envrc",
+		".env-local",
+		"client_secret_123.apps.googleusercontent.com.json",
+		"my-service-account-key.json",
+		"release.jks",
+		"debug.keystore",
+		".htpasswd",
 	];
 	for (const name of names) {
 		const e = env("linux");
