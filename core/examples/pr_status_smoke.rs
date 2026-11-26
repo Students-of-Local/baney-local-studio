@@ -71,8 +71,15 @@ impl Shim {
         };
         let three =
             if checks_on_three == "passing" { rollup("SUCCESS", "COMPLETED") } else { rollup("", "IN_PROGRESS") };
+        let fork = |mut pull: serde_json::Value, owner: &str| {
+            pull["isCrossRepository"] = json!(true);
+            pull["headRepositoryOwner"] = json!({ "login": owner });
+            pull
+        };
         let pulls = json!([
-            pull(15, "thread-5", "CLOSED", json!([])),
+            fork(pull(17, "thread-2", "OPEN", json!([])), "stranger"),
+            fork(pull(16, "thread-6", "MERGED", json!([])), "stranger"),
+            fork(pull(15, "thread-5", "CLOSED", json!([])), "Smoke"),
             pull(14, "thread-4", "MERGED", rollup("SUCCESS", "COMPLETED")),
             pull(13, "thread-3", "OPEN", three),
             pull(12, "thread-2", "OPEN", rollup("FAILURE", "COMPLETED")),
@@ -131,6 +138,7 @@ fn repository(scratch: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
         git(&repo, &["worktree", "add", "--quiet", "-b", &format!("thread-{index}"), &path])?;
         worktrees.push(worktree);
     }
+    git(&repo, &["remote", "add", "fork", "git@github.com:smoke/r.git"])?;
     Ok((repo, worktrees))
 }
 
@@ -237,11 +245,14 @@ fn run(scratch: &Path) -> Result<()> {
     let calls = shim.calls();
     ensure!(calls.len() == 1, "{BRANCHES} branches of one repository took {} gh calls: {calls:?}", calls.len());
     ensure!(
-        calls[0] == "pr list --state all --limit 100 --json number,title,url,state,headRefName,baseRefName,statusCheckRollup",
+        calls[0]
+            == "pr list --state all --limit 100 --json number,title,url,state,headRefName,baseRefName,statusCheckRollup,isCrossRepository,headRepositoryOwner",
         "unexpected gh call {:?}",
         calls[0]
     );
-    println!("ok: {BRANCHES} thread branches of one repository took 1 gh call, and the branch with no PR shows none");
+    println!(
+        "ok: {BRANCHES} thread branches of one repository took 1 gh call; the branch with no PR, and the branches with a stranger's fork PR of the same name, show none of those"
+    );
 
     app.hold(&shim, 1, seconds(30), &repo_text, "asked again 30 s later")?;
     println!("ok: asked again within 30 s (thread list and git status) made no new call");
