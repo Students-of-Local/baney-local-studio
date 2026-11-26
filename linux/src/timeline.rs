@@ -820,7 +820,7 @@ fn minimap(list: &gtk::ListView, scroller: &gtk::ScrolledWindow) -> (gtk::Box, g
         let span = (viewport.page_size() / upper * height).max(6.0);
         cairo.rectangle(0.0, top, width, span);
         cairo.fill().ok();
-        cairo.set_source_rgba(0.204, 0.420, 0.945, 0.9);
+        cairo.set_source_rgba(f64::from(color.red()), f64::from(color.green()), f64::from(color.blue()), 0.9);
         for index in users {
             let y = f64::from(index) / f64::from(count.max(1)) * (height - 3.0);
             cairo.rectangle(2.0, y, width - 4.0, 3.0);

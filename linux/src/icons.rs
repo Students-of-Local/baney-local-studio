@@ -88,7 +88,7 @@ const CSS: &str = r"
 .ls-tab-close { min-width: 24px; min-height: 24px; padding: 0; }
 .ls-picker-remove { min-width: 24px; min-height: 24px; padding: 0; }
 .ls-minimap-button { min-width: 24px; min-height: 24px; padding: 0; }
-.ls-minimap drawingarea { opacity: 0.55; }
+.ls-minimap drawingarea { opacity: 0.55; color: var(--accent-color); }
 .ls-minimap:hover drawingarea { opacity: 1; }
 .ls-picker-icon { min-width: 16px; }
 .ls-shelf image { color: var(--sidebar-fg-color); }

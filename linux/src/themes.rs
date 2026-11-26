@@ -100,6 +100,9 @@ pub fn all(settings: &Settings) -> Vec<Theme> {
             accent: (*accent).to_string(),
         })
         .collect();
+    if let Some(omarchy) = crate::omarchy::theme() {
+        themes.insert(1, omarchy);
+    }
     for theme in custom(settings) {
         themes.retain(|known| known.name != theme.name);
         themes.push(theme);
@@ -108,7 +111,7 @@ pub fn all(settings: &Settings) -> Vec<Theme> {
 }
 
 pub fn find(settings: &Settings) -> Option<Theme> {
-    let name = settings.theme.as_deref()?;
+    let name = settings.theme.as_deref().or_else(|| crate::omarchy::present().then_some(crate::omarchy::NAME))?;
     all(settings).into_iter().find(|theme| theme.name == name)
 }
 
