@@ -804,6 +804,12 @@ fn gpu_row(gpu: &LocalGpu) -> gtk::Box {
         head.append(&badge);
     }
     text.append(&head);
+    if gpu.memory_total_mib > 0 {
+        let bar = gtk::ProgressBar::builder().margin_top(3).margin_bottom(3).build();
+        #[allow(clippy::cast_precision_loss)]
+        bar.set_fraction((gpu.memory_used_mib as f64 / gpu.memory_total_mib as f64).clamp(0.0, 1.0));
+        text.append(&bar);
+    }
     if let Some(link) = &gpu.link {
         text.append(&wrapped(link, &["dim-label", "ls-dash-small"]));
     }

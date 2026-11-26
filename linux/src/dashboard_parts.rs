@@ -175,7 +175,6 @@ pub fn figure_grid(hero: &Hero, chart_title: &gtk::Label, sparkline: &Sparkline,
     chart.set_margin_top(44);
     chart.append(chart_title);
     chart.append(&sparkline.area);
-    sparkline.area.bind_property("visible", &chart, "visible").sync_create().build();
     grid.attach(&hero.root, 0, 0, 1, 1);
     grid.attach(&chart, 1, 0, 2, 1);
     for (row, figures) in (1..).zip(rows.iter()) {
