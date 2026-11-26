@@ -105,6 +105,8 @@ const CSS: &str = r"
 .ls-summary image { color: var(--window-fg-color); }
 .ls-settings preferencesgroup box.header label.heading { font-size: 1.15em; }
 .ls-settings-trail { margin-start: 6px; }
+floating-sheet > dimming { background-color: RGB(from var(--shade-color) r g b / calc(alpha * 2.25)); }
+.ls-settings row .subtitle { font-size: 12px; }
 ";
 
 const HIGH_CONTRAST: &str = r"
