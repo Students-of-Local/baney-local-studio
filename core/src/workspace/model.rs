@@ -53,6 +53,7 @@ pub enum LocalAction {
     SetPowerBudget { controller: String, active_watts: u32, away_watts: Option<u32> },
     LaunchPool { controller: String, model: String },
     StopPool { controller: String, pool: String },
+    EjectGpu { controller: String, gpu: u32, cancel: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1017,6 +1018,38 @@ pub struct LocalGpu {
     #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "ffi", uniffi(default = None))]
     pub link: Option<String>,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub eject: Option<LocalEject>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalEjectState {
+    Ready,
+    Busy,
+    NeedsRoot,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalEjectProcess {
+    pub pid: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalEject {
+    pub state: LocalEjectState,
+    pub draining: bool,
+    pub blockers: Vec<LocalEjectProcess>,
+    pub command: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

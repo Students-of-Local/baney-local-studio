@@ -15,11 +15,11 @@ use tokio::task::JoinSet;
 
 use super::model::{
     LocalAction, LocalCluster, LocalClusterCheck, LocalClusterMachine, LocalClusterPower, LocalController,
-    LocalDownload, LocalEndpoint, LocalEngineState, LocalGpu, LocalHardware, LocalHotplug, LocalJob, LocalLendMode,
-    LocalLendState, LocalLentServer, LocalMachineStatus, LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase,
-    LocalPowerHelper, LocalPowerLever, LocalRecipe, LocalRecord, LocalRegistry, LocalRegistryMatch, LocalShare,
-    LocalSnapshot, LocalTailnet, LocalThunderbolt, LocalThunderboltState, LocalUsage, RegistryModel, RegistryVariant,
-    Settings, TailnetDevice, UsageDay,
+    LocalDownload, LocalEject, LocalEjectProcess, LocalEjectState, LocalEndpoint, LocalEngineState, LocalGpu,
+    LocalHardware, LocalHotplug, LocalJob, LocalLendMode, LocalLendState, LocalLentServer, LocalMachineStatus,
+    LocalModelUsage, LocalPool, LocalPoolModel, LocalPoolPhase, LocalPowerHelper, LocalPowerLever, LocalRecipe,
+    LocalRecord, LocalRegistry, LocalRegistryMatch, LocalShare, LocalSnapshot, LocalTailnet, LocalThunderbolt,
+    LocalThunderboltState, LocalUsage, RegistryModel, RegistryVariant, Settings, TailnetDevice, UsageDay,
 };
 use super::process;
 use super::time::{day_key, monday_of, now_ms, parse_rfc3339_ms, DAY_MS};
@@ -133,6 +133,24 @@ fn tokens_of(usage: &[Value], since: &str, until: &str) -> u64 {
         .sum()
 }
 
+fn eject(value: &Value) -> LocalEject {
+    LocalEject {
+        state: match value.get("state").and_then(Value::as_str) {
+            Some("ready") => LocalEjectState::Ready,
+            Some("busy") => LocalEjectState::Busy,
+            Some("needs_root") => LocalEjectState::NeedsRoot,
+            _ => LocalEjectState::Unsupported,
+        },
+        draining: flag(value, "draining"),
+        blockers: array(value, "blockers")
+            .iter()
+            .map(|process| LocalEjectProcess { pid: small(process, "pid"), name: text(process, "name") })
+            .collect(),
+        command: optional_text(value, "command"),
+        message: optional_text(value, "message"),
+    }
+}
+
 fn hardware(value: &Value) -> LocalHardware {
     let gpus: Vec<LocalGpu> = array(value, "gpus")
         .iter()
@@ -145,6 +163,7 @@ fn hardware(value: &Value) -> LocalHardware {
             busy: flag(gpu, "busy"),
             external: flag(gpu, "external"),
             link: gpu.get("link").and_then(|link| optional_text(link, "note")),
+            eject: gpu.get("eject").filter(|eject| eject.is_object()).map(eject),
         })
         .collect();
     let cpus = small(value, "cpus");
@@ -1088,7 +1107,8 @@ impl Local {
             | LocalAction::SetDiscovery { .. }
             | LocalAction::SetPowerBudget { .. }
             | LocalAction::LaunchPool { .. }
-            | LocalAction::StopPool { .. } => self.cluster_action(&root, action).await?,
+            | LocalAction::StopPool { .. }
+            | LocalAction::EjectGpu { .. } => self.cluster_action(&root, action).await?,
         }
         self.assemble(&root).await
     }
@@ -1151,6 +1171,7 @@ impl Local {
             | LocalAction::SetPowerBudget { .. }
             | LocalAction::LaunchPool { .. }
             | LocalAction::StopPool { .. }
+            | LocalAction::EjectGpu { .. }
             | LocalAction::Registry { .. }
             | LocalAction::Inspect { .. }
             | LocalAction::Download { .. }
@@ -1219,6 +1240,11 @@ impl Local {
             LocalAction::StopPool { controller, pool } => {
                 let endpoint = self.target(root, &controller).await?;
                 let path = format!("/api/cluster/pool/{}/stop", encode_segment(&pool));
+                self.request(&endpoint, Method::POST, &path, Some(json!({})), ACTION_TIMEOUT).await?;
+            }
+            LocalAction::EjectGpu { controller, gpu, cancel } => {
+                let endpoint = self.target(root, &controller).await?;
+                let path = format!("/api/hardware/gpus/{gpu}/eject{}", if cancel { "/cancel" } else { "" });
                 self.request(&endpoint, Method::POST, &path, Some(json!({})), ACTION_TIMEOUT).await?;
             }
             _ => {}
@@ -1300,7 +1326,8 @@ impl Local {
             | LocalAction::SetDiscovery { .. }
             | LocalAction::SetPowerBudget { .. }
             | LocalAction::LaunchPool { .. }
-            | LocalAction::StopPool { .. } => {}
+            | LocalAction::StopPool { .. }
+            | LocalAction::EjectGpu { .. } => {}
         }
         Ok(())
     }
