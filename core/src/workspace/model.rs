@@ -738,6 +738,8 @@ pub struct Settings {
     pub harness_accounts: HarnessAccounts,
     pub switch_accounts_on_limit: bool,
     pub automatic_updates: bool,
+    pub browser_use: bool,
+    pub computer_use: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -928,6 +930,8 @@ impl Default for Settings {
             harness_accounts: HarnessAccounts::default(),
             switch_accounts_on_limit: true,
             automatic_updates: local_studio_version::CHANNEL != "dev",
+            browser_use: false,
+            computer_use: false,
         }
     }
 }

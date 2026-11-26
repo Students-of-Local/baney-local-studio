@@ -6,6 +6,7 @@ use crate::harness;
 use crate::model::{Delivery, ModelKey, NoticeLevel, PromptDraft, Update};
 use crate::plugins::{self, Plugin};
 use crate::store::HeldPrompt;
+use crate::tools;
 use crate::workspace::{configured_providers, Provider};
 
 const SIDE_MODELS: [&str; 10] = [
@@ -45,7 +46,7 @@ impl Actor {
         crate::daemon::agent_dir().is_some_and(|agent| Provider::configured(&agent, provider).is_local())
     }
 
-    fn thread_model(&self, id: &str) -> Option<(String, String)> {
+    pub(super) fn thread_model(&self, id: &str) -> Option<(String, String)> {
         if let Some(harness) = self.harness(id) {
             return Some((harness::provider_of(harness).to_string(), String::new()));
         }
@@ -129,6 +130,15 @@ impl Actor {
             );
             self.refuse(id, plugin, text, None, prompt, request);
             return Ok(Gate::Refused);
+        }
+        if self.holds_tools(active) {
+            if self.running(id) {
+                if !again {
+                    self.hold(id, prompt, delivery, request);
+                }
+                return Ok(Gate::Held);
+            }
+            self.drop_tools(active).await?;
         }
         let (open, clashes) = self.network_servers(active, &plugins).await?;
         if !open.is_empty() || !clashes.is_empty() {
@@ -302,6 +312,18 @@ impl Actor {
             .collect();
         let (clashes, open) = listed.into_iter().partition(|server| ours.contains(server));
         Ok((open, clashes))
+    }
+
+    fn holds_tools(&self, active: &str) -> bool {
+        !active.is_empty() && self.ask_sent.get(active).and_then(Value::as_array).is_none_or(|sent| tools::holds(sent))
+    }
+
+    async fn drop_tools(&mut self, active: &str) -> Result<(), String> {
+        let sent = self.ask_sent.get(active).and_then(Value::as_array).cloned().unwrap_or_default();
+        let servers = sent.into_iter().filter(|one| one["name"] != tools::SERVER).collect();
+        self.replace_servers(active, servers)
+            .await
+            .map_err(|error| format!("Could not take browser and computer use off: {error}"))
     }
 
     async fn pin_local(

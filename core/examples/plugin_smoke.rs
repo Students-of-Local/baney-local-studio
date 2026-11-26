@@ -494,12 +494,16 @@ fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
 
 const LOCAL_USAGE: &str = "usage: plugin_smoke --local-only <eukhe> <scratch dir> (needs a local model: LOCAL_STUDIO_SMOKE_MODEL=<provider>/<model> at LOCAL_STUDIO_SMOKE_BASE_URL, default the LFM2.5 8B model on 127.0.0.1:11434)";
 
+#[path = "support/held.rs"]
+mod held;
+
 mod local_only {
+    use super::held::held;
     use super::{
         ensure, json, plugin_store, prompt, stop_daemon, user_text, write_private, Arc, AtomicUsize, Capability,
         Command, Connection, Context, DaemonClient, DaemonCommand, DaemonLaunch, Delivery, Duration, Grants, Harness,
         Instant, Map, OpenOptionsExt, Ordering, Path, PathBuf, Read, Signal, Studio, StudioConfig, TcpListener,
-        ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MAX_TOKENS, MID, STEP,
+        ThreadSettings, ThreadStatus, UsagePeriod, UsageReport, Value, View, Waker, Write, MID, STEP,
     };
     use local_studio_core::{ConsentAnswer, ImageAttachment, PromptDraft};
     use std::sync::OnceLock;
@@ -634,7 +638,7 @@ for line in sys.stdin:
                 "baseUrl": base(),
                 "api": "openai-completions",
                 "apiKey": "ollama",
-                "models": [{ "id": mid(), "name": mid(), "contextWindow": 32768, "maxTokens": MAX_TOKENS }],
+                "models": [{ "id": mid(), "name": mid(), "contextWindow": 32768, "maxTokens": 1024 }],
             }),
         );
         providers.insert(
@@ -836,15 +840,22 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
 
     fn fence(socket: &Path, thread: &str, on: bool) -> anyhow::Result<()> {
         let server = json!({ "type": "stdio", "name": "intruder", "command": "/usr/bin/true", "cwd": "/" });
-        session(socket, thread, |active| {
-            Some(DaemonCommand::ReplaceAcpMcpServers {
-                id: None,
-                active_session_id: active.to_string(),
-                owner_id: "smoke-intruder".to_string(),
-                servers: Value::Array(if on { vec![server] } else { Vec::new() }),
-                rest: Map::default(),
-            })
-        })?;
+        let lists = if on {
+            vec![("local-studio-ask", Vec::new()), ("smoke-intruder", vec![server])]
+        } else {
+            vec![("smoke-intruder", Vec::new())]
+        };
+        for (owner, servers) in lists {
+            session(socket, thread, |active| {
+                Some(DaemonCommand::ReplaceAcpMcpServers {
+                    id: None,
+                    active_session_id: active.to_string(),
+                    owner_id: owner.to_string(),
+                    servers: Value::Array(servers),
+                    rest: Map::default(),
+                })
+            })?;
+        }
         Ok(())
     }
 
@@ -997,7 +1008,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         Ok(())
     }
 
-    fn queued_during_run(harness: &mut Harness, ledger_out: &Path) -> anyhow::Result<()> {
+    fn queued_during_run(harness: &mut Harness, socket: &Path, ledger_out: &Path) -> anyhow::Result<()> {
         let studio = Arc::clone(&harness.studio);
         let project = harness.view.projects[0].id.clone();
         let before = server_starts(ledger_out, "plugin-ledger").len();
@@ -1007,6 +1018,11 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         let thread = harness.view.thread("busy").context("busy thread")?;
         studio.select_thread(Some(thread.clone()));
         harness.pump_until("busy thread working", STEP, |view| !view.idle(&thread))?;
+        studio.abort(thread.clone());
+        harness.pump_until("busy thread stopped", STEP, |view| view.idle(&thread))?;
+        ensure!(held(socket, &thread)?, "the busy thread was not offered Local Studio's own tools");
+        studio.send("long".to_string(), thread.clone(), prompt(long), Delivery::Queue);
+        harness.pump_until("busy thread working again", STEP, |view| !view.idle(&thread))?;
         studio.send("queued".to_string(), thread.clone(), prompt(ASK), Delivery::Queue);
         harness
             .pump_until("still working after the queued /ledger", Duration::from_secs(2), |view| !view.idle(&thread))?;
@@ -1019,6 +1035,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
                 && starts.iter().all(|row| row.get("LOCAL_STUDIO_LOCAL_ONLY").and_then(Value::as_str) == Some("1")),
             "plugin-ledger did not start for the /ledger queued during a local turn: {starts:?}"
         );
+        ensure!(!held(socket, &thread)?, "Local Studio's own tools are still in the queued /ledger session");
         Ok(())
     }
 
@@ -1095,6 +1112,11 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
         std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
         std::env::set_var(LEDGER_ENV, &ledger_out);
+        let tools = web.join("local-studio-browser");
+        let (stub, started) = (web.join("server.py"), root.join("tools.jsonl"));
+        executable(&tools, &format!("#!/bin/sh\nexec {} local-studio {}\n", stub.display(), started.display()))?;
+        std::env::set_var("LOCAL_STUDIO_BROWSER_BIN", &tools);
+        std::fs::write(data.join("settings.json"), r#"{"browserUse":true,"computerUse":true}"#)?;
         let socket = root.join("d.sock");
         let config = StudioConfig {
             socket_path: Some(socket.to_string_lossy().into_owned()),
@@ -1255,7 +1277,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
         std::env::set_var(LEDGER_ENV, ledger_out);
         record("draft", draft_returned(harness, hits));
         record("drift", drifted(harness, agent, stubs.port, stubs.drift_port, stubs.drift_hits));
-        record("queued", queued_during_run(harness, ledger_out));
+        record("queued", queued_during_run(harness, socket, ledger_out));
         studio.run_local(cloud.clone(), local.clone());
         harness.pump_until("switched to the local model and running", step, |view| {
             view.threads.iter().any(|row| {
@@ -1306,6 +1328,7 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
             servers.iter().filter(|(name, up)| *up && name != "plugin-ledger").map(|(name, _)| name.as_str()).collect();
         ensure!(connected.is_empty(), "other MCP servers are connected in the /ledger session: {connected:?}");
         ensure!(!servers.iter().any(|(name, _)| name == "web-search"), "web-search is still in the /ledger session");
+        ensure!(!held(socket, &cloud)?, "Local Studio's own tools are still in the /ledger session");
         println!(
             "ok   check 4b: the /ledger session lists {} MCP connections, none connected besides the plugin and no web-search; plugin-ledger started {} time(s), each with LOCAL_STUDIO_LOCAL_ONLY=1",
             servers.len(),
