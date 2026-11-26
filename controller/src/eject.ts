@@ -1,15 +1,15 @@
-import { accessSync, constants, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
 import { arch, platform } from "node:os";
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
 import type { LocalEject, LocalEjectProcess } from "./contracts.ts";
-import { exec, fail, type HttpError, httpError, lastLine } from "./core.ts";
+import { exec, fail, type HttpError, lastLine } from "./core.ts";
 import { pciId, type RawGpu, sysfs } from "./hardware.ts";
 
 export interface EjectResult {
   gpu: number | null;
   name: string | null;
-  state: "removed" | "busy" | "needs_root" | "unsupported";
+  state: "removed" | "busy" | "needs_root" | "unsupported" | "cancelled";
   draining: boolean;
   unloaded: string[];
   processes: LocalEjectProcess[];
@@ -57,16 +57,27 @@ const removeFile = (g: RawGpu): string | null => {
 
 const rootCommand = (path: string) => `echo 1 | sudo tee ${path}`;
 
-const computeApps = (busId: string) =>
+const holders = (busId: string) =>
   Effect.gen(function* () {
-    const r = yield* exec(["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader", "-i", busId], 8_000);
+    const r = yield* exec(["nvidia-smi", "-q", "-d", "PIDS", "-i", busId], 8_000);
     if (r.code !== 0) return yield* fail(500, "NVIDIA_SMI_FAILED", `nvidia-smi could not list the programs on the GPU: ${lastLine(r)}`);
-    return r.stdout.split("\n").flatMap((line): LocalEjectProcess[] => {
-      const [pid = "", name = "", used = ""] = line.split(",").map((s) => s.trim());
-      const n = Number(pid);
-      const mib = Number.parseFloat(used);
-      return n > 0 ? [{ pid: n, name: name.split("/").pop() || comm(n), usedMiB: Number.isFinite(mib) ? mib : null }] : [];
-    });
+    const found: { -readonly [K in keyof LocalEjectProcess]: LocalEjectProcess[K] }[] = [];
+    for (const line of r.stdout.split("\n")) {
+      const [key = "", value = ""] = line.split(/\s:\s/, 2).map((s) => s.trim());
+      const last = found.at(-1);
+      if (key === "Process ID" && Number(value) > 0) found.push({ pid: Number(value), name: comm(Number(value)), usedMiB: null });
+      else if (last && key === "Name" && value) last.name = value.split("/").pop() || last.name;
+      else if (last && key === "Used GPU Memory" && Number.isFinite(Number.parseFloat(value))) last.usedMiB = Number.parseFloat(value);
+    }
+    return found;
+  });
+
+const pinned = (busId: string) =>
+  Effect.gen(function* () {
+    const r = yield* exec(["nvidia-smi", "--query-gpu=display_active,persistence_mode", "--format=csv,noheader", "-i", busId], 8_000);
+    if (r.code !== 0) return yield* fail(500, "NVIDIA_SMI_FAILED", `nvidia-smi could not read the GPU's display and persistence mode: ${lastLine(r)}`);
+    const [display = "", persistence = ""] = r.stdout.trim().split(",").map((s) => s.trim());
+    return { display: display === "Enabled", persistence: persistence === "Enabled" };
   });
 
 export const makeEject = (d: Deps) => {
@@ -106,16 +117,25 @@ export const makeEject = (d: Deps) => {
       if (!g.external || !g.busId || !remove) return yield* fail(404, "NOT_EXTERNAL", `${g.name} is not an external GPU, so it cannot be ejected.`);
       draining.add(g.uuid);
       const unloaded = yield* d.unload(g);
-      let processes = yield* computeApps(g.busId);
+      let processes = yield* holders(g.busId);
       for (let i = 0; unloaded.length && processes.length && i < 20; i++) {
         yield* Effect.sleep("1 second");
-        processes = yield* computeApps(g.busId);
+        processes = yield* holders(g.busId);
       }
       if (processes.length)
         return done(g, { state: "busy", draining: true, unloaded, processes, command: null, message: `${g.name} is still in use by ${processes.map((p) => `${p.name} (pid ${p.pid})`).join(", ")}. Local Studio does not stop programs it did not start. Quit them and eject again, or cancel to use the GPU again.` });
+      const { display, persistence } = yield* pinned(g.busId);
+      if (display)
+        return done(g, { state: "busy", draining: true, unloaded, processes: [], command: null, message: `${g.name} drives a display. Move the display to another GPU, then eject again.` });
+      if (persistence)
+        return done(g, { state: "busy", draining: true, unloaded, processes: [], command: `sudo nvidia-smi -i ${g.busId} -pm 0`, message: `Persistence mode keeps the driver open on ${g.name}. Turn it off with the command, then eject again.` });
       if (!writable(remove))
         return done(g, { state: "needs_root", draining: true, unloaded, processes: [], command: rootCommand(remove), message: `Nothing is using ${g.name} now. Removing it from the PCI bus needs an administrator: run the command, then unplug it. Local Studio loads nothing on it until then.` });
-      yield* Effect.try({ try: () => writeFileSync(remove, "1"), catch: (e) => httpError(500, "EJECT_FAILED", `could not write ${remove}: ${String(e)}`) });
+      if (!draining.has(g.uuid))
+        return done(g, { state: "cancelled", draining: false, unloaded, processes: [], command: null, message: `The eject of ${g.name} was cancelled, so it stays on the PCI bus.` });
+      const w = yield* exec(["sh", "-c", 'printf 1 > "$1"', "sh", remove], 30_000);
+      if (w.code === 124) return yield* fail(500, "EJECT_TIMEOUT", `the kernel did not finish removing ${g.name} within 30 seconds; something still holds the driver open`);
+      if (w.code !== 0) return yield* fail(500, "EJECT_FAILED", `could not write ${remove}: ${lastLine(w)}`);
       return done(g, { state: "removed", draining: true, unloaded, processes: [], command: null, message: `${g.name} is off the PCI bus. You can unplug it now.` });
     });
 

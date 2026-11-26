@@ -14,6 +14,7 @@ const auth = { authorization: `Bearer ${key}`, "content-type": "application/json
 const children = [];
 const state = join(root, "state");
 const apps = join(state, "apps");
+const pinned = join(state, "pinned");
 const sys = join(root, "sys");
 const INTERNAL = "00000000:01:00.0";
 const EXTERNAL = "00000000:0B:00.0";
@@ -85,14 +86,16 @@ try {
   mkdirSync(state);
   mkdirSync(join(root, "bin"));
   writeFileSync(apps, "GPU-ext,00000000:0B:00.0,4242,vllm,20480,local-studio-job1\n");
+  writeFileSync(pinned, "Disabled, Disabled\n");
   writeFileSync(
     join(root, "bin/nvidia-smi"),
     [
       "#!/bin/sh",
       'case "$1" in',
+      `--query-gpu=display_active,persistence_mode) cat "$EJECT_STATE/pinned" ;;`,
       `--query-gpu=*) printf '0, GPU-int, NVIDIA GeForce RTX 4090, 900, 24564, 30.1, 450.00, 40, 0, ${INTERNAL}, 4, 4, 16, 16\\n1, GPU-ext, NVIDIA GeForce RTX 3090, 900, 24576, 20.5, 350.00, 38, 0, ${EXTERNAL}, 3, 3, 4, 4\\n' ;;`,
-      `--query-compute-apps=gpu_uuid,pid) awk -F, '{print $1", "$3}' "$EJECT_STATE/apps" ;;`,
-      `--query-compute-apps=pid,process_name,used_memory) awk -F, -v bus="$4" '$2==bus {print $3", "$4", "$5" MiB"}' "$EJECT_STATE/apps" ;;`,
+      `--query-compute-apps=gpu_uuid,pid) awk -F, '$7!="G" {print $1", "$3}' "$EJECT_STATE/apps" ;;`,
+      `-q) awk -F, -v bus="$5" '$2==bus {print "        Process ID                        : "$3; print "            Type                          : "($7=="" ? "C" : $7); print "            Name                          : /usr/bin/"$4; print "            Used GPU Memory               : "$5" MiB"}' "$EJECT_STATE/apps" ;;`,
       "esac",
       "",
     ].join("\n"),
@@ -190,7 +193,32 @@ try {
   assert(alive(foreign.pid));
   console.log("cancel: draining cleared, the load goes through");
   foreign.kill("SIGTERM");
+
+  const xorg = spawn("sleep", ["600"], { stdio: "ignore" });
+  children.push(xorg);
+  writeFileSync(apps, `GPU-ext,${EXTERNAL},${xorg.pid},Xorg,4,,G\n`);
+  r = await (await eject(1)).json();
+  assert.equal(r.state, "busy", JSON.stringify(r));
+  assert.deepEqual(r.processes, [{ pid: xorg.pid, name: "Xorg", usedMiB: 4 }]);
+  assert.equal(readFileSync(remove, "utf8"), "");
+  await cancel(1);
+  xorg.kill("SIGTERM");
   writeFileSync(apps, "");
+  console.log(`graphics client: busy with pid ${xorg.pid} (Xorg), not in the compute apps`);
+
+  writeFileSync(pinned, "Enabled, Disabled\n");
+  r = await (await eject(1)).json();
+  assert.equal(r.state, "busy", JSON.stringify(r));
+  assert.match(r.message, /drives a display/);
+  await cancel(1);
+  writeFileSync(pinned, "Disabled, Enabled\n");
+  r = await (await eject(1)).json();
+  assert.equal(r.state, "busy", JSON.stringify(r));
+  assert.equal(r.command, `sudo nvidia-smi -i ${EXTERNAL} -pm 0`);
+  assert.equal(readFileSync(remove, "utf8"), "", "nothing was written while the driver is pinned");
+  await cancel(1);
+  writeFileSync(pinned, "Disabled, Disabled\n");
+  console.log("display or persistence mode on the GPU: busy, nothing written");
 
   chmodSync(remove, 0o444);
   r = await (await eject(1)).json();
@@ -207,7 +235,7 @@ try {
   assert.equal(onMac.state, "unsupported", JSON.stringify(onMac));
   assert.equal((await snapshot(mac)).hardware.gpus.find((g) => g.index === 1).eject.state, "unsupported");
   console.log("macOS arm64: unsupported");
-  console.log("PASS eject: internal, removed, unload first, busy, draining refusal, cancel, needs_root, macOS arm64.");
+  console.log("PASS eject: internal, removed, unload first, busy, draining refusal, cancel, graphics client, display and persistence, needs_root, macOS arm64.");
 } finally {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   await Promise.all(children.map((child) => (child.exitCode === null && child.signalCode === null ? once(child, "exit") : undefined)));

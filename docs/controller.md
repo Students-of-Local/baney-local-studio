@@ -128,8 +128,8 @@ Each external GPU in `hardware.gpus` carries `eject`: `state` is `ready`, `busy`
 
 1. Marks the GPU draining. Until the eject ends or is cancelled, a load on it answers 409 `DRAINING`, and the machine lends and pools nothing.
 2. Unloads every model the controller started on it (registry runs and pooled models), through the same stop as an unload.
-3. Lists the compute programs still on it with `nvidia-smi --query-compute-apps=pid,process_name,used_memory -i <bus id>`. Any left were started elsewhere, so it answers `busy` with their pid, name and MiB and never signals them.
-4. With nothing left, writes `1` to `/sys/bus/pci/devices/<addr>/remove` and answers `removed`. When that file is not writable it answers `needs_root` with `echo 1 | sudo tee /sys/bus/pci/devices/<addr>/remove`, and the GPU stays draining until it disappears or the eject is cancelled. `boltctl` cannot deauthorize a device without root, so Thunderbolt authorization is left alone.
+3. Lists every program still on it, graphics clients such as Xorg included, with `nvidia-smi -q -d PIDS -i <bus id>`. Any left were started elsewhere, so it answers `busy` with their pid, name and MiB and never signals them. It also answers `busy` while the GPU drives a display, or while persistence mode holds the driver open (with `sudo nvidia-smi -i <bus id> -pm 0` as the `command`).
+4. With nothing left and the eject not cancelled meanwhile, writes `1` to `/sys/bus/pci/devices/<addr>/remove` from a child process with a 30 second limit and answers `removed`. When that file is not writable it answers `needs_root` with `echo 1 | sudo tee /sys/bus/pci/devices/<addr>/remove`, and the GPU stays draining until it disappears or the eject is cancelled. `boltctl` cannot deauthorize a device without root, so Thunderbolt authorization is left alone.
 
 An internal GPU answers 404 `NOT_EXTERNAL`. An Apple silicon Mac and Windows answer `unsupported`; an Intel Mac runs `SafeEjectGPU Eject` when it has the tool. `POST .../eject/cancel` clears draining.
 
