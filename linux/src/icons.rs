@@ -4,74 +4,83 @@ use gtk::prelude::*;
 pub const SIZE: i32 = 16;
 pub const HERO: i32 = 48;
 
-pub const ADD: &str = "list-add-symbolic";
-pub const CLOSE: &str = "window-close-symbolic";
-pub const STOP: &str = "media-playback-stop-symbolic";
-pub const RUN: &str = "media-playback-start-symbolic";
-pub const UP: &str = "go-up-symbolic";
-pub const DOWN: &str = "go-down-symbolic";
-pub const BACK: &str = "go-previous-symbolic";
-pub const FORWARD: &str = "go-next-symbolic";
-pub const EXPANDED: &str = "pan-down-symbolic";
-pub const COLLAPSED: &str = "pan-end-symbolic";
-pub const REFRESH: &str = "view-refresh-symbolic";
-pub const COPY: &str = "edit-copy-symbolic";
-pub const EDIT: &str = "document-edit-symbolic";
-pub const RESET: &str = "edit-undo-symbolic";
-pub const DELETE: &str = "user-trash-symbolic";
-pub const ARCHIVE: &str = "folder-download-symbolic";
-pub const SETTINGS: &str = "emblem-system-symbolic";
-pub const FOLDER: &str = "folder-symbolic";
-pub const FOLDER_OPEN: &str = "folder-open-symbolic";
-pub const FOLDER_NEW: &str = "folder-new-symbolic";
-pub const FILE: &str = "text-x-generic-symbolic";
-pub const TERMINAL: &str = "utilities-terminal-symbolic";
-pub const SIDEBAR: &str = "sidebar-show-symbolic";
-pub const PANEL: &str = "sidebar-show-right-symbolic";
-pub const SPLIT: &str = "view-dual-symbolic";
-pub const MAXIMIZE: &str = "view-fullscreen-symbolic";
-pub const MORE: &str = "view-more-symbolic";
-pub const ATTACH: &str = "mail-attachment-symbolic";
-pub const UNREAD: &str = "mail-unread-symbolic";
-pub const PIN: &str = "view-pin-symbolic";
-pub const DONE: &str = "object-select-symbolic";
-pub const WORKING: &str = "content-loading-symbolic";
-pub const APPROVAL: &str = "dialog-question-symbolic";
-pub const ERROR: &str = "dialog-error-symbolic";
-pub const WARNING: &str = "dialog-warning-symbolic";
-pub const INFO: &str = "help-about-symbolic";
-pub const TIME: &str = "document-open-recent-symbolic";
-pub const WATCH: &str = "view-reveal-symbolic";
-pub const SEARCH: &str = "system-search-symbolic";
-pub const WEB: &str = "web-browser-symbolic";
-pub const AGENT: &str = "avatar-default-symbolic";
-pub const TOOL: &str = "preferences-system-symbolic";
-pub const LOCKED: &str = "changes-prevent-symbolic";
-pub const UNLOCKED: &str = "changes-allow-symbolic";
-pub const GOAL: &str = "mark-location-symbolic";
-pub const PULL_REQUESTS: &str = "preferences-system-sharing-symbolic";
-pub const DEVICE: &str = "phone-symbolic";
-pub const USAGE: &str = "power-profile-performance-symbolic";
-pub const SERVER: &str = "network-server-symbolic";
-pub const OFFLINE: &str = "network-offline-symbolic";
-pub const PLUGIN: &str = "application-x-addon-symbolic";
-pub const UNREACHABLE: &str = "network-error-symbolic";
-pub const KEYBOARD: &str = "input-keyboard-symbolic";
-pub const PROVIDERS: &str = "application-x-addon-symbolic";
-pub const KEYS: &str = "dialog-password-symbolic";
-pub const APPEARANCE: &str = "preferences-desktop-appearance-symbolic";
-pub const STORAGE: &str = "drive-harddisk-symbolic";
-pub const STARRED: &str = "starred-symbolic";
-pub const STAR_ADD: &str = "star-new-symbolic";
-pub const NONE: &str = "list-remove-symbolic";
-pub const BRANCH: &str = "media-record-symbolic";
-pub const SAVE: &str = "document-save-symbolic";
-pub const SWITCH: &str = "network-transmit-receive-symbolic";
-pub const COMPACTED: &str = "view-restore-symbolic";
-pub const ALL: &str = "view-grid-symbolic";
-pub const COMPUTER: &str = "computer-symbolic";
-pub const CONNECTIONS: &str = "network-workgroup-symbolic";
-pub const UPDATE: &str = "software-update-available-symbolic";
+macro_rules! icons {
+    ($($name:ident = $file:literal;)*) => {
+        $(pub const $name: &str = concat!("ls-", $file, "-symbolic");)*
+        const FILES: &[(&str, &[u8])] = &[$((concat!("ls-", $file, "-symbolic.svg"), include_bytes!(concat!("../assets/icons/", $file, ".svg")))),*];
+    };
+}
+
+icons! {
+    ADD = "plus";
+    CLOSE = "x";
+    STOP = "square";
+    RUN = "play";
+    UP = "chevron-up";
+    DOWN = "chevron-down";
+    BACK = "chevron-left";
+    FORWARD = "chevron-right";
+    EXPANDED = "chevron-down";
+    COLLAPSED = "chevron-right";
+    REFRESH = "refresh-cw";
+    COPY = "copy";
+    EDIT = "pencil";
+    RESET = "undo-2";
+    DELETE = "trash-2";
+    ARCHIVE = "archive";
+    SETTINGS = "settings";
+    FOLDER = "folder";
+    FOLDER_OPEN = "folder-open";
+    FOLDER_NEW = "folder-plus";
+    FILE = "file-text";
+    TERMINAL = "square-terminal";
+    SIDEBAR = "panel-left";
+    PANEL = "panel-right";
+    SPLIT = "columns-2";
+    MAXIMIZE = "maximize-2";
+    MORE = "ellipsis";
+    ATTACH = "paperclip";
+    UNREAD = "mail";
+    PIN = "pin";
+    DONE = "check";
+    WORKING = "loader-circle";
+    APPROVAL = "circle-question-mark";
+    ERROR = "circle-x";
+    WARNING = "triangle-alert";
+    INFO = "info";
+    TIME = "clock";
+    WATCH = "eye";
+    SEARCH = "search";
+    WEB = "globe";
+    AGENT = "bot";
+    TOOL = "wrench";
+    LOCKED = "lock";
+    UNLOCKED = "lock-open";
+    GOAL = "target";
+    PULL_REQUESTS = "git-pull-request";
+    DEVICE = "smartphone";
+    USAGE = "gauge";
+    SERVER = "server";
+    OFFLINE = "cloud-off";
+    PLUGIN = "puzzle";
+    UNREACHABLE = "unplug";
+    KEYBOARD = "keyboard";
+    PROVIDERS = "puzzle";
+    KEYS = "key-round";
+    APPEARANCE = "palette";
+    STORAGE = "hard-drive";
+    STARRED = "star";
+    STAR_ADD = "star-plus";
+    NONE = "minus";
+    BRANCH = "git-branch";
+    SAVE = "save";
+    SWITCH = "arrow-left-right";
+    COMPACTED = "minimize-2";
+    ALL = "layout-grid";
+    COMPUTER = "monitor";
+    CONNECTIONS = "network";
+    UPDATE = "download";
+}
 
 pub const STACKED: &str = "ls-icon-stacked";
 
@@ -104,7 +113,23 @@ image.dim-label, image.ls-meta { color: inherit; }
 .ls-footer button.active, .ls-tab.active, button:checked { box-shadow: inset 0 0 0 2px currentColor; }
 ";
 
+fn write_icons() -> std::io::Result<std::path::PathBuf> {
+    let dir = gtk::glib::user_cache_dir().join("local-studio").join("icons");
+    std::fs::create_dir_all(&dir)?;
+    for (name, bytes) in FILES {
+        let path = dir.join(name);
+        if std::fs::read(&path).ok().as_deref() != Some(*bytes) {
+            std::fs::write(&path, bytes)?;
+        }
+    }
+    Ok(dir)
+}
+
 pub fn install(display: &gdk::Display) {
+    match write_icons() {
+        Ok(dir) => gtk::IconTheme::for_display(display).add_search_path(dir),
+        Err(error) => eprintln!("local-studio: could not write the app's icons: {error}"),
+    }
     let base = gtk::CssProvider::new();
     base.load_from_string(CSS);
     gtk::style_context_add_provider_for_display(display, &base, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 3);
