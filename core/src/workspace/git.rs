@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -464,6 +464,8 @@ pub(crate) async fn push(project: &Path) -> Result<String, String> {
 }
 
 pub(crate) const PR_FIELDS: &str = "number,title,url,state,headRefName,baseRefName,statusCheckRollup";
+const REPOSITORY_PR_FIELDS: &str =
+    "number,title,url,state,headRefName,baseRefName,statusCheckRollup,isCrossRepository,headRepositoryOwner";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -481,6 +483,16 @@ pub(crate) struct GhPull {
     base_ref_name: String,
     #[serde(default)]
     status_check_rollup: Vec<Value>,
+    #[serde(default)]
+    is_cross_repository: bool,
+    #[serde(default)]
+    head_repository_owner: Option<GhOwner>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GhOwner {
+    #[serde(default)]
+    login: String,
 }
 
 impl GhPull {
@@ -522,16 +534,39 @@ fn checks(rollup: &[Value]) -> String {
 }
 
 pub(crate) async fn list_pull_requests(project: &Path) -> Result<Vec<PullRequest>, String> {
-    let out =
-        run_ok("gh", ["pr", "list", "--state", "all", "--limit", "50", "--json", PR_FIELDS], project, SLOW).await?;
-    let pulls: Vec<GhPull> = serde_json::from_str(&out).map_err(|error| format!("unexpected gh output: {error}"))?;
-    Ok(pulls.into_iter().map(GhPull::into_pull).collect())
+    Ok(pull_list(project, "50", PR_FIELDS).await?.into_iter().map(GhPull::into_pull).collect())
 }
 
-pub(crate) async fn branch_pull_request(project: &Path, branch: &str) -> Option<PullRequest> {
-    process::which("gh")?;
-    let out = run_ok("gh", ["pr", "view", branch, "--json", PR_FIELDS], project, QUICK).await.ok()?;
-    serde_json::from_str::<GhPull>(&out).ok().map(GhPull::into_pull)
+/// The newest pull request for each head branch of this repository. A PR from a fork counts only when that
+/// fork is one of the repository's remotes, so a stranger's `main` or `patch-1` is not taken for ours.
+pub(crate) async fn repository_pull_requests(dir: &Path) -> Result<HashMap<String, PullRequest>, String> {
+    let owners = remote_owners(dir).await;
+    let mut by_head = HashMap::new();
+    for pull in pull_list(dir, "100", REPOSITORY_PR_FIELDS).await? {
+        let owner = pull.head_repository_owner.as_ref().map(|owner| owner.login.to_ascii_lowercase());
+        if pull.is_cross_repository && !owner.is_some_and(|owner| owners.contains(&owner)) {
+            continue;
+        }
+        let pull = pull.into_pull();
+        by_head.entry(pull.head.clone()).or_insert(pull);
+    }
+    Ok(by_head)
+}
+
+async fn pull_list(dir: &Path, limit: &str, fields: &str) -> Result<Vec<GhPull>, String> {
+    let out = run_ok("gh", ["pr", "list", "--state", "all", "--limit", limit, "--json", fields], dir, SLOW).await?;
+    serde_json::from_str(&out).map_err(|error| format!("unexpected gh output: {error}"))
+}
+
+async fn remote_owners(dir: &Path) -> HashSet<String> {
+    let Ok(out) = git(dir, &["remote", "-v"], QUICK).await else { return HashSet::new() };
+    out.lines().filter_map(|line| line.split_whitespace().nth(1)).filter_map(url_owner).collect()
+}
+
+fn url_owner(url: &str) -> Option<String> {
+    let mut parts = url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']);
+    parts.next()?;
+    parts.next().filter(|owner| !owner.is_empty()).map(str::to_ascii_lowercase)
 }
 
 pub(crate) async fn create_pull_request(
@@ -653,18 +688,6 @@ pub(crate) async fn remove_worktree(project: &Path, worktree: &Path) -> Result<(
     git(project, &["worktree", "remove", "--force", "--", &path], SLOW).await?;
     let _ = git(project, &["worktree", "prune"], QUICK).await;
     Ok(())
-}
-
-pub(crate) async fn branch_pull_request_list(dir: &Path, branch: &str) -> Result<Option<PullRequest>, String> {
-    let out = run_ok(
-        "gh",
-        ["pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", PR_FIELDS],
-        dir,
-        SLOW,
-    )
-    .await?;
-    let pulls: Vec<GhPull> = serde_json::from_str(&out).map_err(|error| format!("unexpected gh output: {error}"))?;
-    Ok(pulls.into_iter().next().map(GhPull::into_pull))
 }
 
 pub(crate) async fn merge_pull_request(project: &Path, number: u64, method: MergeMethod) -> Result<String, String> {
