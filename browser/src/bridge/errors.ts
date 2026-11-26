@@ -7,7 +7,7 @@
 import { isDetachError, isNavigatedError, PageException } from "../browser/cdp.js";
 import { ClipboardChordError } from "../browser/key-commands.js";
 import { NoTabError } from "../browser/session.js";
-import { ERR, FILE_ASK_TIMEOUT_MS, FILE_FETCH_WAIT_MS, type RpcError } from "./protocol.js";
+import { ERR, FILE_ASK_TIMEOUT_MS, FILE_FETCH_WAIT_MS, PERMISSION_TIMEOUT_MS, type RpcError } from "./protocol.js";
 
 export class BridgeError extends Error {
 	constructor(
@@ -26,13 +26,20 @@ export class BridgeError extends Error {
 /** A handler that never settles must not wedge the client's queue (the bridge) or the panel's turn forever. */
 export const HANDLER_TIMEOUT_MS = 90000;
 
+/** The calls that put a site question to the person (checkUrl) once before their own work. */
+const ASKS_SITE = new Set(["edits.add", "edits.update", "edits.off", "edits.remove"]);
+
 /**
  * How long one agent call may run in the bridge. An upload's begin may wait for the person's answer. A download's or
  * PDF's begin fetches up to 50 MB, and the CLI waits FILE_FETCH_WAIT_MS for it, so the bridge gives up just before.
+ * A call that asks about a site has the question's whole wait on top of its own time, so no answer ends as the no it
+ * is, not a timeout; navigate and tabs_create can ask twice, about the site and about the one a redirect led to.
  */
 export function handlerLimit(method: string): number {
 	if (method === "files.upload.begin") return FILE_ASK_TIMEOUT_MS + 30000;
 	if (method === "files.download.begin" || method === "files.pdf.begin") return FILE_FETCH_WAIT_MS - 5000;
+	if (method === "navigate" || method === "tabs.create") return 2 * PERMISSION_TIMEOUT_MS + HANDLER_TIMEOUT_MS;
+	if (ASKS_SITE.has(method)) return PERMISSION_TIMEOUT_MS + HANDLER_TIMEOUT_MS;
 	return HANDLER_TIMEOUT_MS;
 }
 

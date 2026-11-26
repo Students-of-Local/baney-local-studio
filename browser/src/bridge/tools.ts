@@ -385,6 +385,11 @@ function stopIfAborted(ctx: HandlerContext): void {
 		);
 }
 
+/** After a site question: the call may have ended while it waited (its limit, the host gone), and then opens nothing. */
+function stopIfEnded(ctx: HandlerContext): void {
+	if (ctx.aborted()) throw new BridgeError(ERR.INTERRUPTED, "This call has ended, so no page was opened.");
+}
+
 type Handler = (ctx: HandlerContext, params: Params) => Promise<unknown>;
 
 function num(params: Params, key: string): number | undefined {
@@ -903,6 +908,7 @@ export const handlers: Record<string, Handler> = {
 	"tabs.create": async (ctx, params) => {
 		const url = str(params, "url");
 		if (url) await ctx.checkUrl(url);
+		stopIfEnded(ctx);
 		const { tab, ready, note } = await openCapturedTab(ctx, url, 20000, true);
 		const summary = { ...(await tabSummary(tab.id!, !ready)), ...(note ? { note } : {}) };
 		return refuseUncheckedLanding(ctx, tab.id!, summary, new Set(url ? [hostOf(url)] : []));
@@ -977,6 +983,7 @@ export const handlers: Record<string, Handler> = {
 		const url = requireStr(params, "url");
 		const history = url === "back" || url === "forward";
 		if (!history) await ctx.checkUrl(url);
+		stopIfEnded(ctx);
 		/** The hosts checked for this call: the landing is checked again only when a redirect took it elsewhere. */
 		const checked = new Set(history ? [] : [hostOf(url)]);
 		// The first navigate of a session opens its tab (blank, with capture on) and loads the URL into it.

@@ -93,6 +93,7 @@ import {
 	MAX_FRAME_FROM_EXTENSION,
 	type ModelTier,
 	NATIVE_HOST_NAMES,
+	PERMISSION_TIMEOUT_MS,
 	PROTOCOL_VERSION,
 	traceNow,
 	UPDATE_PROGRESS_KEY,
@@ -112,7 +113,6 @@ export function trace(line: string): void {
 }
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
-const PERMISSION_TIMEOUT_MS = 120000;
 
 interface ClientState {
 	clientId: string;

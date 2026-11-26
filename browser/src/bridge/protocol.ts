@@ -37,6 +37,8 @@ export const FILE_UPLOAD_MAX_FILES = 10;
 export const FILE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 /** The most one download or page PDF may be. */
 export const FILE_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+/** How long the person has to answer a site question (an agent opening a site not allowed yet); no answer is a no. */
+export const PERMISSION_TIMEOUT_MS = 120000;
 /** How long the person has to answer an upload question; no answer is a no. */
 export const FILE_ASK_TIMEOUT_MS = 120000;
 /** How long the CLI waits for a download or PDF to begin. The bridge's own limit for those is a little less (handlerLimit). */

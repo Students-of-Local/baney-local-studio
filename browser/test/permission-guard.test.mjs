@@ -194,6 +194,39 @@ test("first-F1, sol-F3: a site a redirect lands on is asked about before any of 
 	assert.equal(plain.reply.error, undefined, JSON.stringify(plain.reply.error));
 });
 
+test("second-S1: a site question nobody answers ends as permission_denied, not a timeout, and one answered after its call ended opens nothing", async () => {
+	const { port, sent } = await redirectingBridge({});
+	await setPermissionMode("manual");
+	const { handlerLimit, HANDLER_TIMEOUT_MS } = await import("../src/bridge/errors.ts");
+	const { PERMISSION_TIMEOUT_MS } = await import("../src/bridge/protocol.ts");
+	for (const method of ["navigate", "tabs.create"])
+		assert.ok(handlerLimit(method) >= 2 * PERMISSION_TIMEOUT_MS + HANDLER_TIMEOUT_MS, `${method}: ${handlerLimit(method)}`);
+	for (const method of ["edits.add", "edits.update", "edits.off", "edits.remove"])
+		assert.ok(handlerLimit(method) >= PERMISSION_TIMEOUT_MS + HANDLER_TIMEOUT_MS, `${method}: ${handlerLimit(method)}`);
+	// Every wait of a minute or more runs a thousand times faster: the question's two minutes, the call's limit.
+	const patched = globalThis.setTimeout;
+	globalThis.setTimeout = (fn, ms, ...args) => patched(fn, ms >= 60000 ? ms / 1000 : ms, ...args);
+	try {
+		for (const [id, method] of [[11, "navigate"], [12, "tabs.create"]]) {
+			port.deliver({ type: "request", clientId: "c1", id, method, params: { url: `https://unanswered.example/${id}` } });
+			await sent((m) => m.event === "permission_request" && m.data.url === `https://unanswered.example/${id}`);
+			const reply = await sent((m) => m.type === "response" && m.id === id);
+			assert.equal(reply.error?.code, "permission_denied", `${method}: ${JSON.stringify(reply.error)}`);
+		}
+	} finally {
+		globalThis.setTimeout = patched;
+	}
+	// The host goes while the question is open, and the person says yes after: the call has ended, so no tab opens.
+	const before = (await chrome.tabs.query({})).length;
+	port.deliver({ type: "request", clientId: "c1", id: 13, method: "tabs.create", params: { url: "https://late.example/" } });
+	const asked = await sent((m) => m.event === "permission_request" && m.data.host === "late.example");
+	for (const fn of port.onDisconnect.listeners) fn();
+	await recordDecision(asked.data.requestId, "allow_once");
+	await new Promise((r) => setTimeout(r, 300));
+	const tabs = await chrome.tabs.query({});
+	assert.equal(tabs.length, before, `a tab opened after its call ended: ${JSON.stringify(tabs.map((t) => t.url))}`);
+});
+
 test("an older CLI says nothing about remote, but its remote sessions are told by the name serve gives them", () => {
 	for (const [client, remote] of [
 		[{ name: "claude", remote: true }, true],
