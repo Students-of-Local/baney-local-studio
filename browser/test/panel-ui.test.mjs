@@ -366,3 +366,51 @@ test("sending from the panel with another session's tab in front leaves that tab
 	assert.ok(fake.table()["bridge-claude-shop"].tabIds.includes(t), "T stays in the bridge session");
 	assert.ok(!fake.table()["saved-chat"].tabIds.includes(t), "and the panel's chat did not take it");
 });
+
+test("review-r1 first-F2: a Claude subscription token is refused as a key before any check, and Save anyway can't store it", async () => {
+	const { refusedKey } = await import("../src/models/key-reason.ts");
+	const token = "sk" + "-ant-" + "oat01-abc";
+	const refused = refusedKey("anthropic", token);
+	assert.equal(refused?.kind, "rejected");
+	assert.match(refused.reason, /subscription sign-in was removed/);
+	assert.equal(refusedKey("anthropic", "sk" + "-ant-" + "api03-abc"), undefined);
+	assert.equal(refusedKey("openai", "sk" + "-proj-" + "abc"), undefined);
+	const row = readFileSync(new URL("../src/components/ProviderKeyRow.ts", import.meta.url), "utf8");
+	const save = row.slice(row.indexOf("private async save("), row.indexOf("private async removeKey("));
+	assert.match(save, /problem = refusedKey\(provider, key\) \?\? \(force \? undefined : await checkKey\(/, "checked first, on the force path too");
+	assert.ok(save.indexOf("refusedKey(") < save.indexOf("providerKeys.set("));
+});
+
+test("review-r1 first-F3: a restored chat starts the same watchers as a new one, the update status among them", () => {
+	const src = readFileSync(new URL("../src/sidepanel.ts", import.meta.url), "utf8");
+	const watchers = src.slice(src.indexOf("function startWatchers() {"));
+	assert.match(watchers.slice(0, watchers.indexOf("\n}\n")), /void watchUpdateStatus\(renderApp\)/);
+	const restored = src.slice(src.indexOf("if (sessionData) {"), src.indexOf("// Session doesn't exist"));
+	assert.match(restored, /startWatchers\(\);\s*return;/);
+	assert.doesNotMatch(src.replace(watchers.slice(0, watchers.indexOf("\n}\n")), ""), /void watch\w+\(renderApp\)/, "no watcher is started outside startWatchers");
+});
+
+test("review-r1 first-F4: Escape in an open page, dialog, menu or the title editor closes it instead of stopping the run", () => {
+	const src = readFileSync(new URL("../src/sidepanel.ts", import.meta.url), "utf8");
+	const handler = src.slice(src.indexOf("// KEYBOARD SHORTCUTS"), src.indexOf("// TEST STEPS FROM DEBUGGER.TS"));
+	assert.match(handler, /closest\("\[role=dialog\], \[role=menu\], \[data-title-input\]"\)/);
+	assert.match(handler, /document\.querySelector\('\[aria-modal="true"\], \.fixed\.inset-0'\)/, "a page or dialog open over the chat");
+	assert.match(handler, /e\.key === "Escape" && agent\?\.state\.isStreaming && !inBridgeQuestion && !inLayer\) \{\s*e\.preventDefault\(\);\s*e\.stopPropagation\(\);\s*agent\.abort\(\);/);
+	const page = readFileSync(new URL("../src/components/PageBase.ts", import.meta.url), "utf8");
+	assert.match(page, /role="dialog" aria-modal="true"/, "pages carry what the guard looks for");
+	assert.match(page, /class="fixed inset-0 /);
+	assert.match(src, /data-title-input>/);
+});
+
+test("review-r1 second-S3: a chat whose only message from the person has an attachment is saved, titled and recalled", async () => {
+	const { isPerson } = await import("../src/models/compaction.ts");
+	assert.equal(isPerson({ role: "user-with-attachments", content: "What does this say?", attachments: [] }), true);
+	const src = readFileSync(new URL("../src/sidepanel.ts", import.meta.url), "utf8");
+	const save = src.slice(src.indexOf("const shouldSaveSession = "), src.indexOf("const saveSession = "));
+	assert.match(save, /messages\.some\(isPerson\)/);
+	const title = src.slice(src.indexOf("const generateTitle = "), src.indexOf("const shouldSaveSession = "));
+	assert.match(title, /messages\.find\(isPerson\)/);
+	for (const m of src.matchAll(/role (===|!==) "user"(?!-)[^\n]*/g))
+		assert.match(m[0], /"user-with-attachments"/, `a check that misses attached messages: ${m[0]}`);
+	assert.doesNotMatch(src, /\.some\(\(m(: AgentMessage)?\) => m\.role === "user"\)/);
+});
