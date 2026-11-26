@@ -70,7 +70,7 @@ impl Workspace {
         }
         if settings.worktree_cleanup_on_merge {
             if let Some(branch) = git::current_branch(worktree).await {
-                let pull = self.branch_pull_request(worktree, &branch).await;
+                let pull = self.branch_pull_request(worktree, &branch, true).await;
                 if pull.is_some_and(|pull| pull.state.eq_ignore_ascii_case("MERGED")) {
                     return true;
                 }

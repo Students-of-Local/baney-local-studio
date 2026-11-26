@@ -266,7 +266,7 @@ impl Workspace {
     async fn status_update(&self, project: &str) -> Result<Update, String> {
         let mut status = git::status(Path::new(project)).await?;
         if let Some(branch) = status.branch.clone().filter(|_| status.upstream.is_some()) {
-            status.pull_request = self.branch_pull_request(Path::new(project), &branch).await;
+            status.pull_request = self.branch_pull_request(Path::new(project), &branch, false).await;
         }
         Ok(Update::GitStatus { project: project.to_string(), status })
     }

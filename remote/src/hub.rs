@@ -488,6 +488,10 @@ impl State {
         }
     }
 
+    fn report_clients(&self, studio: &Studio) {
+        studio.set_remote_clients(self.sessions.values().filter(|session| session.conn.is_some()).count());
+    }
+
     fn drop_session(&mut self, studio: &Studio, device: &str, code: u16, reason: &str) {
         let Some(mut session) = self.sessions.remove(device) else { return };
         session.close(code, reason);
@@ -741,6 +745,7 @@ impl Hub {
             for session in state.sessions.values_mut() {
                 session.uploads.retain(|_, upload| now.duration_since(upload.at) <= kept());
             }
+            state.report_clients(&self.studio);
         }
     }
 
@@ -1068,6 +1073,7 @@ impl Hub {
                 state.watch(&self.studio, device, thread);
             }
         }
+        state.report_clients(&self.studio);
         Some(conn)
     }
 
@@ -1080,6 +1086,7 @@ impl Hub {
                 session.drop_partial();
             }
         }
+        state.report_clients(&self.studio);
     }
 
     pub fn retain(&self, known: &HashMap<String, String>) {
@@ -1103,6 +1110,7 @@ impl Hub {
         for device in revoked {
             state.drop_ledger(&device);
         }
+        state.report_clients(&self.studio);
     }
 
     // Fleet stream frames go to one connection outside the update sequence: they are never
