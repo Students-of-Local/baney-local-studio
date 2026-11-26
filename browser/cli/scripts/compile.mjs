@@ -4,9 +4,9 @@
 //   node scripts/compile.mjs --arch arm64|x64 --out <file> [--os linux|darwin|windows] [--work <dir>]
 // --os cross-builds for another system (the release builds all three on one Linux runner); the default is this one.
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -20,11 +20,26 @@ if (!["arm64", "x64"].includes(arch) || !out) {
 	console.error("usage: node scripts/compile.mjs --arch arm64|x64 --out <file>");
 	process.exit(2);
 }
-const work = arg("--work") ?? mkdtempSync(join(tmpdir(), "local-studio-compile-"));
-// build.mjs empties its out dir first, so a --work that already holds files would be deleted with them.
-if (arg("--work") && existsSync(work) && readdirSync(work).length > 0) {
-	console.error(`compile: --work ${work} is not empty; give a new or empty folder`);
+const given = arg("--work");
+if (given === "") {
+	console.error("compile: --work needs a folder");
 	process.exit(2);
+}
+// Absolute, since build.mjs runs from this package's folder and would read a relative path against it.
+const work = resolve(given ?? mkdtempSync(join(tmpdir(), "local-studio-compile-")));
+// build.mjs empties its out dir first, so a --work holding anything but an earlier compile's output would be deleted
+// with it. STAMP marks a folder compile built.
+const STAMP = ".local-studio-compile";
+if (given !== undefined && existsSync(work)) {
+	if (!statSync(work).isDirectory()) {
+		console.error(`compile: --work ${work} is not a folder`);
+		process.exit(2);
+	}
+	const entries = readdirSync(work);
+	if (entries.length > 0 && !entries.includes(STAMP)) {
+		console.error(`compile: --work ${work} is not empty; give a new or empty folder, or one compile built`);
+		process.exit(2);
+	}
 }
 const run = (cmd, args, env = {}) => {
 	const r = spawnSync(cmd, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...env } });
@@ -34,6 +49,7 @@ const run = (cmd, args, env = {}) => {
 	}
 };
 run(process.execPath, ["scripts/build.mjs"], { LOCAL_STUDIO_BROWSER_CLI_COMPILED: "1", LOCAL_STUDIO_BROWSER_CLI_OUT_DIR: work });
+writeFileSync(join(work, STAMP), "");
 // This machine's system unless --os names another: the Mac app's build, and a real executable to run wherever the tests run.
 const os = arg("--os", process.platform === "win32" ? "windows" : process.platform);
 if (!["linux", "darwin", "windows"].includes(os)) {
@@ -43,4 +59,4 @@ if (!["linux", "darwin", "windows"].includes(os)) {
 run("bun", ["build", "--compile", "--bytecode", `--target=bun-${os}-${arch === "x64" ? "x64-baseline" : arch}`, join(work, "index.js"), "--outfile", out]);
 // The x86_64 build is the baseline one: it runs on every Intel Mac and under Rosetta (which has no AVX).
 chmodSync(out, 0o755);
-if (!arg("--work")) rmSync(work, { recursive: true, force: true });
+if (given === undefined) rmSync(work, { recursive: true, force: true });
