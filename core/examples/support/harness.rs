@@ -735,6 +735,8 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
     let (studio, signal, mut watch) = open(config)?;
     let outcome = (|| {
         let watch = &mut watch;
+        studio.add_project(work.to_string_lossy().into_owned());
+        pump(&studio, &signal, watch, "project added", |watch| watch.projects.len() == 1)?;
         pump(&studio, &signal, watch, "models listed", |watch| {
             watch.models.iter().any(|model| model.provider == target.provider)
         })?;
@@ -747,8 +749,6 @@ fn first_run(config: &StudioConfig, target: &Target, work: &Path) -> anyhow::Res
             models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>().join(", ")
         );
         println!("     running {}/{model}", target.provider);
-        studio.add_project(work.to_string_lossy().into_owned());
-        pump(&studio, &signal, watch, "project added", |watch| watch.projects.len() == 1)?;
         let settings = ThreadSettings {
             provider: Some(target.provider.to_string()),
             model: Some(model),
