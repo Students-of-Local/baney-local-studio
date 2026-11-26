@@ -144,6 +144,7 @@ pub(super) struct ProviderState {
     servers: Vec<Server>,
     synthetic_error: Option<String>,
     synthetic_quota: Option<String>,
+    synthetic_run: u64,
 }
 
 #[derive(Clone)]
@@ -313,7 +314,11 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
                 env_var: Some(built_in.env.to_string()),
                 base_url: None,
                 api: None,
-                models: files.providers.get(built_in.id).map(models_of).unwrap_or_default(),
+                models: if built_in.id == SYNTHETIC {
+                    files.providers.get(SYNTHETIC).map(models_of).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
                 quota: state.synthetic_quota.clone().filter(|_| built_in.id == SYNTHETIC),
             }
         })
@@ -833,6 +838,14 @@ fn synthetic_key(auth: &Map<String, Value>) -> Option<String> {
     stored_key(auth, SYNTHETIC).or_else(|| std::env::var(SYNTHETIC_ENV).ok().filter(|key| !key.trim().is_empty()))
 }
 
+fn synthetic_owned(entry: &Value, base_url: &str) -> bool {
+    match text(entry, "apiKey") {
+        Some(SYNTHETIC_ENV) => true,
+        Some("none") => text(entry, "baseUrl").map(|url| url.trim_end_matches('/')) == Some(base_url),
+        _ => false,
+    }
+}
+
 fn synthetic_entry(existing: Option<&Value>, base_url: &str, models: &[ProviderModel]) -> Value {
     let mut entry = provider_entry(existing, "Synthetic", base_url, ProviderApi::OpenAiCompatible, models);
     entry["apiKey"] = json!(SYNTHETIC_ENV);
@@ -977,6 +990,7 @@ impl Workspace {
     }
 
     async fn sync_synthetic(&self) -> Result<bool, String> {
+        let _sync = self.inner.synthetic_lock.lock().await;
         let outcome = self.list_synthetic().await;
         let error = outcome.as_ref().err().map(|error| format!("Synthetic: {error}"));
         self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_error = error;
@@ -985,36 +999,47 @@ impl Workspace {
 
     async fn list_synthetic(&self) -> Result<bool, String> {
         let agent = self.agent()?;
-        let auth = {
+        let (auth, existing) = {
             let agent = agent.clone();
-            blocking(move || read_object(&agent.join("auth.json"))).await?
+            blocking(move || Ok((read_object(&agent.join("auth.json"))?, configured_providers(&agent).remove(SYNTHETIC))))
+                .await?
         };
         let key = synthetic_key(&auth);
         let origin = synthetic_origin();
         let base_url = format!("{origin}/openai/v1");
-        self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_quota = None;
-        let models = match &key {
-            Some(key) => Some(discover(&base_url, ProviderApi::OpenAiCompatible, Some(key)).await?.1),
-            None => None,
+        let run = {
+            let mut state = self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
+            state.synthetic_quota = None;
+            state.synthetic_run += 1;
+            state.synthetic_run
         };
-        if let Some(key) = key {
+        if let Some(key) = key.clone() {
             let workspace = self.clone();
             let origin = origin.clone();
             self.inner.runtime.spawn(async move {
                 let quota = synthetic_quota(&origin, &key).await;
-                workspace.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_quota = quota;
-                workspace.publish_providers();
+                let mut state = workspace.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
+                if state.synthetic_run == run {
+                    state.synthetic_quota = quota;
+                    drop(state);
+                    workspace.publish_providers();
+                }
             });
         }
+        if existing.as_ref().is_some_and(|entry| !synthetic_owned(entry, &base_url)) {
+            return Ok(false);
+        }
+        let models = match &key {
+            Some(key) => Some(discover(&base_url, ProviderApi::OpenAiCompatible, Some(key)).await?.1),
+            None => None,
+        };
         let _guard = self.inner.providers_lock.lock().await;
         blocking(move || {
             let existing = configured_providers(&agent).remove(SYNTHETIC);
-            let ours = existing.as_ref().is_none_or(|entry| text(entry, "apiKey") == Some(SYNTHETIC_ENV));
-            let wanted = match models {
-                Some(models) => Some(synthetic_entry(existing.as_ref(), &base_url, &models)),
-                None if ours => None,
-                None => existing.clone(),
-            };
+            if existing.as_ref().is_some_and(|entry| !synthetic_owned(entry, &base_url)) {
+                return Ok(false);
+            }
+            let wanted = models.map(|models| synthetic_entry(existing.as_ref(), &base_url, &models));
             if existing == wanted {
                 return Ok(false);
             }
@@ -1250,10 +1275,7 @@ impl Workspace {
                 blocking(move || store_key(&agent, &provider, key.as_deref())).await?;
             }
             if provider == SYNTHETIC {
-                if let Err(error) = workspace.sync_synthetic().await {
-                    workspace.reload_catalog();
-                    return Err(format!("{message} {error}"));
-                }
+                let _ = workspace.sync_synthetic().await;
             }
             workspace.reload_models(reply, message);
             Ok(Vec::new())

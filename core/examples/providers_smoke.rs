@@ -469,7 +469,7 @@ fn drive(
     local_servers(harness, agent, port)?;
     add_and_chat(harness, agent, port, &project)?;
     edit_and_keys(harness, agent, port)?;
-    synthetic(harness, agent, port)?;
+    synthetic(harness, agent, port, &project)?;
     local_fleet(harness, port, &project)?;
     cleanup(harness, agent, original)
 }
@@ -843,7 +843,7 @@ fn synthetic_ready(view: &View, quota: Option<&str>) -> bool {
     }) && SYNTHETIC_MODELS.iter().all(|(id, _)| view.has_model("synthetic", id))
 }
 
-fn synthetic(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Result<()> {
+fn synthetic(harness: &mut Harness, agent: &Path, port: u16, project: &str) -> anyhow::Result<()> {
     let studio = Arc::clone(&harness.studio);
     let models_path = agent.join("models.json");
     studio.load_providers();
@@ -875,6 +875,12 @@ fn synthetic(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Result<(
     );
     println!("ok   Synthetic lists {:?} and shows {SYNTHETIC_QUOTA:?}", SYNTHETIC_MODELS.map(|(id, _)| id));
 
+    let thread = harness.start("synthetic-draft", project, "ping", settings("synthetic", SYNTHETIC_MODELS[0].0))?;
+    let reply = format!("Stub reply from {} (key ok).", SYNTHETIC_MODELS[0].0);
+    harness.pump_until("a thread on a Synthetic model gets the stub's reply with the saved key", |view| {
+        view.answer(&thread).contains(&reply) && view.idle(&thread)
+    })?;
+
     stub_call(port, "POST", "/stub/quota-error")?;
     studio.load_providers();
     harness
@@ -898,6 +904,53 @@ fn synthetic(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Result<(
         }) && !view.models.iter().any(|model| model.provider == "synthetic")
     })?;
     ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "Synthetic entry left in models.json");
+
+    let handwritten = json!({
+        "baseUrl": format!("http://127.0.0.1:{port}/proxy/v1"),
+        "api": "openai-completions",
+        "apiKey": "!cat /nonexistent/synthetic-key",
+        "models": [{ "id": "mine" }]
+    });
+    seed_synthetic(&models_path, &handwritten)?;
+    for key in [Some(KEY), None] {
+        let request = harness.request();
+        studio.set_provider_key(request.clone(), "synthetic".to_string(), key.map(str::to_string));
+        harness.answer("Synthetic key changed beside a hand-written entry", &request)?;
+        let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
+        ensure!(entry == handwritten, "the hand-written Synthetic entry was rewritten: {entry}");
+    }
+    println!("ok   a hand-written synthetic entry stays as written with and without a key");
+
+    let workaround = json!({
+        "name": "Synthetic",
+        "baseUrl": format!("http://127.0.0.1:{port}/openai/v1"),
+        "api": "openai-completions",
+        "apiKey": "none",
+        "models": [{ "id": SYNTHETIC_MODELS[0].0, "name": SYNTHETIC_MODELS[0].0 }]
+    });
+    seed_synthetic(&models_path, &workaround)?;
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), Some(KEY.to_string()));
+    harness.answer("Synthetic key saved beside an endpoint added by hand", &request)?;
+    harness.pump_until("the old Synthetic endpoint becomes the built-in with both models", |view| {
+        synthetic_ready(view, Some(SYNTHETIC_QUOTA))
+    })?;
+    ensure!(
+        read_json(&models_path)?["providers"]["synthetic"]["apiKey"] == "SYNTHETIC_API_KEY",
+        "the old Synthetic endpoint was not adopted"
+    );
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), None);
+    harness.answer("adopted Synthetic key removed", &request)?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "the adopted entry stayed");
+    println!("ok   an endpoint added by hand at Synthetic's origin becomes the built-in, and leaves with its key");
+    Ok(())
+}
+
+fn seed_synthetic(models_path: &Path, entry: &Value) -> anyhow::Result<()> {
+    let mut models = read_json(models_path)?;
+    models["providers"]["synthetic"] = entry.clone();
+    std::fs::write(models_path, serde_json::to_vec_pretty(&models)?)?;
     Ok(())
 }
 

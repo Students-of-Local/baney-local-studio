@@ -111,7 +111,7 @@ fn serve(stream: &TcpStream, key: &str) -> anyhow::Result<()> {
         ("GET", "/stub/quota-failures") => {
             respond(stream, "200 OK", "text/plain", &QUOTA_FAILURES.load(Ordering::SeqCst).to_string())
         }
-        ("POST", "/v1/chat/completions") => {
+        ("POST", "/v1/chat/completions" | "/openai/v1/chat/completions") => {
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
             let model = body.get("model").and_then(Value::as_str).unwrap_or("unknown").to_string();
             let text = format!("Stub reply from {model} ({auth}).");
