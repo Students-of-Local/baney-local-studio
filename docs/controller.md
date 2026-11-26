@@ -76,6 +76,7 @@ All routes except `/api/health` and `/api/cluster/hello` require the fleet key. 
 | `POST /api/cluster/rpc`, `/api/cluster/rpc/stop`, `/api/cluster/release`                          | Controller to controller: lend an `rpc-server`, stop it, take it back |
 | `POST /api/cluster/hello`                                                                         | Discovery handshake; needs no key, answers only with a keyed proof    |
 | `POST /api/thunderbolt/authorize`                                                                 | Approve a pending Thunderbolt or USB4 device with `boltctl`           |
+| `POST /api/hardware/gpus/<id>/eject`, `/api/hardware/gpus/<id>/eject/cancel`                      | Safely eject an external GPU, or cancel and use it again              |
 
 Registry launches use pinned container images and weight revisions on free matching NVIDIA GPUs, on ports 18100 to 18299. They never evict running engines.
 
@@ -120,6 +121,19 @@ Every 5 seconds the controller reads `nvidia-smi` (memory, power draw and limit,
 On Linux the controller marks a GPU as external when its PCI device sits behind a port the kernel calls `removable`, or under the upstream bridge of a discrete Thunderbolt or USB4 controller. Each GPU reports its PCIe link (`gen`, `width` and their maximums) with a plain bandwidth note. A PCIe 3.0 x4 enclosure moves about 3.9 GB/s, so loading a model takes longer than on an internal slot, while decoding speed is nearly the same.
 
 `hardware.thunderbolt` lists Thunderbolt and USB4 devices from `boltctl list --all` (or sysfs when bolt is missing). A device the system has not approved shows as `pending`. `POST /api/thunderbolt/authorize` with its `uuid` runs `boltctl enroll --policy auto <uuid>`. If polkit wants an administrator password the call returns 403 `NEEDS_PASSWORD` and says how to approve it by hand.
+
+### Ejecting an external GPU
+
+Each external GPU in `hardware.gpus` carries `eject`: `state` is `ready`, `busy` (with `blockers`, the programs outside Local Studio on it), `needs_root` (with the `command` to run) or `unsupported`, plus `draining`. `POST /api/hardware/gpus/<id>/eject` takes the GPU's index, UUID or PCI bus id and:
+
+1. Marks the GPU draining. Until the eject ends or is cancelled, a load on it answers 409 `DRAINING`, and the machine lends and pools nothing.
+2. Unloads every model the controller started on it (registry runs and pooled models), through the same stop as an unload.
+3. Lists every program still on it, graphics clients such as Xorg included, with `nvidia-smi -q -d PIDS -i <bus id>`. Any left were started elsewhere, so it answers `busy` with their pid, name and MiB and never signals them. It also answers `busy` while the GPU drives a display, or while persistence mode holds the driver open (with `sudo nvidia-smi -i <bus id> -pm 0` as the `command`).
+4. With nothing left and the eject not cancelled meanwhile, writes `1` to `/sys/bus/pci/devices/<addr>/remove` from a child process with a 30 second limit and answers `removed`. When that file is not writable it answers `needs_root` with `echo 1 | sudo tee /sys/bus/pci/devices/<addr>/remove`, and the GPU stays draining until it disappears or the eject is cancelled. `boltctl` cannot deauthorize a device without root, so Thunderbolt authorization is left alone.
+
+An internal GPU answers 404 `NOT_EXTERNAL`. An Apple silicon Mac and Windows answer `unsupported`; an Intel Mac runs `SafeEjectGPU Eject` when it has the tool. `POST .../eject/cancel` clears draining.
+
+`cd controller && node test/eject.mjs` checks this against a real controller with a stub `nvidia-smi` and `docker` on `PATH` and a scratch sysfs (`LOCAL_STUDIO_SYSFS`); `LOCAL_STUDIO_TEST_PLATFORM=darwin-arm64` stands in for an Apple silicon Mac.
 
 The controller reads the GPU list every 2 seconds, so a GPU that is plugged in or pulled shows within about 2 seconds. A removed GPU fails every job on it with "<GPU> was unplugged." and stops any `rpc-server` lent from it. `hardware.hotplug` keeps the last eight changes for an hour; an added GPU lists up to five recipes and models that fit its memory.
 

@@ -27,6 +27,25 @@ export const LocalPcieLink = Schema.Struct({
 });
 export type LocalPcieLink = typeof LocalPcieLink.Type;
 
+export const LocalEjectProcess = Schema.Struct({
+  pid: Schema.Number,
+  name: Schema.String,
+  usedMiB: OptionalNumber,
+});
+export type LocalEjectProcess = typeof LocalEjectProcess.Type;
+
+export const LocalEjectState = Schema.Literals(["ready", "busy", "needs_root", "unsupported"]);
+export type LocalEjectState = typeof LocalEjectState.Type;
+
+export const LocalEject = Schema.Struct({
+  state: LocalEjectState,
+  draining: Schema.Boolean,
+  blockers: Schema.Array(LocalEjectProcess),
+  command: OptionalString,
+  message: OptionalString,
+});
+export type LocalEject = typeof LocalEject.Type;
+
 export const LocalGpu = Schema.Struct({
   ...LocalGpuTelemetry.fields,
   card: OptionalString,
@@ -34,6 +53,7 @@ export const LocalGpu = Schema.Struct({
   external: Schema.optionalKey(Schema.Boolean),
   busId: Schema.optionalKey(OptionalString),
   link: Schema.optionalKey(Schema.NullOr(LocalPcieLink)),
+  eject: Schema.optionalKey(LocalEject),
 });
 export type LocalGpu = typeof LocalGpu.Type;
 

@@ -708,6 +708,7 @@ export const makeCluster = (d: ClusterDeps) => {
       await Promise.all([...rpcs.keys()].map(stopRpc));
     },
     poolPorts: () => [...pools.values()].filter((p) => p.info.phase === "starting" || p.info.phase === "ready").map((p) => p.info.port),
+    poolsUsing: (pids: readonly number[]) => [...pools.values()].filter((p) => p.proc && pids.includes(p.proc.pid) && (p.info.phase === "starting" || p.info.phase === "ready")).map((p) => p.info.id),
     poolPort: (port: number) => [...pools.values()].find((p) => p.info.port === port && (p.info.phase === "starting" || p.info.phase === "ready"))?.info.id ?? null,
     gpuGone: async (uuid: string, why: string) => {
       for (const r of [...rpcs.values()].filter((r) => r.gpuIds.includes(uuid))) {
