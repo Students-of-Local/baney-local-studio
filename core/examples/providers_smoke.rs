@@ -877,7 +877,8 @@ fn synthetic(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Result<(
 
     stub_call(port, "POST", "/stub/quota-error")?;
     studio.load_providers();
-    harness.pump_until("a failing quota leaves Synthetic ready with no quota line", |view| synthetic_ready(view, None))?;
+    harness
+        .pump_until("a failing quota leaves Synthetic ready with no quota line", |view| synthetic_ready(view, None))?;
     let deadline = Instant::now() + STEP_TIMEOUT;
     while stub_call(port, "GET", "/stub/quota-failures")? == "0" {
         ensure!(Instant::now() < deadline, "Synthetic never asked for its quota again");

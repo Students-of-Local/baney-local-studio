@@ -842,8 +842,10 @@ fn synthetic_entry(existing: Option<&Value>, base_url: &str, models: &[ProviderM
 fn quota_line(value: &Value) -> Option<String> {
     let number = |object: &Value, key: &str| object.get(key).and_then(Value::as_f64);
     let mut parts = Vec::new();
-    let rolling = value.get("rollingFiveHourLimit").and_then(|limit| Some((number(limit, "remaining")?, number(limit, "max")?)));
-    let subscription = value.get("subscription").and_then(|limit| Some((number(limit, "limit")?, number(limit, "requests")?)));
+    let rolling =
+        value.get("rollingFiveHourLimit").and_then(|limit| Some((number(limit, "remaining")?, number(limit, "max")?)));
+    let subscription =
+        value.get("subscription").and_then(|limit| Some((number(limit, "limit")?, number(limit, "requests")?)));
     if let Some((left, max)) = rolling {
         parts.push(format!("{left:.0} of {max:.0} requests left in the rolling 5 hours"));
     } else if let Some((limit, used)) = subscription {
