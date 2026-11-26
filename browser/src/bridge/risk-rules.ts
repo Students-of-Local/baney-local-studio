@@ -286,6 +286,10 @@ export const SENSITIVE_DOMAINS: Readonly<Record<Exclude<SiteClass, "account-page
 	mail: [
 		"mail.google.com",
 		"inbox.google.com",
+		// Each sends its visitor on to the mail client above.
+		"gmail.com",
+		"outlook.com",
+		"hotmail.com",
 		"outlook.live.com",
 		"outlook.office.com",
 		"outlook.office365.com",

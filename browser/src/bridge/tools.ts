@@ -112,7 +112,7 @@ import {
 	readChars,
 	sliceInfo,
 } from "./paging.js";
-import { getAllowedHosts, getPermissionMode } from "./permissions.js";
+import { getAllowedHosts, getPermissionMode, hostOf } from "./permissions.js";
 import { ERR, type ModelTier } from "./protocol.js";
 import { cleanRef, lookUpName, nodeLine, REF_RE } from "./ref-lookup.js";
 import { entersText, type HardLimit, limitWhy } from "./risk-rules.js";
@@ -520,6 +520,31 @@ async function refuseGuardedLanding<T extends { url: string }>(
 const GUARDED_LANDING =
 	"That page led to this computer's Local Studio approval address, which an agent never opens. The tab was reset to a blank page.";
 
+/**
+ * A redirect can land the tab on another site than the one checked (gmail.com on mail.google.com, an allowed site on
+ * one the person never allowed). The agent reads that site now, so it gets the check a navigation gets before anything
+ * on it is returned, and a no blanks the tab, as a download's redirect is refused (files.ts). `checked` holds the hosts
+ * this call already checked, so one answer covers the landing and the page after its settle.
+ */
+async function refuseUncheckedLanding<T extends { url: string }>(
+	ctx: HandlerContext,
+	tabId: number,
+	summary: T,
+	checked: Set<string>,
+): Promise<T> {
+	const landed = await refuseGuardedLanding(ctx, tabId, summary);
+	const host = /^https?:/i.test(landed.url) ? hostOf(landed.url) : "";
+	if (!host || checked.has(host)) return landed;
+	try {
+		await ctx.checkUrl(landed.url);
+	} catch (err) {
+		await chrome.tabs.update(tabId, { url: "about:blank" }).catch(() => undefined);
+		throw err;
+	}
+	checked.add(host);
+	return landed;
+}
+
 /** How long after a navigation starts a late redirect is still caught. */
 const GUARD_WATCH_MS = 120000;
 
@@ -865,7 +890,8 @@ export const handlers: Record<string, Handler> = {
 		const url = str(params, "url");
 		if (url) await ctx.checkUrl(url);
 		const { tab, ready, note } = await openCapturedTab(ctx, url, 20000, true);
-		return refuseGuardedLanding(ctx, tab.id!, { ...(await tabSummary(tab.id!, !ready)), ...(note ? { note } : {}) });
+		const summary = { ...(await tabSummary(tab.id!, !ready)), ...(note ? { note } : {}) };
+		return refuseUncheckedLanding(ctx, tab.id!, summary, new Set(url ? [hostOf(url)] : []));
 	},
 
 	"tabs.close": async (ctx, params) => {
@@ -937,6 +963,8 @@ export const handlers: Record<string, Handler> = {
 		const url = requireStr(params, "url");
 		const history = url === "back" || url === "forward";
 		if (!history) await ctx.checkUrl(url);
+		/** The hosts checked for this call: the landing is checked again only when a redirect took it elsewhere. */
+		const checked = new Set(history ? [] : [hostOf(url)]);
 		// The first navigate of a session opens its tab (blank, with capture on) and loads the URL into it.
 		if (!history && num(params, "tabId") === undefined && !(await ctx.session.currentTab())) {
 			const since = await settleStart();
@@ -950,8 +978,8 @@ export const handlers: Record<string, Handler> = {
 			const tabId = tab.id as number;
 			// The new tab is the page itself, not one the page opened.
 			const tabs = [...was, tabId];
-			// The approval page is blanked before anything is run in it.
-			const landed = await refuseGuardedLanding(ctx, tabId, await tabSummary(tabId, !ready));
+			// The approval page is blanked before anything is run in it, and a site the redirect led to is checked.
+			const landed = await refuseUncheckedLanding(ctx, tabId, await tabSummary(tabId, !ready), checked);
 			if (!ready) return { ...landed, ...(note ? { note } : {}), changes: { page: STILL_LOADING } };
 			// openCapturedTab turned Network on before the URL loaded. When capture could not start (note), the
 			// debugger may not have either: then the requests were not counted, and the short loaded window is not used.
@@ -964,11 +992,12 @@ export const handlers: Record<string, Handler> = {
 					page: committed ? NEW_PAGE : NOT_LOADED,
 				}),
 			});
-			return refuseGuardedLanding(ctx, tabId, {
-				...(await tabSummary(tabId)),
-				...settled,
-				...(note ? { note } : {}),
-			});
+			return refuseUncheckedLanding(
+				ctx,
+				tabId,
+				{ ...(await tabSummary(tabId)), ...settled, ...(note ? { note } : {}) },
+				checked,
+			);
 		}
 		const tabId = await resolveTab(ctx, params, false);
 		ctx.mark?.("resolve");
@@ -976,6 +1005,8 @@ export const handlers: Record<string, Handler> = {
 		// A full load is a new document: the report says so without two looks. Only back, forward
 		// and a jump within the page (a new hash) can keep the document, so only they are compared.
 		const from = (await chrome.tabs.get(tabId).catch(() => undefined))?.url ?? "";
+		// Back and forward check where they land against where the tab was: back from a refused landing is refused again.
+		if (history && /^https?:/i.test(from)) checked.add(hostOf(from));
 		const samePage = history || sameDocument(url, from);
 		const before = samePage ? await changesBefore(ctx, tabId) : undefined;
 		// A URL that loads no document (a 204, a download) commits nothing and leaves the page as it was.
@@ -997,7 +1028,7 @@ export const handlers: Record<string, Handler> = {
 		// Content a script draws after the load (a fetch, a skeleton) is there before the agent reads.
 		// The approval page is blanked before anything is run in it.
 		ctx.mark?.("loaded");
-		const landed = await refuseGuardedLanding(ctx, tabId, await tabSummary(tabId, timedOut));
+		const landed = await refuseUncheckedLanding(ctx, tabId, await tabSummary(tabId, timedOut), checked);
 		ctx.mark?.("landed");
 		if (timedOut) return { ...landed, changes: { page: STILL_LOADING } };
 		const page = committed ? NEW_PAGE : NOT_LOADED;
@@ -1016,7 +1047,7 @@ export const handlers: Record<string, Handler> = {
 		);
 		const summary = await tabSummary(tabId);
 		ctx.mark?.("summary");
-		return refuseGuardedLanding(ctx, tabId, { ...summary, ...settled });
+		return refuseUncheckedLanding(ctx, tabId, { ...summary, ...settled }, checked);
 	},
 
 	screenshot: async (ctx, params) => {

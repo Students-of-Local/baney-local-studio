@@ -106,6 +106,94 @@ test("a frontier model's sensitive site is put to the person, and a no says how 
 	assert.match(refused.error.message, /Not allowed to open mail\.google\.com\. The user can allow it in the Local Studio side panel/);
 });
 
+/** The bridge, with tabs that follow `redirects` when they load a URL, as a site's own redirect does. */
+async function redirectingBridge(redirects) {
+	const fake = installFakeChrome();
+	const native = await import(`../src/bridge/native.ts?ctx=${Math.random()}`);
+	const realSetTimeout = globalThis.setTimeout;
+	// Left in place: the guard's two-minute commit watcher must not keep the test process alive.
+	globalThis.setTimeout = (fn, ms, ...args) => {
+		const t = realSetTimeout(fn, ms, ...args);
+		if (ms >= 10000) t.unref();
+		return t;
+	};
+	native.startBridge();
+	const update = chrome.tabs.update;
+	chrome.tabs.update = async (id, p) => {
+		const to = p.url && p.url !== "about:blank" ? (redirects[p.url] ?? p.url) : undefined;
+		const tab = await update(id, to ? { ...p, url: to } : p);
+		const nav = chrome.webNavigation;
+		if (to)
+			realSetTimeout(() => {
+				for (const fn of [...nav.onCommitted.listeners]) fn({ tabId: id, frameId: 0, url: to });
+				for (const fn of [...nav.onDOMContentLoaded.listeners]) fn({ tabId: id, frameId: 0, url: to });
+			}, 5);
+		return tab;
+	};
+	const port = fake.ports[0];
+	const sent = async (is) => {
+		for (let i = 0; i < 2000; i++) {
+			const found = port.sent.find(is);
+			if (found) return found;
+			await new Promise((r) => realSetTimeout(r, 5));
+		}
+		throw new Error("never sent");
+	};
+	let nextId = 100;
+	/** Send a request; `answer` gets each site question in turn and says what the person decides. */
+	const request = async (method, params, answer = () => "deny") => {
+		const id = nextId++;
+		port.deliver({ type: "request", clientId: "c1", id, method, params });
+		const hosts = [];
+		for (let i = 0; i < 2000; i++) {
+			const reply = port.sent.find((m) => m.type === "response" && m.id === id);
+			if (reply) return { reply, hosts };
+			const q = port.sent.find((m) => m.event === "permission_request" && !m.seen);
+			if (q) {
+				q.seen = true;
+				hosts.push(q.data.host);
+				await recordDecision(q.data.requestId, answer(q.data.host));
+			}
+			await new Promise((r) => realSetTimeout(r, 5));
+		}
+		throw new Error(`no reply to ${method}`);
+	};
+	port.deliver({ type: "client_connected", clientId: "c1", client: { name: "claude", session: "redirect", tier: "frontier" } });
+	return { fake, port, sent, request };
+}
+
+test("first-F1, sol-F3: a site a redirect lands on is asked about before any of it is read, and a no blanks the tab", async () => {
+	const redirects = {
+		"https://short.example/m": "https://mail.google.com/mail/u/0/",
+		"https://news.example.com/go": "https://other.example.net/landing",
+	};
+	const { request } = await redirectingBridge(redirects);
+	assert.equal(await isUrlAllowed("https://gmail.com/", "frontier"), false, "gmail.com is mail");
+	assert.equal(await isUrlAllowed("https://outlook.com/", "frontier"), false, "outlook.com is mail");
+	assert.equal(await isUrlAllowed("https://www.hotmail.com/", "frontier"), false, "hotmail.com is mail");
+	// Auto, a frontier model: the short link opens without a question, but the mail it leads to asks.
+	for (const method of ["navigate", "tabs.create"]) {
+		const { reply, hosts } = await request(method, { url: "https://short.example/m" });
+		assert.deepEqual(hosts, ["mail.google.com"], `${method}: the landing was not put to the person`);
+		assert.equal(reply.result, undefined, `${method} returned the mail page: ${JSON.stringify(reply.result)}`);
+		assert.equal(reply.error?.code, "permission_denied");
+		const tabs = await chrome.tabs.query({});
+		assert.ok(!tabs.some((t) => t.url.includes("mail.google.com")), `${method} left the mail page open`);
+	}
+	// Manual: an allowed site that sends the tab on to one the person never allowed asks for that one, and a yes
+	// answers both the landing and the page after its settle.
+	await setPermissionMode("manual");
+	await allowHost("news.example.com");
+	const { reply, hosts } = await request("navigate", { url: "https://news.example.com/go" }, () => "allow_once");
+	assert.deepEqual(hosts, ["other.example.net"]);
+	assert.equal(reply.error, undefined, JSON.stringify(reply.error));
+	assert.equal(reply.result.url, "https://other.example.net/landing");
+	// A site with no redirect asks nothing more.
+	const plain = await request("navigate", { url: "https://news.example.com/plain" });
+	assert.deepEqual(plain.hosts, []);
+	assert.equal(plain.reply.error, undefined, JSON.stringify(plain.reply.error));
+});
+
 test("an older CLI says nothing about remote, but its remote sessions are told by the name serve gives them", () => {
 	for (const [client, remote] of [
 		[{ name: "claude", remote: true }, true],
