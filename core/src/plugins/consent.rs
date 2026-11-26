@@ -105,9 +105,41 @@ pub fn offer_install(root: &Path, arg: &str, request: String) -> Result<Offer, S
     offer_source(root, &source, request)
 }
 
-pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Offer, String> {
+pub fn offer_update(root: &Path, id: &str, channel: &str, request: String) -> Result<Offer, String> {
     let catalog = Catalog::bundled()?;
-    let staged = stage(root, source, &catalog).map_err(|errors| errors.join("; "))?;
+    match catalog.replacing(id) {
+        Some(entry) => offer_replacement(root, id, &entry.id, &catalog, request),
+        None => offer_staged(root, &super::hub::follow(root, id, channel)?, &catalog, request, None),
+    }
+}
+
+pub fn offer_replacement(
+    root: &Path,
+    old: &str,
+    new: &str,
+    catalog: &Catalog,
+    request: String,
+) -> Result<Offer, String> {
+    if let Ok(plugin) = load(&root.join(new)) {
+        let retired = super::hub::retire(root, old, &plugin)?;
+        return Ok(Offer::Installed(format!("{} {} was already installed; {retired}", plugin.name, plugin.version)));
+    }
+    offer_staged(root, &Source::Catalog(new.to_string()), catalog, request, Some(old))
+}
+
+pub fn offer_source(root: &Path, source: &Source, request: String) -> Result<Offer, String> {
+    offer_staged(root, source, &Catalog::bundled()?, request, None)
+}
+
+fn offer_staged(
+    root: &Path,
+    source: &Source,
+    catalog: &Catalog,
+    request: String,
+    replaces: Option<&str>,
+) -> Result<Offer, String> {
+    let mut staged = stage(root, source, catalog).map_err(|errors| errors.join("; "))?;
+    staged.replaces = replaces.map(str::to_string);
     let plugin = staged.plugin();
     let old = load(&root.join(&plugin.id)).ok();
     let asked = asked(plugin, staged.tree(), staged.origin(), &Grants::load(root)?, old.as_ref());

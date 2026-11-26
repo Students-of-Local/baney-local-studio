@@ -3264,8 +3264,7 @@ impl Actor {
         let Some(root) = self.plugins_root(&request) else { return };
         let offering = self.offering();
         tokio::task::spawn_blocking(move || {
-            let offer = plugins::hub::follow(&root, &id, crate::CHANNEL)
-                .and_then(|source| plugins::offer_source(&root, &source, request.clone()));
+            let offer = plugins::offer_update(&root, &id, crate::CHANNEL, request.clone());
             offering(request, offer);
         });
     }
