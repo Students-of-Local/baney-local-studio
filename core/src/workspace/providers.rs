@@ -839,11 +839,8 @@ fn synthetic_key(auth: &Map<String, Value>) -> Option<String> {
 }
 
 fn synthetic_owned(entry: &Value, base_url: &str) -> bool {
-    match text(entry, "apiKey") {
-        Some(SYNTHETIC_ENV) => true,
-        Some("none") => text(entry, "baseUrl").map(|url| url.trim_end_matches('/')) == Some(base_url),
-        _ => false,
-    }
+    matches!(text(entry, "apiKey"), Some(SYNTHETIC_ENV | "none"))
+        && text(entry, "baseUrl").map(|url| url.trim_end_matches('/')) == Some(base_url)
 }
 
 fn synthetic_entry(existing: Option<&Value>, base_url: &str, models: &[ProviderModel]) -> Value {

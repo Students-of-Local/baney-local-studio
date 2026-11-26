@@ -905,21 +905,23 @@ fn synthetic(harness: &mut Harness, agent: &Path, port: u16, project: &str) -> a
     })?;
     ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "Synthetic entry left in models.json");
 
-    let handwritten = json!({
-        "baseUrl": format!("http://127.0.0.1:{port}/proxy/v1"),
-        "api": "openai-completions",
-        "apiKey": "!cat /nonexistent/synthetic-key",
-        "models": [{ "id": "mine" }]
-    });
-    seed_synthetic(&models_path, &handwritten)?;
-    for key in [Some(KEY), None] {
-        let request = harness.request();
-        studio.set_provider_key(request.clone(), "synthetic".to_string(), key.map(str::to_string));
-        harness.answer("Synthetic key changed beside a hand-written entry", &request)?;
-        let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
-        ensure!(entry == handwritten, "the hand-written Synthetic entry was rewritten: {entry}");
+    for api_key in ["!cat /nonexistent/synthetic-key", "SYNTHETIC_API_KEY"] {
+        let handwritten = json!({
+            "baseUrl": format!("http://127.0.0.1:{port}/proxy/v1"),
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{ "id": "mine" }]
+        });
+        seed_synthetic(&models_path, &handwritten)?;
+        for key in [Some(KEY), None] {
+            let request = harness.request();
+            studio.set_provider_key(request.clone(), "synthetic".to_string(), key.map(str::to_string));
+            harness.answer("Synthetic key changed beside a hand-written entry", &request)?;
+            let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
+            ensure!(entry == handwritten, "the hand-written Synthetic entry was rewritten: {entry}");
+        }
     }
-    println!("ok   a hand-written synthetic entry stays as written with and without a key");
+    println!("ok   hand-written synthetic entries (a key command, the SYNTHETIC_API_KEY reference) stay as written with and without a key");
 
     let workaround = json!({
         "name": "Synthetic",
