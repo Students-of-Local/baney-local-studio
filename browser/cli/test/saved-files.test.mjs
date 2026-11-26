@@ -1,9 +1,9 @@
 // Where the files tool keeps a session's files, and how it opens a local file for an upload (D38).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { checkUploadPath } from "../src/file-rules.ts";
 import { filesRoot, isTextMime, MAX_ALL_BYTES, MAX_SAVED_BYTES, MAX_SESSION_BYTES, MAX_SESSION_FILES, mimeFor, privateDirsHere, SavedFiles, sanitizeFileName, sessionFolder, sniffImage, UploadReader } from "../src/saved-files.ts";
@@ -244,7 +244,20 @@ test("every session together has a cap, and a session's files go with it", () =>
 		assert.equal(existsSync(sessions[1].dir), false);
 		const blocked = sessions[2].renamedTo("research");
 		assert.equal(existsSync(sessions[2].dir), true);
-		assert.deepEqual(blocked.list().map((f) => f.name), ["kept.bin"]);
+		assert.equal(blocked.dir, sessions[2].dir, "the blocked session keeps its own folder, not the one it was refused");
+		assert.deepEqual(moved.list().map((f) => f.name), ["kept.bin"], "the other session's files are untouched");
+		// A move the file system refuses leaves the session on its own folder too.
+		const fresh = new SavedFiles("s7");
+		save(fresh, "mine.bin", "x");
+		const mode = statSync(dirname(fresh.dir)).mode & 0o777;
+		chmodSync(dirname(fresh.dir), 0o500);
+		try {
+			const stuck = fresh.renamedTo("elsewhere");
+			assert.equal(stuck.dir, fresh.dir);
+			assert.deepEqual(stuck.list().map((f) => f.name), ["mine.bin"]);
+		} finally {
+			chmodSync(dirname(fresh.dir), mode);
+		}
 	}));
 
 test("the same file named twice in one upload is read whole both times", () =>

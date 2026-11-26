@@ -256,15 +256,20 @@ export class SavedFiles {
 		rmSync(this.dir, { recursive: true, force: true });
 	}
 
-	/** The same files under the session's new name. A folder already there is left alone, and so is this one. */
+	/**
+	 * The same files under the session's new name. A folder already there under that name is another session's:
+	 * it is left alone, and so is this one, which this session keeps, as it does when the move fails.
+	 */
 	renamedTo(session: string): SavedFiles {
 		const next = new SavedFiles(session);
+		if (next.dir === this.dir || existsSync(next.dir)) return this;
+		if (!existsSync(this.dir)) return next;
 		try {
-			if (next.dir !== this.dir && existsSync(this.dir) && !existsSync(next.dir)) renameSync(this.dir, next.dir);
+			renameSync(this.dir, next.dir);
+			return next;
 		} catch {
-			// The files stay under the old name; the new folder starts empty.
+			return this;
 		}
-		return next;
 	}
 
 	/**
