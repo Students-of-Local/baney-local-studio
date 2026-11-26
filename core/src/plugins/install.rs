@@ -681,7 +681,7 @@ impl Staged {
         })?;
         let consent = grants.consent(&plugin);
         drop(lock);
-        let note = match &self.replaces {
+        let note = match self.replaces.as_ref().filter(|old| std::fs::symlink_metadata(root.join(old)).is_ok()) {
             Some(old) => {
                 let retired =
                     super::hub::retire(root, old, &plugin).unwrap_or_else(|error| format!("{old} stays: {error}"));

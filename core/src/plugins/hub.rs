@@ -306,7 +306,7 @@ fn catalog_update(
     let asks = peeked
         .capabilities
         .iter()
-        .filter(|name| Capability::parse(name).is_none_or(|capability| !plugin.asks(capability)))
+        .filter(|name| replacing.is_some() || Capability::parse(name).is_none_or(|capability| !plugin.asks(capability)))
         .cloned()
         .collect();
     Some(Available {

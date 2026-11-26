@@ -35,9 +35,9 @@ description = "Work in Chromium tabs in the background through the Local Studio 
 capabilities = []
 replaces = ["tychicus-browser"]
 git = "https://github.com/Students-of-Local/baney-local-studio"
-rev = "600e9ba479cc2a0c5678e580b1449c51c0f63bf9"
+rev = "398a92135342ed3eed766b22c6d2179a184a24bf"
 subdir = "browser/plugins/browser-use"
-tree = "sha256:0fc373c9595f7d3f15decff3287eb8ab8efd3d500549239465d68a47d04f742c"
+tree = "sha256:b63d7b0a54710e1d139a68d8894c1f5615ba771f2ed972aa5ecdbf057d4a7efe"
 
 [[plugin]]
 id = "computer-use"
@@ -46,6 +46,6 @@ description = "Read and operate desktop apps through accessibility APIs, with th
 capabilities = []
 replaces = ["tychicus-computer"]
 git = "https://github.com/Students-of-Local/baney-local-studio"
-rev = "600e9ba479cc2a0c5678e580b1449c51c0f63bf9"
+rev = "398a92135342ed3eed766b22c6d2179a184a24bf"
 subdir = "browser/plugins/computer-use"
-tree = "sha256:3df0cdd7e47ac9c873e6e494c278a955ff1f658ede3f59e8d17e68e200a04469"
+tree = "sha256:a0c79c7002a85c10e32fdb283ab1a7a401a4b130546aa37f918883daa00d5039"

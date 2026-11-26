@@ -149,8 +149,8 @@ fn catalog(installed: bool) -> Vec<CatalogPlugin> {
         ("gantrel", "Gantrel", "Design 3D printable parts with a local model, then slice, upload and watch them on your printers", "5cdd089", None),
         ("hildegard", "Hildegard", "Make images, video, speech, designed voices and cleaned audio on your own GPU, each one checked before you see it", "504d949", Some("0.1.17")),
         ("smoothstone", "Smoothstone", "Make 3D printable parts with the stone CLI and its tested parametric recipes", "715e0ac", None),
-        ("browser-use", "Local Studio browser use", "Work in Chromium tabs in the background through the Local Studio extension", "600e9ba", None),
-        ("computer-use", "Local Studio computer use", "Read and operate desktop apps through accessibility APIs, with the Local Studio extension's helper", "600e9ba", None),
+        ("browser-use", "Local Studio browser use", "Work in Chromium tabs in the background through the Local Studio extension", "398a921", None),
+        ("computer-use", "Local Studio computer use", "Read and operate desktop apps through accessibility APIs, with the Local Studio extension's helper", "398a921", None),
     ]
     .into_iter()
     .map(|(id, name, description, revision, version)| CatalogPlugin {
@@ -158,7 +158,10 @@ fn catalog(installed: bool) -> Vec<CatalogPlugin> {
         name: name.to_string(),
         description: description.to_string(),
         grants: Vec::new(),
-        source: format!("https://github.com/baney75/{id}"),
+        source: match id {
+            "browser-use" | "computer-use" => "https://github.com/Students-of-Local/baney-local-studio".to_string(),
+            _ => format!("https://github.com/baney75/{id}"),
+        },
         revision: revision.to_string(),
         local_only: false,
         installed: if installed { version.map(str::to_string) } else { None },
