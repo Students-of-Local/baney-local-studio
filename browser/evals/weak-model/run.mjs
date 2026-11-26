@@ -141,7 +141,7 @@ async function killCopy(pid) {
 function mcpConfig(session, kind, stub) {
 	const config = {
 		mcpServers: {
-			localStudio: {
+			"local-studio": {
 				command: process.execPath,
 				args: [cli, "mcp", "--session", session, "--profile", profile || "full"],
 				env: { ...serverEnv, PATH: process.env.PATH ?? "", LOCAL_STUDIO_BROWSER_CLIENT_NAME: "weak-model", LOCAL_STUDIO_COMPUTER_BIN: spacesBin(kind, { allowComputer, wrapper: helper && wrapper, stub, none: join(scratch, "no-computer-helper") }) },

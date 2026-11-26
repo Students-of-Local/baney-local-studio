@@ -50,7 +50,7 @@ export class Transcript {
 
 	push(e) {
 		if (e.type === "system" && e.subtype === "init") {
-			this.mcpStatus = e.mcp_servers?.find((s) => s.name === "local-studio-browser")?.status;
+			this.mcpStatus = e.mcp_servers?.find((s) => s.name === "local-studio")?.status;
 			this.toolCount = e.tools?.filter((t) => t.startsWith("mcp__local-studio__")).length;
 		}
 		if (e.type === "system" && e.subtype === "compact_boundary")

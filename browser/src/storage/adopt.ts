@@ -41,6 +41,18 @@ function currentApi(value: unknown): unknown {
 	return { ...(value as object), model: { ...model, api: COPILOT_API } };
 }
 
+/**
+ * A thread an earlier build marked private (`tabkyraPrivate` and the like) stays private: the bridge and the local mirror
+ * read only `localStudioPrivate`, so a mark left under the old name would make the thread public.
+ */
+function keepPrivate(value: unknown): unknown {
+	if (value === null || typeof value !== "object") return value;
+	const record = value as Record<string, unknown>;
+	if (record.localStudioPrivate === true) return value;
+	const earlier = Object.keys(record).some((key) => /^[a-z]+Private$/.test(key) && record[key] === true);
+	return earlier ? { ...record, localStudioPrivate: true } : value;
+}
+
 /** Copy every record `to` doesn't hold yet. True once all of them are there. */
 export async function moveRecords(
 	from: EarlierStores,
@@ -51,7 +63,7 @@ export async function moveRecords(
 	for (const store of stores) {
 		for (const key of await from.keys(store)) {
 			if (await to.has(store, key)) continue;
-			await to.set(store, key, currentApi(await from.get(store, key)));
+			await to.set(store, key, keepPrivate(currentApi(await from.get(store, key))));
 			whole = (await to.has(store, key)) && whole;
 		}
 	}
