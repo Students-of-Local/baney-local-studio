@@ -54,6 +54,7 @@ impl Sparkline {
         if self.values.borrow().as_slice() != values {
             self.values.replace(values.to_vec());
         }
+        self.area.set_visible(!values.is_empty());
         self.area.queue_draw();
     }
 }
@@ -316,6 +317,7 @@ impl Heatmap {
         format: fn(f64) -> String,
         label: &str,
     ) {
+        self.root.set_visible(source.is_some());
         self.heat.borrow_mut().load(source, format);
         let caption = self.heat.borrow().caption();
         self.caption.set_label(&caption);

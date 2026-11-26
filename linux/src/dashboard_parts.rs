@@ -81,7 +81,7 @@ impl FigureView {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let title = label(title, &["dim-label", "ls-dash-label"]);
         root.append(&title);
-        let value = label("—", &["ls-dash-value"]);
+        let value = label("", &["ls-dash-value"]);
         value.set_ellipsize(pango::EllipsizeMode::Middle);
         let unit = label("", &["dim-label", "ls-dash-label"]);
         value.set_valign(gtk::Align::BaselineFill);
@@ -106,7 +106,8 @@ impl FigureView {
     }
 
     pub fn set(&self, figure: &Figure) {
-        self.value.set_label(figure.value.as_deref().unwrap_or("—"));
+        self.root.set_visible(figure.value.is_some());
+        self.value.set_label(figure.value.as_deref().unwrap_or_default());
         self.unit.set_label(&figure.unit);
         self.unit.set_visible(!figure.unit.is_empty());
         self.hint.set_label(figure.hint.as_deref().unwrap_or(" "));
@@ -140,7 +141,7 @@ pub struct Hero {
 impl Hero {
     pub fn build(title: &str, unit: &str) -> Self {
         let title = label(title, &["dim-label", "ls-dash-label"]);
-        let value = label("—", &["ls-dash-hero"]);
+        let value = label("", &["ls-dash-hero"]);
         value.set_ellipsize(pango::EllipsizeMode::End);
         let unit = label(unit, &["dim-label", "ls-dash-label"]);
         value.set_valign(gtk::Align::BaselineFill);
@@ -160,9 +161,10 @@ impl Hero {
 
     pub fn set(&self, title: &str, value: Option<&str>, unit: &str, hint: &str) {
         self.title.set_label(title);
-        self.value.set_label(value.unwrap_or("—"));
+        self.value.set_label(value.unwrap_or_default());
+        self.value.set_visible(value.is_some());
         self.unit.set_label(unit);
-        self.unit.set_visible(!unit.is_empty());
+        self.unit.set_visible(value.is_some() && !unit.is_empty());
         self.hint.set_label(if hint.is_empty() { " " } else { hint });
     }
 }
@@ -173,6 +175,7 @@ pub fn figure_grid(hero: &Hero, chart_title: &gtk::Label, sparkline: &Sparkline,
     chart.set_margin_top(44);
     chart.append(chart_title);
     chart.append(&sparkline.area);
+    sparkline.area.bind_property("visible", &chart, "visible").sync_create().build();
     grid.attach(&hero.root, 0, 0, 1, 1);
     grid.attach(&chart, 1, 0, 2, 1);
     for (row, figures) in (1..).zip(rows.iter()) {
@@ -190,7 +193,7 @@ fn summary_row(title: &str) -> (gtk::Box, gtk::Label) {
     row.set_margin_bottom(8);
     let name = label(title, &["dim-label", "ls-dash-label"]);
     name.set_hexpand(true);
-    let value = label("—", &["ls-dash-label", "ls-dash-num"]);
+    let value = label("", &["ls-dash-label", "ls-dash-num"]);
     value.set_xalign(1.0);
     value.set_ellipsize(pango::EllipsizeMode::End);
     row.append(&name);
@@ -212,7 +215,7 @@ pub struct TokenSummary {
 impl TokenSummary {
     pub fn build(extra: &[&str]) -> Self {
         let since = label("Tokens", &["dim-label", "ls-dash-label"]);
-        let total = label("—", &["ls-dash-total"]);
+        let total = label("", &["ls-dash-total"]);
         total.set_ellipsize(pango::EllipsizeMode::End);
         let split = label(" ", &["dim-label", "ls-dash-label"]);
         split.set_wrap(true);
@@ -248,39 +251,30 @@ impl TokenSummary {
 
     pub fn set(&self, tokens: Option<&TokenHistory>, empty: &str) {
         self.since.set_label(&since_text(tokens));
-        self.total.set_label(&tokens.map_or_else(|| "—".to_string(), |tokens| numbers::compact(tokens.total)));
+        self.root.set_visible(tokens.is_some());
+        self.total.set_label(&tokens.map_or_else(String::new, |tokens| numbers::compact(tokens.total)));
         self.split.set_label(&match tokens {
-            None => " ".to_string(),
+            None => String::new(),
             Some(tokens) if tokens.total == 0 => empty.to_string(),
             Some(tokens) => {
                 format!("{} read, {} written", numbers::compact(tokens.read), numbers::compact(tokens.written))
             }
         });
-        self.week.set_label(&tokens.map_or_else(|| "—".to_string(), |tokens| numbers::compact(tokens.last_week)));
-        self.busiest.set_label(&tokens.map_or_else(
-            || "—".to_string(),
-            |tokens| {
-                tokens.busiest_day.as_deref().and_then(numbers::parse_day).map_or_else(
-                    || "—".to_string(),
-                    |day| format!("{}, {}", numbers::compact(tokens.busiest_tokens), numbers::day(day, false)),
-                )
-            },
-        ));
-        self.active.set_label(&tokens.map_or_else(
-            || "—".to_string(),
-            |tokens| {
-                format!(
-                    "{} of {}",
-                    numbers::count(tokens.active_days.into()),
-                    numbers::count(tokens.tracked_days.into())
-                )
-            },
-        ));
+        self.week.set_label(&tokens.map_or_else(String::new, |tokens| numbers::compact(tokens.last_week)));
+        self.busiest.set_label(&tokens.map_or_else(String::new, |tokens| {
+            tokens.busiest_day.as_deref().and_then(numbers::parse_day).map_or_else(
+                || "None yet".to_string(),
+                |day| format!("{}, {}", numbers::compact(tokens.busiest_tokens), numbers::day(day, false)),
+            )
+        }));
+        self.active.set_label(&tokens.map_or_else(String::new, |tokens| {
+            format!("{} of {}", numbers::count(tokens.active_days.into()), numbers::count(tokens.tracked_days.into()))
+        }));
     }
 
     pub fn set_extra(&self, index: usize, value: Option<&str>) {
         if let Some(label) = self.extra.get(index) {
-            label.set_label(value.unwrap_or("—"));
+            label.set_label(value.unwrap_or("None yet"));
         }
     }
 }
@@ -297,6 +291,7 @@ pub fn columns(left: &impl IsA<gtk::Widget>, summary: &TokenSummary) -> gtk::Box
     divider.set_margin_start(44);
     divider.set_margin_end(44);
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    summary.root.bind_property("visible", &divider, "visible").sync_create().build();
     top.append(left);
     top.append(&divider);
     top.append(&summary.root);
