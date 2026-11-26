@@ -1,0 +1,317 @@
+// What each permission mode lets an agent do (docs/decisions.md, D67), beyond the store and its migration
+// (permission-modes.test.mjs): a remote session is never in Yolo, and every step in the Runs log carries its mode. The
+// bridge itself is driven in dialog-preset.test.mjs.
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { entersText, textLimit } from "../src/bridge/risk-rules.ts";
+import { allowHost, getPermissionMode, innerUrl, isGuardedUrl, isOwnExtensionUrl, isRemoteClient, isUrlAllowed, LEGACY_MODE_KEY, MODE_KEY, modeFor, peekPermissionMode, recordDecision, setPermissionMode } from "../src/bridge/permissions.ts";
+import { addStep } from "../src/runs/log.ts";
+import { installFakeChrome } from "./fake-chrome.mjs";
+
+const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+const read = (p) => readFileSync(join(repo, p), "utf8");
+
+function fresh() {
+	installFakeChrome();
+	chrome.runtime.id = "abcdefghijklmnopabcdefghijklmnop";
+}
+
+test("a remote session is never in Yolo: it gets Auto's rule", async () => {
+	fresh();
+	assert.deepEqual(
+		["manual", "auto", "yolo"].map((m) => [modeFor(m, false), modeFor(m, true)]),
+		[["manual", "manual"], ["auto", "auto"], ["yolo", "auto"]],
+	);
+	await setPermissionMode("yolo");
+	assert.equal(await isUrlAllowed("https://news.example.com/", "unknown", false), true);
+	assert.equal(await isUrlAllowed("https://news.example.com/", "unknown", true), false, "remote, unknown model: asks");
+	assert.equal(await isUrlAllowed("https://news.example.com/", "frontier", true), true, "remote, frontier: Auto's rule");
+});
+
+test("Auto: a frontier model opens an ordinary site, but mail, a bank or a password manager asks until allowed", async () => {
+	fresh();
+	await setPermissionMode("auto");
+	assert.equal(await isUrlAllowed("https://news.example.com/today", "frontier"), true);
+	for (const tier of ["frontier", "unknown"]) assert.equal(await isUrlAllowed("about:blank", tier), true);
+	const sensitive = ["https://mail.google.com/mail/u/0", "https://www.chase.com/", "https://vault.bitwarden.com/", "https://console.aws.amazon.com/", "https://github.com/settings/profile", "view-source:https://mail.google.com/", "blob:https://mail.google.com/1", "view-source:blob:https://mail.google.com/1"];
+	for (const url of sensitive) assert.equal(await isUrlAllowed(url, "frontier"), false, url);
+	await allowHost("chase.com");
+	assert.equal(await isUrlAllowed("https://secure.chase.com/web/auth", "frontier"), true, "the person allowed it");
+	await setPermissionMode("yolo");
+	assert.equal(await isUrlAllowed("https://mail.google.com/mail/u/0", "unknown"), true, "Yolo asks nothing");
+	assert.equal(await isUrlAllowed("https://mail.google.com/mail/u/0", "frontier", true), false, "but a remote session in Yolo has Auto's asks");
+	await setPermissionMode("manual");
+	assert.equal(await isUrlAllowed("https://news.example.com/today", "frontier"), false);
+});
+
+test("first-F2: a view-source:, blob: or filesystem: URL is checked as the address it wraps, the approval host's included", async () => {
+	fresh();
+	const hosts = ["approve.example.com", "127.0.0.1:8787"];
+	for (const url of [
+		"view-source:https://approve.example.com/authorize?client_id=x",
+		"blob:https://approve.example.com/1f0c",
+		"view-source:blob:https://approve.example.com/1f0c",
+		"VIEW-SOURCE:http://127.0.0.1:8787/authorize",
+		"filesystem:https://approve.example.com/temporary/a.html",
+	]) {
+		assert.equal(isGuardedUrl(url, hosts), true, url);
+		// page.ts runs the guard in the page as source text, so it can't lean on anything outside itself.
+		const inPage = new Function(`return (${isGuardedUrl.toString()})(${JSON.stringify(url)}, ${JSON.stringify(hosts)})`)();
+		assert.equal(inPage, true, `${url}, in the page`);
+	}
+	assert.equal(isGuardedUrl("view-source:https://news.example.com/", hosts), false);
+	assert.equal(isGuardedUrl("view-source:http://127.0.0.1:3000/", hosts), false, "another local port stays open");
+	assert.equal(innerUrl("view-source:blob:https://a.example/1"), "https://a.example/1");
+	assert.equal(innerUrl("https://a.example/view-source:x"), "https://a.example/view-source:x");
+	const own = `chrome-extension://${chrome.runtime.id}/sidepanel.html`;
+	for (const url of [`view-source:${own}`, `blob:chrome-extension://${chrome.runtime.id}/1`, `view-source:blob:chrome-extension://${chrome.runtime.id}/1`])
+		assert.equal(isOwnExtensionUrl(url), true, url);
+	await setPermissionMode("yolo");
+	assert.equal(await isUrlAllowed(`view-source:${own}`, "frontier"), false, "Local Studio's own pages, in Yolo too");
+	await setPermissionMode("manual");
+	await allowHost("news.example.com");
+	assert.equal(await isUrlAllowed("view-source:https://news.example.com/", "unknown"), true, "an allowed site's source is that site");
+	assert.equal(await isUrlAllowed("view-source:https://other.example.com/", "unknown"), false);
+});
+
+test("a frontier model's sensitive site is put to the person, and a no says how to allow it", async () => {
+	const fake = installFakeChrome();
+	const native = await import(`../src/bridge/native.ts?ctx=${Math.random()}`);
+	const realSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = (fn, ms, ...args) => {
+		const t = realSetTimeout(fn, ms, ...args);
+		if (ms >= 10000) t.unref();
+		return t;
+	};
+	native.startBridge();
+	const port = fake.ports[0];
+	port.deliver({ type: "client_connected", clientId: "c1", client: { name: "claude", session: "sensitive", tier: "frontier" } });
+	const sent = async (is) => {
+		for (let i = 0; i < 400; i++) {
+			const found = port.sent.find(is);
+			if (found) return found;
+			await new Promise((r) => realSetTimeout(r, 5));
+		}
+		throw new Error("never sent");
+	};
+	port.deliver({ type: "request", clientId: "c1", id: 2, method: "tabs.create", params: { url: "https://mail.google.com/mail/" } });
+	const asked = await sent((m) => m.event === "permission_request");
+	assert.equal(asked.data.host, "mail.google.com");
+	await recordDecision(asked.data.requestId, "deny");
+	const refused = await sent((m) => m.type === "response" && m.id === 2);
+	assert.equal(refused.error?.code, "permission_denied");
+	assert.match(refused.error.message, /Not allowed to open mail\.google\.com\. The user can allow it in the Local Studio side panel/);
+});
+
+/** The bridge, with tabs that follow `redirects` when they load a URL, as a site's own redirect does. */
+async function redirectingBridge(redirects) {
+	const fake = installFakeChrome();
+	const native = await import(`../src/bridge/native.ts?ctx=${Math.random()}`);
+	const realSetTimeout = globalThis.setTimeout;
+	// Left in place: the guard's two-minute commit watcher must not keep the test process alive.
+	globalThis.setTimeout = (fn, ms, ...args) => {
+		const t = realSetTimeout(fn, ms, ...args);
+		if (ms >= 10000) t.unref();
+		return t;
+	};
+	native.startBridge();
+	const update = chrome.tabs.update;
+	chrome.tabs.update = async (id, p) => {
+		const to = p.url && p.url !== "about:blank" ? (redirects[p.url] ?? p.url) : undefined;
+		const tab = await update(id, to ? { ...p, url: to } : p);
+		const nav = chrome.webNavigation;
+		if (to)
+			realSetTimeout(() => {
+				for (const fn of [...nav.onCommitted.listeners]) fn({ tabId: id, frameId: 0, url: to });
+				for (const fn of [...nav.onDOMContentLoaded.listeners]) fn({ tabId: id, frameId: 0, url: to });
+			}, 5);
+		return tab;
+	};
+	const port = fake.ports[0];
+	const sent = async (is) => {
+		for (let i = 0; i < 2000; i++) {
+			const found = port.sent.find(is);
+			if (found) return found;
+			await new Promise((r) => realSetTimeout(r, 5));
+		}
+		throw new Error("never sent");
+	};
+	let nextId = 100;
+	/** Send a request; `answer` gets each site question in turn and says what the person decides. */
+	const request = async (method, params, answer = () => "deny") => {
+		const id = nextId++;
+		port.deliver({ type: "request", clientId: "c1", id, method, params });
+		const hosts = [];
+		for (let i = 0; i < 2000; i++) {
+			const reply = port.sent.find((m) => m.type === "response" && m.id === id);
+			if (reply) return { reply, hosts };
+			const q = port.sent.find((m) => m.event === "permission_request" && !m.seen);
+			if (q) {
+				q.seen = true;
+				hosts.push(q.data.host);
+				await recordDecision(q.data.requestId, answer(q.data.host));
+			}
+			await new Promise((r) => realSetTimeout(r, 5));
+		}
+		throw new Error(`no reply to ${method}`);
+	};
+	port.deliver({ type: "client_connected", clientId: "c1", client: { name: "claude", session: "redirect", tier: "frontier" } });
+	return { fake, port, sent, request };
+}
+
+test("first-F1, sol-F3: a site a redirect lands on is asked about before any of it is read, and a no blanks the tab", async () => {
+	const redirects = {
+		"https://short.example/m": "https://mail.google.com/mail/u/0/",
+		"https://news.example.com/go": "https://other.example.net/landing",
+	};
+	const { request } = await redirectingBridge(redirects);
+	assert.equal(await isUrlAllowed("https://gmail.com/", "frontier"), false, "gmail.com is mail");
+	assert.equal(await isUrlAllowed("https://outlook.com/", "frontier"), false, "outlook.com is mail");
+	assert.equal(await isUrlAllowed("https://www.hotmail.com/", "frontier"), false, "hotmail.com is mail");
+	// Auto, a frontier model: the short link opens without a question, but the mail it leads to asks.
+	for (const method of ["navigate", "tabs.create"]) {
+		const { reply, hosts } = await request(method, { url: "https://short.example/m" });
+		assert.deepEqual(hosts, ["mail.google.com"], `${method}: the landing was not put to the person`);
+		assert.equal(reply.result, undefined, `${method} returned the mail page: ${JSON.stringify(reply.result)}`);
+		assert.equal(reply.error?.code, "permission_denied");
+		const tabs = await chrome.tabs.query({});
+		assert.ok(!tabs.some((t) => t.url.includes("mail.google.com")), `${method} left the mail page open`);
+	}
+	// Manual: an allowed site that sends the tab on to one the person never allowed asks for that one, and a yes
+	// answers both the landing and the page after its settle.
+	await setPermissionMode("manual");
+	await allowHost("news.example.com");
+	const { reply, hosts } = await request("navigate", { url: "https://news.example.com/go" }, () => "allow_once");
+	assert.deepEqual(hosts, ["other.example.net"]);
+	assert.equal(reply.error, undefined, JSON.stringify(reply.error));
+	assert.equal(reply.result.url, "https://other.example.net/landing");
+	// A site with no redirect asks nothing more.
+	const plain = await request("navigate", { url: "https://news.example.com/plain" });
+	assert.deepEqual(plain.hosts, []);
+	assert.equal(plain.reply.error, undefined, JSON.stringify(plain.reply.error));
+});
+
+test("second-S1: a site question nobody answers ends as permission_denied, not a timeout, and one answered after its call ended opens nothing", async () => {
+	const { port, sent } = await redirectingBridge({});
+	await setPermissionMode("manual");
+	const { handlerLimit, HANDLER_TIMEOUT_MS } = await import("../src/bridge/errors.ts");
+	const { PERMISSION_TIMEOUT_MS } = await import("../src/bridge/protocol.ts");
+	for (const method of ["navigate", "tabs.create"])
+		assert.ok(handlerLimit(method) >= 2 * PERMISSION_TIMEOUT_MS + HANDLER_TIMEOUT_MS, `${method}: ${handlerLimit(method)}`);
+	for (const method of ["edits.add", "edits.update", "edits.off", "edits.remove"])
+		assert.ok(handlerLimit(method) >= PERMISSION_TIMEOUT_MS + HANDLER_TIMEOUT_MS, `${method}: ${handlerLimit(method)}`);
+	// Every wait of a minute or more runs a thousand times faster: the question's two minutes, the call's limit.
+	const patched = globalThis.setTimeout;
+	globalThis.setTimeout = (fn, ms, ...args) => patched(fn, ms >= 60000 ? ms / 1000 : ms, ...args);
+	try {
+		for (const [id, method] of [[11, "navigate"], [12, "tabs.create"]]) {
+			port.deliver({ type: "request", clientId: "c1", id, method, params: { url: `https://unanswered.example/${id}` } });
+			await sent((m) => m.event === "permission_request" && m.data.url === `https://unanswered.example/${id}`);
+			const reply = await sent((m) => m.type === "response" && m.id === id);
+			assert.equal(reply.error?.code, "permission_denied", `${method}: ${JSON.stringify(reply.error)}`);
+		}
+	} finally {
+		globalThis.setTimeout = patched;
+	}
+	// The host goes while the question is open, and the person says yes after: the call has ended, so no tab opens.
+	const before = (await chrome.tabs.query({})).length;
+	port.deliver({ type: "request", clientId: "c1", id: 13, method: "tabs.create", params: { url: "https://late.example/" } });
+	const asked = await sent((m) => m.event === "permission_request" && m.data.host === "late.example");
+	for (const fn of port.onDisconnect.listeners) fn();
+	await recordDecision(asked.data.requestId, "allow_once");
+	await new Promise((r) => setTimeout(r, 300));
+	const tabs = await chrome.tabs.query({});
+	assert.equal(tabs.length, before, `a tab opened after its call ended: ${JSON.stringify(tabs.map((t) => t.url))}`);
+});
+
+test("an older CLI says nothing about remote, but its remote sessions are told by the name serve gives them", () => {
+	for (const [client, remote] of [
+		[{ name: "claude", remote: true }, true],
+		[{ name: "remote-web" }, true],
+		[{ name: "claude" }, false],
+		[{ name: "claude", remote: "yes" }, false],
+		[{ name: "my-remote-agent" }, false],
+		[{}, false],
+	])
+		assert.equal(isRemoteClient(client), remote, JSON.stringify(client));
+	// The name this rests on.
+	assert.match(read("cli/src/remote.ts"), /name: `remote-\$\{label\}`,/);
+});
+
+test("peeking at the mode migrates nothing: the Runs log reads it on every step", async () => {
+	fresh();
+	await chrome.storage.local.set({ [LEGACY_MODE_KEY]: "allow_all" });
+	assert.equal(await peekPermissionMode(), "yolo");
+	assert.equal((await chrome.storage.local.get(MODE_KEY))[MODE_KEY], undefined, "nothing written");
+	// getPermissionMode migrates a legacy name kept under the current key like no mode at all.
+	await chrome.storage.local.remove(LEGACY_MODE_KEY);
+	await chrome.storage.local.set({ [MODE_KEY]: "allow_all" });
+	const peeked = await peekPermissionMode();
+	assert.equal(peeked, await getPermissionMode());
+	assert.equal(peeked, "auto");
+	await setPermissionMode("manual");
+	assert.equal(await peekPermissionMode(), "manual");
+});
+
+test("every step in the Runs log carries the mode it ran under", () => {
+	const log = addStep({ runs: [] }, "s1", { who: "claude", tool: "click", params: { ref: "e3" }, ok: true, ms: 12, mode: "yolo" }, 1);
+	assert.equal(log.runs[0].steps[0].mode, "yolo");
+	const native = read("src/bridge/native.ts");
+	assert.match(native, /if \(isRunStep\(req\.method\)\) runMode = modeFor\(await peekPermissionMode\(\), state\.remote\);/);
+	assert.match(native, /\.\.\.\(runMode \? \{ mode: runMode \} : \{\}\),/);
+});
+
+test("the presses that enter text: one character or Space, read as pressKey reads the chord", () => {
+	for (const [tool, key, want] of [
+		["fill", undefined, true],
+		["type", undefined, true],
+		["press", "a", true],
+		["press", " a ", true],
+		["press", "+a", true],
+		["press", "Hyper+a", true],
+		["press", "Shift+A", true],
+		["press", "Space", true],
+		["press", "\u{1F600}", true],
+		["press", "Enter", false],
+		["press", "Tab", false],
+		["press", "Control+V", true],
+		["press", "Meta+Shift+v", true],
+		["press", "Shift+Insert", true],
+		["press", "Alt+q", true],
+		["press", "Insert", false],
+		["press", "Meta+a", false],
+		["press", "Shift+ctrl+a", false],
+		["press", undefined, false],
+		["click", undefined, false],
+	])
+		assert.equal(entersText(tool, key), want, `${tool} ${key ?? ""}`);
+	assert.doesNotMatch(read("src/bridge/panel-calls.ts"), /hardLimits/, "the side panel's agent is the person's own");
+	assert.match(read("src/bridge/native.ts"), /hardLimits: true,/);
+});
+
+test("the hard limit's rule runs in the page as it stands: it names nothing outside itself", () => {
+	const rule = new Function(`return (${textLimit.toString()})`)();
+	for (const [t, want] of [
+		[{ inputType: "password" }, "password-field"],
+		[{ inputType: "text", name: "Passphrase" }, "password-field"],
+		[{ inputType: "text", name: "Number", autocomplete: "cc-number" }, "payment-field"],
+		[{ inputType: "text", field: "card number" }, "payment-field"],
+		[{ role: "textbox", frameUrl: "https://js.stripe.com/v3/elements-inner-card.html" }, "payment-field"],
+		[{ role: "textbox", frameUrl: "https://js.stripe.com.example.net/" }, undefined],
+		[{ role: "textbox", frameUrl: "https://js.stripe.com./v3/" }, "payment-field"],
+		[{ inputType: "text", name: "Password *" }, "password-field"],
+		[{ inputType: "text", field: "password reset password" }, "password-field"],
+		[{ inputType: "email", field: "password reset email" }, undefined],
+		[{ inputType: "email", name: "Enter your email to reset your password" }, undefined],
+		[{ inputType: "text", name: "Enter your email to reset your password" }, undefined],
+		[{ inputType: "text", name: "Password reset code" }, undefined],
+		[{ inputType: "number", field: "password length" }, undefined],
+		[{ role: "searchbox", name: "Search passwords" }, undefined],
+		[{ inputType: "text", name: "Your name" }, undefined],
+		[{}, undefined],
+	])
+		assert.equal(rule(t), want, JSON.stringify(t));
+});
