@@ -146,19 +146,45 @@ describe("firecrawl self-host only", () => {
 		}
 	});
 
-	it("map and crawl hit their paths", async () => {
+	it("map and crawl hit their paths, and crawl waits for its job's pages", async () => {
 		const seen = [];
+		let asked = 0;
+		const page = (u) => ({ url: u, markdown: `# ${u}` });
 		const srv = createServer((req, res) => {
-			seen.push(req.url);
+			seen.push(`${req.method} ${req.url}`);
 			res.writeHead(200, { "content-type": "application/json" });
-			res.end(JSON.stringify({ ok: true }));
+			const { port } = srv.address();
+			const job = (status, body = {}) => res.end(JSON.stringify({ status, ...body }));
+			if (req.url === "/v2/map") return res.end(JSON.stringify({ ok: true }));
+			if (req.url === "/v2/crawl") return res.end(JSON.stringify({ success: true, id: `job-${seen.filter((s) => s === "POST /v2/crawl").length}` }));
+			// job-1 is scraping once, then done with a second part at next; job-2 fails; job-3 never ends; job-4's next is another server.
+			if (req.url === "/v2/crawl/job-1") return asked++ ? job("completed", { data: [page("a")], next: `http://127.0.0.1:${port}/v2/crawl/job-1?skip=1` }) : job("scraping", { data: [] });
+			if (req.url === "/v2/crawl/job-1?skip=1") return job("completed", { data: [page("b")], next: null });
+			if (req.url === "/v2/crawl/job-2") return job("failed", { error: "robots.txt" });
+			if (req.url === "/v2/crawl/job-3") return job("scraping", { data: [page("c")] });
+			if (req.url === "/v2/crawl/job-4") return job("completed", { data: [page("d")], next: "http://127.0.0.2:1/v2/crawl/job-4?skip=1" });
+			res.end("{}");
 		});
 		await new Promise((r) => srv.listen(0, "127.0.0.1", r));
 		const { port } = srv.address();
 		process.env.FIRECRAWL_API_URL = `http://127.0.0.1:${port}`;
-		await firecrawlMap("https://example.com");
-		await firecrawlCrawl("https://example.com", { limit: 3 });
-		srv.close();
-		assert.deepEqual(seen, ["/v2/map", "/v2/crawl"]);
+		try {
+			await firecrawlMap("https://example.com");
+			const done = await firecrawlCrawl("https://example.com", { limit: 3, pollMs: 10 });
+			assert.deepEqual(seen, ["POST /v2/map", "POST /v2/crawl", "GET /v2/crawl/job-1", "GET /v2/crawl/job-1", "GET /v2/crawl/job-1?skip=1"]);
+			assert.equal(done.status, "completed");
+			assert.deepEqual(done.data.map((p) => p.url), ["a", "b"]);
+			assert.equal(done.next, undefined);
+			assert.equal(done.unfinished, undefined);
+			await assert.rejects(() => firecrawlCrawl("https://example.com", { pollMs: 10 }), /Firecrawl's crawl failed: robots\.txt/);
+			const slow = await firecrawlCrawl("https://example.com", { pollMs: 10, waitMs: 50 });
+			assert.deepEqual(slow.data.map((p) => p.url), ["c"]);
+			assert.match(slow.unfinished, /still running after 0 seconds/);
+			const away = await firecrawlCrawl("https://example.com", { pollMs: 10 });
+			assert.deepEqual(away.data.map((p) => p.url), ["d"], "a next on another server is not followed");
+		} finally {
+			delete process.env.FIRECRAWL_API_URL;
+			srv.close();
+		}
 	});
 });

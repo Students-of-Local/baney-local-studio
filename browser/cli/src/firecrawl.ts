@@ -70,7 +70,8 @@ export function assertSelfHostedFirecrawlUrl(url: string): string {
 	}
 }
 
-async function firecrawlPost(path: string, body: Record<string, unknown>): Promise<unknown> {
+/** POST `body` to `path`, or GET `path` when there is no body. */
+async function firecrawlRequest(path: string, body?: Record<string, unknown>): Promise<unknown> {
 	const base = requireFirecrawlApiUrl();
 	const key = (process.env.FIRECRAWL_API_KEY || "").trim();
 	const headers: Record<string, string> = {
@@ -80,9 +81,9 @@ async function firecrawlPost(path: string, body: Record<string, unknown>): Promi
 	};
 	if (key) headers.Authorization = `Bearer ${key}`;
 	const res = await fetch(new URL(path, `${base}/`), {
-		method: "POST",
+		method: body ? "POST" : "GET",
 		headers,
-		body: JSON.stringify(body),
+		body: body ? JSON.stringify(body) : undefined,
 		signal: AbortSignal.timeout(60_000),
 		// Never follow redirects: a 3xx to api.firecrawl.dev would bypass the hostname guard.
 		redirect: "error",
@@ -118,7 +119,7 @@ export async function pageMarkdown(url: string): Promise<PageMarkdown> {
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
 		throw new Error(`page_markdown only fetches http(s), got ${parsed.protocol}`);
 	}
-	const json = (await firecrawlPost("/v2/scrape", {
+	const json = (await firecrawlRequest("/v2/scrape", {
 		url: parsed.toString(),
 		formats: ["markdown"],
 	})) as {
@@ -136,9 +137,48 @@ export async function pageMarkdown(url: string): Promise<PageMarkdown> {
 }
 
 export async function firecrawlMap(url: string, options: { limit?: number } = {}): Promise<unknown> {
-	return firecrawlPost("/v2/map", { url, limit: options.limit ?? 100 });
+	return firecrawlRequest("/v2/map", { url, limit: options.limit ?? 100 });
 }
 
-export async function firecrawlCrawl(url: string, options: { limit?: number } = {}): Promise<unknown> {
-	return firecrawlPost("/v2/crawl", { url, limit: options.limit ?? 10 });
+const CRAWL_WAIT_MS = 90_000;
+const CRAWL_POLL_MS = 2_000;
+const CRAWL_NEXT_HOPS = 20;
+
+interface CrawlJob {
+	status?: string;
+	data?: unknown[];
+	next?: string | null;
+	error?: string;
+}
+
+/**
+ * Crawl from `url` and return its pages. POST /v2/crawl only starts a job and GET /v2/crawl/{id} reports it, so
+ * this asks until the job is done, or until the wait runs out and returns the pages so far with `unfinished`. A
+ * body too big for one answer goes on at `next`, which is followed only on the same server.
+ */
+export async function firecrawlCrawl(url: string, options: { limit?: number; waitMs?: number; pollMs?: number } = {}): Promise<unknown> {
+	const started = (await firecrawlRequest("/v2/crawl", { url, limit: options.limit ?? 10 })) as { id?: unknown };
+	if (typeof started?.id !== "string" || !started.id) throw new Error("Firecrawl started no crawl: its answer has no job id.");
+	const origin = new URL(requireFirecrawlApiUrl()).origin;
+	const path = `/v2/crawl/${encodeURIComponent(started.id)}`;
+	const deadline = Date.now() + (options.waitMs ?? CRAWL_WAIT_MS);
+	for (;;) {
+		const job = (await firecrawlRequest(path)) as CrawlJob;
+		if (job.status === "failed" || job.status === "cancelled") throw new Error(`Firecrawl's crawl ${job.status}${job.error ? `: ${job.error}` : "."}`);
+		const done = job.status === "completed";
+		if (done || Date.now() >= deadline) {
+			const data = [...(job.data ?? [])];
+			let next = job.next;
+			for (let hop = 0; next && hop < CRAWL_NEXT_HOPS && new URL(next, `${origin}/`).origin === origin; hop++) {
+				const more = new URL(next, `${origin}/`);
+				const page = (await firecrawlRequest(`${more.pathname}${more.search}`)) as CrawlJob;
+				data.push(...(page.data ?? []));
+				next = page.next;
+			}
+			const { next: _next, ...rest } = job;
+			const waited = Math.round((options.waitMs ?? CRAWL_WAIT_MS) / 1000);
+			return { ...rest, data, ...(done ? {} : { unfinished: `The crawl was still running after ${waited} seconds; these are the pages it had.` }) };
+		}
+		await new Promise((r) => setTimeout(r, options.pollMs ?? CRAWL_POLL_MS));
+	}
 }

@@ -811,7 +811,8 @@ test("read tools cap what they hand an agent, say when they cut, and page with o
 			// second-S4: a failed or html-only scrape has no markdown; first-F3: a page of quotes doubles when escaped.
 			if (req.url === "/v2/scrape" && url.includes("nomd")) return res.end(JSON.stringify({ success: true, data: { html: "<p>x</p>", metadata: { sourceURL: url } } }));
 			if (req.url === "/v2/scrape") return res.end(JSON.stringify({ success: true, data: { markdown: url.includes("quotes") ? '"'.repeat(90_000) : markdown, metadata: { sourceURL: "https://page.test/" } } }));
-			res.end(JSON.stringify({ success: true, data: [{ url: "https://page.test/a", markdown }] }));
+			if (req.url === "/v2/crawl") return res.end(JSON.stringify({ success: true, id: "job" }));
+			res.end(JSON.stringify({ status: "completed", data: [{ url: "https://page.test/a", markdown }] }));
 		});
 	});
 	await new Promise((r) => firecrawl.listen(0, "127.0.0.1", r));
