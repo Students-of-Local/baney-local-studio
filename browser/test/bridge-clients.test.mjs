@@ -443,3 +443,17 @@ test("an agent's status call still opens its session and names its tab group", a
 	assert.equal(typeof reply.result.tabGroup, "string");
 	assert.ok(fake.table()["bridge-claude-abc"], "the agent's session was not stored");
 });
+
+test("a remote session, or a client whose hello was missed, can't read chats or sessions or change permissions", async () => {
+	const { request, connect } = await startBridge();
+	connect("r1", "remote-3f9c01ab-ab12cd34", { name: "remote-phone" });
+	connect("l1", "abc");
+	for (const method of ["threads.read", "threads.list", "sessions.list", "sessions.end", "bridge.debug", "permission.allow"]) {
+		const remote = await request("r1", method, { all: true, tabs: true });
+		assert.equal(remote.error?.code, "permission_denied", `remote ${method}: ${JSON.stringify(remote)}`);
+		const unknown = await request("x1", method, { all: true, tabs: true });
+		assert.equal(unknown.error?.code, "permission_denied", `unannounced ${method}: ${JSON.stringify(unknown)}`);
+	}
+	const local = await request("l1", "sessions.list", { all: true, tabs: false });
+	assert.notEqual(local.error?.code, "permission_denied", "a local CLI lost its sessions list");
+});

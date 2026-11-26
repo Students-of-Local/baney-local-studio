@@ -216,6 +216,11 @@ function sessionFor(client: HostClientConnected["client"], clientId: string): { 
 	for (let n = 2; ; n++) if (!taken.has(`${key}-${n}`)) return { key: `${key}-${n}`, name: `${client.session}-${n}` };
 }
 
+/** Methods that run with the person's own trust, for local user processes (`local-studio-browser sessions`, `allow`, `doctor`). */
+function personsTrust(method: string): boolean {
+	return ["permission.", "threads.", "sessions.", "bridge."].some((prefix) => method.startsWith(prefix));
+}
+
 async function onClientConnected(msg: HostClientConnected): Promise<void> {
 	const name = msg.client.name || "harness";
 	const { key, name: sessionName } = sessionFor(msg.client, msg.clientId);
@@ -965,18 +970,20 @@ function onHostMessage(message: HostToExt): void {
 			return;
 		case "request": {
 			if (Array.isArray(message.trace)) message.trace.push(["ext.in", traceNow()]);
-			if (
-				clients.get(message.clientId)?.remote &&
-				["permission.respond", "permission.allow", "permission.setMode"].includes(message.method)
-			) {
-				// A remote connector session never answers its own asks or widens what it may do (D67).
+			const caller = clients.get(message.clientId);
+			if (personsTrust(message.method) && (!caller || caller.remote)) {
+				// These run with the person's own trust (the side panel's, Settings'): a remote connector session never
+				// answers its own asks, widens what it may do, reads past chats or other sessions (D67), and neither does a
+				// client whose hello was missed, which may be one.
 				send({
 					type: "response",
 					clientId: message.clientId,
 					id: message.id,
 					error: {
 						code: ERR.PERMISSION_DENIED,
-						message: "A remote session can't change Local Studio's permissions.",
+						message: caller
+							? "A remote session can't change Local Studio's permissions or read its chats and sessions."
+							: "Local Studio hasn't heard this connection's hello yet. Try again.",
 					},
 				});
 				return;
@@ -1221,6 +1228,8 @@ function onHostMessage(message: HostToExt): void {
 					// Its hello was missed, so nothing says which model it runs.
 					tier: "unknown",
 					sessionKey: `bridge-harness-${message.clientId}`,
+					// Nothing says it is local, so it gets a remote session's limits until its hello arrives.
+					remote: true,
 					queue: Promise.resolve(),
 					lastActivityAt: 0,
 				};
