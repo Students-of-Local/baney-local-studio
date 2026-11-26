@@ -88,6 +88,16 @@ export const CONNECT_METHODS = [
 ] as const;
 export type ConnectMethod = (typeof CONNECT_METHODS)[number];
 
+/** How long the panel waits on a request. A helper from before Connect drops the frame and never replies. */
+export const REQUEST_TIMEOUT_MS = 20_000;
+/** joinHub talks to the hub, whose own timeout is 15 seconds. */
+export const JOIN_TIMEOUT_MS = 30_000;
+/** setupTunnel waits on the person's Cloudflare sign-in (5 minutes) and then DNS (about 1 minute). */
+export const SETUP_TIMEOUT_MS = 7 * 60_000;
+/** The panel's wait for one method; the relay holds a request a little longer, so it never drops one the panel still waits on. */
+export const connectTimeoutMs = (method: string): number =>
+	method === "joinHub" ? JOIN_TIMEOUT_MS : method === "setupTunnel" ? SETUP_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+
 export const CONNECT_PORT = "local-studio-connect";
 
 /** side panel -> background */

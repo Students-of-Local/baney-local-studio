@@ -242,10 +242,23 @@ test("a request the helper never answers fails with no_reply after 20 s (30 s fo
 
 test("the relay forgets a request the host never answers, and clears the timer when it is answered or the panel leaves", () => {
 	const relay = read("src/connect/relay.ts");
-	assert.match(relay, /export const RELAY_WAIT_MS = 60_000;/);
+	assert.match(relay, /export const RELAY_SLACK_MS = 60_000;/);
+	// Each request is held past the panel's own wait for its method, so a slow setupTunnel answer is not dropped.
+	assert.match(relay, /waiting\.set\(hostId, \{ port, id: request\.id, limit: connectTimeoutMs\(request\.method\) \}\);/);
+	assert.match(relay, /setTimeout\(\(\) => waiting\.delete\(hostId\), w\.limit \+ RELAY_SLACK_MS\)/);
 	assert.match(relay, /const forget = \(hostId: number\)[\s\S]*?clearTimeout\(waiting\.get\(hostId\)\?\.timer\);\s*waiting\.delete\(hostId\);/);
 	assert.match(relay, /if \(message\.error \|\| reply\.result !== undefined\) forget\(message\.id\);/);
 	assert.match(relay, /if \(w\.port === port\) forget\(hostId\);/);
+});
+
+test("the relay's wait for each method outlasts the panel's", async () => {
+	const { connectTimeoutMs, SETUP_TIMEOUT_MS, JOIN_TIMEOUT_MS, REQUEST_TIMEOUT_MS } = await import("../src/connect/types.ts");
+	assert.equal(connectTimeoutMs("setupTunnel"), SETUP_TIMEOUT_MS);
+	assert.equal(SETUP_TIMEOUT_MS, 7 * 60_000);
+	assert.equal(connectTimeoutMs("joinHub"), JOIN_TIMEOUT_MS);
+	assert.equal(connectTimeoutMs("status"), REQUEST_TIMEOUT_MS);
+	const client = await import("../src/connect/client.ts?limits");
+	assert.equal(client.SETUP_TIMEOUT_MS, SETUP_TIMEOUT_MS);
 });
 
 test("a hub at http://[::1]:port passes the panel's shape checks, as it does the host's", async () => {
@@ -531,7 +544,9 @@ test("setupTunnel needs a click gesture, and its request waits seven minutes", a
 	assert.equal(gate.allows("setupTunnel", { token: "t", at: 1_000_000 }), true);
 	const client = await import("../src/connect/client.ts?setup");
 	assert.equal(client.SETUP_TIMEOUT_MS, 7 * 60_000);
-	assert.match(read("src/connect/client.ts"), /method === "setupTunnel" \? SETUP_TIMEOUT_MS/);
+	assert.match(read("src/connect/client.ts"), /const limit = connectTimeoutMs\(method\);/);
+	const { connectTimeoutMs } = await import("../src/connect/types.ts");
+	assert.equal(connectTimeoutMs("setupTunnel"), 7 * 60_000);
 });
 
 test("the one-button flow (with its Cloudflare form) shows for route none, the relay, Funnel and Cloudflare, and not for a custom address, a hub or a link", async () => {

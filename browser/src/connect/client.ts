@@ -10,12 +10,16 @@ import {
 	CONNECT_PORT,
 	type ConnectReply,
 	type ConnectStatus,
+	connectTimeoutMs,
 	type DeviceCode,
 	GESTURE_METHODS,
 	type Gesture,
+	JOIN_TIMEOUT_MS,
 	type JoinResult,
+	REQUEST_TIMEOUT_MS,
 	type RemoteAnswer,
 	type RemoteFixAnswer,
+	SETUP_TIMEOUT_MS,
 	type TunnelResult,
 } from "./types.js";
 
@@ -38,12 +42,7 @@ interface Waiter {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
-/** How long a request may go unanswered. A helper from before Connect drops the frame and never replies. */
-export const REQUEST_TIMEOUT_MS = 20_000;
-/** joinHub talks to the hub, whose own timeout is 15 seconds. */
-export const JOIN_TIMEOUT_MS = 30_000;
-/** setupTunnel waits on the person's Cloudflare sign-in (5 minutes) and then DNS (about 1 minute). */
-export const SETUP_TIMEOUT_MS = 7 * 60_000;
+export { JOIN_TIMEOUT_MS, REQUEST_TIMEOUT_MS, SETUP_TIMEOUT_MS };
 export const noReplyMessage = (): string =>
 	`Local Studio's helper didn't answer. Update it: ${hostCommandText("update")}`;
 
@@ -100,8 +99,7 @@ function mintGesture(method: string): Gesture | undefined {
 
 function request<T>(method: string, params?: Record<string, unknown>, onProgress?: Waiter["onProgress"]): Promise<T> {
 	const id = ++seq;
-	const limit =
-		method === "joinHub" ? JOIN_TIMEOUT_MS : method === "setupTunnel" ? SETUP_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+	const limit = connectTimeoutMs(method);
 	return new Promise<T>((resolve, reject) => {
 		let gesture: Gesture | undefined;
 		try {

@@ -12,14 +12,19 @@ import { hostCommandText } from "../bridge/host-command.js";
 import { onConnectMessage, sendConnect } from "../bridge/native.js";
 import { checkConnectRequest } from "./check.js";
 import { GestureGate, isSidePanelPort } from "./gate.js";
-import { CONNECT_PORT, type ConnectReply } from "./types.js";
+import { CONNECT_PORT, type ConnectReply, connectTimeoutMs } from "./types.js";
 
-/** A request the host never answers (a helper from before Connect drops the frame) is forgotten after this; the panel gave up sooner. */
-export const RELAY_WAIT_MS = 60_000;
+/**
+ * A request the host never answers (a helper from before Connect drops the frame) is forgotten this long after the panel's
+ * own wait for its method (connectTimeoutMs) runs out, so an answer the panel still waits on, such as setupTunnel's after a
+ * slow Cloudflare sign-in, always reaches it.
+ */
+export const RELAY_SLACK_MS = 60_000;
 
 interface Waiting {
 	port: chrome.runtime.Port;
 	id: number;
+	limit: number;
 	timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -34,7 +39,7 @@ export function startConnectRelay(): void {
 		const w = waiting.get(hostId);
 		if (!w) return;
 		clearTimeout(w.timer);
-		w.timer = setTimeout(() => waiting.delete(hostId), RELAY_WAIT_MS);
+		w.timer = setTimeout(() => waiting.delete(hostId), w.limit + RELAY_SLACK_MS);
 	};
 	onConnectMessage((message) => {
 		if (message === "disconnected") {
@@ -85,7 +90,7 @@ export function startConnectRelay(): void {
 				return;
 			}
 			const hostId = ++seq;
-			waiting.set(hostId, { port, id: request.id });
+			waiting.set(hostId, { port, id: request.id, limit: connectTimeoutMs(request.method) });
 			arm(hostId);
 			if (
 				!sendConnect({
