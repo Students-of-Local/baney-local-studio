@@ -47,26 +47,38 @@ const hfToken = (): string | null => {
 
 const QUANT = /(?:^|[-_.])((?:UD-)?(?:I?Q\d|TQ\d)[A-Za-z0-9_]*|BF16|F16|F32|MXFP4[A-Za-z0-9_]*|\d+(?:\.\d+)?bpw)$/i;
 
-const fileSets = (repo: Repo): { format: string; quant: string | null; stem: string; bytes: number | null }[] => {
+type FileSet = { format: string; quant: string | null; stem: string; bytes: number | null };
+
+const SHARD = /-\d{5}-of-\d{5}\.safetensors$/i;
+
+const fileSets = (repo: Repo): FileSet[] => {
   const tags = repo.tags ?? [];
   const mlx = tags.includes("mlx") || /mlx/i.test(repo.id);
   const exl3 = tags.includes("exl3") || /exl3/i.test(repo.id);
-  const sets = new Map<string, { format: string; quant: string | null; stem: string; bytes: number | null }>();
+  const sets = new Map<string, FileSet>();
+  const add = (key: string, set: Omit<FileSet, "bytes">, size: number | undefined) => {
+    const s = sets.get(key) ?? { ...set, bytes: 0 };
+    s.bytes = s.bytes === null || size === undefined ? null : s.bytes + size;
+    sets.set(key, s);
+  };
+  const folders = new Map<string, { rfilename: string; size?: number }[]>();
   for (const f of repo.siblings ?? []) {
-    let key: string, format: string, quant: string | null, stem = "";
-    if (/\.gguf$/i.test(f.rfilename)) {
-      if (/mmproj/i.test(f.rfilename)) continue;
-      key = f.rfilename.replace(/-\d{5}-of-\d{5}\.gguf$/i, ".gguf");
-      stem = (key.split("/").pop() ?? key).replace(/\.gguf$/i, "");
-      format = "gguf";
-      quant = QUANT.exec(stem)?.[1] ?? stem;
-    } else if (/\.safetensors$/i.test(f.rfilename)) {
-      format = key = mlx ? "mlx" : exl3 ? "exl3" : "safetensors";
-      quant = mlx ? (/\d+[-_]?bit/i.exec(repo.id)?.[0] ?? null) : exl3 ? (/\d+(?:\.\d+)?_?bpw/i.exec(repo.id)?.[0] ?? null) : null;
-    } else continue;
-    const set = sets.get(key) ?? { format, quant, stem, bytes: 0 };
-    set.bytes = set.bytes === null || f.size === undefined ? null : set.bytes + f.size;
-    sets.set(key, set);
+    const name = f.rfilename.split("/").pop() ?? f.rfilename;
+    if (/\.gguf$/i.test(name)) {
+      if (/mmproj/i.test(name)) continue;
+      const key = f.rfilename.replace(/-\d{5}-of-\d{5}\.gguf$/i, ".gguf");
+      const stem = (key.split("/").pop() ?? key).replace(/\.gguf$/i, "");
+      add(`gguf:${key}`, { format: "gguf", quant: QUANT.exec(stem)?.[1] ?? stem, stem }, f.size);
+    } else if (/\.safetensors$/i.test(name) && !/^adapter_model/i.test(name)) {
+      const folder = f.rfilename.includes("/") ? f.rfilename.slice(0, f.rfilename.lastIndexOf("/")) : "";
+      folders.set(folder, [...(folders.get(folder) ?? []), f]);
+    }
+  }
+  const format = mlx ? "mlx" : exl3 ? "exl3" : "safetensors";
+  const named = mlx ? (/\d+[-_]?bit/i.exec(repo.id)?.[0] ?? null) : exl3 ? (/\d+(?:\.\d+)?_?bpw/i.exec(repo.id)?.[0] ?? null) : null;
+  for (const [folder, files] of folders) {
+    const shards = files.filter((f) => SHARD.test(f.rfilename));
+    for (const f of shards.length ? shards : files) add(`st:${folder}`, { format, quant: named ?? (folder || null), stem: folder }, f.size);
   }
   const all = [...sets.values()];
   return all.map((s) => (s.stem && all.some((o) => o !== s && o.quant === s.quant) ? { ...s, quant: s.stem } : s));
@@ -74,15 +86,31 @@ const fileSets = (repo: Repo): { format: string; quant: string | null; stem: str
 
 const fit = (sizeGb: number | null, format: string, device: Device): { label: string | null; why: string } => {
   if (sizeGb === null) return { label: null, why: "Hugging Face did not give every file's size" };
-  const best = device.gpus
-    .map((g) => ({ name: g.name, apple: g.vendor === "apple", usable: g.vendor === "apple" ? 0.75 * device.ramTotalGb : 0.9 * (g.vramFreeGb ?? 0) }))
-    .sort((a, b) => b.usable - a.usable)[0] ?? { name: "no GPU", apple: false, usable: 0 };
+  const groups = new Map<string, { name: string; apple: boolean; gpus: { usable: number; total: number; free: number | null }[] }>();
+  for (const g of device.gpus) {
+    const apple = g.vendor === "apple";
+    const group = groups.get(`${g.vendor}/${g.backend}`) ?? { name: g.name, apple, gpus: [] };
+    if (apple && group.gpus.length) continue;
+    const total = apple ? device.ramTotalGb : (g.vramGb ?? 0);
+    group.gpus.push({ usable: apple ? 0.75 * total : 0.9 * total, total, free: g.vramFreeGb });
+    groups.set(`${g.vendor}/${g.backend}`, group);
+  }
+  const sum = (xs: number[]): number => xs.reduce((a, b) => a + b, 0);
+  const best = [...groups.values()].map((g) => ({ ...g, gpus: g.gpus.sort((a, b) => b.usable - a.usable) })).sort((a, b) => sum(b.gpus.map((x) => x.usable)) - sum(a.gpus.map((x) => x.usable)))[0] ?? { name: "no GPU", apple: false, gpus: [] };
   const need = sizeGb * 1.1 + 1;
+  const all = sum(best.gpus.map((x) => x.usable));
+  let n = 0;
+  while (n < best.gpus.length && sum(best.gpus.slice(0, n).map((x) => x.usable)) < need) n++;
+  const used = best.gpus.slice(0, Math.max(n, 1));
+  const usable = sum(used.map((x) => x.usable));
+  const where = `${best.name}${used.length > 1 ? `, split across ${used.length} GPUs` : ""}`;
+  const free = used.every((x) => x.free !== null) ? sum(used.map((x) => x.free ?? 0)) : null;
+  const busy = used.length && free !== null && free < Math.min(need, usable) ? `; ${r1(sum(used.map((x) => x.total)) - free)} GB in use now` : "";
   const ram = format === "gguf" && !best.apple ? 0.8 * device.ramFreeGb : 0;
   const disk = sizeGb > device.disk.freeGb ? `; the files need ${r1(sizeGb)} GB of disk and ${device.disk.path} has ${device.disk.freeGb} GB free` : "";
-  if (need <= best.usable) return { label: "Fits", why: `needs ${r1(need)} GB of the ${r1(best.usable)} GB usable on ${best.name}${disk}` };
-  if (ram && need <= best.usable + ram) return { label: "Offload", why: `needs ${r1(need)} GB: ${r1(best.usable)} GB on ${best.name} and ${r1(need - best.usable)} GB of the ${r1(ram)} GB usable RAM${disk}` };
-  return { label: "Won't fit", why: `needs ${r1(need)} GB, ${r1(need - best.usable - ram)} GB more than the ${r1(best.usable + ram)} GB usable on ${best.name}${ram ? " plus RAM" : ""}${disk}` };
+  if (need <= all) return { label: "Fits", why: `needs ${r1(need)} GB of the ${r1(usable)} GB usable on ${where}${busy}${disk}` };
+  if (ram && need <= all + ram) return { label: "Offload", why: `needs ${r1(need)} GB: ${r1(all)} GB on ${where} and ${r1(need - all)} GB of the ${r1(ram)} GB usable RAM${busy}${disk}` };
+  return { label: "Won't fit", why: `needs ${r1(need)} GB, ${r1(need - all - ram)} GB more than the ${r1(all + ram)} GB usable on ${where}${ram ? " plus RAM" : ""}${busy}${disk}` };
 };
 
 const searchHf = async (query: string, limit: number, device: Device, warnings: string[]): Promise<Result[]> => {

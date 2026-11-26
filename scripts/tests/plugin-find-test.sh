@@ -14,7 +14,7 @@ device() {
   printf '{"os":"linux","arch":"x64","ramTotalGb":%s,"ramFreeGb":%s,"disk":{"path":"%s","freeGb":500},"gpus":[' "$2" "$2" "$scratch/hf" > "$scratch/$1.json"
   local sep="" i=0
   for _ in $(seq "$5"); do
-    printf '%s{"id":"nvidia:%s","name":"%s","vendor":"nvidia","backend":"nvidia","vramGb":%s,"vramFreeGb":%s,"pci":null,"removable":false}' "$sep" "$i" "$3" "$4" "$4" >> "$scratch/$1.json"
+    printf '%s{"id":"nvidia:%s","name":"%s","vendor":"nvidia","backend":"nvidia","vramGb":%s,"vramFreeGb":%s,"pci":null,"removable":false}' "$sep" "$i" "$3" "$4" "${6:-$4}" >> "$scratch/$1.json"
     sep=, i=$((i + 1))
   done
   echo ']}' >> "$scratch/$1.json"
@@ -68,6 +68,19 @@ must(lines.length === r.picks.length + r.results.length, 'one line per entry');
 must(lines.slice(0, r.picks.length).every((l) => l.startsWith('Proven\t')) && lines.slice(r.picks.length).every((l) => l.endsWith('est. pending')), 'picks first in text');"
 result $? "find qwen3 on a 24 GB card: matching picks first, then HF results, a quant under 19 GB Fits"
 
+for free in 2 null; do
+  device "free$free" 64 "NVIDIA GeForce RTX 4090" 24 1 "$free"
+  find_json "free$free" qwen3 > "$scratch/out.json"; code=$?
+  check "must($code === 0, 'exit');
+must(r.results.some((x) => x.label === 'Fits'), 'no Fits');
+for (const x of r.results) {
+  must(x.label === label(x.sizeGb, 24, 64, x.format === 'gguf'), JSON.stringify(x));
+  const note = x.why.includes('22 GB in use now');
+  must('$free' === '2' ? note === (Math.min(x.sizeGb * 1.1 + 1, 21.6) > 2) : !x.why.includes('in use'), 'in use note: ' + x.why);
+}"
+  result $? "24 GB card with vramFreeGb $free: labels from total VRAM$([ "$free" = 2 ] && echo ", 22 GB in use named in why")"
+done
+
 repo=bartowski/Llama-3.3-70B-Instruct-GGUF
 for ram in 64 8; do
   device "ram$ram" "$ram" "NVIDIA GeForce RTX 4080" 16 1
@@ -81,6 +94,13 @@ if (want !== 'Offload') must(q4.why.includes((Math.round((q4.sizeGb * 1.1 + 1 - 
   result $? "70B Q4_K_M GGUF on a 16 GB card with $ram GB RAM free: $([ "$ram" = 64 ] && echo Offload || echo "Won't fit, gap named")"
 done
 
+find_json rtx3090x2 "$repo" > "$scratch/out.json"; code=$?
+check "must($code === 0, 'exit');
+const split = r.results.filter((x) => x.repo === '$repo' && x.sizeGb > 24 && x.sizeGb * 1.1 + 1 <= 43.2);
+must(split.length > 0 && split.every((x) => x.label === 'Fits' && x.why.includes('split across 2 GPUs')), JSON.stringify(split));
+for (const x of r.results) must(x.label === label(x.sizeGb, 48, 64, x.format === 'gguf'), JSON.stringify(x));"
+result $? "2 x RTX 3090: a 70B set over 24 GB that fits both cards is Fits, split across 2 GPUs"
+
 curl -sf "https://huggingface.co/api/models/$repo?blobs=true" > "$scratch/repo.json"
 check "must($code === 0, 'exit');
 const parts = JSON.parse(fs.readFileSync('$scratch/repo.json', 'utf8')).siblings.filter((f) => /Q5_K_M-0000\d-of-00002\.gguf\$/.test(f.rfilename));
@@ -88,6 +108,26 @@ const sets = r.results.filter((x) => x.repo === '$repo' && x.quant === 'Q5_K_M')
 must(parts.length === 2 && sets.length === 1, parts.length + ' parts, ' + sets.length + ' sets');
 must(sets[0].sizeGb === Math.round(parts.reduce((a, f) => a + f.size, 0) / 2 ** 30 * 10) / 10, 'size ' + sets[0].sizeGb);"
 result $? "split GGUF Q5_K_M (2 parts): one set, sizeGb the sum of the parts"
+
+mistral=mistralai/Mistral-7B-Instruct-v0.3
+curl -sf "https://huggingface.co/api/models/$mistral?blobs=true" > "$scratch/mistral.json"
+find_json rtx4090 "$mistral" > "$scratch/out.json"; code=$?
+check "must($code === 0, 'exit');
+const files = JSON.parse(fs.readFileSync('$scratch/mistral.json', 'utf8')).siblings;
+const shards = files.filter((f) => /^model-\\d{5}-of-\\d{5}\\.safetensors\$/.test(f.rfilename));
+const sets = r.results.filter((x) => x.repo === '$mistral' && x.format === 'safetensors');
+must(shards.length === 3 && files.some((f) => f.rfilename === 'consolidated.safetensors'), 'repo layout changed');
+must(sets.length === 1 && sets[0].sizeGb === Math.round(shards.reduce((a, f) => a + f.size, 0) / 2 ** 30 * 10) / 10, JSON.stringify(sets));"
+result $? "$mistral: one safetensors set, the shards' sum, consolidated.safetensors not counted"
+
+adapter=harness-hub/Qwen3.8-27B-pi-adapted
+curl -sf "https://huggingface.co/api/models/$adapter" > "$scratch/adapter.json"
+find_json rtx4090 "$adapter" > "$scratch/out.json"; code=$?
+check "must($code === 0, 'exit');
+const st = JSON.parse(fs.readFileSync('$scratch/adapter.json', 'utf8')).siblings.filter((f) => f.rfilename.endsWith('.safetensors')).map((f) => f.rfilename);
+must(JSON.stringify(st) === '[\"adapter_model.safetensors\"]', 'repo layout changed: ' + st);
+must(!r.results.some((x) => x.repo === '$adapter'), 'adapter-only repo gave a set');"
+result $? "$adapter (adapter only): no safetensors set"
 
 gated=meta-llama/Llama-3.1-8B-Instruct
 find_json rtx4090 "$gated" > "$scratch/out.json"; code=$?
