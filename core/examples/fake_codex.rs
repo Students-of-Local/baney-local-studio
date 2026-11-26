@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -80,6 +80,22 @@ impl Shared {
             let params = json!({ "turnId": turn, "itemId": format!("command-{number}"), "command": SKILL_READ });
             ("item/commandExecution/requestApproval", params)
         };
+        self.wait(&id, method, &params, &answer)
+    }
+
+    fn ask_user(&self, turn: &str, number: u64) -> Option<String> {
+        let id = json!(format!("input-{number}"));
+        let (sender, answer) = channel();
+        self.answers.lock().unwrap_or_else(PoisonError::into_inner).push((id.clone(), sender));
+        let color = json!({ "id": "color", "header": "Color", "question": "Which color?",
+            "options": [{ "label": "Red", "description": "warm" }, { "label": "Blue", "description": "cool" }] });
+        let size = json!({ "id": "size", "header": "Size", "question": "Which size?", "options": null });
+        let params = json!({ "threadId": "", "turnId": turn, "itemId": format!("input-{number}"), "isBlocking": true,
+            "questions": [color, size] });
+        self.wait(&id, "item/tool/requestUserInput", &params, &answer)
+    }
+
+    fn wait(&self, id: &Value, method: &str, params: &Value, answer: &Receiver<String>) -> Option<String> {
         self.write(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         loop {
             if let Ok(decision) = answer.recv_timeout(Duration::from_millis(20)) {
@@ -95,7 +111,9 @@ impl Shared {
         let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(index) = answers.iter().position(|(known, _)| known == id) {
             let (_, sender) = answers.remove(index);
+            let picked = |key: &str| result["answers"][key]["answers"][0].as_str().unwrap_or("nothing").to_string();
             let answer = match result["action"].as_str() {
+                _ if result.get("answers").is_some() => format!("picked {} and {}", picked("color"), picked("size")),
                 Some(action) => format!("{action} {}", result["_meta"]["persist"].as_str().unwrap_or("once")),
                 None => result["decision"].as_str().unwrap_or("refusal").to_string(),
             };
@@ -236,6 +254,14 @@ fn turn(shared: &Shared, id: &Value, text: &str) {
         };
         reply = format!("{reply} after {decision}");
     }
+    if text.contains("questions") {
+        let Some(answer) = shared.ask_user(&turn, number) else {
+            shared.interrupted.store(false, Ordering::Relaxed);
+            shared.completed(&turn, "interrupted", None);
+            return;
+        };
+        reply = format!("{reply}: {answer}");
+    }
     if text.contains("look up") {
         let server = shared.skills.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let found = (server["default_tools_approval_mode"] == "approve").then(|| mcp::skills(&server, text)).flatten();
@@ -261,7 +287,7 @@ fn at_home() -> bool {
 }
 
 fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
-    if matches!(method, "thread/start" | "thread/resume") {
+    if matches!(method, "thread/start" | "thread/resume" | "thread/fork") {
         *shared.skills.lock().unwrap_or_else(PoisonError::into_inner) =
             params["config"]["mcp_servers"]["local-studio-skills"].clone();
         let projects = params["config"]["projects"].as_object().cloned().unwrap_or_default();
@@ -298,7 +324,22 @@ fn request(shared: &Arc<Shared>, id: &Value, method: &str, params: &Value) {
         }
         "thread/resume" => {
             pause(RESUME_DELAY);
-            shared.respond(id, &shared.thread(&params["threadId"]));
+            let fork = params["threadId"].as_str().filter(|thread| thread.starts_with("fake-fork-"));
+            if fork.and_then(Shared::store).is_some_and(|file| !file.exists()) {
+                shared.refuse(id, "no rollout found for this thread");
+            } else {
+                shared.respond(id, &shared.thread(&params["threadId"]));
+            }
+        }
+        "thread/fork" => {
+            let fork = format!("fake-fork-{}", std::process::id());
+            let files = params["threadId"].as_str().and_then(Shared::store).zip(Shared::store(&fork));
+            let copied = files.and_then(|(origin, file)| std::fs::copy(origin, file).ok());
+            if copied.is_some() {
+                shared.respond(id, &shared.thread(&json!(fork)));
+            } else {
+                shared.refuse(id, "no rollout found for this thread");
+            }
         }
         "thread/read" => shared.respond(id, &shared.thread(&params["threadId"])),
         "thread/compact/start" => {

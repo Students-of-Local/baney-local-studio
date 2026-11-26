@@ -5,8 +5,9 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::{glib, pango};
 use local_studio_core::{
-    LocalAction, LocalCluster, LocalController, LocalGpu, LocalHotplug, LocalLendMode, LocalLendState, LocalPool,
-    LocalPoolModel, LocalPoolPhase, LocalPowerHelper, LocalPowerLever, LocalThunderbolt, LocalThunderboltState,
+    LocalAction, LocalCluster, LocalController, LocalEject, LocalEjectState, LocalGpu, LocalHotplug, LocalLendMode,
+    LocalLendState, LocalPool, LocalPoolModel, LocalPoolPhase, LocalPowerHelper, LocalPowerLever, LocalThunderbolt,
+    LocalThunderboltState,
 };
 
 use crate::app::App;
@@ -304,6 +305,12 @@ impl ClusterView {
                 .flat_map(|hardware| &hardware.thunderbolt)
                 .map(|device| format!("authorize:{target}:{}", device.uuid))
                 .collect::<Vec<_>>(),
+            controller
+                .hardware
+                .iter()
+                .flat_map(|hardware| &hardware.gpus)
+                .flat_map(|gpu| [false, true].map(|cancel| format!("eject:{target}:{}:{cancel}", gpu.index)))
+                .collect(),
             vec![
                 format!("lending:{target}"),
                 format!("discovery:{target}"),
@@ -366,7 +373,11 @@ impl ClusterView {
             list.append(&label("No NVIDIA GPU reported.", &["dim-label", "ls-dash-label"]));
         }
         for gpu in gpus {
-            list.append(&gpu_row(gpu));
+            let line = gpu_row(gpu);
+            list.append(&line);
+            if let Some(eject) = gpu.eject.as_ref().filter(|_| controller.local) {
+                self.eject(controller, gpu, eject, &line, &list, pending);
+            }
         }
         let devices = controller.hardware.iter().flat_map(|hardware| &hardware.thunderbolt);
         for device in devices.filter(|device| device.state != LocalThunderboltState::Authorized) {
@@ -431,6 +442,71 @@ impl ClusterView {
             line.append(&button);
         }
         line
+    }
+
+    fn eject(
+        &self,
+        controller: &LocalController,
+        gpu: &LocalGpu,
+        eject: &LocalEject,
+        line: &gtk::Box,
+        list: &gtk::Box,
+        pending: &dyn Fn(&str) -> bool,
+    ) {
+        let key = |cancel: bool| format!("eject:{}:{}:{cancel}", controller.target, gpu.index);
+        let (ejecting, cancelling) = (pending(&key(false)), pending(&key(true)));
+        let busy = ejecting || cancelling;
+        let button = |caption: &str, tip: &str, cancel: bool| {
+            let caption = match (cancel, ejecting, cancelling) {
+                (false, true, _) => "Ejecting…",
+                (true, _, true) => "Cancelling…",
+                _ => caption,
+            };
+            let button = parts::button(&gtk::Label::new(Some(caption)), true);
+            button.set_valign(gtk::Align::Start);
+            button.set_sensitive(!busy);
+            button.set_tooltip_text(Some(tip));
+            let weak = self.app.clone();
+            let (target, index, key) = (controller.target.clone(), gpu.index, key(cancel));
+            button.connect_clicked(move |_| {
+                act(&weak, LocalAction::EjectGpu { controller: target.clone(), gpu: index, cancel }, key.clone());
+            });
+            button
+        };
+        if !eject.draining {
+            if eject.state != LocalEjectState::Unsupported {
+                line.append(&button(
+                    "Eject",
+                    "Unload its models and take it off the bus so it can be unplugged",
+                    false,
+                ));
+            }
+            return;
+        }
+        let block = column(4);
+        block.set_margin_start(34);
+        let text = match eject.state {
+            LocalEjectState::Ready => "Ejecting…",
+            _ => eject.message.as_deref().unwrap_or("Ejecting…"),
+        };
+        let message = wrapped(text, &["ls-dash-small", "warning"]);
+        block.append(&message);
+        for process in &eject.blockers {
+            block.append(&label(&format!("pid {} · {}", process.pid, process.name), &["dim-label", "ls-dash-small"]));
+        }
+        if let Some(command) = &eject.command {
+            let shown = label(command, &["ls-dash-small", "monospace"]);
+            shown.set_selectable(true);
+            shown.set_wrap(true);
+            block.append(&shown);
+        }
+        let actions = row(8);
+        if eject.state == LocalEjectState::Busy {
+            actions.append(&button("Try Again", "Eject again once those programs have quit", false));
+        }
+        actions.append(&button("Cancel Eject", "Let this GPU load models again", true));
+        block.append(&actions);
+        list.append(&block);
     }
 
     fn lending(
@@ -728,6 +804,12 @@ fn gpu_row(gpu: &LocalGpu) -> gtk::Box {
         head.append(&badge);
     }
     text.append(&head);
+    if gpu.memory_total_mib > 0 {
+        let bar = gtk::ProgressBar::builder().margin_top(3).margin_bottom(3).build();
+        #[allow(clippy::cast_precision_loss)]
+        bar.set_fraction((gpu.memory_used_mib as f64 / gpu.memory_total_mib as f64).clamp(0.0, 1.0));
+        text.append(&bar);
+    }
     if let Some(link) = &gpu.link {
         text.append(&wrapped(link, &["dim-label", "ls-dash-small"]));
     }

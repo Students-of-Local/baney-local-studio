@@ -507,7 +507,7 @@ mod local_only {
     const LOCAL: &str = "ollama-local";
     const DRIFT: &str = "drift-stub";
     const LEDGER_ENV: &str = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT";
-    const CASES: [(&str, &str, bool); 12] = [
+    const CASES: [(&str, &str, bool); 13] = [
         ("case-v6-loopback", "http://[::1]:11434/v1", true),
         ("case-v6-mapped", "http://[::ffff:127.0.0.1]:11434/v1", true),
         ("case-v6-ula", "http://[fd00::1]:11434/v1", true),
@@ -518,6 +518,7 @@ mod local_only {
         ("case-100-128", "http://100.128.0.1:11434/v1", false),
         ("case-localhost-dot", "http://localhost.:11434/v1", false),
         ("openai", "http://127.0.0.1:11434/v1", false),
+        ("synthetic", "http://127.0.0.1:11434/v1", false),
         ("case-ftp", "ftp://127.0.0.1:11434/v1", false),
         ("case-no-base-url", "", false),
     ];
@@ -1613,8 +1614,8 @@ LEDGER_OUT = "LOCAL_STUDIO_PLUGIN_LEDGER__OUT"
 
 mod hub {
     use super::{
-        ensure, plugin_store, Arc, Command, Context, Duration, Instant, Path, Signal, Studio, StudioConfig, Update,
-        Value, Waker,
+        bail, ensure, plugin_store, Arc, Capability, Catalog, Command, Context, Duration, Grants, Instant, Path,
+        PathBuf, Signal, Source, Studio, StudioConfig, Update, Value, Waker,
     };
     use local_studio_core::{CatalogPlugin, ConsentAnswer, ConsentRequest, PluginRow, PluginState};
 
@@ -1623,6 +1624,8 @@ mod hub {
     const ID: &str = "beacon";
     const CATALOG: &str = "smoothstone";
     const PLAIN: &str = "plainfolder";
+    const OLD: &str = "tychicus-browser";
+    const NEW: &str = "browser-use";
     const STEP: Duration = Duration::from_secs(180);
 
     #[derive(Default)]
@@ -1721,7 +1724,7 @@ mod hub {
         Ok(())
     }
 
-    fn release(repo: &Path, version: &str, capabilities: &[&str]) -> anyhow::Result<()> {
+    fn release(repo: &Path, id: &str, version: &str, capabilities: &[&str]) -> anyhow::Result<()> {
         let listed: Vec<String> = capabilities.iter().map(|name| format!("{name:?}")).collect();
         let gates: Vec<String> = capabilities
             .iter()
@@ -1732,7 +1735,7 @@ mod hub {
         std::fs::write(
             repo.join("plugin.toml"),
             format!(
-                "id = \"{ID}\"\nversion = \"{version}\"\ndescription = \"Fixture plugin for the hub smoke\"\ncapabilities = [{}]\n\n[mcp]\ncommand = \"bin/server.sh\"\nargs = [\"serve\", \"--granted={}\"]\n\n[gates]\n{gates}",
+                "id = \"{id}\"\nversion = \"{version}\"\ndescription = \"Fixture plugin for the hub smoke\"\ncapabilities = [{}]\n\n[mcp]\ncommand = \"bin/server.sh\"\nargs = [\"serve\", \"--granted={}\"]\n\n[gates]\n{gates}",
                 listed.join(", "),
                 plugin_store::GRANTED
             ),
@@ -1749,6 +1752,142 @@ mod hub {
             .map(|args| args.iter().filter_map(Value::as_str).map(str::to_string).collect()))
     }
 
+    const OLD_ASKS: [&str; 3] = ["mcp-server", "screen-capture", "synthetic-input"];
+    const NEW_ASKS: [&str; 2] = ["mcp-server", "screen-capture"];
+    const REPLACES: &str = "\"tychicus-browser\"";
+
+    fn fixture(root: &Path, id: &str, capabilities: &[&str]) -> anyhow::Result<PathBuf> {
+        let repo = root.join(id);
+        std::fs::create_dir_all(repo.join("bin"))?;
+        std::fs::write(repo.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
+        Command::new("chmod").arg("755").arg(repo.join("bin").join("server.sh")).status()?;
+        git(&repo, &["init", "-q", "-b", "main"])?;
+        release(&repo, id, "1.0.0", capabilities)?;
+        Ok(repo)
+    }
+
+    fn entry(
+        repo: &Path,
+        id: &str,
+        capabilities: &[&str],
+        replaces: &str,
+        tree: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let rev = Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output()?.stdout;
+        let tree = match tree {
+            Some(tree) => tree.to_string(),
+            None => plugin_store::tree_hash(repo, &[]).map_err(anyhow::Error::msg)?,
+        };
+        let listed: Vec<String> = capabilities.iter().map(|name| format!("{name:?}")).collect();
+        Ok(format!(
+            "[[plugin]]\nid = \"{id}\"\ndescription = \"Fixture\"\ncapabilities = [{}]\nreplaces = [{replaces}]\ngit = \"{}\"\nrev = \"{}\"\ntree = \"{tree}\"\n",
+            listed.join(", "),
+            repo.display(),
+            String::from_utf8_lossy(&rev).trim()
+        ))
+    }
+
+    fn parse(text: &str) -> anyhow::Result<Catalog> {
+        Catalog::parse(text).map_err(anyhow::Error::msg)
+    }
+
+    fn held(plugins: &Path, id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let grants = Grants::load(plugins).map_err(anyhow::Error::msg)?;
+        Ok(grants.granted(id).map(|(_, _, held)| held.into_iter().map(str::to_string).collect()))
+    }
+
+    fn recorded(plugins: &Path, id: &str) -> anyhow::Result<bool> {
+        Ok(plugin_store::Origins::load(plugins).map_err(anyhow::Error::msg)?.get(id).is_some())
+    }
+
+    fn setup(fixtures: &Path, name: &str, tree: Option<&str>) -> anyhow::Result<(PathBuf, Catalog)> {
+        let plugins = fixtures.join(name);
+        let old = parse(&entry(&fixtures.join(OLD), OLD, &OLD_ASKS, "", None)?)?;
+        plugin_store::install(&plugins, &Source::Catalog(OLD.into()), &old)
+            .map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+        let plugin = plugin_store::load(&plugins.join(OLD)).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+        let mut grants = Grants::load(&plugins).map_err(anyhow::Error::msg)?;
+        let all = [Capability::McpServer, Capability::ScreenCapture, Capability::SyntheticInput];
+        grants.grant(&plugin, &all, None).map_err(anyhow::Error::msg)?;
+        grants.save(&plugins).map_err(anyhow::Error::msg)?;
+        Ok((plugins, parse(&entry(&fixtures.join(NEW), NEW, &NEW_ASKS, REPLACES, tree)?)?))
+    }
+
+    fn replaced(root: &Path) -> anyhow::Result<()> {
+        let bundled = Catalog::bundled().map_err(anyhow::Error::msg)?;
+        for (id, old) in [(NEW, OLD), ("computer-use", "tychicus-computer")] {
+            let entry = bundled.entry(id).context(id)?;
+            ensure!(entry.replaces == [old] && bundled.entry(old).is_none(), "bundled {id}: {entry:?}");
+            ensure!(bundled.replacing(old).is_some_and(|entry| entry.id == id), "{old} is not replaced by {id}");
+        }
+        println!("ok   the bundled catalog's browser-use and computer-use replace the tychicus ids");
+        let fixtures = root.join("replace");
+        let (old, new) = (fixture(&fixtures, OLD, &OLD_ASKS)?, fixture(&fixtures, NEW, &NEW_ASKS)?);
+        let own =
+            format!("{}\n{}", entry(&new, NEW, &NEW_ASKS, REPLACES, None)?, entry(&old, OLD, &OLD_ASKS, "", None)?);
+        let error = Catalog::parse(&own).err().unwrap_or_default();
+        ensure!(error.contains("replaces tychicus-browser, which is still a catalog entry"), "own entry: {error:?}");
+        let twice =
+            format!("{}\n{}", entry(&new, NEW, &NEW_ASKS, REPLACES, None)?, entry(&old, "other", &[], REPLACES, None)?);
+        let error = Catalog::parse(&twice).err().unwrap_or_default();
+        ensure!(error.contains("more than one entry replaces tychicus-browser"), "replaced twice: {error:?}");
+        println!("ok   a catalog that replaces its own entry, or one id twice, is refused");
+
+        let (plugins, catalog) = setup(&fixtures, "fresh", None)?;
+        let offer = plugin_store::offer_replacement(&plugins, OLD, NEW, &catalog, "replace-fresh".into());
+        let Ok(plugin_store::Offer::Ask(pending)) = offer else {
+            bail!("the successor asks for permissions but opened no sheet")
+        };
+        let asked: Vec<String> = pending.request().rows.iter().map(|row| row.id.clone()).collect();
+        ensure!(asked == NEW_ASKS, "fresh: its own sheet asks for {asked:?}");
+        let message = plugin_store::answer(&plugins, *pending, &[]).map_err(anyhow::Error::msg)?;
+        let said = "replaced tychicus-browser; its permissions went with it, and browser-use asks for its own";
+        ensure!(message.contains(said), "fresh: {message}");
+        ensure!(plugins.join(NEW).exists() && !plugins.join(OLD).exists(), "fresh: folders");
+        ensure!(recorded(&plugins, NEW)? && !recorded(&plugins, OLD)?, "fresh: origins");
+        let kept = held(&plugins, NEW)?;
+        ensure!(
+            kept == Some(vec!["mcp-server".to_string()]),
+            "fresh: the successor holds {kept:?}, not only what its sheet granted"
+        );
+        ensure!(held(&plugins, OLD)?.is_none(), "fresh: {OLD} still holds grants");
+        println!("ok   {message}");
+
+        let (plugins, catalog) = setup(&fixtures, "failed", Some(&format!("sha256:{}", "0".repeat(64))))?;
+        let files = |plugins: &Path| {
+            [plugin_store::GRANTS, plugin_store::ORIGINS].map(|name| std::fs::read(plugins.join(name)).ok())
+        };
+        let before = files(&plugins);
+        let offer = plugin_store::offer_replacement(&plugins, OLD, NEW, &catalog, "replace-failed".into());
+        let Err(error) = offer else { bail!("a successor with the wrong tree installed") };
+        ensure!(error.contains("tree hash mismatch"), "failed: {error}");
+        ensure!(plugins.join(OLD).join("plugin.toml").exists() && !plugins.join(NEW).exists(), "failed: folders");
+        ensure!(files(&plugins) == before, "failed: grants.json or origins.json changed");
+        println!("ok   a failed successor install leaves {OLD}, grants.json and origins.json as they were");
+
+        let (plugins, catalog) = setup(&fixtures, "both", None)?;
+        plugin_store::install(&plugins, &Source::Catalog(NEW.into()), &catalog)
+            .map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+        let plugin = plugin_store::load(&plugins.join(NEW)).map_err(|errors| anyhow::anyhow!(errors.join("; ")))?;
+        let mut grants = Grants::load(&plugins).map_err(anyhow::Error::msg)?;
+        grants.grant(&plugin, &[Capability::McpServer], None).map_err(anyhow::Error::msg)?;
+        grants.save(&plugins).map_err(anyhow::Error::msg)?;
+        let inode = |plugins: &Path| {
+            std::fs::metadata(plugins.join(NEW)).map(|meta| std::os::unix::fs::MetadataExt::ino(&meta))
+        };
+        let before = inode(&plugins)?;
+        let offer = plugin_store::offer_replacement(&plugins, OLD, NEW, &catalog, "replace-both".into());
+        let Ok(plugin_store::Offer::Installed(message)) = offer else {
+            bail!("both installed: a sheet opened or it failed")
+        };
+        ensure!(message.contains("already installed; replaced tychicus-browser"), "both: {message}");
+        ensure!(inode(&plugins)? == before, "both: the installed successor was installed again");
+        ensure!(!plugins.join(OLD).exists() && !recorded(&plugins, OLD)? && recorded(&plugins, NEW)?, "both: old kept");
+        ensure!(held(&plugins, NEW)? == Some(vec!["mcp-server".to_string()]), "both: grants");
+        println!("ok   {message}");
+        Ok(())
+    }
+
     pub fn run(root: &Path) -> anyhow::Result<()> {
         ensure!(!root.exists(), "{} exists; give a fresh scratch dir", root.display());
         let (data, agent, repo) = (root.join("data"), root.join("agent"), root.join(ID));
@@ -1756,6 +1895,7 @@ mod hub {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(agent.join("settings.json"), "{}\n")?;
+        replaced(root)?;
         std::env::set_var("LOCAL_STUDIO_DATA_DIR", &data);
         std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
         git(&repo, &["init", "-q", "-b", "main"])?;
@@ -1764,7 +1904,7 @@ mod hub {
         std::fs::create_dir_all(repo.join("bin"))?;
         std::fs::write(repo.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
         Command::new("chmod").arg("755").arg(repo.join("bin").join("server.sh")).status()?;
-        release(&repo, "1.0.0", &["mcp-server", "screen-capture"])?;
+        release(&repo, ID, "1.0.0", &["mcp-server", "screen-capture"])?;
         let url = format!("file://{}", repo.canonicalize()?.display());
         let config = StudioConfig {
             socket_path: Some(root.join("absent.sock").to_string_lossy().into_owned()),
@@ -1851,6 +1991,43 @@ mod hub {
         Ok(())
     }
 
+    fn replacement(hub: &mut Hub, plugins: &Path, dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!("id = \"{OLD}\"\nversion = \"1.0.0\"\ndescription = \"Fixture the catalog replaces\"\ncapabilities = []\n"),
+        )?;
+        for (round, said) in [("fresh", "replaced"), ("again", "already installed; replaced")] {
+            let (install, check, update) =
+                (format!("hub-old-{round}"), format!("hub-old-check-{round}"), format!("hub-old-update-{round}"));
+            hub.studio.install_plugin(install.clone(), dir.to_string_lossy().into_owned());
+            hub.pump(&format!("{round}: install {OLD}"), |seen| {
+                seen.outcome(&install).is_some() && seen.row(OLD).is_some()
+            })?;
+            hub.studio.check_plugin_updates(check.clone());
+            hub.pump(&format!("{round}: the update check offers {NEW} in place of {OLD}"), |seen| {
+                seen.outcome(&check).is_some() && seen.row(OLD).is_some_and(|row| row.update.is_some())
+            })?;
+            let row = hub.seen.row(OLD).context("old row")?;
+            ensure!(row.detail.contains("replaced by Local Studio browser use"), "{round}: row {row:?}");
+            hub.studio.update_plugin(update.clone(), OLD.into());
+            hub.pump(&format!("{round}: the update leaves {NEW} and removes {OLD}"), |seen| {
+                seen.outcome(&update).is_some() && seen.row(OLD).is_none() && seen.row(NEW).is_some()
+            })?;
+            let outcome = hub.seen.outcome(&update).cloned();
+            ensure!(
+                outcome.as_ref().is_some_and(|outcome| outcome
+                    .as_ref()
+                    .is_ok_and(|message| message.contains(said) && message.contains("its permissions went with it"))),
+                "{round}: update {outcome:?}"
+            );
+            let origins = std::fs::read_to_string(plugins.join(plugin_store::ORIGINS))?;
+            ensure!(!plugins.join(OLD).exists() && !origins.contains(OLD), "{round}: {OLD} is still recorded");
+            ensure!(origins.contains(NEW), "{round}: origins.json lacks {NEW}");
+        }
+        Ok(())
+    }
+
     fn untold(hub: &mut Hub, dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir.join("bin"))?;
         std::fs::write(dir.join("bin").join("server.sh"), "#!/bin/sh\nexec cat\n")?;
@@ -1876,7 +2053,7 @@ mod hub {
     }
 
     fn updates(hub: &mut Hub, repo: &Path) -> anyhow::Result<()> {
-        release(repo, "1.1.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
+        release(repo, ID, "1.1.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
         hub.studio.check_plugin_updates("hub-check".into());
         hub.pump("the update check finds 1.1.0 on the channel", |seen| {
             seen.outcome("hub-check").is_some() && seen.row(ID).is_some_and(|row| row.update.is_some())
@@ -1899,7 +2076,7 @@ mod hub {
                 .is_some_and(|row| row.version == "1.1.0" && row.update.is_none() && row.state == PluginState::Running)
         })?;
 
-        release(repo, "1.2.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
+        release(repo, ID, "1.2.0", &["mcp-server", "screen-capture", "synthetic-input"])?;
         let sheets = hub.seen.sheets;
         hub.studio.check_plugin_updates("hub-check-2".into());
         hub.pump("the next check finds 1.2.0", |seen| {
@@ -1984,8 +2161,11 @@ mod hub {
         let plain = repo.parent().context("scratch root")?.join(PLAIN);
         untold(hub, &plain)?;
         whole_catalog(hub, plugins)?;
+        replacement(hub, plugins, &repo.parent().context("scratch root")?.join(OLD))?;
 
-        for (request, id) in [("hub-remove", ID), ("hub-remove-catalog", CATALOG), ("hub-remove-plain", PLAIN)] {
+        for (request, id) in
+            [("hub-remove", ID), ("hub-remove-catalog", CATALOG), ("hub-remove-plain", PLAIN), ("hub-remove-new", NEW)]
+        {
             hub.studio.remove_plugin(request.into(), id.into());
             hub.pump(&format!("remove {id}"), |seen| seen.outcome(request).is_some() && seen.row(id).is_none())?;
             ensure!(!plugins.join(id).exists(), "{id} folder is still there");
@@ -1994,7 +2174,7 @@ mod hub {
         let grants = std::fs::read_to_string(plugins.join("grants.json")).unwrap_or_default();
         let origins = std::fs::read_to_string(plugins.join(plugin_store::ORIGINS)).unwrap_or_default();
         ensure!(
-            !grants.contains(ID) && !origins.contains(ID) && !origins.contains(CATALOG),
+            !grants.contains(ID) && [ID, CATALOG, NEW, OLD].iter().all(|id| !origins.contains(id)),
             "grants or origins remember a removed plugin"
         );
         ensure!(

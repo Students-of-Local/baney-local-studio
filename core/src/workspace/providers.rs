@@ -27,7 +27,12 @@ const ENDPOINT_HEADER: &str = "x-local-studio-endpoint";
 const EXCERPT: usize = 200;
 const SERVER_TIMEOUT: Duration = Duration::from_millis(1500);
 const SERVER_BYTES: usize = 1 << 20;
+const SHOWN: usize = 24;
 const ANTHROPIC: &str = "anthropic";
+const SYNTHETIC: &str = "synthetic";
+const SYNTHETIC_ENV: &str = "SYNTHETIC_API_KEY";
+const SYNTHETIC_ORIGIN: &str = "https://api.synthetic.new";
+const QUOTA_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const CLAUDE_SIGN_IN: &str = "Eukhe's Claude models are hidden: its Claude subscription sign-in identifies as Claude Code and can get the Anthropic account restricted. Use Claude Code (your claude CLI sign-in) for Claude, or save an Anthropic API key.";
 
 struct BuiltIn {
@@ -36,7 +41,7 @@ struct BuiltIn {
     env: &'static str,
 }
 
-const BUILT_INS: [BuiltIn; 16] = [
+const BUILT_INS: [BuiltIn; 17] = [
     BuiltIn { id: "openai", name: "OpenAI", env: "OPENAI_API_KEY" },
     BuiltIn { id: "anthropic", name: "Anthropic", env: "ANTHROPIC_API_KEY" },
     BuiltIn { id: "google", name: "Google Gemini", env: "GEMINI_API_KEY" },
@@ -53,6 +58,7 @@ const BUILT_INS: [BuiltIn; 16] = [
     BuiltIn { id: "zai", name: "Z.ai", env: "ZAI_API_KEY" },
     BuiltIn { id: "minimax", name: "MiniMax", env: "MINIMAX_API_KEY" },
     BuiltIn { id: "vercel-ai-gateway", name: "Vercel AI Gateway", env: "AI_GATEWAY_API_KEY" },
+    BuiltIn { id: SYNTHETIC, name: "Synthetic", env: SYNTHETIC_ENV },
 ];
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -137,6 +143,9 @@ pub(super) struct ProviderState {
     errors: Vec<String>,
     fleet: Vec<LocalController>,
     servers: Vec<Server>,
+    synthetic_error: Option<String>,
+    synthetic_quota: Option<String>,
+    synthetic_run: u64,
 }
 
 #[derive(Clone)]
@@ -306,7 +315,12 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
                 env_var: Some(built_in.env.to_string()),
                 base_url: None,
                 api: None,
-                models: Vec::new(),
+                models: if built_in.id == SYNTHETIC {
+                    files.providers.get(SYNTHETIC).map(models_of).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                quota: state.synthetic_quota.clone().filter(|_| built_in.id == SYNTHETIC),
             }
         })
         .collect();
@@ -332,6 +346,7 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
                 base_url: text(entry, "baseUrl").map(str::to_string),
                 api: text(entry, "api").and_then(api_of),
                 models: models_of(entry),
+                quota: None,
             }
         })
         .collect();
@@ -352,6 +367,7 @@ fn statuses(state: &ProviderState, files: &Files) -> Vec<ProviderStatus> {
             base_url: None,
             api: None,
             models: Vec::new(),
+            quota: None,
         })
         .collect();
     others.sort_by(|left, right| left.name.cmp(&right.name));
@@ -771,9 +787,8 @@ fn server_at(preset: EndpointPreset) -> Option<Server> {
     Some(Server { name: preset.name, base_url, port: url.port_or_known_default()?, models: Vec::new() })
 }
 
-async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Server> {
-    let asked = client.get(format!("{}/models", server.base_url)).send().await;
-    let mut response = asked.ok().filter(|response| response.status().is_success())?;
+async fn read_server(request: reqwest::RequestBuilder) -> Option<Value> {
+    let mut response = request.send().await.ok().filter(|response| response.status().is_success())?;
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
         if body.len() + chunk.len() > SERVER_BYTES {
@@ -781,9 +796,72 @@ async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Serve
         }
         body.extend_from_slice(&chunk);
     }
-    server.models = parse_models(&serde_json::from_slice(&body).ok()?);
+    serde_json::from_slice(&body).ok()
+}
+
+async fn ask_server(client: reqwest::Client, mut server: Server) -> Option<Server> {
+    server.models = parse_models(&read_server(client.get(format!("{}/models", server.base_url))).await?);
     server.models.retain(|model| !model.id.to_lowercase().contains("embed"));
-    (!server.models.is_empty()).then_some(server)
+    if server.models.is_empty() {
+        return None;
+    }
+    context_windows(&client, &mut server).await;
+    Some(server)
+}
+
+fn size(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64).filter(|size| *size > 0)
+}
+
+fn without_window(server: &mut Server) -> impl Iterator<Item = &mut ProviderModel> {
+    server.models.iter_mut().filter(|model| model.context_window == 0)
+}
+
+async fn context_windows(client: &reqwest::Client, server: &mut Server) {
+    let root = server.base_url.strip_suffix("/v1").unwrap_or(&server.base_url).to_string();
+    if without_window(server).next().is_none() {
+        return;
+    }
+    if let Some(props) = read_server(client.get(format!("{root}/props"))).await {
+        if let Some(n_ctx) =
+            size(props.pointer("/default_generation_settings/n_ctx")).or_else(|| size(props.get("n_ctx")))
+        {
+            without_window(server).for_each(|model| model.context_window = n_ctx);
+        }
+    }
+    if let Some(listed) = read_server(client.get(format!("{root}/api/v0/models"))).await {
+        for entry in listed.get("data").and_then(Value::as_array).into_iter().flatten() {
+            let found = size(entry.get("loaded_context_length"));
+            if let (Some(found), Some(id)) = (found, text(entry, "id")) {
+                without_window(server).filter(|model| model.id == id).for_each(|model| model.context_window = found);
+            }
+        }
+    }
+    let Some(running) = read_server(client.get(format!("{root}/api/ps"))).await else { return };
+    let running = running.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
+    for model in without_window(server).take(SHOWN) {
+        let loaded = running.iter().find(|entry| {
+            text(entry, "name") == Some(model.id.as_str()) || text(entry, "model") == Some(model.id.as_str())
+        });
+        if let Some(found) = loaded.and_then(|entry| size(entry.get("context_length"))) {
+            model.context_window = found;
+            continue;
+        }
+        let Some(shown) =
+            read_server(client.post(format!("{root}/api/show")).json(&json!({ "model": model.id }))).await
+        else {
+            continue;
+        };
+        let set = text(&shown, "parameters").and_then(|parameters| {
+            parameters.lines().find_map(|line| match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["num_ctx", value] => value.parse::<u64>().ok().filter(|size| *size > 0),
+                _ => None,
+            })
+        });
+        if let Some(found) = set {
+            model.context_window = found;
+        }
+    }
 }
 
 fn server_client() -> Result<reqwest::Client, String> {
@@ -808,6 +886,55 @@ async fn find_servers(presets: Vec<EndpointPreset>) -> Result<Vec<Server>, Strin
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tokio::task::spawn_blocking(work).await.map_err(|error| error.to_string())?
+}
+
+fn synthetic_origin() -> String {
+    std::env::var("LOCAL_STUDIO_SYNTHETIC_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| SYNTHETIC_ORIGIN.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn synthetic_key(auth: &Map<String, Value>) -> Option<String> {
+    stored_key(auth, SYNTHETIC).or_else(|| std::env::var(SYNTHETIC_ENV).ok().filter(|key| !key.trim().is_empty()))
+}
+
+fn synthetic_owned(entry: &Value, base_url: &str) -> bool {
+    matches!(text(entry, "apiKey"), Some(SYNTHETIC_ENV | "none"))
+        && text(entry, "baseUrl").map(|url| url.trim_end_matches('/')) == Some(base_url)
+}
+
+fn synthetic_entry(existing: Option<&Value>, base_url: &str, models: &[ProviderModel]) -> Value {
+    let mut entry = provider_entry(existing, "Synthetic", base_url, ProviderApi::OpenAiCompatible, models);
+    entry["apiKey"] = json!(SYNTHETIC_ENV);
+    entry
+}
+
+fn quota_line(value: &Value) -> Option<String> {
+    let number = |object: &Value, key: &str| object.get(key).and_then(Value::as_f64);
+    let mut parts = Vec::new();
+    let rolling =
+        value.get("rollingFiveHourLimit").and_then(|limit| Some((number(limit, "remaining")?, number(limit, "max")?)));
+    let subscription =
+        value.get("subscription").and_then(|limit| Some((number(limit, "limit")?, number(limit, "requests")?)));
+    if let Some((left, max)) = rolling {
+        parts.push(format!("{left:.0} of {max:.0} requests left in the rolling 5 hours"));
+    } else if let Some((limit, used)) = subscription {
+        parts.push(format!("{:.0} of {limit:.0} requests left", (limit - used).max(0.0)));
+    }
+    if let Some(percent) = value.get("weeklyTokenLimit").and_then(|limit| number(limit, "percentRemaining")) {
+        parts.push(format!("{percent:.0}% of weekly tokens left"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+async fn synthetic_quota(origin: &str, key: &str) -> Option<String> {
+    let client = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(QUOTA_TIMEOUT).build().ok()?;
+    let response = client.get(format!("{origin}/v2/quotas")).bearer_auth(key).send().await.ok()?;
+    let value: Value = response.error_for_status().ok()?.json().await.ok()?;
+    quota_line(&value)
 }
 
 fn chosen_key(key: &ProviderKey) -> Option<String> {
@@ -884,7 +1011,7 @@ impl Workspace {
         let update = {
             let state = self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
             let mut errors = state.errors.clone();
-            for error in &files.errors {
+            for error in files.errors.iter().chain(&state.synthetic_error) {
                 if !errors.contains(error) {
                     errors.push(error.clone());
                 }
@@ -905,6 +1032,89 @@ impl Workspace {
             let fleet = workspace.inner.local.fleet(&workspace.current_settings()).await;
             workspace.fleet_seen(fleet);
         });
+        let workspace = self.clone();
+        self.inner.runtime.spawn(async move {
+            match workspace.sync_synthetic().await {
+                Ok(true) => workspace.reload_catalog(),
+                Ok(false) | Err(_) => workspace.publish_providers(),
+            }
+        });
+    }
+
+    fn reload_catalog(&self) {
+        let reloader = self.inner.models_reloader.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        match reloader {
+            Some(reloader) => reloader(None),
+            None => self.publish_providers(),
+        }
+    }
+
+    async fn sync_synthetic(&self) -> Result<bool, String> {
+        let _sync = self.inner.synthetic_lock.lock().await;
+        let outcome = self.list_synthetic().await;
+        let error = outcome.as_ref().err().map(|error| format!("Synthetic: {error}"));
+        self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner).synthetic_error = error;
+        outcome
+    }
+
+    async fn list_synthetic(&self) -> Result<bool, String> {
+        let agent = self.agent()?;
+        let (auth, existing) = {
+            let agent = agent.clone();
+            blocking(move || {
+                let path = agent.join("auth.json");
+                Ok((read_object(&path)?, configured_providers(&agent).remove(SYNTHETIC)))
+            })
+            .await?
+        };
+        let key = synthetic_key(&auth);
+        let origin = synthetic_origin();
+        let base_url = format!("{origin}/openai/v1");
+        let run = {
+            let mut state = self.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
+            state.synthetic_quota = None;
+            state.synthetic_run += 1;
+            state.synthetic_run
+        };
+        if let Some(key) = key.clone() {
+            let workspace = self.clone();
+            let origin = origin.clone();
+            self.inner.runtime.spawn(async move {
+                let quota = synthetic_quota(&origin, &key).await;
+                let mut state = workspace.inner.providers.lock().unwrap_or_else(PoisonError::into_inner);
+                if state.synthetic_run == run {
+                    state.synthetic_quota = quota;
+                    drop(state);
+                    workspace.publish_providers();
+                }
+            });
+        }
+        if existing.as_ref().is_some_and(|entry| !synthetic_owned(entry, &base_url)) {
+            return Ok(false);
+        }
+        let models = match &key {
+            Some(key) => Some(discover(&base_url, ProviderApi::OpenAiCompatible, Some(key)).await?.1),
+            None => None,
+        };
+        let _guard = self.inner.providers_lock.lock().await;
+        blocking(move || {
+            let existing = configured_providers(&agent).remove(SYNTHETIC);
+            if existing.as_ref().is_some_and(|entry| !synthetic_owned(entry, &base_url)) {
+                return Ok(false);
+            }
+            let wanted = models.map(|models| synthetic_entry(existing.as_ref(), &base_url, &models));
+            if existing == wanted {
+                return Ok(false);
+            }
+            edit_models(&agent, |providers| {
+                match wanted {
+                    Some(entry) => providers.insert(SYNTHETIC.to_string(), entry),
+                    None => providers.remove(SYNTHETIC),
+                };
+                Ok(true)
+            })
+        })
+        .await
     }
 
     pub(crate) fn find_local_servers(&self, presets: Vec<EndpointPreset>) {
@@ -1122,8 +1332,14 @@ impl Workspace {
             } else {
                 format!("Removed the {} key.", display_name(&provider))
             };
-            let _guard = workspace.inner.providers_lock.lock().await;
-            blocking(move || store_key(&agent, &provider, key.as_deref())).await?;
+            {
+                let _guard = workspace.inner.providers_lock.lock().await;
+                let provider = provider.clone();
+                blocking(move || store_key(&agent, &provider, key.as_deref())).await?;
+            }
+            if provider == SYNTHETIC {
+                let _ = workspace.sync_synthetic().await;
+            }
             workspace.reload_models(reply, message);
             Ok(Vec::new())
         });

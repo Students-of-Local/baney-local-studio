@@ -450,7 +450,9 @@ async function main(): Promise<void> {
 			console.log(`${sym.ok} Launcher ${c.dim(result.launcher)}`);
 			for (const f of result.written) console.log(`${sym.ok} ${verb} ${c.dim(f)}`);
 			for (const f of result.skipped) console.log(`${sym.ok} Current ${c.dim(f)}`);
-			if (result.written.length + result.skipped.length === 0) {
+			for (const f of result.failed) console.log(`${sym.fail} Could not write ${c.dim(f)}`);
+			if (result.failed.length > 0) process.exitCode = 1;
+			if (result.written.length + result.skipped.length + result.failed.length === 0) {
 				console.log(`${sym.fail} No Chromium browser profile found. Open your browser once, then run this again.`);
 				process.exitCode = 1;
 				return;

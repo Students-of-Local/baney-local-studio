@@ -72,6 +72,7 @@ if (args[0] === "login") {
 	if (whoami === "out") { console.log("You are not authenticated. Please run wrangler login."); process.exit(1); }
 	console.log(JSON.stringify(whoami));
 } else if (args[0] === "deploy") {
+	if (args[2].length > 25) { console.error("Tag must be at most 25 characters"); process.exit(1); }
 	writeFileSync(${JSON.stringify(join(dir, "tag"))}, args[2]);
 	const tries = readFileSync(${JSON.stringify(log)}, "utf8").split("\\n").filter((l) => l.startsWith("npx ") && l.includes(" deploy ")).length;
 	if (${JSON.stringify(deploy)} === "subdomain" || tries <= ${subdomainAfter}) { console.error("You need to register a workers.dev subdomain before publishing to workers.dev"); process.exit(1); }

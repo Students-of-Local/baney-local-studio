@@ -257,7 +257,7 @@ test("API keys are one line per provider: the key field opens on Add key, a bad 
 
 test("Settings > Skills lists every library skill, with no cap", async () => {
 	const { libraryRows } = await import("../src/dialogs/skill-list.ts");
-	const folders = readdirSync(new URL("../skills/", import.meta.url), { withFileTypes: true })
+	const folders = readdirSync(new URL("../../skills/", import.meta.url), { withFileTypes: true })
 		.filter((d) => d.isDirectory())
 		.map((d) => d.name);
 	const bundled = folders.map((name) => ({ name, description: `${name} does a thing. More detail.` }));

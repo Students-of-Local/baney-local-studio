@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -186,6 +187,25 @@ test("SIWC: a callback with someone else's state is refused and the attempt keep
 	callback.searchParams.set("client_id", ISSUED);
 	assert.equal((await get(callback.toString())).status, 400);
 	assert.equal(siwc.status().signedIn, false);
+	pending.cancel();
+	await assert.rejects(pending.result, /cancelled/);
+});
+
+test("SIWC: a request target that is no URL is answered and the sign-in keeps waiting", async () => {
+	const siwc = new Siwc({ fetch: fakeOpenAI().fetch, dir: tempDir(), preferredPort: 0 });
+	const pending = await siwc.startSignIn();
+	const { port } = new URL(pending.redirectUri);
+	const reply = await new Promise((resolve, reject) => {
+		let text = "";
+		const socket = connect(Number(port), "127.0.0.1", () => socket.end("GET // HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n"));
+		socket.on("data", (d) => {
+			text += d;
+		});
+		socket.once("error", reject);
+		socket.once("close", () => resolve(text));
+	});
+	assert.match(reply, /^HTTP\/1\.1 404 /);
+	assert.equal((await get(`${pending.redirectUri}?state=not-ours`)).status, 400, "the listener still answers");
 	pending.cancel();
 	await assert.rejects(pending.result, /cancelled/);
 });

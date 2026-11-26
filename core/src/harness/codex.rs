@@ -14,9 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     assistant, command, diff_details, emit_message, notice, now_ms, output, program, stop_reason, tool_result, trust,
-    user, Agent, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
+    user, Agent, Asked, Event, Failure, Image, Launch, Sink, Spend, Stop, CODEX_PROVIDER,
 };
-use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption};
+use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, ModelOption, Question};
 use crate::skills::SERVER;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -76,11 +76,12 @@ struct Process {
     kill: Option<oneshot::Sender<()>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Ask {
     Item,
     Legacy,
     Tool { session: bool },
+    Input { ids: Vec<String> },
 }
 
 struct PendingApproval {
@@ -500,9 +501,6 @@ pub(crate) async fn read(account: Option<&Path>, thread: &str) -> Result<Vec<Age
 
 impl Codex {
     pub(crate) async fn spawn(launch: &Launch, sink: Sink) -> Result<(Self, String, Vec<AgentMessage>), String> {
-        if !Path::new(&launch.cwd).is_dir() {
-            return Err(format!("This thread's folder is gone: {}", launch.cwd));
-        }
         let approvals = Arc::new(Mutex::new(HashMap::new()));
         let turns = SharedTurns::default();
         let mut process =
@@ -530,11 +528,20 @@ impl Codex {
                 params["config"]["mcp_servers"] = json!({ SERVER: skills });
                 params["config"]["mcp_servers"][SERVER]["default_tools_approval_mode"] = json!("approve");
             }
-            if launch.resume {
+            if let Some(origin) = &launch.fork {
+                params["threadId"] = json!(origin);
+                let forked = process.rpc.call("thread/fork", params).await?;
+                let thread = forked.get("thread").cloned().unwrap_or(Value::Null);
+                let id = thread
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Codex forked a thread without an id.".to_string())?;
+                Ok::<_, String>((id.to_string(), history(&thread)))
+            } else if launch.resume {
                 params["threadId"] = json!(launch.native);
                 let resumed = process.rpc.call("thread/resume", params).await?;
                 let thread = resumed.get("thread").cloned().unwrap_or(Value::Null);
-                Ok::<_, String>((launch.native.clone(), history(&thread)))
+                Ok((launch.native.clone(), history(&thread)))
             } else {
                 let started = process.rpc.call("thread/start", params).await?;
                 let id = started
@@ -689,6 +696,10 @@ impl Codex {
             .remove(request)
             .ok_or_else(|| "That approval is no longer pending.".to_string())?;
         let decision = match (answer, pending.ask) {
+            (_, Ask::Input { .. }) => {
+                self.rpc.refuse(&pending.id, "The user dismissed the question.");
+                return Ok(());
+            }
             (_, Ask::Tool { session }) => {
                 let session = session && matches!(answer, ApprovalAnswer::AlwaysAllowSession);
                 return self.rpc.respond(&pending.id, &tool_answer(!matches!(answer, ApprovalAnswer::Deny), session));
@@ -701,6 +712,17 @@ impl Codex {
             (ApprovalAnswer::Deny, Ask::Legacy) => "denied",
         };
         self.rpc.respond(&pending.id, &json!({ "decision": decision }))
+    }
+
+    pub(crate) fn answer_questions(&mut self, request: &str, answers: &[String]) -> Result<(), String> {
+        let mut approvals = self.approvals.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(PendingApproval { id, ask: Ask::Input { ids } }) = approvals.remove(request) else {
+            return Err("That question is no longer pending.".to_string());
+        };
+        drop(approvals);
+        let answered: Map<String, Value> =
+            ids.into_iter().zip(answers).map(|(key, answer)| (key, json!({ "answers": [answer] }))).collect();
+        self.rpc.respond(&id, &json!({ "answers": answered }))
     }
 
     pub(crate) fn set_access(&mut self, access: AccessMode) {
@@ -1034,6 +1056,9 @@ impl Translator {
     }
 
     fn request(&mut self, id: &Value, method: &str, params: &Value) {
+        if method == "item/tool/requestUserInput" {
+            return self.user_input(id, params);
+        }
         let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
         let (summary, effect, ask) = match method {
             "item/commandExecution/requestApproval" => {
@@ -1094,6 +1119,29 @@ impl Translator {
             effects: vec![effect.to_string()],
             agent: None,
         }));
+    }
+
+    fn user_input(&mut self, id: &Value, params: &Value) {
+        let (ids, questions): (Vec<String>, Vec<Question>) = params
+            .get("questions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|question| {
+                let key = question.get("id").and_then(Value::as_str)?.to_string();
+                Some((key, super::asked_question(question)?))
+            })
+            .unzip();
+        if questions.is_empty() {
+            self.rpc.refuse(id, "Local Studio could not show this question.");
+            return;
+        }
+        let request = request_key(id);
+        self.approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(request.clone(), PendingApproval { id: id.clone(), ask: Ask::Input { ids } });
+        self.sink.send(Event::Questions(Asked { request_id: request, questions }));
     }
 
     fn usage(&mut self, usage: Option<&Value>) {

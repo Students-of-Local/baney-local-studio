@@ -53,6 +53,7 @@ pub enum LocalAction {
     SetPowerBudget { controller: String, active_watts: u32, away_watts: Option<u32> },
     LaunchPool { controller: String, model: String },
     StopPool { controller: String, pool: String },
+    EjectGpu { controller: String, gpu: u32, cancel: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,6 +448,9 @@ pub struct ProviderStatus {
     pub base_url: Option<String>,
     pub api: Option<ProviderApi>,
     pub models: Vec<ProviderModel>,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub quota: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -765,6 +769,7 @@ pub struct AccountLabel {
 pub struct T3Choices {
     pub accounts: bool,
     pub projects: bool,
+    pub threads: bool,
     pub models: bool,
     pub keybindings: bool,
     pub appearance: bool,
@@ -773,7 +778,15 @@ pub struct T3Choices {
 
 impl Default for T3Choices {
     fn default() -> Self {
-        Self { accounts: true, projects: true, models: true, keybindings: true, appearance: true, preferences: true }
+        Self {
+            accounts: true,
+            projects: true,
+            threads: true,
+            models: true,
+            keybindings: true,
+            appearance: true,
+            preferences: true,
+        }
     }
 }
 
@@ -783,6 +796,7 @@ impl Default for T3Choices {
 pub enum T3Kind {
     Accounts,
     Projects,
+    Threads,
     Models,
     Keybindings,
     Appearance,
@@ -1007,6 +1021,38 @@ pub struct LocalGpu {
     #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
     #[cfg_attr(feature = "ffi", uniffi(default = None))]
     pub link: Option<String>,
+    #[cfg_attr(feature = "wire", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "ffi", uniffi(default = None))]
+    pub eject: Option<LocalEject>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LocalEjectState {
+    Ready,
+    Busy,
+    NeedsRoot,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalEjectProcess {
+    pub pid: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "wire", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct LocalEject {
+    pub state: LocalEjectState,
+    pub draining: bool,
+    pub blockers: Vec<LocalEjectProcess>,
+    pub command: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

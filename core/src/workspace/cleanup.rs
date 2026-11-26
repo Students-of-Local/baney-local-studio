@@ -70,16 +70,8 @@ impl Workspace {
         }
         if settings.worktree_cleanup_on_merge {
             if let Some(branch) = git::current_branch(worktree).await {
-                let dir = worktree.to_string_lossy().into_owned();
-                let merged = match self.inner.links.merged(&dir, &branch) {
-                    Some(merged) => merged,
-                    None => git::branch_pull_request_list(worktree, &branch)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some_and(|pull| pull.state.eq_ignore_ascii_case("MERGED")),
-                };
-                if merged {
+                let pull = self.branch_pull_request(worktree, &branch, true).await;
+                if pull.is_some_and(|pull| pull.state.eq_ignore_ascii_case("MERGED")) {
                     return true;
                 }
             }

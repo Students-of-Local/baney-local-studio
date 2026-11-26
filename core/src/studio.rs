@@ -672,8 +672,20 @@ pub struct Studio {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Studio {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
-    #[allow(clippy::too_many_lines)]
     pub fn new(config: StudioConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, StudioError> {
+        Self::open(config, waker, true)
+    }
+}
+
+impl Studio {
+    /// For a process that shows this Studio to nobody itself, such as `local-studio-serve`: pull request status
+    /// makes no GitHub calls until a remote client attaches.
+    pub fn new_unwatched(config: StudioConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, StudioError> {
+        Self::open(config, waker, false)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn open(config: StudioConfig, waker: Arc<dyn Waker>, owner_watching: bool) -> Result<Arc<Self>, StudioError> {
         crate::skills::app();
         let socket = daemon::socket_path(config.socket_path.as_deref());
         let plugins_dir = plugins::plugins_dir(config.data_dir.as_deref());
@@ -707,6 +719,7 @@ impl Studio {
             controller_main,
             text.clone(),
         );
+        workspace.set_owner_watching(owner_watching);
         workspace.find_skills(plugins_dir.clone(), None);
         workspace.start_kernel(daemon::kernel_program(config.launch.as_ref()));
         let codex_models = harness::saved_codex_models(&data_dir);
@@ -792,6 +805,7 @@ impl Studio {
             ask_task,
             ask_tokens,
             questions: HashMap::new(),
+            harness_answers: HashMap::new(),
             ask_notes: HashMap::new(),
             ask_sent: HashMap::new(),
             consents: Arc::default(),
@@ -821,7 +835,10 @@ impl Studio {
             _runtime: runtime,
         }))
     }
+}
 
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Studio {
     pub fn tick(&self) -> Vec<Update> {
         self.mailbox.drain()
     }
@@ -1217,6 +1234,11 @@ fn host_caller() -> Option<plugins::Caller> {
 }
 
 impl Studio {
+    /// The phones and desktop links connected to this Studio's server right now.
+    pub fn set_remote_clients(&self, count: usize) {
+        self.workspace.set_remote_clients(count);
+    }
+
     pub fn subscribe(&self, waker: Arc<dyn Waker>) -> Subscription {
         self.mailbox.subscribe(waker)
     }
@@ -1369,6 +1391,7 @@ struct Actor {
     ask_task: Option<tokio::task::JoinHandle<()>>,
     ask_tokens: plugins::ask::Tokens,
     questions: HashMap<String, Vec<ask::Pending>>,
+    harness_answers: HashMap<(String, String), Vec<Option<String>>>,
     ask_notes: HashMap<String, Vec<String>>,
     ask_sent: HashMap<String, Value>,
     consents: Arc<std::sync::Mutex<plugins::Pendings>>,
@@ -3262,8 +3285,7 @@ impl Actor {
         let Some(root) = self.plugins_root(&request) else { return };
         let offering = self.offering();
         tokio::task::spawn_blocking(move || {
-            let offer = plugins::hub::follow(&root, &id, crate::CHANNEL)
-                .and_then(|source| plugins::offer_source(&root, &source, request.clone()));
+            let offer = plugins::offer_update(&root, &id, crate::CHANNEL, request.clone());
             offering(request, offer);
         });
     }
@@ -4572,6 +4594,9 @@ impl Actor {
                     thread.run_started_at = None;
                 }
                 self.itself.send(Command::SendHeld { thread: id.clone() });
+                if self.ask_notes.contains_key(&id) {
+                    self.itself.send(Command::FlushAskNotes { thread: id.clone() });
+                }
             }
             if flipped {
                 self.emit_info(&id);

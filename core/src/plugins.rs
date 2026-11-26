@@ -17,7 +17,10 @@ pub mod market;
 #[cfg(all(test, unix))]
 mod tests;
 
-pub use consent::{answer, offer_capabilities, offer_grant, offer_install, offer_source, Offer, Pending, Pendings};
+pub use consent::{
+    answer, offer_capabilities, offer_grant, offer_install, offer_replacement, offer_source, offer_update, Offer,
+    Pending, Pendings,
+};
 pub use grants::{Consent, Grants, GRANTS};
 pub use install::{
     install, resolve_channel, stage, tree_hash, Catalog, CatalogEntry, Installed, Origin, Origins, Source, Staged,

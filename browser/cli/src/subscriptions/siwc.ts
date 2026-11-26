@@ -238,8 +238,11 @@ export class Siwc {
 		timer.unref?.();
 
 		server.on("request", (req, res) => {
-			const url = new URL(req.url ?? "/", `http://${SIWC.callbackHost}:${port}`);
-			if (req.method !== "GET" || url.pathname !== SIWC.callbackPath) {
+			const base = `http://${SIWC.callbackHost}:${port}`;
+			const target = req.url ?? "/";
+			// "//" and the like parse as no URL at all; throwing here would end the native host.
+			const url = URL.canParse(target, base) ? new URL(target, base) : undefined;
+			if (req.method !== "GET" || url?.pathname !== SIWC.callbackPath) {
 				res.writeHead(404).end();
 				return;
 			}

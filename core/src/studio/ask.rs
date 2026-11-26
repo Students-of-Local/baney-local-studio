@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 
 use super::{now_ms, truncate, Actor, BODY_LIMIT};
+use crate::harness::Asked;
 use crate::model::{NoticeLevel, NotificationKind, Question, QuestionOption, Update};
 use crate::plugins::ask::{self, Ask, Outcome};
 use crate::plugins::{self, Grants};
@@ -13,27 +14,40 @@ pub(super) struct Pending {
     pub(super) request: String,
     pub(super) plugin: String,
     pub(super) text: String,
-    pub(super) choices: Vec<String>,
+    options: Vec<QuestionOption>,
+    multi_select: bool,
     pub(super) at: i64,
-    reply: oneshot::Sender<Outcome>,
+    reply: Reply,
+}
+
+enum Reply {
+    Plugin(oneshot::Sender<Outcome>),
+    Harness { base: String, index: usize },
 }
 
 impl Pending {
     fn update(&self, thread: &str) -> Update {
+        let source = match &self.reply {
+            Reply::Plugin(_) => format!("plugin:{}", self.plugin),
+            Reply::Harness { .. } => format!("harness:{}", self.plugin),
+        };
         Update::Questions {
             thread: thread.to_string(),
             request: self.request.clone(),
-            source: format!("plugin:{}", self.plugin),
+            source,
             questions: vec![Question {
                 header: self.plugin.clone(),
                 question: self.text.clone(),
-                options: self
-                    .choices
-                    .iter()
-                    .map(|label| QuestionOption { label: label.clone(), description: String::new() })
-                    .collect(),
-                multi_select: false,
+                options: self.options.clone(),
+                multi_select: self.multi_select,
             }],
+        }
+    }
+
+    fn harness_base(&self) -> Option<&str> {
+        match &self.reply {
+            Reply::Harness { base, .. } => Some(base),
+            Reply::Plugin(_) => None,
         }
     }
 }
@@ -66,7 +80,9 @@ impl Actor {
             refuse(reply, "the plugin no longer holds the ask-user grant");
             return;
         }
-        let pending = Pending { request, plugin, text, choices, at: now_ms(), reply };
+        let options = choices.into_iter().map(|label| QuestionOption { label, description: String::new() }).collect();
+        let pending =
+            Pending { request, plugin, text, options, multi_select: false, at: now_ms(), reply: Reply::Plugin(reply) };
         let update = pending.update(&thread);
         let body = truncate(&format!("{} asks: {}", pending.plugin, pending.text), BODY_LIMIT);
         self.questions.entry(thread.clone()).or_default().push(pending);
@@ -74,6 +90,52 @@ impl Actor {
         let title = self.title(&thread);
         self.mailbox.push(Update::Notification { thread, kind: NotificationKind::NeedsAnswer, title, body });
         self.dirty = true;
+    }
+
+    pub(super) fn harness_questions(&mut self, id: &str, source: &str, asked: Asked) {
+        let Asked { request_id, questions } = asked;
+        let count = questions.len();
+        let mut body = None;
+        for (index, question) in questions.into_iter().enumerate() {
+            let request = if count == 1 { request_id.clone() } else { format!("{request_id}#{}", index + 1) };
+            let pending = Pending {
+                request,
+                plugin: source.to_string(),
+                text: question.question,
+                options: question.options,
+                multi_select: question.multi_select,
+                at: now_ms(),
+                reply: Reply::Harness { base: request_id.clone(), index },
+            };
+            body.get_or_insert_with(|| truncate(&format!("{source} asks: {}", pending.text), BODY_LIMIT));
+            self.mailbox.push(pending.update(id));
+            self.questions.entry(id.to_string()).or_default().push(pending);
+        }
+        self.harness_answers.insert((id.to_string(), request_id), vec![None; count]);
+        let title = self.title(id);
+        let body = body.unwrap_or_default();
+        self.mailbox.push(Update::Notification {
+            thread: id.to_string(),
+            kind: NotificationKind::NeedsAnswer,
+            title,
+            body,
+        });
+        self.dirty = true;
+    }
+
+    pub(super) fn harness_questions_gone(&mut self, id: &str, base: &str) {
+        self.harness_answers.remove(&(id.to_string(), base.to_string()));
+        let gone: Vec<String> = self
+            .questions
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter(|pending| pending.harness_base() == Some(base))
+            .map(|pending| pending.request.clone())
+            .collect();
+        for request in gone {
+            self.take_question(id, &request);
+        }
     }
 
     pub(super) fn emit_questions(&self, id: &str) {
@@ -109,11 +171,27 @@ impl Actor {
             return;
         };
         let Some(pending) = self.take_question(id, request) else { return };
-        let note = note(&pending.plugin, &pending.text, &format!("You answered: {answer}"));
-        let _ = pending.reply.send(Outcome::Answered(answer));
-        self.ask_notes.entry(id.to_string()).or_default().push(note);
-        if !self.running(id) {
-            self.flush_ask_notes(id).await;
+        match pending.reply {
+            Reply::Plugin(reply) => {
+                let note = note(&pending.plugin, &pending.text, &format!("You answered: {answer}"));
+                let _ = reply.send(Outcome::Answered(answer));
+                self.ask_notes.entry(id.to_string()).or_default().push(note);
+                if !self.running(id) {
+                    self.flush_ask_notes(id).await;
+                }
+            }
+            Reply::Harness { base, index } => {
+                let key = (id.to_string(), base);
+                let Some(slots) = self.harness_answers.get_mut(&key) else { return };
+                if let Some(slot) = slots.get_mut(index) {
+                    *slot = Some(answer);
+                }
+                if slots.iter().all(Option::is_some) {
+                    let answers: Vec<String> =
+                        self.harness_answers.remove(&key).into_iter().flatten().flatten().collect();
+                    self.cli_answer_questions(id, &key.1, &answers);
+                }
+            }
         }
     }
 
@@ -125,11 +203,20 @@ impl Actor {
         let Some(list) = self.questions.remove(id) else { return };
         for pending in list {
             self.mailbox.push(Update::QuestionsSettled { thread: id.to_string(), request: pending.request.clone() });
-            if noted {
-                let note = note(&pending.plugin, &pending.text, "You stopped the question (not confirmed).");
-                self.ask_notes.entry(id.to_string()).or_default().push(note);
+            match pending.reply {
+                Reply::Plugin(reply) => {
+                    if noted {
+                        let note = note(&pending.plugin, &pending.text, "You stopped the question (not confirmed).");
+                        self.ask_notes.entry(id.to_string()).or_default().push(note);
+                    }
+                    let _ = reply.send(Outcome::Cancelled);
+                }
+                Reply::Harness { base, .. } => {
+                    if self.harness_answers.remove(&(id.to_string(), base.clone())).is_some() {
+                        self.cli_dismiss(id, &base);
+                    }
+                }
             }
-            let _ = pending.reply.send(Outcome::Cancelled);
         }
         self.dirty = true;
     }

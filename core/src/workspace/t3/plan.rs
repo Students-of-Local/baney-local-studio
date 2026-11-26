@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::source::{Instance, Selection, T3Data, ThemeFile};
+use super::threads::threads_group;
 use crate::harness::{self, accounts, CLAUDE_PROVIDER, CODEX_PROVIDER};
 use crate::model::{Harness, ModelKey};
-use crate::store::StoredProject;
+use crate::store::{StoredProject, ThreadFlags};
 use crate::workspace::model::{
     AccountLabel, ProjectSettings, Settings, T3Choices, T3Group, T3Item, T3ItemState, T3Kind,
 };
@@ -33,6 +34,8 @@ pub(crate) struct Ls {
     pub(crate) favorites: Vec<ModelKey>,
     pub(crate) hidden: Vec<ModelKey>,
     pub(crate) project_settings: BTreeMap<String, ProjectSettings>,
+    pub(crate) sessions: BTreeSet<String>,
+    pub(crate) threads: Vec<ThreadFlags>,
 }
 
 const APPEARANCE: [(&str, &str, &str); 14] = [
@@ -81,6 +84,7 @@ fn chosen(choices: T3Choices, kind: T3Kind) -> bool {
     match kind {
         T3Kind::Accounts => choices.accounts,
         T3Kind::Projects => choices.projects,
+        T3Kind::Threads => choices.threads,
         T3Kind::Models => choices.models,
         T3Kind::Keybindings => choices.keybindings,
         T3Kind::Appearance => choices.appearance,
@@ -92,6 +96,7 @@ fn title(kind: T3Kind) -> &'static str {
     match kind {
         T3Kind::Accounts => "Sign-ins",
         T3Kind::Projects => "Projects",
+        T3Kind::Threads => "Threads",
         T3Kind::Models => "Models",
         T3Kind::Keybindings => "Keyboard shortcuts",
         T3Kind::Appearance => "Appearance",
@@ -104,15 +109,15 @@ pub(crate) struct Outcome {
     pub(crate) problems: Vec<String>,
 }
 
-struct Engine<'a> {
-    imported: &'a mut BTreeMap<String, Value>,
+pub(super) struct Engine<'a> {
+    pub(super) imported: &'a mut BTreeMap<String, Value>,
     choices: T3Choices,
     apply: bool,
     groups: BTreeMap<T3Kind, Vec<T3Item>>,
 }
 
 impl Engine<'_> {
-    fn live(&self, kind: T3Kind) -> bool {
+    pub(super) fn live(&self, kind: T3Kind) -> bool {
         self.apply && chosen(self.choices, kind)
     }
 
@@ -131,7 +136,7 @@ impl Engine<'_> {
         state
     }
 
-    fn member(&mut self, kind: T3Kind, key: &str, present: bool) -> T3ItemState {
+    pub(super) fn member(&mut self, kind: T3Kind, key: &str, present: bool) -> T3ItemState {
         let state = if present {
             T3ItemState::Synced
         } else if self.imported.contains_key(key) {
@@ -145,7 +150,7 @@ impl Engine<'_> {
         state
     }
 
-    fn item(&mut self, kind: T3Kind, key: String, label: String, detail: String, state: T3ItemState) {
+    pub(super) fn item(&mut self, kind: T3Kind, key: String, label: String, detail: String, state: T3ItemState) {
         self.groups.entry(kind).or_default().push(T3Item { key, label, detail, state });
     }
 }
@@ -160,7 +165,7 @@ fn worst(states: &[T3ItemState]) -> T3ItemState {
     }
 }
 
-fn harness_of(driver: &str) -> Option<Harness> {
+pub(super) fn harness_of(driver: &str) -> Option<Harness> {
     match driver {
         "claudeAgent" => Some(Harness::ClaudeCode),
         "codex" => Some(Harness::Codex),
@@ -168,7 +173,7 @@ fn harness_of(driver: &str) -> Option<Harness> {
     }
 }
 
-fn unsupported_reason(driver: &str) -> String {
+pub(super) fn unsupported_reason(driver: &str) -> String {
     let name = match driver {
         "cursor" => "Cursor Agent",
         "grok" => "Grok CLI",
@@ -181,7 +186,7 @@ fn unsupported_reason(driver: &str) -> String {
     format!("Not supported yet: Local Studio has no {name} harness. Claude Code and Codex are supported.")
 }
 
-fn driver_name(driver: &str) -> &str {
+pub(super) fn driver_name(driver: &str) -> &str {
     match driver {
         "claudeAgent" => "Claude Code",
         "codex" => "Codex",
@@ -194,7 +199,7 @@ fn driver_name(driver: &str) -> &str {
     }
 }
 
-fn display(path: &Path) -> String {
+pub(super) fn display(path: &Path) -> String {
     let text = path.to_string_lossy().into_owned();
     let home = crate::platform::home().map(|home| home.to_string_lossy().into_owned());
     match home {
@@ -206,7 +211,7 @@ fn display(path: &Path) -> String {
     }
 }
 
-fn account_dir(instance: &Instance, harness: Harness) -> Option<PathBuf> {
+pub(super) fn account_dir(instance: &Instance, harness: Harness) -> Option<PathBuf> {
     match instance.home_path.as_deref() {
         Some(path) => Some(accounts::expand(path)),
         None => accounts::home_dir_of(harness),
@@ -330,7 +335,7 @@ pub(crate) struct Mapped {
     pub(crate) model: String,
 }
 
-fn map_model(t3: &T3Data, instance_id: &str, model: &str) -> Result<Mapped, String> {
+pub(super) fn map_model(t3: &T3Data, instance_id: &str, model: &str) -> Result<Mapped, String> {
     let model = model.trim();
     if model.is_empty() {
         return Err("No model is set in T3 Code.".to_string());
@@ -365,12 +370,14 @@ pub(crate) fn sync(t3: &T3Data, ls: &mut Ls, state: &mut SyncState, apply: bool)
     let mut problems = t3.problems.clone();
     accounts_group(&mut engine, t3, ls);
     projects_group(&mut engine, t3, ls, &mut problems);
+    threads_group(&mut engine, t3, ls);
     models_group(&mut engine, t3, ls);
     keybindings_group(&mut engine, t3, ls);
     settings_groups(&mut engine, t3, ls);
     let groups = [
         T3Kind::Accounts,
         T3Kind::Projects,
+        T3Kind::Threads,
         T3Kind::Models,
         T3Kind::Keybindings,
         T3Kind::Appearance,

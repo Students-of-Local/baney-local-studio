@@ -60,6 +60,16 @@ impl Sparkline {
 
 fn draw_sparkline(area: &gtk::DrawingArea, cr: &cairo::Context, width: f64, height: f64, values: &[f64]) {
     if values.is_empty() {
+        let color = area.color();
+        source(cr, &color, 0.12);
+        cr.set_line_width(1.0);
+        cr.set_dash(&[3.0, 4.0], 0.0);
+        for step in 1..=3 {
+            let y = (height * f64::from(step) / 3.0 - 0.5).round() + 0.5;
+            cr.move_to(0.0, y);
+            cr.line_to(width, y);
+        }
+        cr.stroke().ok();
         return;
     }
     let peak = values.iter().copied().fold(0.0_f64, f64::max);
@@ -316,6 +326,7 @@ impl Heatmap {
         format: fn(f64) -> String,
         label: &str,
     ) {
+        self.root.set_visible(source.is_some());
         self.heat.borrow_mut().load(source, format);
         let caption = self.heat.borrow().caption();
         self.caption.set_label(&caption);

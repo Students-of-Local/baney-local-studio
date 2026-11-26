@@ -134,6 +134,12 @@ private struct LocalGpuList: View {
                         .font(.system(size: 12))
                         .monospacedDigit()
                         .foregroundStyle(Theme.secondaryText)
+                    if controller.local, let eject = gpu.eject, !eject.draining, eject.state != .unsupported {
+                        GpuEjectButton(controller: controller, gpu: gpu, pages: pages, caption: "Eject", help: "Unload its models and take it off the bus so it can be unplugged", cancel: false)
+                    }
+                }
+                if controller.local, let eject = gpu.eject, eject.draining {
+                    GpuEjectStatus(controller: controller, gpu: gpu, eject: eject, pages: pages)
                 }
             }
             ForEach(devices, id: \.uuid) { device in
@@ -153,6 +159,61 @@ private struct LocalGpuList: View {
                 }
             }
         }
+    }
+}
+
+private struct GpuEjectButton: View {
+    let controller: LocalController
+    let gpu: LocalGpu
+    let pages: PagesStore
+    let caption: String
+    let help: String
+    let cancel: Bool
+
+    private func pending(_ cancel: Bool) -> Bool { pages.isPending(.eject(controller.target, gpu.index, cancel)) }
+
+    var body: some View {
+        Button(pending(cancel) ? (cancel ? "Cancelling…" : "Ejecting…") : caption) {
+            pages.perform(.ejectGpu(controller: controller.target, gpu: gpu.index, cancel: cancel), pending: .eject(controller.target, gpu.index, cancel))
+        }
+        .buttonStyle(DashboardButtonStyle(bordered: true))
+        .disabled(pending(false) || pending(true))
+        .help(help)
+    }
+}
+
+private struct GpuEjectStatus: View {
+    let controller: LocalController
+    let gpu: LocalGpu
+    let eject: LocalEject
+    let pages: PagesStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(eject.state == .ready ? "Ejecting…" : eject.message ?? "Ejecting…")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.warning)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(eject.blockers, id: \.pid) { process in
+                Text("pid \(process.pid) · \(process.name)")
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            if let command = eject.command {
+                Text(command)
+                    .font(.system(size: 12, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                if eject.state == .busy {
+                    GpuEjectButton(controller: controller, gpu: gpu, pages: pages, caption: "Try Again", help: "Eject again once those programs have quit", cancel: false)
+                }
+                GpuEjectButton(controller: controller, gpu: gpu, pages: pages, caption: "Cancel Eject", help: "Let this GPU load models again", cancel: true)
+            }
+        }
+        .padding(.leading, 34)
     }
 }
 

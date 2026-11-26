@@ -14,6 +14,7 @@ pub struct Available {
     pub version: String,
     pub asks: Vec<String>,
     pub reference: String,
+    pub replaced_by: Option<String>,
 }
 
 fn short(rev: &str) -> String {
@@ -97,6 +98,10 @@ pub fn rows(
         .iter()
         .map(|(plugin, consent, held)| {
             let (state, detail) = state(plugin, consent, held, taken);
+            let detail = match updates.get(&plugin.id).and_then(|available| available.replaced_by.as_ref()) {
+                Some(name) => format!("{detail}; it is replaced by {name}, and updating installs that"),
+                None => detail,
+            };
             let recorded = grants.granted(&plugin.id).map(|(_, source, _)| source.to_string()).unwrap_or_default();
             let origin = origins.get(&plugin.id);
             let granted = |capability: Capability| match consent {
@@ -222,13 +227,14 @@ fn compare(new: &str, old: &str) -> Option<Ordering> {
 
 #[must_use]
 pub fn check(root: &Path, plugins: &[Plugin], channel: &str) -> (BTreeMap<String, Available>, Vec<String>) {
+    let catalog = Catalog::bundled();
     let origins = Origins::load(root).unwrap_or_default();
     let mut found: BTreeMap<String, Available> = BTreeMap::new();
     let mut errors: Vec<String> = Vec::new();
     for plugin in plugins {
         let Some(origin) = origins.get(&plugin.id) else { continue };
-        if origin.pinned {
-            if let Some(available) = catalog_update(plugin, origin.rev.as_deref(), &mut errors) {
+        if origin.pinned || catalog.as_ref().is_ok_and(|catalog| catalog.replacing(&plugin.id).is_some()) {
+            if let Some(available) = catalog_update(plugin, origin.rev.as_deref(), &catalog, &mut errors) {
                 found.insert(plugin.id.clone(), available);
             }
             continue;
@@ -267,21 +273,27 @@ pub fn check(root: &Path, plugins: &[Plugin], channel: &str) -> (BTreeMap<String
             .filter(|name| Capability::parse(name).is_none_or(|capability| !plugin.asks(capability)))
             .cloned()
             .collect();
-        found.insert(plugin.id.clone(), Available { rev, version: peeked.version, asks, reference });
+        found.insert(plugin.id.clone(), Available { rev, version: peeked.version, asks, reference, replaced_by: None });
     }
     (found, errors)
 }
 
-fn catalog_update(plugin: &Plugin, installed: Option<&str>, errors: &mut Vec<String>) -> Option<Available> {
-    let catalog = match Catalog::bundled() {
+fn catalog_update(
+    plugin: &Plugin,
+    installed: Option<&str>,
+    catalog: &Result<Catalog, String>,
+    errors: &mut Vec<String>,
+) -> Option<Available> {
+    let catalog = match catalog {
         Ok(catalog) => catalog,
         Err(error) => {
-            errors.push(error);
+            errors.push(error.clone());
             return None;
         }
     };
-    let entry = catalog.entry(&plugin.id)?;
-    if installed == Some(entry.rev.as_str()) {
+    let replacing = catalog.replacing(&plugin.id);
+    let entry = replacing.or_else(|| catalog.entry(&plugin.id))?;
+    if replacing.is_none() && installed == Some(entry.rev.as_str()) {
         return None;
     }
     let peeked = match peek(&entry.git, &entry.rev, entry.subdir.as_deref(), None) {
@@ -294,10 +306,16 @@ fn catalog_update(plugin: &Plugin, installed: Option<&str>, errors: &mut Vec<Str
     let asks = peeked
         .capabilities
         .iter()
-        .filter(|name| Capability::parse(name).is_none_or(|capability| !plugin.asks(capability)))
+        .filter(|name| replacing.is_some() || Capability::parse(name).is_none_or(|capability| !plugin.asks(capability)))
         .cloned()
         .collect();
-    Some(Available { rev: entry.rev.clone(), version: peeked.version, asks, reference: "catalog".to_string() })
+    Some(Available {
+        rev: entry.rev.clone(),
+        version: peeked.version,
+        asks,
+        reference: "catalog".to_string(),
+        replaced_by: replacing.map(|entry| entry.name.clone().unwrap_or_else(|| entry.id.clone())),
+    })
 }
 
 pub fn follow(root: &Path, id: &str, channel: &str) -> Result<Source, String> {
@@ -345,6 +363,15 @@ pub fn remove(root: &Path, id: &str) -> Result<String, String> {
         origins.save(root)?;
     }
     Ok(format!("Removed {id} and its permissions"))
+}
+
+pub(crate) fn retire(root: &Path, old: &str, new: &Plugin) -> Result<String, String> {
+    if old == new.id {
+        return Err(format!("{old} cannot replace itself"));
+    }
+    remove(root, old)?;
+    let own = if new.capabilities.is_empty() { String::new() } else { format!(", and {} asks for its own", new.id) };
+    Ok(format!("replaced {old}; its permissions went with it{own}"))
 }
 
 pub fn revoke(root: &Path, id: &str, capability: &str) -> Result<String, String> {

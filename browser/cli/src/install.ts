@@ -5,7 +5,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import extensionId from "../../src/bridge/extension-id.json" with { type: "json" };
@@ -192,28 +192,39 @@ export function hostTarget(): string {
 	return COMPILED ? selfExec() : launcherPath();
 }
 
+/**
+ * Write a launcher beside its path and rename it over: a symlink there (to the person's own script, say) is replaced,
+ * never followed and written through, and a stopped write leaves the old launcher whole.
+ */
+function putLauncher(path: string, text: string): void {
+	const tmp = `${path}.${process.pid}.tmp`;
+	try {
+		writeFileSync(tmp, text);
+		if (!/\.(cmd|bat)$/i.test(path)) chmodSync(tmp, 0o755);
+		renameSync(tmp, path);
+	} catch (err) {
+		rmSync(tmp, { force: true });
+		throw err;
+	}
+}
+
 function writeScript(path: string, args: string, options: { compileCache?: boolean } = {}): void {
 	if (COMPILED) {
 		// The helper is the whole program: no Node to pin, no script, no compile cache.
-		if (process.platform === "win32") writeFileSync(path, `@echo off\r\n"${selfExec()}" ${args} %*\r\n`);
-		else {
-			writeFileSync(path, `#!/bin/sh\nexec "${selfExec()}" ${args}"$@"\n`);
-			chmodSync(path, 0o755);
-		}
+		putLauncher(path, process.platform === "win32" ? `@echo off\r\n"${selfExec()}" ${args} %*\r\n` : `#!/bin/sh\nexec "${selfExec()}" ${args}"$@"\n`);
 		return;
 	}
 	const node = stableNode();
 	const script = selfPrefix()[0] ?? process.argv[1];
 	if (process.platform === "win32") {
-		writeFileSync(path, `@echo off\r\n"${node}" "${script}" ${args} %*\r\n`);
+		putLauncher(path, `@echo off\r\n"${node}" "${script}" ${args} %*\r\n`);
 	} else {
 		// Node's compile cache (Node 22.1+; older versions ignore it): a small saving, about 10 ms
 		// of 120 on one machine, near run-to-run noise (`cli/eval/bridge-metrics.mjs --only launcher`).
 		const cache = join(cacheDir(), "node-compile-cache");
 		// Only the launcher harnesses run; the native host's environment (and what it spawns) is unchanged.
 		const prefix = options.compileCache ? `: "\${NODE_COMPILE_CACHE:=${cache}}"\nexport NODE_COMPILE_CACHE\n` : "";
-		writeFileSync(path, `#!/bin/sh\n${prefix}exec "${node}" "${script}" ${args}"$@"\n`);
-		chmodSync(path, 0o755);
+		putLauncher(path, `#!/bin/sh\n${prefix}exec "${node}" "${script}" ${args}"$@"\n`);
 	}
 }
 
@@ -280,11 +291,7 @@ export function ensureLauncherRuns(path: string, program: string): boolean {
 	};
 	if (named?.length === 1 && same(named[0], program)) return false;
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-	if (/\.(cmd|bat)$/i.test(path)) writeFileSync(path, `@echo off\r\n"${program}" %*\r\n`);
-	else {
-		writeFileSync(path, `#!/bin/sh\nexec "${program}" "$@"\n`);
-		chmodSync(path, 0o755);
-	}
+	putLauncher(path, /\.(cmd|bat)$/i.test(path) ? `@echo off\r\n"${program}" %*\r\n` : `#!/bin/sh\nexec "${program}" "$@"\n`);
 	return true;
 }
 
@@ -317,7 +324,10 @@ const WINDOWS_HIVES = ["Google\\Chrome", "BraveSoftware\\Brave-Browser", "Micros
 export interface InstallResult {
 	launcher: string;
 	written: string[];
+	/** Already right, so left as they were. */
 	skipped: string[];
+	/** Windows registry keys that couldn't be written. */
+	failed: string[];
 }
 
 export interface InstallOptions {
@@ -339,6 +349,7 @@ export function install(options: InstallOptions = {}): InstallResult {
 	const launcher = keepLaunchers || options.dryRun ? hostTarget() : writeLauncher();
 	const written: string[] = [];
 	const skipped: string[] = [];
+	const failed: string[] = [];
 
 	if (process.platform === "win32") {
 		for (const host of NATIVE_HOST_NAMES) {
@@ -354,11 +365,11 @@ export function install(options: InstallOptions = {}): InstallResult {
 					execFileSync("reg", ["add", key, "/ve", "/t", "REG_SZ", "/d", file, "/f"], { stdio: "ignore" });
 					written.push(key);
 				} catch {
-					skipped.push(key);
+					failed.push(key);
 				}
 			}
 		}
-		return { launcher, written, skipped };
+		return { launcher, written, skipped, failed };
 	}
 
 	for (const { name, dir } of browserDirs()) {
@@ -381,7 +392,7 @@ export function install(options: InstallOptions = {}): InstallResult {
 			written.push(file);
 		}
 	}
-	return { launcher, written, skipped };
+	return { launcher, written, skipped, failed };
 }
 
 /** The program a host manifest names, or undefined when the file isn't there or isn't one. */

@@ -1,6 +1,7 @@
 // `local-studio-browser pi-extension` writes local-studio.ts for pi and touches nothing else in the folder.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -35,4 +36,59 @@ test("a second run writes its own file again and leaves the others in the folder
 	writePiExtension(d);
 	assert.deepEqual(readdirSync(d).sort(), ["local-studio.ts", "mine.ts"]);
 	assert.equal(readFileSync(join(d, "mine.ts"), "utf8"), "// my own pi extension\n");
+});
+
+test("a connection that drops part way through a reply leaves the next one readable", { skip: process.platform === "win32" && "sockets", timeout: 20_000 }, async (t) => {
+	const text = readFileSync(writePiExtension(dir("bridge")), "utf8");
+	const body = text.slice(text.indexOf("const SOCKET_OVERRIDE"), text.indexOf("const bridge = new Bridge();"));
+	const sockets = dir("s");
+	chmodSync(sockets, 0o700);
+	process.env.LOCAL_STUDIO_BROWSER_SOCKET_DIR = sockets;
+	t.after(() => delete process.env.LOCAL_STUDIO_BROWSER_SOCKET_DIR);
+	const { Bridge } = await loadTs(`import { existsSync, readdirSync, statSync } from "node:fs";
+import { connect } from "node:net";
+import { userInfo } from "node:os";
+import { basename, join } from "node:path";
+${body}
+export { Bridge };`);
+	const encode = (message) => {
+		const json = Buffer.from(JSON.stringify(message));
+		const head = Buffer.alloc(4);
+		head.writeUInt32LE(json.length);
+		return Buffer.concat([head, json]);
+	};
+	const open = new Set();
+	let seen = 0;
+	// The first connection closes before its welcome, the second half way through a reply, the third answers.
+	const server = createServer((socket) => {
+		const turn = ++seen;
+		open.add(socket);
+		socket.on("error", () => undefined);
+		if (turn === 1) return socket.end();
+		socket.write(encode({ type: "welcome" }));
+		let requests = 0;
+		socket.on("data", (d) => {
+			if (!d.includes('"request"') || requests++) return;
+			const id = Number(/"id":(\d+)/.exec(d.toString("latin1"))[1]);
+			const reply = encode({ type: "response", id, result: { turn } });
+			if (turn === 2) socket.end(reply.subarray(0, reply.length - 5));
+			else socket.write(reply);
+		});
+	});
+	t.after(() => {
+		for (const socket of open) socket.destroy();
+		server.close();
+	});
+	await new Promise((r) => server.listen(join(sockets, `${process.pid}.sock`), r));
+	const bridge = new Bridge();
+	await assert.rejects(bridge.call("tabs.list", {}), /bridge closed/);
+	await assert.rejects(bridge.call("tabs.list", {}), /bridge closed/);
+	assert.deepEqual(await bridge.call("tabs.list", {}), { turn: 3 });
+	// A call made while the last connection is still closing goes out on a new one, and the old call still ends.
+	const waiting = bridge.call("never.answered", {});
+	await new Promise((r) => setTimeout(r, 50));
+	bridge.socket.destroy();
+	const [old, next] = await Promise.allSettled([waiting, bridge.call("tabs.list", {})]);
+	assert.match(String(old.reason), /bridge closed/);
+	assert.deepEqual(next.value, { turn: 4 });
 });

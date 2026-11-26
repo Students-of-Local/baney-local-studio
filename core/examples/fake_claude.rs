@@ -44,18 +44,23 @@ fn limited() -> bool {
     account().is_some_and(|dir| dir.join(LIMITED).is_file())
 }
 
-fn session_file(args: &[String]) -> Option<PathBuf> {
-    let session = args.windows(2).find(|pair| pair[0] == "--session-id" || pair[0] == "--resume")?[1].clone();
+fn session_file(args: &[String]) -> Option<(PathBuf, Option<PathBuf>)> {
+    let named = |flag: &str| args.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].clone());
     let root = account()?;
     let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    Some(root.join("projects").join(escaped).join(format!("{session}.jsonl")))
+    let file = |session: String| root.join("projects").join(&escaped).join(format!("{session}.jsonl"));
+    let own = named("--session-id").or_else(|| named("--resume"))?;
+    Some((file(own), named("--resume").map(file).filter(|_| args.iter().any(|arg| arg == "--fork-session"))))
 }
 
-fn remember(file: Option<&PathBuf>, lines: &[Value]) {
-    let Some(file) = file else { return };
+fn remember(session: Option<&(PathBuf, Option<PathBuf>)>, lines: &[Value]) {
+    let Some((file, origin)) = session else { return };
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).ok();
+    }
+    if let Some(origin) = origin.as_ref().filter(|_| !file.exists()) {
+        std::fs::copy(origin, file).ok();
     }
     let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) else { return };
     for line in lines {
@@ -63,17 +68,54 @@ fn remember(file: Option<&PathBuf>, lines: &[Value]) {
     }
 }
 
+fn ask(inbox: &Receiver<Value>, waiting: &mut VecDeque<Value>, turn: u32) -> Option<String> {
+    let id = format!("fake-ask-{turn}");
+    let color = json!({ "question": "Which color?", "header": "Color", "multiSelect": false,
+        "options": [{ "label": "Red", "description": "warm" }, { "label": "Blue", "description": "cool" }] });
+    let size = json!({ "question": "Which size?", "header": "Size", "multiSelect": true,
+        "options": [{ "label": "Small", "description": "" }, { "label": "Large", "description": "" }] });
+    let input = json!({ "questions": [color, size] });
+    emit(&json!({ "type": "control_request", "request_id": id,
+        "request": { "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": input } }));
+    loop {
+        let next = inbox.recv().unwrap_or_else(|_| std::process::exit(0));
+        if interrupt(&next) {
+            answer_control(&next);
+            return None;
+        }
+        if next["type"] == "control_response" && next["response"]["request_id"] == id {
+            let response = &next["response"]["response"];
+            if response["behavior"] != "allow" {
+                return Some("question denied".to_string());
+            }
+            let answers = &response["updatedInput"]["answers"];
+            let picked = |key: &str| answers[key].as_str().unwrap_or("nothing").to_string();
+            return Some(format!("picked {} and {}", picked("Which color?"), picked("Which size?")));
+        }
+        if next["type"] == "control_request" {
+            answer_control(&next);
+        } else {
+            waiting.push_back(next);
+        }
+    }
+}
+
 fn run(
     turn: u32,
     frame: &Value,
     (effort, sources, servers): (&str, &str, Option<&Value>),
-    (inbox, file): (&Receiver<Value>, Option<&PathBuf>),
+    (inbox, session): (&Receiver<Value>, Option<&(PathBuf, Option<PathBuf>)>),
     waiting: &mut VecDeque<Value>,
 ) {
     let text = frame["message"]["content"].as_str().unwrap_or_default().to_string();
     emit(&json!({ "type": "system", "subtype": "init", "model": "fake-claude" }));
     emit(&json!({ "type": "user", "message": { "role": "user", "content": text }, "isReplay": true }));
     let mut aborted = false;
+    let mut asked = None;
+    if text.contains("questions") {
+        asked = ask(inbox, waiting, turn);
+        aborted = asked.is_none();
+    }
     if text.contains("slow") {
         let deadline = Instant::now() + SLOW;
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -124,6 +166,9 @@ fn run(
     }
     let mut reply =
         skill::reply(&text).unwrap_or_else(|| format!("reply to {text} at effort {effort} with {sources} settings"));
+    if let Some(asked) = asked {
+        reply = format!("{reply}: {asked}");
+    }
     if text.contains("look up") {
         let found = servers.and_then(|servers| mcp::skills(&servers["mcpServers"]["local-studio-skills"], &text));
         reply = format!("{reply}, found {}", found.as_deref().unwrap_or("no server"));
@@ -138,7 +183,7 @@ fn run(
         },
     });
     emit(&assistant);
-    remember(file, &[json!({ "type": "user", "message": { "role": "user", "content": text } }), assistant]);
+    remember(session, &[json!({ "type": "user", "message": { "role": "user", "content": text } }), assistant]);
     emit(&json!({ "type": "result", "subtype": "success", "is_error": false, "result": reply }));
 }
 
@@ -154,7 +199,7 @@ fn main() {
         let allowed = args.iter().any(|arg| arg == ALLOWED);
         allowed.then(|| serde_json::from_str::<Value>(&pair[1]).ok()).flatten()
     });
-    let file = session_file(&args);
+    let session = session_file(&args);
     let (frames, inbox) = mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -178,7 +223,7 @@ fn main() {
         match frame["type"].as_str() {
             Some("user") => {
                 turn += 1;
-                run(turn, &frame, (&effort, &sources, servers.as_ref()), (&inbox, file.as_ref()), &mut waiting);
+                run(turn, &frame, (&effort, &sources, servers.as_ref()), (&inbox, session.as_ref()), &mut waiting);
             }
             Some("control_request") => answer_control(&frame),
             _ => {}

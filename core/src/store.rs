@@ -55,6 +55,10 @@ pub(crate) struct ThreadFlags {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) native_session: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fork_of: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) forked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,

@@ -127,7 +127,7 @@ def main [
         cp ($package | path join "LocalStudio-Info.plist") ($contents | path join "Info.plist")
         compile-icon $package ($contents | path join "Resources")
         bundle-controller $repo ($contents | path join "Resources" "controller")
-        cp -r ($repo | path join "browser" "skills") ($contents | path join "Resources" "app-skills")
+        cp -r ($repo | path join "skills") ($contents | path join "Resources" "app-skills")
         for resource in (glob ($package | path join "Resources" "*")) {
             cp $resource ($contents | path join "Resources")
         }

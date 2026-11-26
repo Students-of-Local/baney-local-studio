@@ -173,7 +173,7 @@ Set up once by hand, before the first stable release: the `stable` branch, start
 
 | Product | Mode | Today | Changes to adopt this scheme |
 | --- | --- | --- | --- |
-| Local Studio desktop (`baney75/local-studio`) | side by side | Nightly and dev workflows, version stamping, signed in-app updates and `scripts/install.sh`; no release published yet | Publish the first nightly; add the `stable` branch at the first stable release |
+| Local Studio desktop (`Students-of-Local/baney-local-studio`) | side by side | Nightly and dev workflows, version stamping, signed in-app updates and `scripts/install.sh`; no release published yet | Publish the first nightly; add the `stable` branch at the first stable release |
 | Local Studio iPhone (`ios/` in this repo) | side by side | In progress (PR #4) | Same version and tags as the desktop app, so the protocol always matches |
 | Silas | replace | `vX.Y.Z` tags from the Mac, rolling `nightly` (`-nightly.YYYYMMDDHHMM`) | Add `stable` branch and `dev`; add `+<sha7>` to nightly versions |
 | Polycarp | replace | Rolling `preview` pre-release | Move `preview` to `nightly` through a bridge build (Renaming a feed); add `stable` and `dev` |

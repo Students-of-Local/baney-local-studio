@@ -190,6 +190,7 @@ fn rtx_gpu(index: u32, used: f64) -> LocalGpu {
         busy: true,
         external: false,
         link: None,
+        eject: None,
     }
 }
 

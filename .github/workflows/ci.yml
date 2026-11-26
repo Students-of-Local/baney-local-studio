@@ -12,6 +12,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 jobs:
+  changes:
+    name: What changed
+    runs-on: ubuntu-24.04
+    outputs:
+      apps: ${{ steps.c.outputs.apps }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: c
+        run: scripts/ci-apps.sh
+
   core:
     name: Core (Linux)
     runs-on: ubuntu-24.04
@@ -38,6 +50,11 @@ jobs:
         run: |
           cargo build -p local-studio-core --example update_smoke
           scripts/tests/update-lock-test.sh "${CARGO_TARGET_DIR:-target}/debug/examples/update_smoke" "$RUNNER_TEMP/up"
+      - name: The app's skills are found by what people ask
+        run: |
+          cargo build -p local-studio-core --bin local-studio
+          scripts/tests/skills-text-test.sh
+          scripts/tests/skills-recall-test.sh "${CARGO_TARGET_DIR:-target}/debug/local-studio" "$RUNNER_TEMP/sr"
       - name: Skill and prompt frontmatter is read as YAML
         run: cargo run -p local-studio-core --example frontmatter_smoke
       - name: Threads open only web and mail links
@@ -78,6 +95,7 @@ jobs:
       - run: scripts/tests/privacy-hosts-test.sh
       - run: scripts/tests/sign-in-files-test.sh
       - run: scripts/tests/relay-bundle-test.sh
+      - run: scripts/tests/ci-apps-test.sh
       - name: Version strings sort local < dev < nightly < stable
         run: |
           set -euo pipefail
@@ -94,6 +112,8 @@ jobs:
 
   macos:
     name: macOS
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.apps != 'false' }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,6 +130,8 @@ jobs:
 
   macos-app:
     name: macOS app
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.apps != 'false' }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,6 +155,8 @@ jobs:
 
   ios-app:
     name: iPhone app
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.apps != 'false' }}
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

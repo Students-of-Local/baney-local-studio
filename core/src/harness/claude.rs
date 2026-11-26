@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use eukhe_types::daemon::{SessionEvent, StreamUpdate};
 use eukhe_types::session::AgentMessage;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
     assistant, command, diff_details, emit_message, notice, now_ms, program, stop_reason, tool_result, user, Agent,
-    Event, Image, Launch, Sink, Spend, Stop, CLAUDE_PROVIDER,
+    Asked, Event, Image, Launch, Sink, Spend, Stop, CLAUDE_PROVIDER,
 };
-use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption};
+use crate::model::{AccessMode, Approval, ApprovalAnswer, ContextUsage, Harness, ModelOption, Question};
 use crate::skills::{SERVER, TOOLS};
 
 const MODELS: [(&str, &str, &str); 9] = [
@@ -79,6 +79,12 @@ fn offered(skills: &Value) -> [String; 4] {
     ["--mcp-config".to_string(), servers, "--allowedTools".to_string(), tools]
 }
 
+fn session(launch: &Launch) -> Vec<&str> {
+    let own = [if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()];
+    let origin = launch.fork.iter().flat_map(|origin| ["--resume", origin.as_str(), "--fork-session"]);
+    origin.chain(own).collect()
+}
+
 impl Claude {
     pub(crate) fn spawn(launch: &Launch, sink: Sink) -> Result<Self, String> {
         let binary = program("LOCAL_STUDIO_CLAUDE_BIN", "claude");
@@ -109,7 +115,7 @@ impl Claude {
             command.args(["--setting-sources", "user"]);
         }
         command.args(launch.skills.iter().filter(|_| !Path::new(MANAGED).exists()).flat_map(offered));
-        command.args([if launch.resume { "--resume" } else { "--session-id" }, launch.native.as_str()]);
+        command.args(session(launch));
         if let Some(account) = &launch.account {
             command.env("CLAUDE_CONFIG_DIR", account);
         }
@@ -245,6 +251,29 @@ impl Claude {
             }
             ApprovalAnswer::Deny => json!({ "behavior": "deny", "message": "The user denied this in Local Studio." }),
         };
+        self.reply(request, &response)
+    }
+
+    pub(crate) fn answer_questions(&self, request: &str, answers: &[String]) -> Result<(), String> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(request)
+            .ok_or_else(|| "That question is no longer pending.".to_string())?;
+        let mut input = pending["input"].clone();
+        let answered: Map<String, Value> = input["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .zip(answers)
+            .filter_map(|(question, answer)| Some((question["question"].as_str()?.to_string(), json!(answer))))
+            .collect();
+        input["answers"] = Value::Object(answered);
+        self.reply(request, &json!({ "behavior": "allow", "updatedInput": input }))
+    }
+
+    fn reply(&self, request: &str, response: &Value) -> Result<(), String> {
         self.write(&json!({
             "type": "control_response",
             "response": { "subtype": "success", "request_id": request, "response": response },
@@ -543,6 +572,18 @@ impl Translator {
         }
         let tool = request.get("tool_name").and_then(Value::as_str).unwrap_or_default();
         let input = request.get("input").cloned().unwrap_or(Value::Null);
+        if tool == "AskUserQuestion" {
+            let questions: Option<Vec<Question>> =
+                input["questions"].as_array().into_iter().flatten().map(super::asked_question).collect();
+            if let Some(questions) = questions.filter(|questions| !questions.is_empty()) {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(id.clone(), json!({ "input": input, "suggestions": [] }));
+                self.sink.send(Event::Questions(Asked { request_id: id, questions }));
+                return;
+            }
+        }
         let summary = describe(tool, &input);
         let note = request
             .get("description")

@@ -252,6 +252,11 @@ pub fn set_current(colors: &Colors) {
 }
 
 pub fn resolve(theme: Option<&str>, dark: bool) -> Colors {
+    if theme == Some(crate::omarchy::NAME) {
+        if let Some(colors) = crate::omarchy::colors() {
+            return colors;
+        }
+    }
     match (theme, dark) {
         (Some(GILDRB), true) => GILDRB_DARK,
         (Some(GILDRB), false) => GILDRB_LIGHT,

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-FLOORS = {0: (129, 156, 162), 1000: (94, 120, 138)}
+FLOORS = {0: (150, 168, 170), 1000: (132, 155, 160)}
 CUTS = (1, 3, 5)
 
 

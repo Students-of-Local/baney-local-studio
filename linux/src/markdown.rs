@@ -16,6 +16,7 @@ const QUOTE_MARGIN: i32 = 14;
 const CODE_INSET: i32 = 12;
 const CELL_GAP: i32 = 28;
 const HIDDEN: char = '\u{200B}';
+const PAD: char = '\u{00A0}';
 const BREAK: &str = "\u{2028}";
 
 enum Kind {
@@ -32,10 +33,17 @@ struct Line {
     kind: Kind,
 }
 
+struct Link {
+    tag: gtk::TextTag,
+    url: String,
+    detail: Option<String>,
+}
+
 #[derive(Default)]
 struct Doc {
     lines: Vec<Line>,
-    links: Vec<(gtk::TextTag, String)>,
+    links: Vec<Link>,
+    buttons: bool,
     generation: u64,
 }
 
@@ -66,6 +74,7 @@ impl Views {
             return entry.view.clone();
         }
         let (view, doc) = create();
+        doc.borrow_mut().buttons = true;
         fill(&view, &doc, text);
         let entry = Entry { text: text.to_string(), style, view: view.clone(), doc };
         if self.entries.insert(key, entry).is_none() {
@@ -119,7 +128,11 @@ fn create() -> (gtk::TextView, Rc<RefCell<Doc>>) {
         if presses != 1 || view.buffer().has_selection() {
             return;
         }
-        let Some(url) = link_at(&view, &clicked.borrow(), x, y) else { return };
+        let Some((url, detail)) = link_at(&view, &clicked.borrow(), x, y) else { return };
+        if detail.is_some() {
+            let _ = view.activate_action("links.open", Some(&url.to_variant()));
+            return;
+        }
         let handled = view.activate_action("win.open-link", Some(&url.to_variant())).is_ok();
         if !handled && local_studio_core::refused_link(&url).is_none() {
             let window = view.root().and_downcast::<gtk::Window>();
@@ -135,6 +148,13 @@ fn create() -> (gtk::TextView, Rc<RefCell<Doc>>) {
         view.set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
     });
     view.add_controller(motion);
+    view.set_has_tooltip(true);
+    let shown = Rc::clone(&doc);
+    view.connect_query_tooltip(move |view, x, y, keyboard, tooltip| {
+        let detail = link_at(view, &shown.borrow(), f64::from(x), f64::from(y)).and_then(|(_, detail)| detail);
+        tooltip.set_text(detail.as_deref());
+        detail.is_some() && !keyboard
+    });
     view.connect_map(|view| {
         let view = view.downgrade();
         glib::idle_add_local_once(move || {
@@ -146,11 +166,11 @@ fn create() -> (gtk::TextView, Rc<RefCell<Doc>>) {
     (view, doc)
 }
 
-fn link_at(view: &gtk::TextView, doc: &Doc, x: f64, y: f64) -> Option<String> {
+fn link_at(view: &gtk::TextView, doc: &Doc, x: f64, y: f64) -> Option<(String, Option<String>)> {
     #[allow(clippy::cast_possible_truncation)]
     let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
     let iter = view.iter_at_location(bx, by)?;
-    doc.links.iter().find(|(tag, _)| iter.has_tag(tag)).map(|(_, url)| url.clone())
+    doc.links.iter().find(|link| iter.has_tag(&link.tag)).map(|link| (link.url.clone(), link.detail.clone()))
 }
 
 fn rgba(color: &str, alpha: f32) -> Option<gdk::RGBA> {
@@ -182,6 +202,10 @@ fn styles(buffer: &gtk::TextBuffer, colors: &Colors) {
     let link = add("link");
     link.set_foreground_rgba(rgba(colors.accent, 1.0).as_ref());
     link.set_underline(pango::Underline::Single);
+    let button = add("button");
+    button.set_foreground_rgba(rgba(colors.accent, 1.0).as_ref());
+    button.set_background_rgba(rgba(colors.accent, 0.14).as_ref());
+    button.set_weight(600);
     for (name, scale) in [("h1", 1.4), ("h2", 1.25), ("h3", 1.1), ("h4", 1.0)] {
         let heading = add(name);
         heading.set_weight(700);
@@ -231,7 +255,8 @@ struct Builder<'a> {
     buffer: gtk::TextBuffer,
     starts: Vec<(i32, Vec<String>)>,
     lines: Vec<Line>,
-    links: Vec<(gtk::TextTag, String)>,
+    links: Vec<Link>,
+    buttons: bool,
     jobs: Vec<Job>,
     group: usize,
     tables: usize,
@@ -253,7 +278,16 @@ impl Builder<'_> {
     }
 
     fn spans(&mut self, spans: &[Span], extra: &[&str]) {
+        let mut last = None;
         for span in spans {
+            let words = span.link.as_deref().filter(|_| self.buttons).and_then(crate::app_links::words);
+            let again = words.is_some() && span.link == last;
+            let link =
+                span.link.as_ref().filter(|url| words.is_some() || !self.buttons || !crate::app_links::ours(url));
+            last.clone_from(&span.link);
+            if again {
+                continue;
+            }
             let mut tags = extra.to_vec();
             if span.style.bold {
                 tags.push("bold");
@@ -267,16 +301,20 @@ impl Builder<'_> {
             if span.style.strike {
                 tags.push("strike");
             }
-            if span.link.is_some() {
+            if link.is_some() && words.is_none() {
                 tags.push("link");
             }
             let start = self.buffer.char_count();
-            self.insert(&span.text.replace(['\n', '\r', '\u{2029}'], BREAK), &tags);
-            if let Some(url) = &span.link {
+            match &words {
+                Some(words) => self.insert(&format!("{PAD}{}{PAD}", words.title), &["button"]),
+                None => self.insert(&span.text.replace(['\n', '\r', '\u{2029}'], BREAK), &tags),
+            }
+            if let Some(url) = link {
                 let tag = gtk::TextTag::new(None);
                 self.buffer.tag_table().add(&tag);
                 self.buffer.apply_tag(&tag, &self.buffer.iter_at_offset(start), &self.buffer.end_iter());
-                self.links.push((tag, url.clone()));
+                let detail = words.map(|words| words.detail);
+                self.links.push(Link { tag, url: url.clone(), detail });
             }
         }
     }
@@ -442,14 +480,14 @@ impl Builder<'_> {
 
 fn fill(view: &gtk::TextView, doc: &Rc<RefCell<Doc>>, text: &str) {
     let buffer = view.buffer();
-    let generation = {
+    let (generation, buttons) = {
         let mut doc = doc.borrow_mut();
         let table = buffer.tag_table();
-        for (tag, _) in doc.links.drain(..) {
-            table.remove(&tag);
+        for link in doc.links.drain(..) {
+            table.remove(&link.tag);
         }
         doc.generation += 1;
-        doc.generation
+        (doc.generation, doc.buttons)
     };
     buffer.set_text("");
     let mut builder = Builder {
@@ -458,6 +496,7 @@ fn fill(view: &gtk::TextView, doc: &Rc<RefCell<Doc>>, text: &str) {
         starts: Vec::new(),
         lines: Vec::new(),
         links: Vec::new(),
+        buttons,
         jobs: Vec::new(),
         group: 0,
         tables: 0,

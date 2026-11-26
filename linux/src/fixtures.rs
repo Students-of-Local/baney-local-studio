@@ -34,7 +34,7 @@ pub fn scenes() -> Vec<&'static str> {
     all
 }
 
-pub const SCENES: [&str; 62] = [
+pub const SCENES: [&str; 63] = [
     "01-empty",
     "02-new-thread",
     "03-conversation",
@@ -45,6 +45,7 @@ pub const SCENES: [&str; 62] = [
     "08-diff-panel",
     "09-terminal-drawer",
     "10-settings-general",
+    "10-settings-search",
     "11-settings-keybindings",
     "12-local",
     "13-usage",
@@ -201,6 +202,14 @@ pub fn stage(app: &Rc<App>, scene: &str) {
             conversation(app, false);
             app.open_settings(Some("general"));
             app.apply(vec![Update::Providers { providers: providers(), engines: Vec::new(), errors: Vec::new() }]);
+        }
+        "10-settings-search" => {
+            conversation(app, false);
+            app.open_settings(Some("general"));
+            app.apply(vec![Update::Providers { providers: providers(), engines: Vec::new(), errors: Vec::new() }]);
+            if let Some(settings) = app.settings.borrow().as_ref() {
+                settings.search("worktree");
+            }
         }
         "11-settings-keybindings" => {
             conversation(app, false);
@@ -804,6 +813,7 @@ pub fn provider(
         base_url: None,
         api: None,
         models: Vec::new(),
+        quota: None,
     }
 }
 
@@ -813,6 +823,10 @@ pub fn providers() -> Vec<ProviderStatus> {
         provider("openai", "OpenAI", ProviderKind::BuiltIn, ProviderCredential::Environment, 14),
         provider("google", "Google", ProviderKind::BuiltIn, ProviderCredential::Missing, 6),
         provider("openrouter", "OpenRouter", ProviderKind::BuiltIn, ProviderCredential::Missing, 0),
+        ProviderStatus {
+            quota: Some("412 of 600 requests left in the rolling 5 hours · 87% of weekly tokens left".to_string()),
+            ..provider("synthetic", "Synthetic", ProviderKind::BuiltIn, ProviderCredential::StoredKey, 2)
+        },
     ]
 }
 
@@ -918,6 +932,7 @@ fn local_snapshot() -> LocalSnapshot {
                     busy: true,
                     external: false,
                     link: None,
+                    eject: None,
                 },
                 LocalGpu {
                     index: 1,
@@ -928,6 +943,7 @@ fn local_snapshot() -> LocalSnapshot {
                     busy: true,
                     external: false,
                     link: None,
+                    eject: None,
                 },
             ],
             memory_used_bytes: 43_400_000_000,

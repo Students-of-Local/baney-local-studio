@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -26,6 +26,8 @@ const STEP_TIMEOUT: Duration = Duration::from_mins(15);
 const KEY: &str = "sk-stub-local-smoke-0001";
 const WRONG_KEY: &str = "sk-stub-wrong-0002";
 const OPENAI_KEY: &str = "sk-openai-smoke-not-real";
+const SYNTHETIC_MODELS: [(&str, u64); 2] = [("hf:zai-org/GLM-5.3", 202_752), ("hf:moonshotai/Kimi-K2.6", 262_144)];
+const SYNTHETIC_QUOTA: &str = "412 of 600 requests left in the rolling 5 hours · 87% of weekly tokens left";
 
 #[derive(Default)]
 struct Signal {
@@ -375,6 +377,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let daemon = PathBuf::from(args.next().context(usage)?);
     let base = args.next().map_or_else(|| PathBuf::from("/tmp/ls-providers"), PathBuf::from);
+    std::env::remove_var("SYNTHETIC_API_KEY");
     let root = base.join(format!("run-{}", std::process::id()));
     let real = root.join("real");
     real_model::install(&real.join("agent"))?;
@@ -419,6 +422,7 @@ fn run(daemon: &Path, root: &Path, stub: Option<u16>) -> anyhow::Result<()> {
             "modelsDir": root.join("models"),
         });
         std::fs::write(controller.join("config.json"), named.to_string())?;
+        std::env::set_var("LOCAL_STUDIO_SYNTHETIC_URL", format!("http://127.0.0.1:{port}"));
     }
     std::env::set_var("LOCAL_STUDIO_DATA_DIR", root.join("data"));
     std::env::set_var("EUKHE_CODING_AGENT_DIR", &agent);
@@ -463,8 +467,10 @@ fn drive(
     };
     discovery(harness, port)?;
     local_servers(harness, agent, port)?;
+    server_windows(harness, agent)?;
     add_and_chat(harness, agent, port, &project)?;
     edit_and_keys(harness, agent, port)?;
+    synthetic(harness, agent, port, &project)?;
     local_fleet(harness, port, &project)?;
     cleanup(harness, agent, original)
 }
@@ -555,7 +561,7 @@ fn discovery(harness: &mut Harness, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn canned(answer: Option<String>) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
+fn canned(answer: Option<String>, counted: fn(&str) -> bool) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -563,17 +569,127 @@ fn canned(answer: Option<String>) -> anyhow::Result<(u16, Arc<AtomicUsize>)> {
     std::thread::spawn(move || {
         let mut held = Vec::new();
         for mut stream in listener.incoming().flatten() {
-            count.fetch_add(1, Ordering::SeqCst);
             if let Some(answer) = &answer {
-                let lines = BufReader::new(&stream).lines().map_while(Result::ok);
+                let mut lines = BufReader::new(&stream).lines().map_while(Result::ok);
+                if counted(&lines.next().unwrap_or_default()) {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
                 lines.take_while(|line| !line.is_empty()).for_each(drop);
                 let _ = stream.write_all(answer.as_bytes());
             } else {
+                count.fetch_add(1, Ordering::SeqCst);
                 held.push(stream);
             }
         }
     });
     Ok((port, hits))
+}
+
+fn engine_like(routes: Vec<(&'static str, String)>) -> anyhow::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(&stream);
+            let mut first = String::new();
+            let mut length = 0;
+            let mut line = String::new();
+            if reader.read_line(&mut first).is_err() {
+                continue;
+            }
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut body = vec![0; length];
+            if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
+                continue;
+            }
+            let route = first.split(' ').take(2).collect::<Vec<_>>().join(" ");
+            let model =
+                serde_json::from_slice::<Value>(&body).ok().and_then(|body| body["model"].as_str().map(str::to_string));
+            let named = model.map(|model| format!("{route} {model}"));
+            let answer = routes
+                .iter()
+                .find(|(known, _)| Some(*known) == named.as_deref())
+                .or_else(|| routes.iter().find(|(known, _)| *known == route))
+                .map(|(_, body)| body.as_str());
+            let (head, body) = answer.map_or(("404 Not Found", "{}"), |body| ("200 OK", body));
+            let reply = format!("HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    Ok(port)
+}
+
+fn server_windows(harness: &mut Harness, agent: &Path) -> anyhow::Result<()> {
+    let list = |ids: &[&str]| {
+        json!({ "object": "list", "data": ids.iter().map(|id| json!({ "id": id, "object": "model" })).collect::<Vec<_>>() }).to_string()
+    };
+    let set = json!({
+        "parameters": "num_ctx                        16384\nstop                           \"<|im_end|>\"",
+        "model_info": { "lfm3.context_length": 262_144 },
+    })
+    .to_string();
+    let card =
+        json!({ "parameters": "stop \"<|im_end|>\"", "model_info": { "lfm3.context_length": 262_144 } }).to_string();
+    let ollama = engine_like(vec![
+        ("GET /v1/models", list(&["tiny:latest", "card:latest"])),
+        ("GET /api/ps", r#"{"models":[]}"#.to_string()),
+        ("POST /api/show tiny:latest", set),
+        ("POST /api/show card:latest", card),
+    ])?;
+    let llama = engine_like(vec![
+        ("GET /v1/models", list(&["tiny:latest"])),
+        ("GET /props", r#"{"default_generation_settings":{"n_ctx":8192}}"#.to_string()),
+    ])?;
+    let studio = json!({ "data": [
+        { "id": "warm", "loaded_context_length": 4096, "max_context_length": 131_072 },
+        { "id": "cold", "max_context_length": 131_072 },
+    ] })
+    .to_string();
+    let lm = engine_like(vec![("GET /v1/models", list(&["warm", "cold"])), ("GET /api/v0/models", studio)])?;
+    let cases = [
+        (ollama, vec![("tiny:latest", Some(16_384)), ("card:latest", None)]),
+        (llama, vec![("tiny:latest", Some(8_192))]),
+        (lm, vec![("warm", Some(4_096)), ("cold", None)]),
+    ];
+    for (port, windows) in cases {
+        let base = format!("http://127.0.0.1:{port}/v1");
+        harness.studio.find_local_servers(vec![found_here(base.clone())]);
+        let listed = base.clone();
+        harness.pump_until("an engine whose model list has no context size is found", move |view| {
+            view.engines.iter().any(|engine| engine.id == listed)
+        })?;
+        let request = harness.request();
+        harness.studio.use_local_engine(request.clone(), base.clone());
+        harness.answer("that engine is used", &request)?;
+        let providers = read_json(&agent.join("models.json"))?["providers"].clone();
+        let (id, entry) = providers
+            .as_object()
+            .and_then(|providers| providers.iter().find(|(_, entry)| entry["baseUrl"] == base.as_str()))
+            .context("the used engine is in models.json")?;
+        for (model, window) in windows {
+            let written = entry["models"]
+                .as_array()
+                .and_then(|models| models.iter().find(|written| written["id"] == model))
+                .with_context(|| format!("{base}: {model} is in models.json: {entry}"))?;
+            ensure!(written["contextWindow"].as_u64() == window, "{base}: {model}: {written}");
+            match window {
+                Some(window) => {
+                    println!("ok   {base} {model} is added with the context size the engine runs ({window})");
+                }
+                None => println!("ok   {base} {model} is added with no context size, not its card's maximum"),
+            }
+        }
+        let request = harness.request();
+        harness.studio.remove_custom_provider(request.clone(), id.clone());
+        harness.answer("that engine is removed", &request)?;
+    }
+    harness.studio.find_local_servers(Vec::new());
+    harness.pump_until("those engines leave the list", |view| view.engines.is_empty())
 }
 
 fn found_here(base_url: String) -> EndpointPreset {
@@ -609,8 +725,9 @@ fn local_servers(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Resu
     };
     let list = r#"{"data":[{"id":"other"}]}"#;
     let big = format!(r#"{{"data":[{{"id":"{}"}}]}}"#, "x".repeat(2 << 20));
-    let (elsewhere, elsewhere_hits) = canned(reply("200 OK", list))?;
-    let (proxy, proxy_hits) = canned(reply("200 OK", list))?;
+    let (elsewhere, elsewhere_hits) = canned(reply("200 OK", list), |line| line.contains("/studio-only/"))?;
+    let (proxy, proxy_hits) =
+        canned(reply("200 OK", list), |line| line.split(' ').nth(1).is_some_and(|target| target.starts_with("http")))?;
     let bad = [
         None,
         reply("401 Unauthorized", list),
@@ -619,12 +736,14 @@ fn local_servers(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Resu
         reply("200 OK", r#"{"data":[]}"#),
         reply("200 OK", r#"{"data":[{"id":"text-embedding-nomic-embed-text-v1.5"}]}"#),
         reply("200 OK", &big),
-        reply(&format!("302 Found\r\nLocation: http://127.0.0.1:{elsewhere}/v1/models"), ""),
+        reply(&format!("302 Found\r\nLocation: http://127.0.0.1:{elsewhere}/studio-only/v1/models"), ""),
     ];
-    let mut urls =
-        vec![format!("http://[::ffff:127.0.0.1]:{elsewhere}/v1"), format!("http://127.0.0.1:{}/v1", free_port()?)];
+    let mut urls = vec![
+        format!("http://[::ffff:127.0.0.1]:{elsewhere}/studio-only/v1"),
+        format!("http://127.0.0.1:{}/v1", free_port()?),
+    ];
     for answer in bad {
-        urls.push(format!("http://127.0.0.1:{}/v1", canned(answer)?.0));
+        urls.push(format!("http://127.0.0.1:{}/v1", canned(answer, |_| true)?.0));
     }
     let base = format!("http://127.0.0.1:{port}/v1");
     urls.push(format!("{base}/"));
@@ -810,6 +929,138 @@ fn edit_and_keys(harness: &mut Harness, agent: &Path, port: u16) -> anyhow::Resu
         view.provider("openai").is_some_and(|provider| provider.credential == ProviderCredential::Missing)
     })?;
     ensure!(read_json(&agent.join("auth.json"))?.get("openai").is_none(), "openai key left in auth.json");
+    Ok(())
+}
+
+fn stub_call(port: u16, method: &str, path: &str) -> anyhow::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer)?;
+    let (head, body) = answer.split_once("\r\n\r\n").context("stub answer")?;
+    ensure!(head.starts_with("HTTP/1.1 200"), "stub {path}: {head}");
+    Ok(body.to_string())
+}
+
+fn synthetic_ready(view: &View, quota: Option<&str>) -> bool {
+    view.provider("synthetic").is_some_and(|provider| {
+        provider.credential == ProviderCredential::StoredKey
+            && provider.configured
+            && provider.quota.as_deref() == quota
+            && provider.models.iter().map(|model| (model.id.as_str(), model.context_window)).eq(SYNTHETIC_MODELS)
+    }) && SYNTHETIC_MODELS.iter().all(|(id, _)| view.has_model("synthetic", id))
+}
+
+fn synthetic(harness: &mut Harness, agent: &Path, port: u16, project: &str) -> anyhow::Result<()> {
+    let studio = Arc::clone(&harness.studio);
+    let models_path = agent.join("models.json");
+    studio.load_providers();
+    harness.pump_until("Synthetic listed without a key, not ready, asking for one", |view| {
+        view.provider("synthetic").is_some_and(|provider| {
+            provider.kind == ProviderKind::BuiltIn
+                && provider.credential == ProviderCredential::Missing
+                && !provider.configured
+                && provider.env_var.as_deref() == Some("SYNTHETIC_API_KEY")
+                && provider.quota.is_none()
+        })
+    })?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "Synthetic written without a key");
+
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), Some(KEY.to_string()));
+    harness.answer("Synthetic key saved", &request)?;
+    harness.pump_until("Synthetic ready with both stub models, their context and the quota", |view| {
+        synthetic_ready(view, Some(SYNTHETIC_QUOTA))
+    })?;
+    ensure!(mode(&models_path)? == 0o600, "models.json is not 0600");
+    ensure!(!std::fs::read_to_string(&models_path)?.contains(KEY), "the Synthetic key landed in models.json");
+    let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
+    ensure!(
+        entry["apiKey"] == "SYNTHETIC_API_KEY"
+            && entry["api"] == "openai-completions"
+            && entry["baseUrl"] == format!("http://127.0.0.1:{port}/openai/v1"),
+        "Synthetic entry {entry}"
+    );
+    println!("ok   Synthetic lists {:?} and shows {SYNTHETIC_QUOTA:?}", SYNTHETIC_MODELS.map(|(id, _)| id));
+
+    let thread = harness.start("synthetic-draft", project, "ping", settings("synthetic", SYNTHETIC_MODELS[0].0))?;
+    let reply = format!("Stub reply from {} (key ok).", SYNTHETIC_MODELS[0].0);
+    harness.pump_until("a thread on a Synthetic model gets the stub's reply with the saved key", |view| {
+        view.answer(&thread).contains(&reply) && view.idle(&thread)
+    })?;
+
+    stub_call(port, "POST", "/stub/quota-error")?;
+    studio.load_providers();
+    harness
+        .pump_until("a failing quota leaves Synthetic ready with no quota line", |view| synthetic_ready(view, None))?;
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    while stub_call(port, "GET", "/stub/quota-failures")? == "0" {
+        ensure!(Instant::now() < deadline, "Synthetic never asked for its quota again");
+        harness.settle(Duration::from_millis(200))?;
+    }
+    harness.settle(Duration::from_secs(1))?;
+    ensure!(synthetic_ready(&harness.view, None), "after the quota 500: {:?}", harness.view.provider("synthetic"));
+    ensure!(harness.view.errors.is_empty(), "a quota 500 surfaced as an error: {:?}", harness.view.errors);
+    println!("ok   a quota 500 leaves Synthetic ready without a quota line");
+
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), None);
+    harness.answer("Synthetic key removed", &request)?;
+    harness.pump_until("Synthetic back to missing with its models gone", |view| {
+        view.provider("synthetic").is_some_and(|provider| {
+            provider.credential == ProviderCredential::Missing && !provider.configured && provider.models.is_empty()
+        }) && !view.models.iter().any(|model| model.provider == "synthetic")
+    })?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "Synthetic entry left in models.json");
+
+    for api_key in ["!cat /nonexistent/synthetic-key", "SYNTHETIC_API_KEY"] {
+        let handwritten = json!({
+            "baseUrl": format!("http://127.0.0.1:{port}/proxy/v1"),
+            "api": "openai-completions",
+            "apiKey": api_key,
+            "models": [{ "id": "mine" }]
+        });
+        seed_synthetic(&models_path, &handwritten)?;
+        for key in [Some(KEY), None] {
+            let request = harness.request();
+            studio.set_provider_key(request.clone(), "synthetic".to_string(), key.map(str::to_string));
+            harness.answer("Synthetic key changed beside a hand-written entry", &request)?;
+            let entry = read_json(&models_path)?["providers"]["synthetic"].clone();
+            ensure!(entry == handwritten, "the hand-written Synthetic entry was rewritten: {entry}");
+        }
+    }
+    println!("ok   hand-written synthetic entries (a key command, the SYNTHETIC_API_KEY reference) stay as written with and without a key");
+
+    let workaround = json!({
+        "name": "Synthetic",
+        "baseUrl": format!("http://127.0.0.1:{port}/openai/v1"),
+        "api": "openai-completions",
+        "apiKey": "none",
+        "models": [{ "id": SYNTHETIC_MODELS[0].0, "name": SYNTHETIC_MODELS[0].0 }]
+    });
+    seed_synthetic(&models_path, &workaround)?;
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), Some(KEY.to_string()));
+    harness.answer("Synthetic key saved beside an endpoint added by hand", &request)?;
+    harness.pump_until("the old Synthetic endpoint becomes the built-in with both models", |view| {
+        synthetic_ready(view, None)
+    })?;
+    ensure!(
+        read_json(&models_path)?["providers"]["synthetic"]["apiKey"] == "SYNTHETIC_API_KEY",
+        "the old Synthetic endpoint was not adopted"
+    );
+    let request = harness.request();
+    studio.set_provider_key(request.clone(), "synthetic".to_string(), None);
+    harness.answer("adopted Synthetic key removed", &request)?;
+    ensure!(read_json(&models_path)?["providers"].get("synthetic").is_none(), "the adopted entry stayed");
+    println!("ok   an endpoint added by hand at Synthetic's origin becomes the built-in, and leaves with its key");
+    Ok(())
+}
+
+fn seed_synthetic(models_path: &Path, entry: &Value) -> anyhow::Result<()> {
+    let mut models = read_json(models_path)?;
+    models["providers"]["synthetic"] = entry.clone();
+    std::fs::write(models_path, serde_json::to_vec_pretty(&models)?)?;
     Ok(())
 }
 

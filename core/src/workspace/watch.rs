@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
 use super::git;
@@ -33,6 +33,9 @@ impl GitWatcher {
         let lookup = Arc::clone(&routes);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let Ok(event) = event else { return };
+            if matches!(event.kind, EventKind::Access(_)) {
+                return;
+            }
             let routes = lookup.lock().unwrap_or_else(PoisonError::into_inner);
             let mut projects = BTreeSet::new();
             for path in event.paths.iter().filter(|path| relevant(path)) {

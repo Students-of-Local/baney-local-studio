@@ -187,6 +187,17 @@ function onExtensionMessage(message: ExtToHost): void {
 	}
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** A frame this host can read: an object with a type, and a hello that names its client. */
+function isFrame(value: unknown): value is { type: string } {
+	return isObject(value) && typeof value.type === "string";
+}
+
+function isClientFrame(value: unknown): value is ClientToHost {
+	return isFrame(value) && (value.type !== "hello" || isObject((value as { client?: unknown }).client));
+}
+
 function onClientMessage(client: Client, message: ClientToHost): void {
 	if (message.type === "hello") {
 		client.hello = message;
@@ -312,7 +323,17 @@ export function runNativeHost(args: readonly string[] = []): void {
 		socket.on("data", (chunk) => {
 			client.lastDataAt = Date.now();
 			const { messages, error } = parser.push(chunk);
-			for (const m of messages) onClientMessage(client, m as ClientToHost);
+			for (const m of messages) {
+				try {
+					if (!isClientFrame(m)) throw new Error("not a message");
+					onClientMessage(client, m);
+				} catch (err) {
+					// Whatever it held (a session that won't print, nesting too deep to send), it costs this client only.
+					process.stderr.write(`[local-studio-browser-host] bad frame from ${id}: ${String(err)}\n`);
+					socket.destroy();
+					return;
+				}
+			}
 			if (error) {
 				process.stderr.write(`[local-studio-browser-host] bad frame from ${id}: ${String(error)}\n`);
 				socket.destroy();
@@ -338,7 +359,7 @@ export function runNativeHost(args: readonly string[] = []): void {
 	process.stdin.on("data", (chunk: Buffer) => {
 		if (stopping) return;
 		const { messages, error } = parser.push(chunk);
-		for (const m of messages) onExtensionMessage(m as ExtToHost);
+		for (const m of messages) if (isFrame(m)) onExtensionMessage(m as ExtToHost);
 		if (error) {
 			process.stderr.write(`[local-studio-browser-host] bad frame from extension, restarting: ${String(error)}\n`);
 			stopping = true;

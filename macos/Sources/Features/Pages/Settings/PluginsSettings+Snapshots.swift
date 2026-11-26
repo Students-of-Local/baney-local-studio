@@ -78,8 +78,8 @@ enum PluginsFixtures {
         catalogEntry("gantrel", "Gantrel", "Design 3D printable parts with a local model, then slice, upload and watch them on your printers", "5cdd089", nil),
         catalogEntry("hildegard", "Hildegard", "Make images, video, speech, designed voices and cleaned audio on your own GPU, each one checked before you see it", "504d949", "0.1.17"),
         catalogEntry("smoothstone", "Smoothstone", "Make 3D printable parts with the stone CLI and its tested parametric recipes", "715e0ac", nil),
-        catalogEntry("tychicus-browser", "Browser use", "Work in Chromium tabs in the background through the Local Studio extension", "fa6fcbe", nil),
-        catalogEntry("tychicus-computer", "Computer use", "Read and operate desktop apps through accessibility APIs", "fa6fcbe", nil),
+        catalogEntry("browser-use", "Local Studio browser use", "Work in Chromium tabs in the background through the Local Studio extension", "f5d7a0a", nil),
+        catalogEntry("computer-use", "Local Studio computer use", "Read and operate desktop apps through accessibility APIs, with the Local Studio extension's helper", "f5d7a0a", nil),
     ]
 
     static var update: Update {
@@ -98,8 +98,10 @@ enum PluginsFixtures {
     }
 
     private static func catalogEntry(_ id: String, _ name: String, _ description: String, _ revision: String, _ installed: String?) -> CatalogPlugin {
-        CatalogPlugin(
-            id: id, name: name, description: description, grants: [], source: "https://github.com/baney75/\(id)",
+        let local = ["browser-use", "computer-use"].contains(id)
+        let source = local ? "https://github.com/Students-of-Local/baney-local-studio" : "https://github.com/baney75/\(id)"
+        return CatalogPlugin(
+            id: id, name: name, description: description, grants: [], source: source,
             revision: revision, localOnly: false, installed: installed
         )
     }

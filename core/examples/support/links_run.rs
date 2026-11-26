@@ -45,8 +45,15 @@ pub fn run() -> Result<()> {
         ("b.docx", b"PK\x03\x04"),
         ("program.txt", b"\x7fELF\x02"),
         ("alias.pdf", b"book\0\0\0\0mark\0\0\0\0"),
+        ("jar.docx", b"PK\x03\x04\x14\0\x08\x08\x08\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\0\0\0META-INF/"),
+        ("shortcut.txt", b"L\0\0\0\x01\x14\x02\0"),
+        ("cut.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"),
     ] {
         write(root.join("home/docs").join(file), bytes)?;
+    }
+    for (file, kind, shift) in [("old.doc", 0x06, 9), ("msi.doc", 0x84, 9), ("msi.xls", 0x84, 12), ("old.pdf", 0x06, 9)]
+    {
+        write(root.join("home/docs").join(file), compound(kind, shift))?;
     }
     for (link, to) in [("trap.pdf", "x.sh"), ("b", "a.PDF"), ("gone", "nowhere")] {
         symlink(to, root.join("home/docs").join(link))?;
@@ -99,6 +106,21 @@ fn fake(path: &Path, exit: u8) -> Result<()> {
     create_dir_all(path.parent().context("no folder")?)?;
     write(path, format!("#!/bin/sh\n{{ printf '%s|' \"$0\" \"$@\"; echo $$; }} >> \"$LINKS_LOG\"\nexit {exit}\n"))?;
     Ok(set_permissions(path, Permissions::from_mode(0o755))?)
+}
+
+fn compound(kind: u8, shift: u8) -> Vec<u8> {
+    let sector = 1 << shift;
+    let root = sector * 3;
+    let mut file = vec![0; sector * 4];
+    file[..8].copy_from_slice(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1");
+    file[30] = shift;
+    file[48] = 2;
+    let class = if kind == 0x84 { &b"\x10\x0c"[..] } else { &b"\x09\x02"[..] };
+    file[root + 80] = kind;
+    file[root + 81..root + 83].copy_from_slice(class);
+    file[root + 88] = 0xc0;
+    file[root + 95] = 0x46;
+    file
 }
 
 fn plan(rest: &str, on: Platform, env: &LinkEnv) -> String {

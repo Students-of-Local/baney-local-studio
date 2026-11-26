@@ -34,14 +34,14 @@ Stable and nightly install side by side and share your threads. Dev keeps its ow
 **Nightly, macOS on Apple Silicon or Linux x86_64:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/baney75/local-studio/main/scripts/install.sh | bash -s -- --channel nightly
+curl -fsSL https://raw.githubusercontent.com/Students-of-Local/baney-local-studio/main/scripts/install.sh | bash -s -- --channel nightly
 ```
 
 The script reads the channel's feed, checks the download's sha256 and its signature against the channel key built into the script, installs it (`/Applications` on macOS, `~/.local` on Linux) and opens it. Checking the signature needs minisign, OpenSSL 3 or python3; on a Mac without them, run `xcode-select --install` or `brew install minisign` first. Use `--channel stable` or `--channel dev` for the other channels. With Automatic updates on (the default on stable and nightly), the app then keeps itself current: it checks its own channel every 6 hours, downloads and verifies the update, and shows **Update** in the window and **Restart to Update** in Settings → General. With it off (the default on dev), or with `LOCAL_STUDIO_NO_UPDATE_CHECK=1` set, it checks only when you choose Check Now.
 
 Nightly and dev macOS builds are signed with the project's own certificate and are not notarized, so install them with the script, which checks them first. Stable is notarized.
 
-**Linux (dev channel) by hand:** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/baney75/local-studio/releases/tag/dev). Dev keeps its own data, so threads made there do not carry over to nightly or stable.
+**Linux (dev channel) by hand:** download `local-studio-linux-x86_64.tar.gz` from the [dev release](https://github.com/Students-of-Local/baney-local-studio/releases/tag/dev). Dev keeps its own data, so threads made there do not carry over to nightly or stable.
 
 **From source, macOS:**
 
@@ -105,11 +105,11 @@ The plugin family, in progress:
 | Plugin | What it is | State |
 | --- | --- | --- |
 | [Browser use and computer use](browser) | Your agents work in your browser through the Local Studio extension, and in desktop apps | Both plugins in the bundled catalog; moving into this repository |
-| [Hildegard](https://github.com/baney75/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | In the bundled catalog |
-| [Gantrel](https://github.com/baney75/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
+| [Hildegard](https://github.com/Students-of-Local/hildegard) | Your own AI studio: images, film and voices on your own GPU, plus music and sound | In the bundled catalog |
+| [Gantrel](https://github.com/Students-of-Local/Gantrel) | Local-AI 3D design, from printable parts to slicing and printing | In the bundled catalog |
 | [UntoCaesar](https://github.com/baney75/UntoCaesar) | Local-AI tax filing that never leaves your machine | Engine and manifest on a branch |
 | [Corunis](https://github.com/baney75/Corunis) | A private organizational brain for universities | MCP server and manifest on a branch |
-| [Fonsviva](https://github.com/baney75/Fonsviva) | Local compute and model serving the plugins run on | In progress |
+| [Fonsviva](https://github.com/Students-of-Local/Fonsviva) | Local compute and model serving the plugins run on | In progress |
 
 From the command line:
 

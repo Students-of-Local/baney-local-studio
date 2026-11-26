@@ -3,9 +3,17 @@ import LocalStudioKit
 
 @MainActor
 enum SmokeModel {
-    static let key = ModelKey(provider: "anthropic", model: "claude-haiku-5-5")
-    static let thinking = "low"
-    static let label = "\(key.provider)/\(key.model) thinking \(thinking)"
+    static let variable = "LOCAL_STUDIO_SMOKE_MODEL"
+    static let key: ModelKey = {
+        let value = ProcessInfo.processInfo.environment[variable] ?? ""
+        let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2, parts[0] != "anthropic" else {
+            print("FAIL \(variable) must name a local model as <provider>/<model>, such as ollama/fv-smoke-lfm3-1.7b, and is \"\(value)\"")
+            exit(1)
+        }
+        return ModelKey(provider: parts[0], model: parts[1])
+    }()
+    static let label = "\(key.provider)/\(key.model)"
 
     static func configured(_ conversation: ConversationStore) -> Bool {
         conversation.models.contains { $0.provider == key.provider && $0.id == key.model && $0.configured }
@@ -14,7 +22,7 @@ enum SmokeModel {
     static func select(_ conversation: ConversationStore) -> Bool {
         guard conversation.modelsLoaded, configured(conversation) else { return false }
         conversation.newThread.model = key
-        conversation.newThread.thinkingLevel = thinking
+        conversation.newThread.thinkingLevel = nil
         return true
     }
 

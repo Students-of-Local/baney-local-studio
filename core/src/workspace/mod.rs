@@ -34,7 +34,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch as channel};
@@ -42,7 +42,7 @@ use tokio::sync::{mpsc, watch as channel};
 use self::devices::Devices;
 use self::links::Links;
 use self::local::Local;
-use self::model::{DiffScope, LocalAction, MergeMethod, PullRequest, Settings, TerminalSize, UsagePeriod};
+use self::model::{DiffScope, LocalAction, MergeMethod, Settings, TerminalSize, UsagePeriod};
 use self::projects::ProjectFile;
 use self::setup::Setups;
 use self::terminal::{Launch, Message, Terminals};
@@ -53,14 +53,11 @@ use crate::oneshot::TextGen;
 use crate::skills::{self, Listed, Store};
 use crate::studio::Mailbox;
 
-const PULL_REQUEST_TTL: Duration = Duration::from_secs(60);
 const DASHBOARD_EVERY: Duration = Duration::from_secs(3);
 
 type ProjectAdder = Arc<dyn Fn(String) + Send + Sync>;
 
 type ModelsReloader = Arc<dyn Fn(Option<(String, String)>) + Send + Sync>;
-
-type CachedPullRequest = (Instant, Option<PullRequest>);
 
 struct Inner {
     runtime: Handle,
@@ -79,9 +76,9 @@ struct Inner {
     dashboard: Mutex<Option<tokio::task::AbortHandle>>,
     watcher: GitWatcher,
     watch_lock: tokio::sync::Mutex<()>,
-    pull_requests: Mutex<HashMap<(String, String), CachedPullRequest>>,
     providers: Mutex<providers::ProviderState>,
     providers_lock: tokio::sync::Mutex<()>,
+    synthetic_lock: tokio::sync::Mutex<()>,
     models_reloader: Mutex<Option<ModelsReloader>>,
     stopped: AtomicBool,
     project_file: Mutex<ProjectFile>,
@@ -143,9 +140,9 @@ impl Workspace {
             terminals: Terminals::default(),
             watcher: GitWatcher::new(notify),
             watch_lock: tokio::sync::Mutex::new(()),
-            pull_requests: Mutex::new(HashMap::new()),
             providers: Mutex::new(providers::ProviderState::default()),
             providers_lock: tokio::sync::Mutex::new(()),
+            synthetic_lock: tokio::sync::Mutex::new(()),
             models_reloader: Mutex::new(None),
             stopped: AtomicBool::new(false),
             project_file: Mutex::new(project_file),
@@ -269,34 +266,13 @@ impl Workspace {
     async fn status_update(&self, project: &str) -> Result<Update, String> {
         let mut status = git::status(Path::new(project)).await?;
         if let Some(branch) = status.branch.clone().filter(|_| status.upstream.is_some()) {
-            status.pull_request = self.pull_request_for(project, &branch).await;
+            status.pull_request = self.branch_pull_request(Path::new(project), &branch, false).await;
         }
-        self.refresh_links_for(project);
         Ok(Update::GitStatus { project: project.to_string(), status })
     }
 
-    async fn pull_request_for(&self, project: &str, branch: &str) -> Option<PullRequest> {
-        let key = (project.to_string(), branch.to_string());
-        if let Some((at, cached)) = self.inner.pull_requests.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
-            if at.elapsed() < PULL_REQUEST_TTL {
-                return cached.clone();
-            }
-        }
-        let found = git::branch_pull_request(Path::new(project), branch).await;
-        self.inner
-            .pull_requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, (Instant::now(), found.clone()));
-        found
-    }
-
     fn forget_pull_requests(&self, project: &str) {
-        self.inner
-            .pull_requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|(owner, _), _| owner != project);
+        self.inner.links.forget(Path::new(project));
     }
 
     pub(crate) fn git_status(&self, project: String) {

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,10 +11,10 @@ use eukhe_client::daemon_client::DaemonClient;
 use eukhe_types::daemon::DaemonCommand;
 use local_studio_core::{
     AccessMode, ApprovalAnswer, Connection, DaemonLaunch, Delivery, HarnessAccounts, ItemKind, NoticeLevel,
-    NotificationKind, PromptDraft, Settings, SkillDraft, SkillFile, Studio, StudioConfig, ThreadSettings, TranscriptOp,
-    Update, Waker, WorktreeChoice,
+    NotificationKind, PromptDraft, Question, Settings, SkillDraft, SkillFile, Studio, StudioConfig, ThreadSettings,
+    TranscriptOp, Update, Waker, WorktreeChoice,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 #[allow(dead_code)]
 #[path = "support/harness.rs"]
@@ -53,6 +53,7 @@ struct Watch {
     misses: Vec<String>,
     settings: Option<Settings>,
     asked: BTreeMap<String, Vec<String>>,
+    cards: Vec<(String, String, Question)>,
     codex: bool,
     done: Vec<String>,
     drafts: BTreeMap<String, Option<SkillDraft>>,
@@ -128,6 +129,13 @@ fn apply(watch: &mut Watch, update: Update) {
         Update::Approvals { thread, approvals } => {
             let asked = approvals.into_iter().map(|approval| format!("{}: {}", approval.request_id, approval.command));
             watch.asked.insert(thread, asked.collect());
+        }
+        Update::Questions { thread, request, questions, .. } => {
+            watch.cards.retain(|(known, asked, _)| *known != thread || *asked != request);
+            watch.cards.extend(questions.into_iter().map(|question| (thread.clone(), request.clone(), question)));
+        }
+        Update::QuestionsSettled { thread, request } => {
+            watch.cards.retain(|(known, asked, _)| *known != thread || *asked != request);
         }
         Update::Settings { settings } => watch.settings = Some(settings),
         Update::Projects { projects } => watch.projects = projects.into_iter().map(|project| project.id).collect(),
@@ -425,6 +433,67 @@ fn codex_drop(run: &mut Run, label: &str, first: &str, held: &str) -> anyhow::Re
     run.slow(first)?;
     run.send(held);
     run.check(&format!("{label}: the dropped held message is shown in the transcript"), |watch| watch.noticed(held));
+    Ok(())
+}
+
+fn cards(watch: &Watch, thread: &str) -> Vec<(String, Question)> {
+    watch
+        .cards
+        .iter()
+        .filter(|(known, ..)| known == thread)
+        .map(|(_, request, question)| (request.clone(), question.clone()))
+        .collect()
+}
+
+fn harness_questions(run: &mut Run, pick: (&str, &str), source: &str) -> anyhow::Result<()> {
+    run.start(&format!("{source}-questions"), pick, None)?;
+    let thread = run.thread();
+    run.send("questions alpha");
+    let shown = |watch: &Watch| {
+        let cards = cards(watch, &watch.thread.clone().unwrap_or_default());
+        cards.len() == 2
+            && cards[0].1.header == source
+            && cards[0].1.question == "Which color?"
+            && cards[0].1.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() == ["Red", "Blue"]
+            && cards[0].1.options[0].description == "warm"
+            && cards[1].1.question == "Which size?"
+    };
+    if !run.within(&format!("{source}: both questions show as cards with their options"), CHECK_TIMEOUT, shown) {
+        println!("     cards {:?}", cards(&run.watch, &thread));
+        return Ok(());
+    }
+    let asked = cards(&run.watch, &thread);
+    let answers = HashMap::from([("Which color?".to_string(), "Blue".to_string())]);
+    run.studio.answer_questions(thread.clone(), asked[0].0.clone(), answers);
+    run.check(&format!("{source}: the answered card goes, the other stays"), |watch| {
+        let left = cards(watch, watch.thread.as_deref().unwrap_or_default());
+        left.len() == 1 && left[0].1.question == "Which size?"
+    });
+    run.until(PROMPT, |_| false);
+    if run.watch.replied("picked").is_some() || !run.watch.busy {
+        run.watch.miss(format!("{source}: the turn went on before every question was answered"));
+    }
+    let answers = HashMap::from([("Which size?".to_string(), "Small, Large".to_string())]);
+    run.studio.answer_questions(thread.clone(), asked[1].0.clone(), answers);
+    run.check(&format!("{source}: the CLI gets both answers by its own keys"), |watch| {
+        watch.replied("picked Blue and Small, Large").is_some()
+            && !watch.busy
+            && cards(watch, watch.thread.as_deref().unwrap_or_default()).is_empty()
+    });
+    run.send("questions bravo");
+    run.within(&format!("{source}: a second ask shows its cards"), CHECK_TIMEOUT, |watch| {
+        cards(watch, watch.thread.as_deref().unwrap_or_default()).len() == 2
+    });
+    run.studio.abort(thread);
+    run.within(
+        &format!("{source}: Stop clears the cards and ends the turn unanswered"),
+        Duration::from_secs(20),
+        |watch| {
+            cards(watch, watch.thread.as_deref().unwrap_or_default()).is_empty()
+                && !watch.busy
+                && watch.answers("picked") == 1
+        },
+    );
     Ok(())
 }
 
@@ -801,6 +870,8 @@ fn scenarios(run: &mut Run, root: &Path) -> anyhow::Result<()> {
     codex_drop(run, "codex-start-exit", "slow romeo", "crash sierra")?;
     codex_drop(run, "codex-error-stop", "slow quota-error mike", "november")?;
     codex_drop(run, "codex-failed-stop", "slow quota-fail oscar", "papa")?;
+    harness_questions(run, CLAUDE, "Claude Code")?;
+    harness_questions(run, CODEX, "Codex")?;
     codex_unexpected_approval(run)?;
     codex_tool_approval(run)?;
     looks_up(run)?;
@@ -1545,6 +1616,135 @@ fn reopens_while_programs_start(config: &StudioConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct Origin {
+    thread: &'static str,
+    flags: Value,
+    file: PathBuf,
+    line: Value,
+}
+
+fn origins(root: &Path) -> anyhow::Result<Vec<Origin>> {
+    let (home, cwd) = (root.join("home").canonicalize()?, root.join("work").canonicalize()?);
+    let cwd = cwd.to_string_lossy().into_owned();
+    let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let claude = |account: &str, name: &str| home.join(account).join("projects").join(&escaped).join(name);
+    let message =
+        json!({ "id": "msg-origin", "role": "assistant", "content": [{ "type": "text", "text": "from elsewhere" }] });
+    let turn = json!({ "id": "turn-origin", "items": [{ "id": "item-origin", "type": "agentMessage", "text": "from elsewhere" }] });
+    let said = json!({ "type": "assistant", "message": message });
+    let limited = home.join(".claude-a").to_string_lossy().into_owned();
+    let flags =
+        |harness: &str, fork: &str| json!({ "harness": harness, "forkOf": fork, "cwd": cwd, "access": "fullAccess" });
+    let mut other = flags("claudeCode", "origin-limited");
+    other["account"] = json!(limited);
+    let own = |mut flags: Value, native: &str| {
+        flags["nativeSession"] = json!(native);
+        flags
+    };
+    let rollout = home.join(".codex/sessions/2026/11/21/rollout-2026-11-21T00-00-00-origin-codex.jsonl");
+    Ok(vec![
+        Origin {
+            thread: "fork-claude",
+            flags: own(flags("claudeCode", "origin-claude"), "fork-claude"),
+            file: claude(".claude", "origin-claude.jsonl"),
+            line: said.clone(),
+        },
+        Origin { thread: "fork-codex", flags: flags("codex", "origin-codex"), file: rollout, line: turn },
+        Origin {
+            thread: "fork-limited",
+            flags: own(other, "fork-limited"),
+            file: claude(".claude-a", "origin-limited.jsonl"),
+            line: said,
+        },
+    ])
+}
+
+fn forks(config: &StudioConfig, root: &Path) -> anyhow::Result<Vec<String>> {
+    let origins = origins(root)?;
+    let path = root.join("data/state.json");
+    let mut state: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    for origin in &origins {
+        state["threads"][origin.thread] = origin.flags.clone();
+        std::fs::create_dir_all(origin.file.parent().context("session folder")?)?;
+        std::fs::write(&origin.file, format!("{}\n", origin.line))?;
+    }
+    std::fs::write(&path, serde_json::to_vec(&state)?)?;
+    let (first, second) = (root.join("home/.claude-a").canonicalize()?, root.join("home/.claude-b").canonicalize()?);
+    for dir in [&first, &second] {
+        std::fs::remove_file(dir.join("limited")).ok();
+        unpark(root, dir)?;
+    }
+    std::fs::write(first.join("limited"), "")?;
+    let mut misses = Vec::new();
+    for turn in ["limit one", "limit two"] {
+        let watch = opened(config, |run| {
+            for origin in &origins {
+                let name = origin.thread;
+                run.shown(name, name)?;
+                run.check(&format!("{name}: the other session's transcript is shown before {turn:?}"), |watch| {
+                    watch.replied("from elsewhere").is_some()
+                });
+                run.send(&format!("{turn} {name}"));
+                run.check(&format!("{name}: {turn:?} is answered with the other session's transcript kept"), |watch| {
+                    watch.replied(&format!("reply to {turn} {name}")).is_some()
+                        && watch.replied("from elsewhere").is_some()
+                        && (turn == "limit one" || watch.replied(&format!("reply to limit one {name}")).is_some())
+                        && !watch.busy
+                });
+                if std::fs::read_to_string(&origin.file)? == format!("{}\n", origin.line) {
+                    println!("ok   {name}: the other session's file is unchanged");
+                } else {
+                    run.watch.miss(format!("{name}: the other session's file was written"));
+                }
+            }
+            Ok(())
+        })?;
+        misses.extend(watch.misses);
+    }
+    let moved = thread_flag(root, "fork-limited", "account");
+    if moved.as_deref() != Some(second.to_string_lossy().as_ref()) {
+        misses.push(format!("fork-limited: expected the second account, got {moved:?}"));
+    }
+    misses.extend(lost_forks(config, root, &origins)?);
+    Ok(misses)
+}
+
+fn lost_forks(config: &StudioConfig, root: &Path, origins: &[Origin]) -> anyhow::Result<Vec<String>> {
+    let mut misses = Vec::new();
+    for origin in origins.iter().filter(|origin| origin.thread != "fork-limited") {
+        let name = origin.thread;
+        let native = thread_flag(root, name, "nativeSession").context("the fork has no session of its own")?;
+        let own = origin.file.with_file_name(format!("{native}.jsonl"));
+        let own = if own.exists() {
+            own
+        } else {
+            origin.file.with_file_name(format!("rollout-2026-11-21T00-00-00-{native}.jsonl"))
+        };
+        std::fs::remove_file(&own).with_context(|| format!("remove {}", own.display()))?;
+        if name == "fork-codex" {
+            std::fs::remove_file(&origin.file)?;
+        }
+        let watch = opened(config, |run| {
+            run.focus(name);
+            run.send(&format!("again {name}"));
+            run.check(&format!("{name}: a message after its copy is gone is answered in a new session"), |watch| {
+                watch.replied(&format!("reply to again {name}")).is_some() && !watch.busy
+            });
+            if run.watch.replied("from elsewhere").is_some() {
+                run.watch.miss(format!("{name}: the other session came back after its copy was lost"));
+            }
+            if run.watch.warnings.iter().any(|text| text.contains("continues in a new")) {
+                println!("ok   {name}: the lost copy is mentioned");
+            } else {
+                run.watch.miss(format!("{name}: no warning that its copy is gone: {:?}", run.watch.warnings));
+            }
+            Ok(())
+        })?;
+        misses.extend(watch.misses);
+    }
+    Ok(misses)
+}
+
 fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
@@ -1646,7 +1846,7 @@ fn main() -> anyhow::Result<()> {
         if !watch.warnings.iter().any(|text| text.starts_with("Could not save the Codex model list")) {
             watch.miss("the list that could not be saved is not mentioned".to_string());
         }
-        misses.extend(watch.misses.into_iter().chain(skill_scenarios(&config, &root)?));
+        misses.extend(watch.misses.into_iter().chain(skill_scenarios(&config, &root)?).chain(forks(&config, &root)?));
         Ok(())
     });
     let stopped = stop_daemon(&socket);

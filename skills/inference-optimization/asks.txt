@@ -1,0 +1,10 @@
+My local model is really slow, can you make it faster?
+vLLM keeps running out of memory when I give it long prompts.
+Which quant should I run on a 12 GB card?
+Benchmark this model on my GPU and tune it until it's as fast as it can get.
+Why does the first token take forever when my agent sends its system prompt?
+Should I use llama.cpp, Ollama or vLLM on this machine?
+How do I fit a 32B model on my laptop without it crawling?
+Speculative decoding: is it worth turning on for my setup?
+Ollama only answers one request at a time, how do I run several at once?
+How many tokens per second should I expect from this card?

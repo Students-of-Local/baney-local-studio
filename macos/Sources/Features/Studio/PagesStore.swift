@@ -22,6 +22,7 @@ enum LocalPendingKey: Hashable {
     case power(String)
     case pool(String)
     case stopPool(String, String)
+    case eject(String, UInt32, Bool)
 }
 
 struct KeybindingIndex {

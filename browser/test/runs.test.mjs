@@ -183,6 +183,40 @@ test("typed text and a URL's query or fragment never reach the log", () => {
 	assert.equal(run.steps[2].result, "signed.example/f");
 });
 
+test("a change report, an error and an untitled tab keep no typed value or URL query in the log", async () => {
+	const report = {
+		changed: ['e5 textbox "Code": value "" -> "493021"', 'e6 textbox "Key": name "Key" -> "API key"; value "a" -> "sk-live-abcdef"'],
+		appeared: ['e9 textbox "Token" value="tok-ab\\"cd"', 'e10 textbox "Cut" value="cut-off-secr...'],
+		url: "https://site.example/cb?code=XYZ789#state=ST4TE",
+		tabsOpened: [{ tabId: 9, url: "https://pop.example/p?session=S3SS" }],
+	};
+	let log = addStep(EMPTY_LOG, "s", step({ result: { changes: report } }), 1);
+	log = addStep(log, "s", step({ result: { changes: report.changed } }), 2);
+	log = addStep(log, "s", step({ result: { effect: `${report.appeared[0]}\nnow at ${report.url}` } }), 3);
+	log = addStep(log, "s", step({ tool: "navigate", ok: false, error: "Navigation to https://site.example/x?token=T0K3N failed: net::ERR_ABORTED" }), 4);
+	const text = JSON.stringify(log);
+	for (const secret of ["493021", "sk-live", "tok-ab", "cut-off", "XYZ789", "ST4TE", "S3SS", "T0K3N"])
+		assert.ok(!text.includes(secret), `${secret} in ${text}`);
+	const steps = log.runs[0].steps;
+	assert.match(steps[0].report, /e5 textbox "Code": value 0 -> 6 characters/);
+	assert.match(steps[0].report, /e6 textbox "Key": name "Key" -> "API key"; value 1 -> 14 characters/);
+	assert.match(steps[0].report, /e9 textbox "Token" value=9 characters/);
+	assert.match(steps[0].report, /url: site\.example\/cb/);
+	assert.match(steps[0].report, /pop\.example\/p/);
+	assert.match(steps[3].result, /Navigation to site\.example\/x failed: net::ERR_ABORTED/);
+	// An untitled tab's run line falls back to its URL: host and path only.
+	const fake = installFakeChrome();
+	const worker = await import("../src/runs/worker.ts?ctx=runs-untitled");
+	const tabId = fake.addTab({ url: "https://untitled.example/a?sid=SID42", title: "" });
+	worker.recordStep("u", step({ tabId }));
+	let run;
+	for (let i = 0; i < 100 && !run; i++) {
+		await new Promise((r) => setTimeout(r, 20));
+		run = (await chrome.storage.local.get(RUNS_KEY))[RUNS_KEY]?.runs.find((r) => r.id === "u");
+	}
+	assert.equal(run?.tabTitle, "untitled.example/a");
+});
+
 test("a worker restart leaves no run waiting on the user", () => {
 	let log = addStep(EMPTY_LOG, "a", step(), 1);
 	log = addStep(log, "b", step(), 2);

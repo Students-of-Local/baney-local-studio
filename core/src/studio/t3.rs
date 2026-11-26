@@ -95,6 +95,8 @@ impl Actor {
             favorites: self.store.favorites.clone(),
             hidden: self.store.hidden.clone(),
             project_settings,
+            sessions: t3::sessions(&self.store),
+            threads: Vec::new(),
         }
     }
 
@@ -110,6 +112,8 @@ impl Actor {
                 self.workspace.update_project_settings(path.clone(), settings.clone());
             }
         }
+        let threads = !after.threads.is_empty();
+        t3::add_threads(&mut self.store, after.threads);
         let models = after.favorites != before.favorites || after.hidden != before.hidden;
         if models {
             self.store.favorites = after.favorites;
@@ -118,9 +122,10 @@ impl Actor {
         if after.projects != before.projects {
             self.store.projects = after.projects;
             self.projects_changed();
-        } else if models {
+        } else if models || threads {
             self.save();
         }
+        self.dirty |= threads;
         if models {
             self.push_models();
         }

@@ -62,6 +62,10 @@ genetics	I got my raw ancestry file from 23andMe and there's a line for rs429358
 genetics	Is the BRCA2 gene on chromosome 13, and where exactly does it sit in the genome?
 genetics	Look up whether labs have flagged this particular mutation as harmful, and how much evidence stands behind that label.
 genetics	How common is this SNP across the world population, and which build are the position numbers from?
+inference-optimization	my local model only does about 8 tokens a second, how do I speed it up
+inference-optimization	vllm crashes with out of memory as soon as the context gets long, what settings should I change
+inference-optimization	which quantization and engine should I pick to run a 30B model on one 24 GB GPU
+inference-optimization	the agent waits ages for the first token every turn, can you tune the server so it answers sooner
 instagram	Can you check what a certain business's account has been putting up lately and tell me the captions and how many likes they got?
 instagram	I want to see what people are saying in the replies under one particular video someone shared. Here's the link.
 instagram	Find me accounts or shops related to 'vintage ceramics' and see if you're even logged in over there first.

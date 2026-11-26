@@ -24,6 +24,8 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
 
     var id: String { rawValue }
 
+    var linkName: String { self == .sourceControl ? "source-control" : rawValue }
+
     var title: String {
         switch self {
         case .project: "Project"

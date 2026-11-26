@@ -807,7 +807,7 @@ enum ConversationFixtures {
 
         ---
 
-        That's all it needs.
+        That's all it needs. [Read this](localstudio://settings/providers) and [this](localstudio://system/displays).
         """)]),
     ]
 

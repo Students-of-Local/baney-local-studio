@@ -1,4 +1,4 @@
-// Regression checks on what the app's skills (skills/) tell an agent to do:
+// Regression checks on what the app's skills (skills/ at the repo's root) tell an agent to do:
 // specific instructions stay correct after review found them wrong: commands are run where the tool exists, and wording is pinned where it isn't.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -11,7 +11,7 @@ import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
-const skill = (name) => readFileSync(join(repo, "skills", name, "SKILL.md"), "utf8");
+const skill = (name) => readFileSync(join(repo, "..", "skills", name, "SKILL.md"), "utf8");
 const root = mkdtempSync(join(tmpdir(), "local-studio-skill-content-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 const has = (cmd) => spawnSync(cmd, ["-version"], { encoding: "utf8" }).status === 0;

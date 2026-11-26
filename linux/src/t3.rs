@@ -67,7 +67,7 @@ pub fn summary(group: &T3Group) -> String {
     }
     let unsupported = count(group, T3ItemState::Unsupported);
     if unsupported > 0 {
-        parts.push(format!("{unsupported} not supported yet"));
+        parts.push(format!("{unsupported} not brought over"));
     }
     parts.join(" · ")
 }
@@ -76,6 +76,7 @@ fn chosen(choices: T3Choices, kind: T3Kind) -> bool {
     match kind {
         T3Kind::Accounts => choices.accounts,
         T3Kind::Projects => choices.projects,
+        T3Kind::Threads => choices.threads,
         T3Kind::Models => choices.models,
         T3Kind::Keybindings => choices.keybindings,
         T3Kind::Appearance => choices.appearance,
@@ -87,6 +88,7 @@ fn set(choices: &mut T3Choices, kind: T3Kind, value: bool) {
     match kind {
         T3Kind::Accounts => choices.accounts = value,
         T3Kind::Projects => choices.projects = value,
+        T3Kind::Threads => choices.threads = value,
         T3Kind::Models => choices.models = value,
         T3Kind::Keybindings => choices.keybindings = value,
         T3Kind::Appearance => choices.appearance = value,
@@ -394,6 +396,15 @@ fn fixture_groups(state: T3ItemState) -> Vec<T3Group> {
                 item("project:/home/demo/Projects/field-notes", "field-notes", "~/Projects/field-notes", state),
                 item("project:/home/demo/Projects/site", "site", "~/Projects/site", kept),
                 item("project:p-old", "old-prototype", "Its folder is gone: ~/Projects/old-prototype", T3ItemState::Unsupported),
+            ],
+        ),
+        group(
+            T3Kind::Threads,
+            "Threads",
+            vec![
+                item("thread:demo-1", "Fix the sidebar order", "Claude Code, ~/Projects/local-studio", state),
+                item("thread:demo-2", "Draft the release notes", "Codex, ~/Projects/site", state),
+                item("thread:demo-3", "Port the importer", "Running in T3 Code. It comes over when it stops.", T3ItemState::Unsupported),
             ],
         ),
         group(

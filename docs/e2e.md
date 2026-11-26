@@ -16,7 +16,7 @@ The examples take the model from the environment and drive nothing else:
 
 Each example writes its own scratch agent dir: a `models.json` with only that provider (`api` `openai-completions`, `apiKey` `none`, the context window above, and a nominal price of $1 per million tokens so the usage report's cost path runs), a `settings.json` naming it as the default, and an `auth.json` of `{}`. Nothing is linked to a real credential, and `local_studio_core::check_scratch_agent` refuses the dir if `auth.json` holds a key. When `LOCAL_STUDIO_SMOKE_IMAGE_MODEL` names another model, the catalog lists it too, with image input and thinking off (`reasoning_effort: "none"`), and `smoke` runs the image turn in a fresh thread: it opens the thread with a one-line text turn on the main model (so the title side question stays on the fast model), switches that thread to the vision model, sends the image with a short history, since the vision model runs mostly on the CPU, and requires the reply to name the image's color. Without it the main model is listed with image input and answers that turn itself. `plugin_smoke` gets the same model as a keyless `local-fleet` provider (override it with `PLUGIN_SMOKE_MODEL`).
 
-No Anthropic model runs here: Eukhe's Anthropic subscription sign-in is ruled out (Donovan, 2026-11-17) and API keys are paid billing. Claude and Codex coverage comes from `harness_claude_smoke` and `harness_codex_smoke`, which run the official `claude` and `codex` CLIs on their own sign-in.
+No Anthropic model runs here: Eukhe's Anthropic subscription sign-in is ruled out (Donovan, 2026-11-17) and API keys are paid billing. Claude coverage comes from `harness_claude_smoke`, which runs the official `claude` CLI on its own sign-in. Codex is retired across the fleet (Donovan, 2026-11-26), so the gate no longer runs `harness_codex_smoke`; it stays in the repo to run by hand where `codex` is installed, and `harness_queue_smoke` keeps covering the Codex harness paths through `fake_codex`.
 
 The gate model is `fv-smoke-lfm3-1.7b` (LFM3 1.7B Q4_K_M) because it is the one model on abbey1 that fits its 4 GB GPU with a 32768 context and still calls tools. Measured on abbey1 on 2026-11-21 with an idle GPU and a 7227-token prompt: 551 tok/s prompt, 87.5 tok/s generation, all of it in VRAM. Qwen3 4B Instruct at the same context spills to the CPU and generates 2.9 tok/s. abbey1's Ollama must serve a context of at least 32768 (`OLLAMA_CONTEXT_LENGTH=32768` in `ollama.service.d/context.conf`); at Ollama's 4096 default Eukhe's system prompt alone overflows. `fv-smoke-lfm3-1.7b` cannot see images, so the gate's image turn runs on `qwen3-vl:4b`, the one vision model on abbey1 that Ollama lets call tools (Eukhe always sends tools, and Ollama refuses them for LFM2-VL and Gemma 3). It runs mostly on the CPU there: about 100 s for a short turn with thinking off, against more than 300 s with Ollama's default thinking. Ollama serves one request at a time, so the gate runs one example at a time.
 
@@ -45,7 +45,7 @@ It ends with each example's time and the total. The status description names the
 
 ```sh
 ssh abbey1
-git clone https://github.com/baney75/local-studio ~/Projects/_work/local-studio-e2e
+git clone https://github.com/Students-of-Local/baney-local-studio ~/Projects/_work/local-studio-e2e
 cd ~/Projects/_work/local-studio-e2e/scripts/e2e-abbey1
 install -m 0644 local-studio-e2e.service local-studio-e2e.timer ~/.config/systemd/user/
 install -m 0600 local-studio-e2e.env ~/.config/local-studio-e2e.env

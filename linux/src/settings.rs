@@ -21,7 +21,7 @@ pub struct SettingsDialog {
 }
 
 struct Inner {
-    dialog: adw::PreferencesDialog,
+    dialog: crate::settings_shell::Shell,
     providers_page: adw::PreferencesPage,
     providers: RefCell<Vec<adw::PreferencesGroup>>,
     providers_shown: RefCell<String>,
@@ -47,8 +47,7 @@ struct Inner {
 
 impl SettingsDialog {
     pub fn new(app: &Rc<App>) -> Self {
-        let dialog = adw::PreferencesDialog::builder().content_width(900).content_height(720).build();
-        dialog.set_search_enabled(true);
+        let dialog = crate::settings_shell::Shell::new(980, 720);
         let weak = Rc::downgrade(app);
         let state = app.state.borrow();
         let general = general_page(&weak, &state);
@@ -75,7 +74,7 @@ impl SettingsDialog {
         dialog.add(&appearance_page(&weak));
         let keys_page = page("keybindings", "Keybindings", icons::KEYBOARD);
         dialog.add(&keys_page);
-        let providers_page = page("providers", "Providers", icons::PROVIDERS);
+        let providers_page = page("providers", "Providers", icons::KEYS);
         dialog.add(&providers_page);
         let plugins_page = page("plugins", "Plugins", icons::PLUGIN);
         dialog.add(&plugins_page);
@@ -127,6 +126,10 @@ impl SettingsDialog {
 
     pub fn show_page(&self, name: &str) {
         self.inner.dialog.set_visible_page_name(name);
+    }
+
+    pub fn search(&self, query: &str) {
+        self.inner.dialog.search(query);
     }
 
     pub fn close(&self) {
@@ -1402,9 +1405,7 @@ fn local_page(app: &Weak<App>, fleet: &crate::fleet::Fleet) -> adw::PreferencesP
     let weak = app.clone();
     open.connect_clicked(move |button| {
         let Some(app) = weak.upgrade() else { return };
-        if let Some(dialog) =
-            button.ancestor(adw::PreferencesDialog::static_type()).and_downcast::<adw::PreferencesDialog>()
-        {
+        if let Some(dialog) = button.ancestor(adw::Dialog::static_type()).and_downcast::<adw::Dialog>() {
             dialog.close();
         }
         app.open_page(Page::Local);

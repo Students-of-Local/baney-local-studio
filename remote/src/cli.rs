@@ -273,7 +273,7 @@ impl Waiter {
         let mut free = 0;
         loop {
             let (waker, notify) = hub::signal();
-            let error = match Studio::new(config.clone(), waker) {
+            let error = match Studio::new_unwatched(config.clone(), waker) {
                 Ok(studio) => {
                     if noted {
                         eprintln!("local-studio-serve: the lock on {} is free; serving", data_dir.display());

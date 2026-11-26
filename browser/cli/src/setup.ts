@@ -98,6 +98,7 @@ function registerHost(options: SetupOptions): boolean {
 	const result = install({ browsers: targets });
 	if (process.platform === "win32") {
 		for (const key of result.written) console.log(`  ${sym.ok} ${key}`);
+		for (const key of result.failed) console.log(`  ${sym.fail} Could not write ${key}`);
 		return result.written.length > 0;
 	}
 	const present = browserDirs().filter(({ name, dir }) => targets.includes(name) && existsSync(dir));
