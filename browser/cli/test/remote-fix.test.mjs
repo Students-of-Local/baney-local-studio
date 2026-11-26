@@ -99,9 +99,10 @@ async function fakeDoh() {
  * A machine on the Funnel route with the serve service installed. serve: "down" (not running) or "up" (running with remote.json as
  * it is now). funnel: whether Funnel is open for the stub's name. dns: the name Tailscale gives this computer now. cfLate: how many
  * reads of the tunnel's service, after it is started, say it is still starting ("spawn scheduled", "activating"). cfDies: it stops
- * right after its first read says running. funnelMode: the tailscale stub's `funnel` (see tailscale-stub.mjs).
+ * right after its first read says running. funnelMode: the tailscale stub's `funnel` (see tailscale-stub.mjs). foreign: more
+ * handlers on 8443, such as another app served privately.
  */
-async function machine(name, { serve = "down", funnel = false, dns = DNS, recorded = DNS, doh, route = "funnel", cfLate = 0, cfDies = false, funnelMode, stale = false, ownFolder = false } = {}) {
+async function machine(name, { serve = "down", funnel = false, dns = DNS, recorded = DNS, doh, route = "funnel", cfLate = 0, cfDies = false, funnelMode, stale = false, ownFolder = false, foreign } = {}) {
 	const dir = join(root, name);
 	const bin = join(dir, "bin");
 	const home = join(dir, "home");
@@ -134,7 +135,7 @@ async function machine(name, { serve = "down", funnel = false, dns = DNS, record
 	const serviceFile = process.platform === "darwin" ? join(home, "Library", "LaunchAgents", "com.localstudio.browser.serve.plist") : join(home, ".config", "systemd", "user", "local-studio-browser-serve.service");
 	mkdirSync(dirname(serviceFile), { recursive: true });
 	writeFileSync(serviceFile, "left by an earlier setup\n");
-	const serveStatus = JSON.stringify({ TCP: { 8443: { HTTPS: true } }, Web: { [`${dns}:8443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${port}` } } } } });
+	const serveStatus = JSON.stringify({ TCP: { 8443: { HTTPS: true } }, Web: { [`${dns}:8443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${port}` }, ...foreign } } } });
 	writeTailscaleStub(join(bin, "tailscale"), { dir, log, dns, serveStatus, ...(funnelMode ? { funnel: funnelMode } : {}) });
 	if (funnel) writeFileSync(join(dir, "funnel-on"), "on\n");
 	const pidFile = join(dir, "serve.pid");
@@ -498,6 +499,21 @@ serviceTest("Funnel not enabled for the tailnet: remote fix stops with the enabl
 		assert.equal(r.code, 3, r.stdout);
 		assert.equal(r.json().state, "funnel_not_allowed");
 		assert.deepEqual(r.json().next, { kind: "open_page", url: ENABLE_URL });
+		assert.ok(!m.funnelOpen());
+	} finally {
+		m.cleanup();
+	}
+});
+
+serviceTest("Funnel closed with another app's private handler on 8443: remote fix opens nothing and exits 3", async () => {
+	const m = await machine("foreign-handler", { serve: "up", foreign: { "/photos": { Proxy: "http://127.0.0.1:9999" } } });
+	try {
+		const r = await m.run(["remote", "fix", "--yes", "--json"]);
+		assert.equal(r.code, 3, r.stdout);
+		assert.equal(r.json().state, "port_busy");
+		assert.equal(r.json().code, "tailscale_port");
+		assert.match(r.json().message, /\/photos/);
+		assert.ok(!m.calls().some((x) => /tailscale funnel --bg/.test(x)), m.calls().join("\n"));
 		assert.ok(!m.funnelOpen());
 	} finally {
 		m.cleanup();

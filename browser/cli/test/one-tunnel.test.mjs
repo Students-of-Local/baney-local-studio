@@ -477,6 +477,26 @@ test("remote join puts remote.json, serve and Local Studio's own tunnel back whe
 	}
 });
 
+test("remote join keeps the route when the new name is only pending in public DNS, and reports the pending check", { skip: unixOnly }, async () => {
+	const s = scenario("join-pending");
+	const local = await localServe(`https://${STUDIO}/mcp`);
+	try {
+		cloudflareRoute(s, 8787);
+		s.writeRecord({ v: 1, owner: "local-studio", route: "cloudflare", hostname: STUDIO, ports: { mcp: local.port } });
+		const r = await s.runAsync(["remote", "join", "--json"], { JOIN_PROOF_PENDING: STUDIO }, { hooks: true });
+		assert.equal(r.code, 0, r.out);
+		const report = r.json();
+		assert.equal(report.step, "joined");
+		assert.match(report.message, /doesn't answer from the internet yet \(dns: /);
+		assert.deepEqual(report.checks.map((c) => `${c.name} ${c.status} ${c.pending === true}`), ["dns fail true"]);
+		assert.deepEqual(s.remoteJson(), { publicUrl: `https://${STUDIO}`, port: local.port, route: "custom" });
+		assert.equal(existsSync(s.serviceFileOf("cloudflared")), false, "Local Studio's own tunnel service stays down");
+		assert.ok(existsSync(s.serviceFileOf("serve")), "serve stays on the record's port");
+	} finally {
+		await local.close();
+	}
+});
+
 /** Local Studio's relay route: remote.json with the relay block, the connector's state file and its service file. */
 function relayRoute(s, port) {
 	const key = randomBytes(32).toString("base64url");
@@ -557,7 +577,7 @@ test("remote join puts back every tailnet mount it took down when teardown fails
 	}
 });
 
-test("remote test and remote fix check a joined tailnet route from inside the tailnet", { skip: unixOnly }, async () => {
+test("remote test, remote fix and remote status check a joined tailnet route from inside the tailnet", { skip: unixOnly }, async () => {
 	const s = scenario("joined-tailnet-checks");
 	const local = await localServe(`https://${DNS}/mcp`);
 	try {
@@ -567,6 +587,10 @@ test("remote test and remote fix check a joined tailnet route from inside the ta
 		assert.match(t.checks.find((x) => x.name === "dns").detail, /checked from inside your tailnet/, JSON.stringify(t.checks));
 		const f = (await s.runAsync(["remote", "fix", "--json", "--yes"])).json();
 		assert.match(f.checks.find((x) => x.name === "dns").detail, /checked from inside your tailnet/, JSON.stringify(f));
+		const st = (await s.runAsync(["remote", "status", "--json"])).json();
+		const names = st.checks.map((x) => x.name);
+		assert.ok(names.includes("tailnet DNS") && names.includes("tailnet fetch"), JSON.stringify(st.checks));
+		assert.ok(!names.includes("public DNS") && !names.includes("public fetch") && !names.includes("public test"), JSON.stringify(st.checks));
 	} finally {
 		await local.close();
 	}
