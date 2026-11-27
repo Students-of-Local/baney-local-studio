@@ -34,12 +34,12 @@ async function stub(t, handle) {
 	return { base: `http://127.0.0.1:${server.address().port}/v1`, seen };
 }
 
-function relay(t, base, key = KEY) {
+function relay(t, base, key = KEY, config = {}) {
 	const home = mkdtempSync(join(tmpdir(), "fleet-relay-"));
 	t.after(() => rmSync(home, { recursive: true, force: true }));
 	if (key) {
 		mkdirSync(join(home, ".local-studio-controller"));
-		writeFileSync(join(home, ".local-studio-controller", "config.json"), JSON.stringify({ fleetKey: key }));
+		writeFileSync(join(home, ".local-studio-controller", "config.json"), JSON.stringify({ fleetKey: key, ...config }));
 	}
 	const frames = [];
 	const waiters = new Map();
@@ -48,7 +48,7 @@ function relay(t, base, key = KEY) {
 			frames.push(frame);
 			if (frame.id !== undefined) waiters.get(`${frame.conversation}:${frame.id}`)?.(frame);
 		},
-		{ env: { LOCAL_STUDIO_FLEET_URL: base }, home },
+		{ env: base ? { LOCAL_STUDIO_FLEET_URL: base } : {}, home },
 	);
 	let seq = 0;
 	const ask = (conversation, op, command) =>
@@ -79,7 +79,7 @@ const sse = (res, chunks, { end = true } = {}) => {
 const delta = (content) => ({ choices: [{ delta: { content } }] });
 
 test("the controller's address and key file follow the env, then the controller's own defaults", () => {
-	assert.equal(fleetBase({}), "http://127.0.0.1:18091/v1");
+	assert.equal(fleetBase({}, "/nowhere"), "http://127.0.0.1:18091/v1");
 	assert.equal(fleetBase({ LOCAL_STUDIO_FLEET_URL: "http://100.64.0.9:18091/v1/" }), "http://100.64.0.9:18091/v1");
 	assert.equal(fleetKeyPath({ LOCAL_STUDIO_CONTROLLER_HOME: "/c" }, "/h"), "/c/config.json");
 	assert.equal(fleetKeyPath({}, "/nowhere"), "/nowhere/.local-studio-controller/config.json");
@@ -96,6 +96,33 @@ test("fleet_models lists what /v1/models lists, with the fleet key the host read
 	assert.equal(s.seen[0].url, "/v1/models");
 	assert.equal(s.seen[0].auth, `Bearer ${KEY}`);
 	assert.ok(!JSON.stringify(h.frames).includes(KEY), "no frame to the extension holds the key");
+});
+
+test("with no env the host reads the controller's address from the key's config.json", async (t) => {
+	const s = await stub(t, (_req, res) => {
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ object: "list", data: [{ id: "auto" }, { id: "z-9" }] }));
+	});
+	const origin = s.base.replace(/\/v1$/, "");
+	for (const url of [origin, `${origin}/`, s.base, `${s.base}/`]) {
+		const h = relay(t, undefined, KEY, { url });
+		assert.equal(fleetBase({}, h.home), s.base, url);
+		const answer = await h.ask("m", "fleet_models");
+		assert.deepEqual(answer.result, { base: s.base, models: [{ id: "auto" }, { id: "z-9" }] }, url);
+	}
+	assert.ok(s.seen.every((r) => r.url === "/v1/models" && r.auth === `Bearer ${KEY}`));
+	const h = relay(t, "http://127.0.0.1:1/v1", KEY, { url: origin });
+	assert.equal(fleetBase({ LOCAL_STUDIO_FLEET_URL: "http://127.0.0.1:1/v1" }, h.home), "http://127.0.0.1:1/v1");
+});
+
+test("a config.json url that is not http(s) falls back to loopback", (t) => {
+	for (const url of ["not a url", "ftp://127.0.0.1:18091", "file:///etc/passwd", "javascript:alert(1)", 18091, null, ""]) {
+		const h = relay(t, undefined, KEY, { url });
+		assert.equal(fleetBase({}, h.home), "http://127.0.0.1:18091/v1", String(url));
+	}
+	const broken = relay(t, undefined, KEY);
+	writeFileSync(join(broken.home, ".local-studio-controller", "config.json"), "{ not json");
+	assert.equal(fleetBase({}, broken.home), "http://127.0.0.1:18091/v1");
 });
 
 test("a controller that is down is fleet_unreachable at once", async (t) => {

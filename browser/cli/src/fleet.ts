@@ -7,8 +7,17 @@ import { ERR } from "../../src/bridge/protocol.ts";
 export const FLEET_OPS: ReadonlySet<string> = new Set(["fleet_models", "fleet_chat"]);
 const LIST_MS = 4000;
 
-export function fleetBase(env: NodeJS.ProcessEnv = process.env): string {
-	return (env.LOCAL_STUDIO_FLEET_URL || "http://127.0.0.1:18091/v1").replace(/\/+$/, "");
+export function fleetBase(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+	if (env.LOCAL_STUDIO_FLEET_URL) return env.LOCAL_STUDIO_FLEET_URL.replace(/\/+$/, "");
+	return controllerUrl(fleetConfig(fleetKeyPath(env, home)).url) ?? "http://127.0.0.1:18091/v1";
+}
+
+function controllerUrl(raw: unknown): string | undefined {
+	if (typeof raw !== "string" || !URL.canParse(raw)) return undefined;
+	const url = new URL(raw);
+	if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+	const path = url.pathname.replace(/\/+$/, "");
+	return `${url.origin}${path.endsWith("/v1") ? path : `${path}/v1`}`;
 }
 
 export function fleetKeyPath(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
@@ -26,13 +35,15 @@ function parse(text: string): unknown {
 	}
 }
 
+function fleetConfig(path: string): { fleetKey?: unknown; url?: unknown } {
+	if (!existsSync(path)) return {};
+	const config = parse(readFileSync(path, "utf8"));
+	return config && typeof config === "object" ? config : {};
+}
+
 function fleetKey(path: string): string | undefined {
-	try {
-		const key = (JSON.parse(readFileSync(path, "utf8")) as { fleetKey?: unknown }).fleetKey;
-		return typeof key === "string" && key ? key : undefined;
-	} catch {
-		return undefined;
-	}
+	const key = fleetConfig(path).fleetKey;
+	return typeof key === "string" && key ? key : undefined;
 }
 
 export function keyFix(path: string, platform: string = process.platform): RpcError & { path: string; fix?: string } {
@@ -95,7 +106,7 @@ export class FleetRelay {
 		const env = this.options.env ?? process.env;
 		const keyPath = fleetKeyPath(env, this.options.home);
 		const key = fleetKey(keyPath);
-		const base = fleetBase(env);
+		const base = fleetBase(env, this.options.home);
 		let response: Response;
 		try {
 			response = await fetch(`${base}${path}`, {
@@ -126,7 +137,7 @@ export class FleetRelay {
 		try {
 			const body = (await answer.json()) as { data?: Array<{ id?: unknown }> };
 			const models = (body.data ?? []).flatMap((m) => (typeof m?.id === "string" ? [{ id: m.id }] : []));
-			this.reply(conversation, id, { result: { base: fleetBase(this.options.env), models } });
+			this.reply(conversation, id, { result: { base: fleetBase(this.options.env, this.options.home), models } });
 		} catch {
 			this.reply(conversation, id, { error: { code: "fleet_error", message: "The controller's model list was not JSON." } });
 		}
