@@ -21,8 +21,8 @@ store="$STUB_STATE/$(printf '%s' "${CLAUDE_CONFIG_DIR-default}" | tr / _)"
 mkdir -p "$store"
 case "$1 $2" in
   "mcp get") [ -f "$store/$3" ] || { echo "No MCP server named \"$3\"." >&2; exit 1; }; cat "$store/$3" ;;
-  "mcp add-json") "$BUN" -e 'const j = JSON.parse(process.argv[2]); console.log(`${process.argv[1]}:\n  Scope: User config\n  Type: stdio\n  Command: ${j.command}\n  Args: ${j.args.join(" ")}`)' "$3" "$4" > "$store/$3" ;;
-  "mcp remove") [ -f "$store/$3" ] || { echo "No MCP server named \"$3\" in user scope" >&2; exit 1; }; rm "$store/$3" ;;
+  "mcp add-json") case "$4" in *"${STUB_ADD_FAIL-@none@}"*) echo "config is locked" >&2; exit 1 ;; esac; "$BUN" -e 'const j = JSON.parse(process.argv[2]); console.log(`${process.argv[1]}:\n  Scope: User config\n  Type: stdio\n  Command: ${j.command}\n  Args: ${j.args.join(" ")}`)' "$3" "$4" > "$store/$3" ;;
+  "mcp remove") [ -f "$store/$3" ] || { echo "server $3 not found" >&2; exit 1; }; rm "$store/$3" ;;
 esac
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$scratch/bin/local-studio-browser"
@@ -46,8 +46,7 @@ ext() { PATH="$1" "$bun" "$root/plugin/src/cli.ts" extensions "${@:2}"; }
 js() { "$bun" -e "$1" "${@:2}" || fail "${@: -1}"; }
 keep12='const fs = require("fs"), M = JSON.parse(fs.readFileSync(process.argv[1], "utf8")), O = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (JSON.stringify(M.mcpServers.polycarp) !== JSON.stringify(O.mcpServers.polycarp) || JSON.stringify(M.mcpServers.notion) !== JSON.stringify(O.mcpServers.notion) || M.theme !== "dark") throw new Error("other mcp.json keys changed");'
-
-out=$(ext "$path" add browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp") || fail "case 1 exited $?"
+out=$(ext "$path" add browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp" 2> "$scratch/err") || fail "case 1 exited $?"
 js 'const fs = require("fs"), [m, a, b, dir] = process.argv.slice(1);
 const M = JSON.parse(fs.readFileSync(m, "utf8"));
 if (JSON.stringify(M.mcpServers["local-studio"]) !== JSON.stringify({ type: "stdio", command: dir + "/bin/local-studio-browser", args: ["mcp"], enabled: true })) throw new Error("mcp.json " + JSON.stringify(M.mcpServers));
@@ -58,21 +57,19 @@ grep -qxF "unset	mcp add-json local-studio {\"type\":\"stdio\",\"command\":\"$sc
 grep -qF "$scratch/claude-b	mcp add-json local-studio " "$STUB_LOG" || fail "case 1: no add-json with CLAUDE_CONFIG_DIR"
 [ "$(adds)" = 2 ] || fail "case 1: $(adds) add-json calls"
 pass "case 1: omp mcp.json, two claude add-json calls (one with CLAUDE_CONFIG_DIR), both allow entries"
-
+[ ! -s "$scratch/err" ] && ! grep -q 'mcp remove' "$STUB_LOG" || fail "case 14: first add ran mcp remove or printed $(cat "$scratch/err")"
+pass "case 14: a first add runs no mcp remove and prints no error"
 js "$keep12" "$mcp" "$scratch/mcp.orig" "case 12 after add"
 grep -qxF "skipped: codex (codex not supported yet)" <<< "$out" || fail "case 10: $out"
 pass "case 10: codex listed as skipped, exit 0"
-
 before=$(sums); n=$(adds); baks=$(find "$scratch" -name '*.bak-localstudio-*' | wc -l)
 ext "$path" add browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp" >/dev/null || fail "case 2 exited $?"
 [ "$before" = "$(sums)" ] || fail "case 2: files changed"
 [ "$baks" = "$(find "$scratch" -name '*.bak-localstudio-*' | wc -l)" ] || fail "case 2: new backups"
 [ "$n" = "$(adds)" ] || fail "case 2: add-json ran again"
 pass "case 2: second add changes no file, makes no backup, runs no add-json"
-
 ! grep -q claude-off "$STUB_LOG" && [ ! -e "$scratch/claude-off" ] || fail "case 3: disabled instance touched"
 pass "case 3: disabled claudeAgent untouched"
-
 mkdir -p "$scratch/fresh/home" "$scratch/fresh/t3/userdata"
 write_settings "$scratch/fresh/t3/userdata/settings.json" "$scratch/fresh/claude-b"
 n=$(wc -l < "$STUB_LOG")
@@ -81,13 +78,11 @@ grep -q "would set mcpServers.local-studio" <<< "$out" && grep -q "would run cla
 [ "$(find "$scratch/fresh" -type f | wc -l)" = 1 ] && [ ! -e "$scratch/fresh/omp" ] && [ ! -e "$scratch/fresh/claude-b" ] || fail "case 4: files written"
 ! tail -n +"$((n + 1))" "$STUB_LOG" | grep -q 'add-json\|mcp remove' || fail "case 4: claude changed"
 pass "case 4: --dry-run prints plans, writes nothing, runs no add-json or remove"
-
 before=$(sums); n=$(wc -l < "$STUB_LOG")
 set +e; out=$(ext "$scratch/nobrowser:/usr/bin:/bin" add browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp" 2>&1); code=$?; set -e
 [ "$code" = 5 ] && [ "$out" = "localstudio: browser needs local-studio-browser; install it first" ] || fail "case 5: exit $code: $out"
 [ "$before" = "$(sums)" ] && [ "$n" = "$(wc -l < "$STUB_LOG")" ] || fail "case 5: something changed"
 pass "case 5: no browser binary, exit 5, nothing written"
-
 ext "$path" add ledger --command /bin/echo --arg hi --t3-home "$scratch/t3" --omp-dir "$scratch/omp" >/dev/null || fail "case 6 exited $?"
 js 'const fs = require("fs"), [m, a, b, r] = process.argv.slice(1);
 if (JSON.stringify(JSON.parse(fs.readFileSync(m, "utf8")).mcpServers.ledger) !== JSON.stringify({ type: "stdio", command: "/bin/echo", args: ["hi"], enabled: true })) throw new Error("mcp.json ledger");
@@ -96,19 +91,27 @@ if (JSON.stringify(JSON.parse(fs.readFileSync(r, "utf8"))) !== JSON.stringify({ 
 [ "$(mode "$record")" = 600 ] || fail "case 6: record mode $(mode "$record")"
 grep -qF "$scratch/claude-b	mcp add-json ledger {\"type\":\"stdio\",\"command\":\"/bin/echo\",\"args\":[\"hi\"]} --scope user" "$STUB_LOG" || fail "case 6: no ledger add-json"
 pass "case 6: custom ledger in mcp.json, allowed, recorded at 0600"
-
+set +e; STUB_ADD_FAIL=bye ext "$path" add ledger --command /bin/echo --arg bye --t3-home "$scratch/t3" --omp-dir "$scratch/omp" 2> "$scratch/err" >/dev/null; code=$?; set -e
+[ "$code" = 1 ] && grep -q "claude-b: claude mcp add-json failed: config is locked; the old server is back" "$scratch/err" || fail "case 15: exit $code $(cat "$scratch/err")"
+grep -qx "  Args: hi" "$STUB_STATE/$(printf '%s' "$scratch/claude-b" | tr / _)/ledger" || fail "case 15: old ledger server gone"
+ext "$path" add ledger --command /bin/echo --arg hi --t3-home "$scratch/t3" --omp-dir "$scratch/omp" >/dev/null || fail "case 15 re-add"
+pass "case 15: a failed add-json puts the old server back and exits 1"
+cp "$scratch/claude-b/settings.json" "$scratch/b.json"; : > "$scratch/claude-b/settings.json"
+before=$(sums); n=$(wc -l < "$STUB_LOG")
+set +e; out=$(ext "$path" add browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp" 2>&1); code=$?; set -e
+[ "$code" = 1 ] && grep -qF "$scratch/claude-b/settings.json is not valid JSON" <<< "$out" && [ "$before" = "$(sums)" ] && [ "$n" = "$(wc -l < "$STUB_LOG")" ] || fail "case 16: exit $code: $out"
+cp "$scratch/b.json" "$scratch/claude-b/settings.json"
+pass "case 16: an unreadable settings.json stops add before any claude command or write"
 before=$(sums); n=$(wc -l < "$STUB_LOG")
 set +e; ext "$path" add Bad_Name --command /bin/echo --t3-home "$scratch/t3" --omp-dir "$scratch/omp" >/dev/null 2>&1; code=$?; set -e
 [ "$code" = 2 ] && [ "$before" = "$(sums)" ] && [ "$n" = "$(wc -l < "$STUB_LOG")" ] || fail "case 7: exit $code or something changed"
 pass "case 7: bad name, exit 2, nothing written"
-
 out=$(ext "$path" list --json --t3-home "$scratch/t3" --omp-dir "$scratch/omp") || fail "case 8 exited $?"
 js 'const r = JSON.parse(process.argv[1]), by = Object.fromEntries(r.extensions.map((e) => [e.name, e.targets]));
 const ids = ["omp", "claude-a", "claude-b"];
 for (const n of ["browser", "ledger"]) if (JSON.stringify(Object.keys(by[n]).sort()) !== JSON.stringify([...ids].sort()) || ids.some((t) => by[n][t] !== "added")) throw new Error(n + " " + JSON.stringify(by[n]));
 if (ids.some((t) => by.skills[t] !== "binary not found")) throw new Error("skills " + JSON.stringify(by.skills));' "$out" "case 8: $out"
 pass "case 8: list shows browser and ledger added everywhere, skills binary not found"
-
 n=$(wc -l < "$STUB_LOG")
 ext "$path" remove browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp" >/dev/null || fail "case 9 exited $?"
 js 'const fs = require("fs"), [m, a, b] = process.argv.slice(1), M = JSON.parse(fs.readFileSync(m, "utf8"));
@@ -118,17 +121,34 @@ if (JSON.stringify(A) !== JSON.stringify(["mcp__ledger__*"]) || JSON.stringify(B
 new=$(tail -n +"$((n + 1))" "$STUB_LOG")
 grep -qxF "unset	mcp remove local-studio --scope user" <<< "$new" && grep -qxF "$scratch/claude-b	mcp remove local-studio --scope user" <<< "$new" || fail "case 9: remove log $new"
 pass "case 9: remove drops the mcp.json key, runs mcp remove per target, drops one allow entry"
-
+n=$(wc -l < "$STUB_LOG")
+ext "$path" remove browser --t3-home "$scratch/t3" --omp-dir "$scratch/omp" > /dev/null 2> "$scratch/err" || fail "case 17 exited $?"
+[ ! -s "$scratch/err" ] && ! tail -n +"$((n + 1))" "$STUB_LOG" | grep -q 'mcp remove' || fail "case 17: $(cat "$scratch/err")"
+pass "case 17: removing an absent server runs no mcp remove and exits 0"
+before=$(sums)
+for c in "remove notion" "add polycarp --command /bin/echo"; do
+  set +e; out=$(ext "$path" $c --t3-home "$scratch/t3" --omp-dir "$scratch/omp" 2>&1); code=$?; set -e
+  [ "$code" = 1 ] && grep -q "left alone" <<< "$out" && [ "$before" = "$(sums)" ] || fail "case 18: $c exit $code: $out"
+done
+out=$(ext "$path" remove nothere --t3-home "$scratch/t3" --omp-dir "$scratch/omp") && grep -q "nothing to remove" <<< "$out" && [ "$before" = "$(sums)" ] || fail "case 18: remove of an absent custom name: $out"
+pass "case 18: remove and add refuse a server localstudio did not add; removing an absent name exits 0"
 js "$keep12" "$mcp" "$scratch/mcp.orig" "case 12 after remove"
 pass "case 12: polycarp and notion kept after add and remove"
-
-"$bun" -e 'const fs = require("fs"), p = process.argv[1], s = JSON.parse(fs.readFileSync(p, "utf8")); s.providerInstances.localstudio.config.commandArgs = ["acp", "--approval-mode=yolo"]; fs.writeFileSync(p, JSON.stringify(s))' "$settings"
-out=$(PATH="$path" "$bun" "$root/plugin/src/cli.ts" install --t3-home "$scratch/t3" --omp-dir "$scratch/omp" --controller http://127.0.0.1:9) || fail "case 11 install exited $?"
-js 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (JSON.stringify(s.providerInstances.localstudio.config.commandArgs) !== JSON.stringify(["acp", "--approval-mode=yolo"])) throw new Error(JSON.stringify(s.providerInstances.localstudio));' "$settings" "case 11 args"
+install_with() {
+  "$bun" -e 'const fs = require("fs"), p = process.argv[1], s = JSON.parse(fs.readFileSync(p, "utf8")); s.providerInstances.localstudio.config.commandArgs = JSON.parse(process.argv[2]); fs.writeFileSync(p, JSON.stringify(s))' "$settings" "$1"
+  out=$(PATH="$path" "$bun" "$root/plugin/src/cli.ts" install --t3-home "$scratch/t3" --omp-dir "$scratch/omp" --controller http://127.0.0.1:9) || fail "$3 install exited $?"
+  js 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (JSON.stringify(s.providerInstances.localstudio.config.commandArgs) !== process.argv[2]) throw new Error(JSON.stringify(s.providerInstances.localstudio));' "$settings" "$2" "$3 args"
+}
+install_with '["acp"]' '["acp","--approval-mode=yolo"]' "case 19"
+grep -q "runs omp with --approval-mode=yolo, so tool calls run without a prompt" <<< "$out" || fail "case 19: no yolo notice: $out"
+pass "case 19: install over [acp] adds --approval-mode=yolo and says so"
+install_with '["acp","--approval-mode=write"]' '["acp","--approval-mode=write"]' "case 20"
+! grep -q "approval-mode=yolo" <<< "$out" || fail "case 20: $out"
+pass "case 20: install keeps --approval-mode=write and prints no yolo notice"
+install_with '["acp","--approval-mode=yolo"]' '["acp","--approval-mode=yolo"]' "case 11"
 grep -qx "localstudio extensions add browser: added for 3 target(s)" <<< "$out" || fail "case 11: no extensions line: $out"
 [ "$("$bun" -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).mcpServers["local-studio"].command)' "$mcp")" = "$scratch/bin/local-studio-browser" ] || fail "case 11: install did not add browser"
 pass "case 11: install keeps --approval-mode=yolo and adds the browser extension"
-
 mkdir -p "$scratch/fresh2/t3/userdata" "$scratch/nob2"
 ln -s "$bun" "$scratch/nob2/bun"; ln -s "$scratch/bin/omp" "$scratch/nob2/omp"
 printf '{"providerInstances":{}}\n' > "$scratch/fresh2/t3/userdata/settings.json"

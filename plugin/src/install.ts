@@ -89,7 +89,8 @@ export const install = async (o: Options): Promise<number> => {
   const instances = (settings.providerInstances ?? {}) as Record<string, unknown>;
   const prior = ((instances.localstudio as { config?: { commandArgs?: unknown } } | undefined)?.config?.commandArgs ?? []) as unknown[];
   const kept = prior.includes("acp") ? prior.slice(prior.indexOf("acp") + 1).filter((a): a is string => typeof a === "string") : [];
-  settings.providerInstances = { ...instances, localstudio: { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: ["acp", ...(kept.length ? kept : ["--approval-mode=yolo"])], customModels: [] } } };
+  const args = ["acp", ...(kept.length ? kept : ["--approval-mode=yolo"])];
+  settings.providerInstances = { ...instances, localstudio: { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: args, customModels: [] } } };
 
   const keyPath = controllerConfig();
   const listed = await listModels(base, fleetKey(keyPath));
@@ -123,6 +124,7 @@ export const install = async (o: Options): Promise<number> => {
     }
   }
   say(browser);
+  if (args.includes("--approval-mode=yolo")) say("localstudio instance runs omp with --approval-mode=yolo, so tool calls run without a prompt; to be asked, put --approval-mode=write or --approval-mode=always-ask after acp in its commandArgs, and install keeps it");
   for (const w of warnings) say(`warning: ${w}`);
   if (o.json) console.log(JSON.stringify({ ok: true, t3Settings: settingsPath, ompModels: modelsPath, provider: "localstudio", models: models.map((m) => m.id), warnings, browser, changed: changed.map((p) => p.path), ...(o.dryRun ? { dryRun: true } : {}) }));
   return 0;
