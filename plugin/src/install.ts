@@ -94,6 +94,7 @@ export const install = async (o: Options): Promise<number> => {
   const old = instances.localstudio;
   let carried: string | undefined;
   let removed = false;
+  let kept = false;
   if (old !== undefined && isOmp(old)) {
     carried = modeOf(argsOf(old));
     delete instances.localstudio;
@@ -105,6 +106,8 @@ export const install = async (o: Options): Promise<number> => {
     key = "omp" in instances ? "omp-local" : "omp";
     while (key in instances) key = `omp-local-${++n}`;
     instances[key] = { driver: "acpRegistry", displayName: "omp", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: ["--mode", "acp", carried ?? "--approval-mode=yolo"], customModels: [] } };
+  } else if (carried === "--approval-mode=yolo" && !modeOf(argsOf(instances[key]))) {
+    kept = true;
   } else if (carried && !modeOf(argsOf(instances[key]))) {
     const entry = instances[key] as Instance & { config: NonNullable<Instance["config"]> };
     instances[key] = { ...entry, config: { ...entry.config, commandArgs: [...(Array.isArray(entry.config.commandArgs) ? entry.config.commandArgs : []), carried] } };
@@ -149,6 +152,7 @@ export const install = async (o: Options): Promise<number> => {
   }
   say(browser);
   if (args.includes("--approval-mode=yolo")) say(`the ${key} instance runs omp with --approval-mode=yolo, so tool calls run without a prompt; to be asked, change it to --approval-mode=write or --approval-mode=always-ask in its commandArgs, and install keeps it`);
+  if (kept) say("the old Local Studio entry ran omp with --approval-mode=yolo; your omp entry keeps its own approval mode; to run it without prompts, add --approval-mode=yolo after --mode acp in its commandArgs");
   for (const w of warnings) say(`warning: ${w}`);
   if (o.json) console.log(JSON.stringify({ ok: true, t3Settings: settingsPath, ompModels: modelsPath, provider: "localstudio", harnesses: [{ name: "omp", instance: key }], models: models.map((m) => m.id), warnings, browser, changed: changed.map((p) => p.path), ...(o.dryRun ? { dryRun: true } : {}) }));
   return 0;

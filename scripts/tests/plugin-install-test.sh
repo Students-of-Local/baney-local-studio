@@ -48,16 +48,16 @@ pass "case 10: --dry-run on case 1 prints the plans and writes nothing"
 out=$(run_install "$p" --controller "$stub") || fail "case 1 exited $?"
 grep -qx 'removed the separate "Local Studio" omp entry; its threads continue under omp' <<< "$out" || fail "case 1: no removed line: $out"
 grep -qx 'local models added to: omp (omp)' <<< "$out" || fail "case 1: no harness line: $out"
-grep -q "the omp instance runs omp with --approval-mode=yolo" <<< "$out" || fail "case 1: no yolo notice: $out"
+grep -qx "the old Local Studio entry ran omp with --approval-mode=yolo; your omp entry keeps its own approval mode; to run it without prompts, add --approval-mode=yolo after --mode acp in its commandArgs" <<< "$out" || fail "case 1: no kept note: $out"
+! grep -q "instance runs omp with --approval-mode=yolo" <<< "$out" || fail "case 1: yolo notice: $out"
 check '
 const fs = require("fs"), [s, m, omp, origS, origM] = process.argv.slice(1);
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const S = JSON.parse(fs.readFileSync(s, "utf8")), O = JSON.parse(fs.readFileSync(origS, "utf8"));
 const M = Bun.YAML.parse(fs.readFileSync(m, "utf8")), OM = Bun.YAML.parse(fs.readFileSync(origM, "utf8"));
 if ("localstudio" in S.providerInstances) throw new Error("localstudio instance kept");
-if (!eq(S.providerInstances.omp.config.commandArgs, ["--mode", "acp", "--approval-mode=yolo"])) throw new Error("omp args " + JSON.stringify(S.providerInstances.omp));
-const om = structuredClone(O.providerInstances.omp); om.config.commandArgs.push("--approval-mode=yolo");
-if (!eq(S.providerInstances.omp, om) || !eq(S.providerInstances.codex, O.providerInstances.codex) || S.linkedEnvironmentsEnabled !== true || !eq(Object.keys(S), Object.keys(O)) || !eq(Object.keys(S.providerInstances), ["omp", "codex"])) throw new Error("other settings changed " + JSON.stringify(S));
+if (!eq(S.providerInstances.omp.config.commandArgs, ["--mode", "acp"])) throw new Error("omp args " + JSON.stringify(S.providerInstances.omp));
+if (!eq(S.providerInstances.omp, O.providerInstances.omp) || !eq(S.providerInstances.codex, O.providerInstances.codex) || S.linkedEnvironmentsEnabled !== true || !eq(Object.keys(S), Object.keys(O)) || !eq(Object.keys(S.providerInstances), ["omp", "codex"])) throw new Error("other settings changed " + JSON.stringify(S));
 if (!eq(M.providers.synthetic, OM.providers.synthetic) || M.providers.synthetic.models.length !== 3 || !eq(M.disabledProviders, OM.disabledProviders) || !eq(Object.keys(M).sort(), ["disabledProviders", "providers"])) throw new Error("case 7: synthetic or top level key changed " + JSON.stringify(M));
 const p = M.providers.localstudio;
 if (!p || !p.apiKey.startsWith("!") || !eq(p.models, [{ id: "stub-model" }, { id: "stub-long", contextWindow: 32768 }])) throw new Error("case 7: localstudio provider " + JSON.stringify(p));
@@ -69,7 +69,7 @@ for pair in "$settings:$scratch/settings.orig" "$models:$scratch/models.orig"; d
   b=("$f".bak-localstudio-*)
   [ ${#b[@]} = 1 ] && cmp -s "${b[0]}" "${pair#*:}" || fail "case 1: one backup of $f equal to the original"
 done
-pass "case 1: localstudio instance removed, its yolo carried to omp, backups made, modes kept"
+pass "case 1: localstudio instance removed, omp keeps its own args with a note, backups made, modes kept"
 pass "case 7: synthetic (3 models) and disabledProviders equal, localstudio provider holds the stub's models"
 
 before=$(sums "$t3"; sums "$ompd"); n=$(baks)
@@ -91,6 +91,13 @@ out=$(run_install "$p" --controller "$stub") || fail "case 3 exited $?"
 check 'const S = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).providerInstances; if ("localstudio" in S || JSON.stringify(S.omp.config.commandArgs) !== JSON.stringify(["--mode", "acp", "--approval-mode=write"])) throw new Error(JSON.stringify(S));' "case 3 contents"
 ! grep -q "approval-mode=yolo" <<< "$out" || fail "case 3: yolo notice: $out"
 pass "case 3: omp keeps --approval-mode=write"
+
+use c3b
+setjson '{"providerInstances":{"omp":{"driver":"acpRegistry","enabled":true,"config":{"commandPath":"/opt/omp","commandArgs":["--mode","acp"]}},'"${lsi/--approval-mode=yolo/--approval-mode=write}"'}}'
+out=$(run_install "$p" --controller "$stub") || fail "case 3b exited $?"
+check 'const S = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).providerInstances; if ("localstudio" in S || JSON.stringify(S.omp.config.commandArgs) !== JSON.stringify(["--mode", "acp", "--approval-mode=write"])) throw new Error(JSON.stringify(S));' "case 3b contents"
+! grep -q "approval-mode=yolo" <<< "$out" || fail "case 3b: yolo line: $out"
+pass "case 3b: an old entry with --approval-mode=write carries write onto an omp entry with none"
 
 use c4
 setjson '{"theme":"dark","providerInstances":{'"$lsi"'}}'
