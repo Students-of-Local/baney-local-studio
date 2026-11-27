@@ -1,11 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { builtinBinary, runExtensions } from "./extensions.ts";
 import { type Plan, read, stamp, write } from "./files.ts";
 
 type Options = { t3Home: string | undefined; ompDir: string | undefined; controller: string | undefined; dryRun: boolean; json: boolean };
 type Model = { id: string; contextWindow?: number };
+type Instance = { driver?: unknown; enabled?: unknown; [k: string]: unknown; config?: { commandPath?: unknown; commandArgs?: unknown; [k: string]: unknown } };
 
 const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 
@@ -86,11 +87,32 @@ export const install = async (o: Options): Promise<number> => {
 
   const settingsText = read(settingsPath);
   const settings = (settingsText === null ? {} : JSON.parse(settingsText)) as Record<string, unknown>;
-  const instances = (settings.providerInstances ?? {}) as Record<string, unknown>;
-  const prior = ((instances.localstudio as { config?: { commandArgs?: unknown } } | undefined)?.config?.commandArgs ?? []) as unknown[];
-  const kept = prior.includes("acp") ? prior.slice(prior.indexOf("acp") + 1).filter((a): a is string => typeof a === "string") : [];
-  const args = ["acp", ...(kept.length ? kept : ["--approval-mode=yolo"])];
-  settings.providerInstances = { ...instances, localstudio: { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: args, customModels: [] } } };
+  const instances = { ...((settings.providerInstances ?? {}) as Record<string, Instance>) };
+  const isOmp = (i: Instance | undefined): boolean => i?.driver === "acpRegistry" && typeof i.config?.commandPath === "string" && basename(i.config.commandPath) === "omp";
+  const argsOf = (i: Instance | undefined): string[] => (Array.isArray(i?.config?.commandArgs) ? i.config.commandArgs.filter((a): a is string => typeof a === "string") : []);
+  const modeOf = (args: string[]): string | undefined => args.find((a) => a.startsWith("--approval-mode="));
+  const old = instances.localstudio;
+  let carried: string | undefined;
+  let removed = false;
+  if (old !== undefined && isOmp(old)) {
+    carried = modeOf(argsOf(old));
+    delete instances.localstudio;
+    removed = true;
+  } else if (old !== undefined) warnings.push(`left providerInstances.localstudio (${typeof old.driver === "string" ? old.driver : "unknown"}) as it is`);
+  let key = Object.keys(instances).find((k) => k !== "localstudio" && instances[k]?.enabled !== false && isOmp(instances[k]));
+  if (key === undefined) {
+    let n = 1;
+    key = "omp" in instances ? "omp-local" : "omp";
+    while (key in instances) key = `omp-local-${++n}`;
+    instances[key] = { driver: "acpRegistry", displayName: "omp", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: ["--mode", "acp", carried ?? "--approval-mode=yolo"], customModels: [] } };
+  } else if (carried && !modeOf(argsOf(instances[key]))) {
+    const entry = instances[key] as Instance & { config: NonNullable<Instance["config"]> };
+    instances[key] = { ...entry, config: { ...entry.config, commandArgs: [...(Array.isArray(entry.config.commandArgs) ? entry.config.commandArgs : []), carried] } };
+  }
+  const args = argsOf(instances[key]);
+  const parsed = settingsText === null ? null : JSON.stringify(settings);
+  settings.providerInstances = instances;
+  const settingsAfter = parsed !== null && parsed === JSON.stringify(settings) ? settingsText : `${JSON.stringify(settings, null, 2)}\n`;
 
   const keyPath = controllerConfig();
   const listed = await listModels(base, fleetKey(keyPath));
@@ -103,17 +125,19 @@ export const install = async (o: Options): Promise<number> => {
   config.providers = { ...providers, localstudio: { baseUrl: `${base}/v1`, api: "openai-completions", apiKey: `!${sq(process.execPath)} -e ${sq(reader)} ${sq(keyPath)}`, models } };
 
   const plans: Plan[] = [
-    { path: settingsPath, before: settingsText, after: `${JSON.stringify(settings, null, 2)}\n` },
+    { path: settingsPath, before: settingsText, after: settingsAfter ?? "" },
     { path: modelsPath, before: modelsText, after: `${Bun.YAML.stringify(config, null, 2).replace(/[ \t]+$/gm, "").replace(/\n*$/, "\n")}` },
   ];
   const changed = plans.filter((p) => p.before !== p.after);
   const when = stamp();
+  if (removed) say(`${o.dryRun ? "would remove" : "removed"} the separate "Local Studio" omp entry; its threads continue under omp`);
   for (const p of changed) {
     say(`${o.dryRun ? "would write" : "writing"} ${p.path}${p.before === null ? " (new)" : `, backup ${p.path}.bak-localstudio-${when}`}`);
     if (!o.dryRun) write(p, when);
   }
   if (!changed.length) say("nothing to change");
   say(`localstudio provider: ${models.length} model(s) from ${base}/v1`);
+  say(`local models added to: omp (${key})`);
   let browser = "localstudio extensions add browser: skipped, local-studio-browser not found; run it after installing the browser";
   if (builtinBinary("browser")) {
     try {
@@ -124,8 +148,8 @@ export const install = async (o: Options): Promise<number> => {
     }
   }
   say(browser);
-  if (args.includes("--approval-mode=yolo")) say("localstudio instance runs omp with --approval-mode=yolo, so tool calls run without a prompt; to be asked, put --approval-mode=write or --approval-mode=always-ask after acp in its commandArgs, and install keeps it");
+  if (args.includes("--approval-mode=yolo")) say(`the ${key} instance runs omp with --approval-mode=yolo, so tool calls run without a prompt; to be asked, change it to --approval-mode=write or --approval-mode=always-ask in its commandArgs, and install keeps it`);
   for (const w of warnings) say(`warning: ${w}`);
-  if (o.json) console.log(JSON.stringify({ ok: true, t3Settings: settingsPath, ompModels: modelsPath, provider: "localstudio", models: models.map((m) => m.id), warnings, browser, changed: changed.map((p) => p.path), ...(o.dryRun ? { dryRun: true } : {}) }));
+  if (o.json) console.log(JSON.stringify({ ok: true, t3Settings: settingsPath, ompModels: modelsPath, provider: "localstudio", harnesses: [{ name: "omp", instance: key }], models: models.map((m) => m.id), warnings, browser, changed: changed.map((p) => p.path), ...(o.dryRun ? { dryRun: true } : {}) }));
   return 0;
 };

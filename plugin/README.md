@@ -2,6 +2,18 @@
 
 The `localstudio` command wires Local Studio into T3 Code: `install` adds the Local Studio provider, `probe` reports this machine's GPUs, and `find` picks models that fit it.
 
+## Install
+
+```
+localstudio install [--harness omp] [--t3-home P] [--omp-dir P] [--controller URL] [--dry-run] [--json]
+```
+
+`install` adds your local models to the harness you already use and registers no harness of its own, so T3 Code shows one omp entry. It writes a `localstudio` provider with the controller's models into omp's `models.yml`, which every omp instance reads, and keeps your other providers (Synthetic included) as they are. In T3's `settings.json` it uses your omp entry, or adds one named `omp` when there is none.
+
+An older install added a separate "Local Studio" omp entry. `install` removes it, and its threads continue under omp. If that entry ran with an `--approval-mode=` and your omp entry has none, your omp entry takes it.
+
+`--harness` takes a comma list. Only `omp` is supported now, and it is the default; Claude Code is not supported yet.
+
 ## Extensions
 
 T3 Code has no MCP setting of its own, so `extensions` writes our MCP servers into the config of each agent T3 runs: omp's `mcp.json`, and every enabled Claude instance through `claude mcp add-json` with its tools allowed in that instance's `settings.json`. Codex and other drivers are listed as skipped.
