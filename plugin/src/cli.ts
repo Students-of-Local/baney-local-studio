@@ -20,7 +20,7 @@ for (let i = 0; i < rest.length; i++) {
     const value = rest[++i];
     if (value === undefined) usage("--arg needs a value");
     extArgs.push(value);
-  } else if (["t3-home", "omp-dir", "controller", "ctx", "limit", "command"].includes(name)) {
+  } else if (["t3-home", "omp-dir", "controller", "ctx", "limit", "command", "harness"].includes(name)) {
     const value = rest[++i];
     if (value === undefined) usage(`--${name} needs a value`);
     flags.set(name, value);
@@ -29,7 +29,7 @@ for (let i = 0; i < rest.length; i++) {
 }
 
 function usage(message: string): never {
-  console.error(`localstudio: ${message}\nusage: localstudio install [--t3-home <dir>] [--omp-dir <dir>] [--controller <url>] [--dry-run] [--json]\n       localstudio probe [--json]\n       localstudio find [query] [--ctx N] [--limit N] [--json]\n       localstudio extensions list [--json]\n       localstudio extensions add <name> [--command <path> [--arg <a>]...] [--t3-home <dir>] [--omp-dir <dir>] [--dry-run] [--json]\n       localstudio extensions remove <name> [--t3-home <dir>] [--omp-dir <dir>] [--dry-run] [--json]`);
+  console.error(`localstudio: ${message}\nusage: localstudio install [--harness omp] [--t3-home <dir>] [--omp-dir <dir>] [--controller <url>] [--dry-run] [--json]\n       localstudio probe [--json]\n       localstudio find [query] [--ctx N] [--limit N] [--json]\n       localstudio extensions list [--json]\n       localstudio extensions add <name> [--command <path> [--arg <a>]...] [--t3-home <dir>] [--omp-dir <dir>] [--dry-run] [--json]\n       localstudio extensions remove <name> [--t3-home <dir>] [--omp-dir <dir>] [--dry-run] [--json]`);
   process.exit(2);
 }
 
@@ -39,6 +39,11 @@ const text = (name: string): string | undefined => {
 };
 
 if (command === "install") {
+  for (const h of new Set((text("harness") ?? "omp").split(",").map((h) => h.trim()))) {
+    if (h === "omp") continue;
+    console.error(h === "claude" ? "localstudio: Claude Code is not supported yet (Students-of-Local/localstudio-plugin#337)" : `localstudio: unknown harness ${h}; known: omp`);
+    process.exit(2);
+  }
   process.exitCode = await install({ t3Home: text("t3-home"), ompDir: text("omp-dir"), controller: text("controller"), dryRun: flags.has("dry-run"), json: flags.has("json") });
 } else if (command === "probe") {
   if ([...flags.keys()].some((k) => k !== "json")) usage("probe takes only --json");
@@ -66,7 +71,7 @@ if (command === "install") {
   const builtin = name === "browser" || name === "skills";
   if (action === "add" && !builtin && !flags.has("command")) usage(`${name} is not built in, so add needs --command`);
   if ((action !== "add" || builtin) && (flags.has("command") || extArgs.length)) usage("--command and --arg are only for adding a custom extension");
-  if ([...flags.keys()].some((k) => ["controller", "ctx", "limit"].includes(k))) usage("extensions takes only --t3-home, --omp-dir, --command, --arg, --dry-run and --json");
+  if ([...flags.keys()].some((k) => ["controller", "ctx", "limit", "harness"].includes(k))) usage("extensions takes only --t3-home, --omp-dir, --command, --arg, --dry-run and --json");
   const r = await runExtensions({ action, name, command: text("command"), args: extArgs, t3Home: text("t3-home"), ompDir: text("omp-dir"), dryRun: flags.has("dry-run") });
   if (flags.has("json")) console.log(JSON.stringify(r.report));
   else for (const line of r.lines) (line.startsWith("error") || r.code ? console.error : console.log)(line);
