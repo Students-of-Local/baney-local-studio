@@ -43,12 +43,13 @@ function controller() {
 		req.on("end", () => {
 			if (state.mode === "401" || req.headers.authorization !== `Bearer ${KEY}`) {
 				res.writeHead(401, { "content-type": "application/json" });
-				res.end(JSON.stringify({ error: { message: "unauthorized" } }));
+				res.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "fleet key required" } }));
 				return;
 			}
 			if (req.url === "/v1/models") {
 				res.writeHead(200, { "content-type": "application/json" });
-				res.end(JSON.stringify({ object: "list", data: MODELS.map((id) => ({ id, object: "model" })) }));
+				const ids = state.mode === "empty" ? ["auto"] : MODELS;
+				res.end(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }));
 				return;
 			}
 			const body = JSON.parse(raw);
@@ -151,6 +152,51 @@ test("the panel's local models come from the controller: list, row, picker, a ch
 	assert.ok(result.content.includes(SECRET), "the tool's result went back in the next request");
 	const stored = await panel(`(async () => JSON.stringify([await chrome.storage.local.get(null), await chrome.storage.session.get(null), document.documentElement.outerHTML]))()`);
 	assert.ok(!stored.includes(KEY), "the extension never holds the fleet key");
+
+	const session = await panel(`new URL(location.href).searchParams.get("session")`);
+	assert.ok(session, "the chat was saved");
+	await panel(`new Promise((ok, fail) => {
+		const open = indexedDB.open("local-studio-storage");
+		open.onerror = () => fail(open.error);
+		open.onsuccess = () => {
+			const store = open.result.transaction("sessions", "readwrite").objectStore("sessions");
+			const get = store.get(${JSON.stringify(session)});
+			get.onsuccess = () => {
+				const data = get.result;
+				data.model = { ...data.model, id: "b-2", api: "eukhe-session", provider: "local-studio" };
+				const put = store.put(data);
+				put.onsuccess = () => ok(true);
+				put.onerror = () => fail(put.error);
+			};
+		};
+	})`);
+	await panel(`location.reload(), true`);
+	await waitFor(() => panel(`!!document.querySelector("textarea")?.placeholder?.includes("Ask about this page")`), 30_000, "the restored chat's composer");
+	const ask = (text) =>
+		panel(`(() => {
+		const box = document.querySelector("textarea");
+		box.focus();
+		const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+		set.call(box, ${JSON.stringify(text)});
+		box.dispatchEvent(new Event("input", { bubbles: true }));
+		box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		return true;
+	})()`);
+	await ask("read it again");
+	try {
+		await waitFor(() => stub.chats.length === 3, 30_000, "the restored chat's request");
+	} catch (err) {
+		throw new Error(`${err.message}\nPanel:\n${await panel(`document.body.innerText`).catch(String)}`);
+	}
+	assert.equal(stub.chats[2].model, "b-2", "a chat saved on the old provider sends on the same listed model");
+
+	stub.state.mode = "empty";
+	await reopen();
+	await waitFor(async () => /Running, no model loaded/.test(await row()), 15_000, "running with no model");
+	assert.equal(await panel(`!!${list}.querySelector('[aria-label="Check for local models"]')`), true);
+	await ask("anything loaded?");
+	await waitFor(async () => /Local models are running, but no model is loaded/.test(await panel(`document.body.innerText`)), 15_000, "the no-model toast");
+	assert.equal(stub.chats.length, 3, "nothing is sent with no model loaded");
 
 	stub.state.mode = "401";
 	await reopen();

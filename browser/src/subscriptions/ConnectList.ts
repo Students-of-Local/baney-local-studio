@@ -309,6 +309,8 @@ export class ConnectList extends LitElement {
 			under: TemplateResult | typeof nothing = nothing,
 		) => this.row("studio", AppWindow, "Local models", line, act, under);
 		if (f.state === "ready" && f.count) return row(`${f.count} ${f.count === 1 ? "model" : "models"} ready`, nothing);
+		if (f.state === "ready")
+			return row("Running, no model loaded", check, html`<p>Load a model in Local Studio, then choose Check.</p>`);
 		if (f.state === "checking") return row("Checking", check);
 		if (f.state === "unauthorized")
 			return row(

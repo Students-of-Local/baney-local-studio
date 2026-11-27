@@ -34,6 +34,14 @@ export function isLocalStudioProvider(provider: string): boolean {
 	return provider === LOCAL_STUDIO_PROVIDER;
 }
 
+export function isStaleLocalModel(model: Model<Api>): boolean {
+	return isLocalStudioProvider(model.provider) && model.api !== FLEET_API;
+}
+
+export function currentFleetModel(model: Model<Api>, listed: readonly Model<Api>[]): Model<Api> | undefined {
+	return listed.find((m) => m.id === model.id) ?? listed[0];
+}
+
 export function localStudioModels(): Model<Api>[] {
 	return lastModels;
 }
