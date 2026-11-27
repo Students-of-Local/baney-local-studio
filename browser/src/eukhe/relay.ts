@@ -64,7 +64,8 @@ export function startEukheRelay(): void {
 		port.onMessage.addListener((raw: unknown) => {
 			const req = raw as Partial<EukheRequest>;
 			if (typeof req?.id !== "number" || typeof req.conversation !== "string" || !req.conversation) return;
-			if (req.op !== "probe" && req.op !== "command" && req.op !== "close") return;
+			const ops: readonly (string | undefined)[] = ["probe", "command", "close", "fleet_models", "fleet_chat"];
+			if (!req.op || !ops.includes(req.op)) return;
 			const conversation = `${prefix}${req.conversation}`.slice(0, 200);
 			conversations.set(conversation, { port, name: req.conversation });
 			mine.add(conversation);

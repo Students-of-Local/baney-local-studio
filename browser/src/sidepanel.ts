@@ -62,10 +62,9 @@ import {
 	isLocalStudioProvider,
 	LOCAL_STUDIO_PROVIDER,
 	localStudioModels,
-	probeLocalStudio,
 	refreshLocalStudioModels,
 	registerLocalStudioApi,
-} from "./eukhe/stream.js";
+} from "./fleet/stream.js";
 import { registerCompactionRenderer } from "./messages/CompactionMessage.js";
 import { browserMessageTransformer } from "./messages/message-transformer.js";
 import {
@@ -657,8 +656,8 @@ async function getProvidersWithKeys(): Promise<string[]> {
 }
 
 /**
- * Local Studio's models, looked up once when the panel starts (the host answers within about 2 s whether the Eukhe daemon
- * runs). Chats run there need no key in the extension (src/eukhe/stream.ts).
+ * Local Studio's models, looked up once when the panel starts (the host asks the controller). Chats run there need no key
+ * in the extension (src/fleet/stream.ts).
  */
 let localStudioReady: Promise<Model<any>[]> = Promise.resolve([]);
 
@@ -1146,13 +1145,9 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			return chrome.runtime.getURL("sandbox.html");
 		},
 		onApiKeyRequired: async (provider: string) => {
-			// Local Studio needs no key: it is ready when its daemon runs.
 			if (isLocalStudioProvider(provider)) {
-				if (await probeLocalStudio()) return true;
-				Toast.error(
-					"The Local Studio app isn't running. Start it, or run eukhe in a terminal, then send again.",
-					8000,
-				);
+				if ((await refreshLocalStudioModels().catch(() => [])).length) return true;
+				Toast.error("Local models aren't running. Start Local Studio's controller, then send again.", 8000);
 				return false;
 			}
 			// A subscription provider has no key: it is ready when its sign-in is.
@@ -1738,7 +1733,6 @@ async function initApp() {
 
 	// Register cached provider model lists now; refresh stale ones in the background.
 	refreshDiscoveredModels(storage).catch((err) => console.warn("Model discovery failed:", err));
-	// Local Studio's daemon: when it runs, chats need no key (src/eukhe/stream.ts).
 	registerLocalStudioApi();
 	localStudioReady = refreshLocalStudioModels().catch((err) => {
 		console.warn("Local Studio models unavailable:", err);
