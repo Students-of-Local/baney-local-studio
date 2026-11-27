@@ -133,7 +133,7 @@ export const install = async (o: Options): Promise<number> => {
   ];
   const changed = plans.filter((p) => p.before !== p.after);
   const when = stamp();
-  if (removed) say(`${o.dryRun ? "would remove" : "removed"} the separate "Local Studio" omp entry; its threads continue under omp`);
+  if (removed) say(`${o.dryRun ? "would remove" : "removed"} the separate "Local Studio" omp entry; threads made with it can be continued by picking an omp model`);
   for (const p of changed) {
     say(`${o.dryRun ? "would write" : "writing"} ${p.path}${p.before === null ? " (new)" : `, backup ${p.path}.bak-localstudio-${when}`}`);
     if (!o.dryRun) write(p, when);
