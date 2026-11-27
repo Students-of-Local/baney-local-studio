@@ -136,8 +136,8 @@ test("a controller that is down is fleet_unreachable at once", async (t) => {
 
 test("a 401 names the key file and, on Linux, the restart that fixes it", async (t) => {
 	const s = await stub(t, (_req, res) => {
-		res.writeHead(401);
-		res.end();
+		res.writeHead(401, { "content-type": "application/json" });
+		res.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "fleet key required" } }));
 	});
 	const h = relay(t, s.base, null);
 	const answer = await h.ask("m", "fleet_models");
@@ -146,6 +146,25 @@ test("a 401 names the key file and, on Linux, the restart that fixes it", async 
 	assert.equal(answer.error.path, join(h.home, ".local-studio-controller", "config.json"));
 	if (process.platform === "linux") assert.equal(answer.error.fix, "systemctl --user restart local-studio-controller");
 	assert.equal(s.seen[0].auth, undefined);
+});
+
+test("a 401 or 403 that is not the controller's own key refusal is a fleet_error with its message", async (t) => {
+	const cases = [
+		[401, { error: { message: "engine says the upstream key is invalid" } }, "engine says the upstream key is invalid"],
+		[401, { error: { code: "invalid_api_key", message: "upstream 401" } }, "upstream 401"],
+		[403, { error: { code: "UNAUTHORIZED", message: "forbidden by the engine" } }, "forbidden by the engine"],
+		[401, "plain refusal", "plain refusal"],
+	];
+	for (const [status, body, said] of cases) {
+		const s = await stub(t, (_req, res) => {
+			res.writeHead(status);
+			res.end(typeof body === "string" ? body : JSON.stringify(body));
+		});
+		const answer = await relay(t, s.base).ask("m", "fleet_models");
+		assert.equal(answer.error.code, "fleet_error", `${status} ${JSON.stringify(body)}`);
+		assert.equal(answer.error.message, `The controller answered ${status}: ${said}`);
+		assert.equal(answer.error.path, undefined);
+	}
 });
 
 test("fleet_chat streams the controller's chunks in order, then fleet_end", async (t) => {

@@ -118,13 +118,10 @@ export class FleetRelay {
 			if ((err as Error).name === "AbortError") return { code: "aborted", message: "Stopped." };
 			return { code: "fleet_unreachable", message: `Local models aren't running: nothing answered at ${base}.` };
 		}
-		if (response.status === 401 || response.status === 403) {
-			void response.body?.cancel();
-			return keyFix(keyPath);
-		}
 		if (!response.ok) {
 			const text = await response.text().catch((err: Error) => err.message);
-			const said = parse(text) as { error?: { message?: unknown } } | undefined;
+			const said = parse(text) as { error?: { code?: unknown; message?: unknown } } | undefined;
+			if (response.status === 401 && said?.error?.code === "UNAUTHORIZED") return keyFix(keyPath);
 			const why = typeof said?.error?.message === "string" ? said.error.message : text.slice(0, 300);
 			return { code: "fleet_error", message: `The controller answered ${response.status}${why ? `: ${why}` : ""}` };
 		}
