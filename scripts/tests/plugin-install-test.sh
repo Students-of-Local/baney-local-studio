@@ -37,7 +37,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const S = JSON.parse(fs.readFileSync(s, "utf8")), O = JSON.parse(fs.readFileSync(origS, "utf8"));
 const M = Bun.YAML.parse(fs.readFileSync(m, "utf8")), OM = Bun.YAML.parse(fs.readFileSync(origM, "utf8"));
 const r = JSON.parse(out);
-const want = { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: omp, commandArgs: ["acp"], customModels: [] } };
+const want = { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: omp, commandArgs: ["acp", "--approval-mode=yolo"], customModels: [] } };
 if (!eq(S.providerInstances.localstudio, want)) throw new Error("localstudio instance " + JSON.stringify(S.providerInstances.localstudio));
 if (!eq(S.providerInstances.omp, O.providerInstances.omp) || S.linkedEnvironmentsEnabled !== true || Object.keys(S).length !== 2) throw new Error("other settings changed");
 if (!eq(M.providers.other, OM.providers.other)) throw new Error("other omp provider changed");

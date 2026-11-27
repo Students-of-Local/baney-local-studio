@@ -1,10 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { builtinBinary, runExtensions } from "./extensions.ts";
+import { type Plan, read, stamp, write } from "./files.ts";
 
 type Options = { t3Home: string | undefined; ompDir: string | undefined; controller: string | undefined; dryRun: boolean; json: boolean };
 type Model = { id: string; contextWindow?: number };
-type Plan = { path: string; before: string | null; after: string };
 
 const sq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 
@@ -66,21 +67,6 @@ const listModels = async (base: string, key: string | null): Promise<Model[] | s
   }
 };
 
-const read = (path: string): string | null => (existsSync(path) ? readFileSync(path, "utf8") : null);
-
-const stamp = (): string => new Date().toISOString().replace(/\D/g, "").slice(0, 14);
-
-const write = (plan: Plan, when: string): void => {
-  const dir = dirname(plan.path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const mode = plan.before === null ? 0o600 : statSync(plan.path).mode & 0o777;
-  if (plan.before !== null) writeFileSync(`${plan.path}.bak-localstudio-${when}`, plan.before, { mode });
-  const tmp = `${plan.path}.localstudio-${process.pid}.tmp`;
-  writeFileSync(tmp, plan.after, { mode });
-  chmodSync(tmp, mode);
-  renameSync(tmp, plan.path);
-};
-
 export const install = async (o: Options): Promise<number> => {
   const say = (line: string) => { if (!o.json) console.log(line); };
   const stop = (code: number, message: string): number => {
@@ -101,7 +87,10 @@ export const install = async (o: Options): Promise<number> => {
   const settingsText = read(settingsPath);
   const settings = (settingsText === null ? {} : JSON.parse(settingsText)) as Record<string, unknown>;
   const instances = (settings.providerInstances ?? {}) as Record<string, unknown>;
-  settings.providerInstances = { ...instances, localstudio: { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: ["acp"], customModels: [] } } };
+  const prior = ((instances.localstudio as { config?: { commandArgs?: unknown } } | undefined)?.config?.commandArgs ?? []) as unknown[];
+  const kept = prior.includes("acp") ? prior.slice(prior.indexOf("acp") + 1).filter((a): a is string => typeof a === "string") : [];
+  const args = ["acp", ...(kept.length ? kept : ["--approval-mode=yolo"])];
+  settings.providerInstances = { ...instances, localstudio: { driver: "acpRegistry", displayName: "Local Studio", enabled: true, config: { source: "local", commandPath: resolve(omp), commandArgs: args, customModels: [] } } };
 
   const keyPath = controllerConfig();
   const listed = await listModels(base, fleetKey(keyPath));
@@ -125,7 +114,18 @@ export const install = async (o: Options): Promise<number> => {
   }
   if (!changed.length) say("nothing to change");
   say(`localstudio provider: ${models.length} model(s) from ${base}/v1`);
+  let browser = "localstudio extensions add browser: skipped, local-studio-browser not found; run it after installing the browser";
+  if (builtinBinary("browser")) {
+    try {
+      const r = await runExtensions({ action: "add", name: "browser", args: [], t3Home, ompDir, dryRun: o.dryRun });
+      browser = `localstudio extensions add browser: ${r.code ? `failed (${r.lines.filter((l) => l.startsWith("error")).join("; ")})` : `${o.dryRun ? "would add" : "added"} for ${r.targets} target(s)`}`;
+    } catch (e) {
+      browser = `localstudio extensions add browser: failed (${e instanceof Error ? e.message : String(e)})`;
+    }
+  }
+  say(browser);
+  if (args.includes("--approval-mode=yolo")) say("localstudio instance runs omp with --approval-mode=yolo, so tool calls run without a prompt; to be asked, put --approval-mode=write or --approval-mode=always-ask after acp in its commandArgs, and install keeps it");
   for (const w of warnings) say(`warning: ${w}`);
-  if (o.json) console.log(JSON.stringify({ ok: true, t3Settings: settingsPath, ompModels: modelsPath, provider: "localstudio", models: models.map((m) => m.id), warnings, changed: changed.map((p) => p.path), ...(o.dryRun ? { dryRun: true } : {}) }));
+  if (o.json) console.log(JSON.stringify({ ok: true, t3Settings: settingsPath, ompModels: modelsPath, provider: "localstudio", models: models.map((m) => m.id), warnings, browser, changed: changed.map((p) => p.path), ...(o.dryRun ? { dryRun: true } : {}) }));
   return 0;
 };
