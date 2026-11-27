@@ -3,10 +3,11 @@ import { arch, freemem, homedir, platform, totalmem } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 export type Gpu = { id: string; name: string; vendor: string; backend: string; vramGb: number | null; vramFreeGb: number | null; pci: string | null; removable: boolean; card: string | null };
-type Card = { match?: { backend?: string; name?: string; names?: string[]; vramGb?: number } };
+export type Card = { match?: { backend?: string; name?: string; names?: string[]; vramGb?: number }; setups?: { cards: number; machines: number; picks: string[] }[] };
+export type Catalog = { cards: Record<string, Card>; recipes?: Record<string, { model?: string; engine?: string; weights?: string; proof?: { at?: string; tps?: number; prefill?: number; failed?: string }[] }>; builds?: Record<string, { format?: string; size_gb?: number }>; models?: Record<string, { name?: string; hf?: string }> };
 
 const CATALOG = "https://local.sybilsolutions.ai/api/v2/catalog.json";
-const gb = (bytes: number): number => Math.round((bytes / 2 ** 30) * 10) / 10;
+export const gb = (bytes: number): number => Math.round((bytes / 2 ** 30) * 10) / 10;
 const PCI_DIR = /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/;
 
 const run = (cmd: string[]): string | null => {
@@ -75,7 +76,7 @@ const mac = (): Omit<Gpu, "card">[] => {
   });
 };
 
-const catalog = async (warnings: string[]): Promise<Record<string, Card> | null> => {
+export const catalog = async (warnings: string[]): Promise<Catalog | null> => {
   const dir = join(homedir(), ".cache", "localstudio");
   const path = join(dir, "catalog.json");
   const fresh = existsSync(path) && Date.now() - statSync(path).mtimeMs < 86_400_000;
@@ -92,7 +93,7 @@ const catalog = async (warnings: string[]): Promise<Record<string, Card> | null>
     }
   }
   try {
-    return (JSON.parse(readFileSync(path, "utf8")) as { cards: Record<string, Card> }).cards;
+    return JSON.parse(readFileSync(path, "utf8")) as Catalog;
   } catch {
     return null;
   }
@@ -100,7 +101,7 @@ const catalog = async (warnings: string[]): Promise<Record<string, Card> | null>
 
 const norm = (s: string): string => s.toLowerCase().replace(/nvidia|geforce|intel|amd|radeon|generation|workstation|edition|\d+\s*gb/g, "").replace(/[^a-z0-9]/g, "");
 
-const matchCard = (cards: Record<string, Card>, g: Omit<Gpu, "card">): string | null =>
+export const matchCard = (cards: Record<string, Card>, g: Omit<Gpu, "card">): string | null =>
   Object.entries(cards)
     .filter(([, c]) => c.match?.backend === g.backend && ((c.match.names ?? []).includes(norm(g.name)) || norm(c.match.name ?? "") === norm(g.name)))
     .map(([id, c]) => ({ id, vram: c.match?.vramGb ?? 0, gap: Math.abs((c.match?.vramGb ?? 0) - (g.vramGb ?? 0)) }))
@@ -110,7 +111,7 @@ const matchCard = (cards: Record<string, Card>, g: Omit<Gpu, "card">): string | 
 export const probe = async () => {
   const warnings: string[] = [];
   const found = platform() === "darwin" ? mac() : [...nvidia(), ...amd(), ...intel()];
-  const cards = found.length ? await catalog(warnings) : null;
+  const cards = found.length ? (await catalog(warnings))?.cards : null;
   const gpus: Gpu[] = found.map((g) => ({ ...g, card: cards ? matchCard(cards, g) : null }));
   const path = process.env.HF_HOME || join(homedir(), ".cache", "huggingface");
   let probePath = path;

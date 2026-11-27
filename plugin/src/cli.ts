@@ -1,14 +1,20 @@
 #!/usr/bin/env bun
+import { find } from "./find.ts";
 import { install } from "./install.ts";
 import { probe } from "./probe.ts";
 
 const [command, ...rest] = process.argv.slice(2);
 const flags = new Map<string, string | true>();
+const args: string[] = [];
 for (let i = 0; i < rest.length; i++) {
   const arg = rest[i] ?? "";
-  if (!arg.startsWith("--")) usage(`unexpected argument ${arg}`);
+  if (!arg.startsWith("--")) {
+    if (command !== "find" || args.length) usage(`unexpected argument ${arg}`);
+    args.push(arg);
+    continue;
+  }
   const name = arg.slice(2);
-  if (["t3-home", "omp-dir", "controller"].includes(name)) {
+  if (["t3-home", "omp-dir", "controller", "ctx", "limit"].includes(name)) {
     const value = rest[++i];
     if (value === undefined) usage(`--${name} needs a value`);
     flags.set(name, value);
@@ -17,7 +23,7 @@ for (let i = 0; i < rest.length; i++) {
 }
 
 function usage(message: string): never {
-  console.error(`localstudio: ${message}\nusage: localstudio install [--t3-home <dir>] [--omp-dir <dir>] [--controller <url>] [--dry-run] [--json]\n       localstudio probe [--json]`);
+  console.error(`localstudio: ${message}\nusage: localstudio install [--t3-home <dir>] [--omp-dir <dir>] [--controller <url>] [--dry-run] [--json]\n       localstudio probe [--json]\n       localstudio find [query] [--ctx N] [--limit N] [--json]`);
   process.exit(2);
 }
 
@@ -37,4 +43,13 @@ if (command === "install") {
     for (const g of result.gpus) console.log(`${g.id}: ${g.name}, ${g.vramGb ?? "?"} GB (${g.vramFreeGb ?? "?"} free), ${g.backend}${g.removable ? ", removable" : ""}, card ${g.card ?? "none"}`);
     for (const w of result.warnings) console.error(`warning: ${w}`);
   }
+} else if (command === "find") {
+  if ([...flags.keys()].some((k) => !["ctx", "limit", "json"].includes(k))) usage("find takes only --ctx, --limit and --json");
+  const count = (name: string, fallback: number): number => {
+    const v = text(name);
+    if (v === undefined) return fallback;
+    if (!/^[1-9]\d*$/.test(v)) usage(`--${name} needs a whole number above 0`);
+    return Number(v);
+  };
+  process.exitCode = await find({ query: args[0], ctx: count("ctx", 8192), limit: count("limit", 10), json: flags.has("json") });
 } else usage(command ? `unknown command ${command}` : "no command");
